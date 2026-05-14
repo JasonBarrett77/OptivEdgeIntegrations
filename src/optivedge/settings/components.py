@@ -1,4 +1,5 @@
 OPTIVEDGE_APPS = [
+    "optivedge.apps.OptivEdgeConfig",
     "optivedge.integrations.apps.IntegrationsConfig",
 ]
 
