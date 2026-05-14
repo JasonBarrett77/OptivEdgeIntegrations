@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block title %}Delete Management Station{% endblock %}
+
+{% block content %}
+{% include "integrations/partials/management_station_detail_content.html" %}
+{% endblock %}
+
+{% block overlay_title %}
+<h1 class="truncate text-sm font-semibold text-slate-900">Delete Management Station</h1>
+{% endblock %}
+
+{% block overlay_body %}
+<form method="post" class="flex flex-col gap-4 px-4 py-4">
+    {% csrf_token %}
+    <div class="border border-red-200 bg-red-50 px-4 py-4">
+        <p class="text-sm text-slate-700">
+            Delete <span class="font-medium">{{ management_station.name|default:management_station.hostname }}</span>?
+        </p>
+        <p class="mt-2 text-sm text-slate-600">
+            This will also delete related sync runs and inventory records tied to this management station.
+        </p>
+    </div>
+    <div class="flex items-center gap-2">
+        <button type="submit" class="inline-flex h-8 items-center justify-center border border-red-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-red-700 hover:bg-red-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20">
+            Delete
+        </button>
+        <a
+            href="{{ overlay_close_url }}"
+            class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+        >
+            Cancel
+        </a>
+    </div>
+</form>
+{% endblock %}

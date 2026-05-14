@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}{{ enforcement_point.vsys_name }} Addresses{% endblock %}
+
+{% block head %}
+{% include "components/partials/analytical_table_styles.html" %}
+{% endblock %}
+
+{% block top_nav %}
+    <a
+        href="/management-stations/{{ management_station.pk }}/"
+        class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+    >
+        Back to Management Station
+    </a>
+{% endblock %}
+
+{% block content %}
+<section class="flex h-full w-full min-h-0 min-w-0 overflow-hidden">
+    <div class="min-h-0 flex-1 overflow-hidden">
+        <div class="flex h-full min-h-0 flex-col px-3 py-2">
+            <div class="flex items-start justify-between gap-3 border-b border-slate-200 pb-2">
+                <div class="min-w-0">
+                    <div class="text-[10px] font-medium uppercase tracking-wide text-slate-500">Addresses</div>
+                    <div class="truncate text-[13px] font-semibold leading-4 text-slate-950">
+                        {{ enforcement_point.vsys_name }}{% if enforcement_point.vsys_display_name %} / {{ enforcement_point.vsys_display_name }}{% endif %}
+                    </div>
+                    <div class="truncate pt-0.5 text-[11px] leading-4 text-slate-500">
+                        {{ enforcement_point.appliance_group|default:enforcement_point.appliance }}
+                    </div>
+                </div>
+                <div class="shrink-0 text-[10px] uppercase tracking-wide text-slate-500">
+                    {{ address_rows|length }} row{{ address_rows|length|pluralize }}
+                </div>
+            </div>
+
+            <div class="min-h-0 flex-1 pt-2 overflow-hidden">
+                <div class="h-full overflow-auto border border-slate-200">
+                    <table class="analytical-table min-w-full table-auto">
+                        <thead>
+                            <tr>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Kind</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Source</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Device Group</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Name</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Type</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Value / Filter</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Members</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Tags</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Description</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for row in address_rows %}
+                            <tr>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{{ row.kind }}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{{ row.config_source_label }}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.provenance %}{{ row.provenance }}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-900">{{ row.name }}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{{ row.value_type }}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.value %}{{ row.value }}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.members %}{% for value in row.members %}<div>{{ value }}</div>{% endfor %}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.tags %}{% for value in row.tags %}<div>{{ value }}</div>{% endfor %}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.description %}{{ row.description }}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
+                            </tr>
+                            {% empty %}
+                            <tr>
+                                <td colspan="9" class="px-4 py-8 text-center text-sm text-slate-500">
+                                    No normalized addresses available for this enforcement point.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock %}

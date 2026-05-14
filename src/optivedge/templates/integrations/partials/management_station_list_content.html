@@ -1,0 +1,75 @@
+<section class="flex h-full w-full min-h-0 min-w-0 flex-col">
+    <div class="flex min-h-0 flex-1 flex-col px-4 py-3">
+        <div class="flex min-h-0 flex-1 flex-col border border-slate-200">
+            <div class="flex shrink-0 items-center justify-between bg-white px-4 py-2">
+                <h1 class="text-sm font-semibold text-slate-900">Management Stations</h1>
+                <div class="flex items-center gap-2">
+                    <form method="post" action="/management-stations/sync-in-scope-all/">
+                        {% csrf_token %}
+                        <button type="submit" class="inline-flex h-8 items-center justify-center border border-emerald-300 bg-emerald-50 px-3 text-sm font-medium whitespace-nowrap text-emerald-700 hover:bg-emerald-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-emerald-500/20">
+                            Refresh All In Scope
+                        </button>
+                    </form>
+                    <a href="/management-stations/create/" class="inline-flex h-8 items-center justify-center border border-blue-300 bg-blue-50 px-3 text-sm font-medium whitespace-nowrap text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20">Create</a>
+                </div>
+            </div>
+            <div class="min-h-0 flex-1 overflow-auto">
+                <table class="min-w-full table-fixed border-separate border-spacing-0">
+                    <thead>
+                        <tr>
+                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Name</th>
+                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Type</th>
+                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Host</th>
+                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Sync Runs</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for station in management_stations %}
+                        <tr
+                            class="cursor-pointer transition-colors duration-150 hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
+                            onclick="window.location.href='/management-stations/{{ station.pk }}/'"
+                            onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); window.location.href='/management-stations/{{ station.pk }}/'; }"
+                            tabindex="0"
+                            role="link"
+                        >
+                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
+                                {{ station.name|default:station.hostname }}
+                            </td>
+                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">{{ station.get_station_type_display }}</td>
+                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">{{ station.hostname }}:{{ station.port }}</td>
+                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">{{ station.sync_run_count }}</td>
+                        </tr>
+                        {% empty %}
+                        <tr>
+                            <td colspan="4" class="border-b border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
+                                No management stations configured.
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="flex shrink-0 items-center justify-between border-t border-slate-200 px-4 py-2">
+                <p class="text-xs text-slate-500">
+                    {{ management_stations|length }} configured station{{ management_stations|length|pluralize }}
+                </p>
+                <div class="flex items-center gap-2">
+                    <button
+                        type="button"
+                        disabled
+                        class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-400 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                        Previous
+                    </button>
+                    <button
+                        type="button"
+                        disabled
+                        class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-400 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                        Next
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>

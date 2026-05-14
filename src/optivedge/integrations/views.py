@@ -1,0 +1,553 @@
+"""UI views for the current integration management surfaces.
+
+This module owns Django views and view-level composition for the management-station
+workflow. Keep vendor session, collection, and persistence logic out of this layer.
+"""
+
+import json
+
+from django.contrib import messages
+from django.core.exceptions import ImproperlyConfigured
+from django.db.models import Count
+from django.http import HttpResponseRedirect
+from django.shortcuts import get_object_or_404
+from django.urls import reverse, reverse_lazy
+from django.views import View
+from django.views.generic import DetailView, ListView, TemplateView
+from django.views.generic.edit import CreateView, DeleteView, UpdateView
+
+from optivedge.integrations.forms import ApplicationEnvironmentForm, ManagementStationForm
+from optivedge.integrations.models import (
+    ApplicationEnvironment,
+    ApplianceGroup,
+    EnforcementPoint,
+    ManagementStation,
+    SecurityRule,
+    Snapshot,
+)
+from optivedge.integrations.presentation import (
+    build_address_group_row,
+    build_address_object_row,
+    joined_member_values,
+    listed_member_values,
+    security_rule_config_source_label,
+)
+from optivedge.integrations.platforms.pan_os import (
+    collect_persist_and_normalize,
+    refresh_in_scope_configuration_snapshots,
+)
+from optivedge.integrations.platforms.pan_os.collectors import collect_show_managed_devices
+from optivedge.integrations.orchestration import refresh_all_panorama_in_scope_data
+
+
+def get_management_station_list_queryset():
+    return ManagementStation.objects.annotate(
+        appliance_group_count=Count("appliance_groups", distinct=True),
+        appliance_count=Count("appliances", distinct=True),
+        enforcement_point_count=Count("enforcement_points", distinct=True),
+        sync_run_count=Count("sync_runs", distinct=True),
+    ).order_by("hostname")
+
+
+def build_management_station_detail_context(management_station):
+    appliance_groups = management_station.appliance_groups.select_related(
+        "active_appliance",
+    ).prefetch_related("appliances")
+    enforcement_points = list(
+        management_station.enforcement_points.select_related(
+            "appliance_group",
+            "appliance",
+        ).prefetch_related("nodes__appliance")
+    )
+    enforcement_points.sort(
+        key=lambda enforcement_point: (
+            enforcement_point_appliance_sort_key(enforcement_point),
+            enforcement_point.vsys_name,
+            enforcement_point.pk,
+        )
+    )
+
+    return {
+        "recent_sync_runs": management_station.sync_runs.all()[:10],
+        "appliance_groups": appliance_groups,
+        "appliances": management_station.appliances.select_related("appliance_group"),
+        "enforcement_points": enforcement_points,
+    }
+
+
+def enforcement_point_appliance_sort_key(enforcement_point):
+    node_names = sorted(
+        str(node.appliance)
+        for node in enforcement_point.nodes.all()
+        if node.appliance is not None
+    )
+    if node_names:
+        return ", ".join(node_names).lower()
+    if enforcement_point.appliance is not None:
+        return str(enforcement_point.appliance).lower()
+    return ""
+
+
+def build_pretty_json(value):
+    return json.dumps(value, indent=2, sort_keys=True)
+
+
+def build_appliance_group_snapshot_context(appliance_group):
+    latest_snapshots = []
+    latest_merged_config = (
+        Snapshot.objects.filter(
+            appliance__appliance_group=appliance_group,
+            source_type="show_merged_config",
+        )
+        .select_related("appliance")
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+    latest_shared_policy = (
+        Snapshot.objects.filter(
+            appliance_group=appliance_group,
+            source_type="show_pushed_shared_policy",
+        )
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+
+    for source_type, label, snapshot in [
+        ("show_merged_config", "Merged Config", latest_merged_config),
+        ("show_pushed_shared_policy", "Pushed Shared Policy", latest_shared_policy),
+    ]:
+        latest_snapshots.append(
+            {
+                "source_type": source_type,
+                "label": label,
+                "snapshot": snapshot,
+                "pretty_payload": build_pretty_json(snapshot.payload) if snapshot is not None else "",
+                "pretty_metadata": build_pretty_json(snapshot.metadata) if snapshot is not None else "",
+            }
+        )
+
+    enforcement_points = appliance_group.enforcement_points.order_by("vsys_name", "pk")
+    for enforcement_point in enforcement_points:
+        latest_vsys_policy = (
+            Snapshot.objects.filter(
+                enforcement_point=enforcement_point,
+                source_type="show_pushed_shared_policy_vsys",
+            )
+            .select_related("enforcement_point")
+            .order_by("-collected_at", "-pk")
+            .first()
+        )
+        label = f"VSYS Pushed Shared Policy / {enforcement_point.vsys_name}"
+        if enforcement_point.vsys_display_name:
+            label = f"{label} / {enforcement_point.vsys_display_name}"
+        latest_snapshots.append(
+            {
+                "source_type": "show_pushed_shared_policy_vsys",
+                "label": label,
+                "snapshot": latest_vsys_policy,
+                "pretty_payload": build_pretty_json(latest_vsys_policy.payload) if latest_vsys_policy is not None else "",
+                "pretty_metadata": build_pretty_json(latest_vsys_policy.metadata) if latest_vsys_policy is not None else "",
+            }
+        )
+
+    return {
+        "latest_snapshots": latest_snapshots,
+    }
+
+
+def build_enforcement_point_security_rule_context(enforcement_point):
+    security_rules = (
+        enforcement_point.security_rules.select_related("source_snapshot")
+        .prefetch_related(
+            "securityrulefromzones",
+            "securityruletozones",
+            "securityrulesourceaddresss",
+            "securityruledestinationaddresss",
+            "securityrulesourceusers",
+            "securityruleapplications",
+            "securityruleservices",
+            "securityrulecategorys",
+            "securityrulesourcehips",
+            "securityruledestinationhips",
+            "securityrulesaasusers",
+            "securityrulesaastenants",
+            "securityruleprofilegroups",
+            "securityruleprofiles",
+        )
+        .order_by("effective_order", "name", "pk")
+    )
+    rows = []
+    for security_rule in security_rules:
+        profile_groups = joined_member_values(security_rule, "securityruleprofilegroups")
+        profiles = ", ".join(
+            f"{profile.profile_type}: {profile.value}"
+            for profile in security_rule.securityruleprofiles.all()
+        )
+        rows.append(
+            {
+                "security_rule": security_rule,
+                "config_source_label": security_rule_config_source_label(security_rule.config_source),
+                "from_zones": listed_member_values(security_rule, "securityrulefromzones"),
+                "to_zones": listed_member_values(security_rule, "securityruletozones"),
+                "source_addresses": listed_member_values(security_rule, "securityrulesourceaddresss"),
+                "destination_addresses": listed_member_values(security_rule, "securityruledestinationaddresss"),
+                "applications": listed_member_values(security_rule, "securityruleapplications"),
+                "services": listed_member_values(security_rule, "securityruleservices"),
+                "categories": listed_member_values(security_rule, "securityrulecategorys"),
+                "profile_groups": profile_groups,
+                "profiles": profiles,
+            }
+        )
+    return {
+        "security_rule_rows": rows,
+    }
+
+
+def build_enforcement_point_address_context(enforcement_point):
+    address_objects = (
+        enforcement_point.address_objects.select_related("source_snapshot")
+        .prefetch_related("tags")
+        .order_by("name", "pk")
+    )
+    address_groups = (
+        enforcement_point.address_groups.select_related("source_snapshot")
+        .prefetch_related("tags", "members")
+        .order_by("name", "pk")
+    )
+    rows = []
+
+    for address_object in address_objects:
+        rows.append(build_address_object_row(address_object))
+
+    for address_group in address_groups:
+        rows.append(build_address_group_row(address_group))
+
+    rows.sort(key=lambda row: (row["kind"] != "Object", row["name"], row["source_snapshot"].pk))
+    return {
+        "address_rows": rows,
+    }
+
+
+def get_application_environment():
+    application_environments = list(ApplicationEnvironment.objects.order_by("pk")[:2])
+    if len(application_environments) > 1:
+        raise ImproperlyConfigured("Expected a single ApplicationEnvironment record for this deployment.")
+    return application_environments[0] if application_environments else None
+
+
+class HomeView(TemplateView):
+    template_name = "workspace.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["application_environment"] = get_application_environment()
+        return context
+
+
+class ManagementStationListView(ListView):
+    model = ManagementStation
+    context_object_name = "management_stations"
+    template_name = "integrations/management_station_list.html"
+
+    def get_queryset(self):
+        return get_management_station_list_queryset()
+
+
+class ManagementStationDetailView(DetailView):
+    model = ManagementStation
+    context_object_name = "management_station"
+    pk_url_kwarg = "pk"
+    template_name = "integrations/management_station_detail.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context.update(build_management_station_detail_context(self.object))
+        return context
+
+
+class RightOverlayMixin:
+    overlay_close_url = None
+    overlay_panel_class = "w-[32rem] max-w-[calc(100vw-15rem)]"
+
+    def get_overlay_close_url(self):
+        return self.overlay_close_url
+
+    def get_overlay_panel_class(self):
+        return self.overlay_panel_class
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["overlay_is_open"] = True
+        context["overlay_close_url"] = self.get_overlay_close_url()
+        context["overlay_panel_class"] = self.get_overlay_panel_class()
+        return context
+
+
+class ManagementStationListBackgroundMixin:
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["management_stations"] = get_management_station_list_queryset()
+        return context
+
+
+class HomeBackgroundMixin:
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["application_environment"] = get_application_environment()
+        return context
+
+
+class ManagementStationDetailBackgroundMixin:
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        management_station = context["management_station"]
+        context.update(build_management_station_detail_context(management_station))
+        return context
+
+
+class ApplianceGroupSnapshotView(RightOverlayMixin, ManagementStationDetailBackgroundMixin, TemplateView):
+    template_name = "integrations/appliance_group_snapshots.html"
+    overlay_panel_class = "w-[56rem] max-w-[calc(100vw-8rem)]"
+
+    def get_context_data(self, **kwargs):
+        management_station = get_object_or_404(ManagementStation, pk=self.kwargs["pk"])
+        appliance_group = get_object_or_404(
+            ApplianceGroup.objects.select_related("active_appliance").prefetch_related("appliances"),
+            pk=self.kwargs["appliance_group_pk"],
+            management_station=management_station,
+        )
+        context = super().get_context_data(
+            management_station=management_station,
+            appliance_group=appliance_group,
+            **kwargs,
+        )
+        context.update(build_appliance_group_snapshot_context(appliance_group))
+        return context
+
+    def get_overlay_close_url(self):
+        return reverse("management_station_detail", kwargs={"pk": self.kwargs["pk"]})
+
+
+class EnforcementPointSecurityRuleListView(TemplateView):
+    template_name = "integrations/enforcement_point_security_rules.html"
+
+    def get_context_data(self, **kwargs):
+        management_station = get_object_or_404(ManagementStation, pk=self.kwargs["pk"])
+        enforcement_point = get_object_or_404(
+            EnforcementPoint.objects.select_related("appliance_group", "appliance").prefetch_related("nodes__appliance"),
+            pk=self.kwargs["enforcement_point_pk"],
+            management_station=management_station,
+        )
+        context = super().get_context_data(**kwargs)
+        context["management_station"] = management_station
+        context["enforcement_point"] = enforcement_point
+        context.update(build_enforcement_point_security_rule_context(enforcement_point))
+        return context
+
+
+class EnforcementPointAddressListView(TemplateView):
+    template_name = "integrations/enforcement_point_addresses.html"
+
+    def get_context_data(self, **kwargs):
+        management_station = get_object_or_404(ManagementStation, pk=self.kwargs["pk"])
+        enforcement_point = get_object_or_404(
+            EnforcementPoint.objects.select_related("appliance_group", "appliance").prefetch_related("nodes__appliance"),
+            pk=self.kwargs["enforcement_point_pk"],
+            management_station=management_station,
+        )
+        context = super().get_context_data(**kwargs)
+        context["management_station"] = management_station
+        context["enforcement_point"] = enforcement_point
+        context.update(build_enforcement_point_address_context(enforcement_point))
+        return context
+
+
+class ManagementStationCreateView(RightOverlayMixin, ManagementStationListBackgroundMixin, CreateView):
+    form_class = ManagementStationForm
+    model = ManagementStation
+    template_name = "integrations/management_station_form.html"
+    overlay_close_url = "/management-stations/"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["form_mode"] = "create"
+        return context
+
+    def get_success_url(self):
+        return reverse("management_station_detail", kwargs={"pk": self.object.pk})
+
+
+class ManagementStationUpdateView(RightOverlayMixin, ManagementStationDetailBackgroundMixin, UpdateView):
+    form_class = ManagementStationForm
+    model = ManagementStation
+    context_object_name = "management_station"
+    pk_url_kwarg = "pk"
+    template_name = "integrations/management_station_form.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["form_mode"] = "update"
+        return context
+
+    def get_success_url(self):
+        return reverse("management_station_detail", kwargs={"pk": self.object.pk})
+
+    def get_overlay_close_url(self):
+        return reverse("management_station_detail", kwargs={"pk": self.object.pk})
+
+
+class ManagementStationDeleteView(RightOverlayMixin, ManagementStationDetailBackgroundMixin, DeleteView):
+    model = ManagementStation
+    context_object_name = "management_station"
+    pk_url_kwarg = "pk"
+    template_name = "integrations/management_station_confirm_delete.html"
+    success_url = reverse_lazy("management_station_list")
+
+    def get_overlay_close_url(self):
+        return reverse("management_station_detail", kwargs={"pk": self.object.pk})
+
+
+class ApplicationEnvironmentSettingsView(RightOverlayMixin, HomeBackgroundMixin, TemplateView):
+    template_name = "integrations/application_environment_form.html"
+    overlay_close_url = "/"
+
+    def get_application_environment(self):
+        return get_application_environment()
+
+    def get_form(self, instance=None, data=None):
+        return ApplicationEnvironmentForm(instance=instance, data=data)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        application_environment = kwargs.pop("application_environment", None) or self.get_application_environment()
+        form = kwargs.pop("form", None) or self.get_form(instance=application_environment)
+        context["application_environment"] = application_environment
+        context["form"] = form
+        context["form_mode"] = "update" if application_environment is not None else "create"
+        return context
+
+    def get(self, request, *args, **kwargs):
+        return self.render_to_response(self.get_context_data())
+
+    def post(self, request, *args, **kwargs):
+        application_environment = self.get_application_environment()
+        form = self.get_form(instance=application_environment, data=request.POST)
+        if not form.is_valid():
+            return self.render_to_response(
+                self.get_context_data(
+                    form=form,
+                    application_environment=application_environment,
+                )
+            )
+
+        self.object = form.save()
+        messages.success(request, "Client environment settings saved.")
+        return HttpResponseRedirect(reverse("home"))
+
+
+class ManagementStationSyncView(View):
+    def post(self, request, pk):
+        management_station = get_object_or_404(ManagementStation, pk=pk)
+        detail_url = reverse("management_station_detail", kwargs={"pk": management_station.pk})
+
+        if management_station.station_type != ManagementStation.StationType.PAN_PANORAMA:
+            messages.error(request, "Sync is currently only supported for Panorama management stations.")
+            return HttpResponseRedirect(detail_url)
+
+        try:
+            collect_persist_and_normalize(
+                management_station,
+                collector=collect_show_managed_devices,
+            )
+        except Exception as exc:
+            messages.error(request, f"Sync failed: {exc}")
+            return HttpResponseRedirect(detail_url)
+
+        messages.success(request, "Managed devices collected, persisted, and normalized.")
+        return HttpResponseRedirect(detail_url)
+
+
+class ManagementStationInScopeSyncView(View):
+    def post(self, request, pk):
+        management_station = get_object_or_404(ManagementStation, pk=pk)
+        detail_url = reverse("management_station_detail", kwargs={"pk": management_station.pk})
+
+        if management_station.station_type != ManagementStation.StationType.PAN_PANORAMA:
+            messages.error(
+                request,
+                "In-scope configuration refresh is currently only supported for Panorama management stations.",
+            )
+            return HttpResponseRedirect(detail_url)
+
+        try:
+            refresh = refresh_in_scope_configuration_snapshots(management_station)
+        except Exception as exc:
+            messages.error(request, f"In-scope configuration refresh failed: {exc}")
+            return HttpResponseRedirect(detail_url)
+
+        batch = refresh.configuration_snapshots
+        messages.success(
+            request,
+            "In-scope configuration refresh completed for "
+            f"{len(batch.merged_config_collections)} appliance config snapshot(s), "
+            f"{len(batch.shared_policy_collections)} shared policy snapshot(s), and "
+            f"{len(batch.vsys_policy_collections)} VSYS policy snapshot(s). "
+            f"Normalized {sum(len(item.address_objects) for item in batch.address_normalizations)} address object(s) "
+            f"and {sum(len(item.address_groups) for item in batch.address_normalizations)} address group(s). "
+            f"Normalized {sum(len(item.security_rules) for item in batch.security_rule_normalizations)} security rule(s).",
+        )
+        failure_count = (
+            len(batch.merged_config_failures)
+            + len(batch.shared_policy_failures)
+            + len(batch.vsys_policy_failures)
+            + len(batch.address_failures)
+            + len(batch.security_rule_failures)
+        )
+        if failure_count:
+            messages.error(
+                request,
+                f"{failure_count} in-scope collection task(s) failed. Review connectivity for disconnected appliances.",
+            )
+        return HttpResponseRedirect(detail_url)
+
+
+class ManagementStationBulkInScopeSyncView(View):
+    def post(self, request):
+        list_url = reverse("management_station_list")
+
+        try:
+            result = refresh_all_panorama_in_scope_data()
+        except Exception as exc:
+            messages.error(request, f"Bulk in-scope configuration refresh failed: {exc}")
+            return HttpResponseRedirect(list_url)
+
+        messages.success(
+            request,
+            (
+                "Bulk in-scope configuration refresh completed for "
+                f"{len(result.platform_refreshes)} Panorama station"
+                f"{'' if len(result.platform_refreshes) == 1 else 's'}, "
+                "then rebuilt security-rule vocabulary for "
+                f"{len(result.security_rule_search_vocabulary)} station"
+                f"{'' if len(result.security_rule_search_vocabulary) == 1 else 's'}."
+            ),
+        )
+        return HttpResponseRedirect(list_url)
+
+
+class EnforcementPointScopeToggleView(View):
+    def post(self, request, pk, enforcement_point_pk):
+        management_station = get_object_or_404(ManagementStation, pk=pk)
+        enforcement_point = get_object_or_404(
+            EnforcementPoint,
+            pk=enforcement_point_pk,
+            management_station=management_station,
+        )
+        detail_url = reverse("management_station_detail", kwargs={"pk": management_station.pk})
+        enforcement_point.in_scope = not enforcement_point.in_scope
+        enforcement_point.save(update_fields=["in_scope"])
+        if enforcement_point.in_scope:
+            messages.success(request, "Enforcement point marked in scope.")
+        else:
+            messages.success(request, "Enforcement point marked out of scope.")
+        return HttpResponseRedirect(detail_url)

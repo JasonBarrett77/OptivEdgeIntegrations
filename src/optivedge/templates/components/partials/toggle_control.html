@@ -1,0 +1,24 @@
+<label for="{{ field.id_for_label }}" class="inline-grid cursor-pointer grid-cols-[auto,auto,auto,auto] items-center">
+    <input
+        type="checkbox"
+        name="{{ field.name }}"
+        id="{{ field.id_for_label }}"
+        value="on"
+        class="peer sr-only appearance-none"
+        {% if field.value %}checked{% endif %}
+    >
+    <span
+        class="relative inline-flex {{ toggle_track_classes }} {{ toggle_focus_classes }} col-start-1 row-start-1 shrink-0 rounded-full bg-slate-300 transition-colors duration-200 peer-checked:bg-blue-600 peer-focus:outline-none after:absolute after:left-0.5 after:top-0.5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 after:content-['']"
+        aria-hidden="true"
+    ></span>
+    {% if label_prefix %}
+        <span class="col-start-2 row-start-1 {{ label_gap_class|default:'ml-1.5' }} {{ toggle_text_classes }} {{ resolved_text_weight }} {{ resolved_text_tracking }} leading-none {{ resolved_text_color }}">{{ label_prefix }}</span>
+        <span class="col-start-3 row-start-1 {{ toggle_text_classes }} {{ resolved_text_weight }} {{ resolved_text_tracking }} leading-none {{ resolved_text_color }}" aria-hidden="true">&nbsp;</span>
+    {% endif %}
+    {% if label_off %}
+        <span class="col-start-4 row-start-1 {{ toggle_text_classes }} {{ resolved_text_weight }} {{ resolved_text_tracking }} leading-none {{ resolved_text_color }} transition-all duration-200 peer-checked:-translate-y-0.5 peer-checked:opacity-0">{{ label_off }}</span>
+    {% endif %}
+    {% if label_on %}
+        <span class="col-start-4 row-start-1 {{ toggle_text_classes }} {{ resolved_text_weight }} {{ resolved_text_tracking }} leading-none {{ resolved_text_color }} translate-y-0.5 opacity-0 transition-all duration-200 peer-checked:translate-y-0 peer-checked:opacity-100">{{ label_on }}</span>
+    {% endif %}
+</label>

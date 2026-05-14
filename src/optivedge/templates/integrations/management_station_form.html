@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}{% if form_mode == "create" %}Create Management Station{% else %}Update Management Station
+{% endif %}{% endblock %}
+
+{% block content %}
+    {% if form_mode == "create" %}
+        {% include "integrations/partials/management_station_list_content.html" %}
+    {% else %}
+        {% include "integrations/partials/management_station_detail_content.html" %}
+    {% endif %}
+{% endblock %}
+
+{% block overlay_title %}
+    <h1 class="truncate text-sm font-semibold text-slate-900">
+        {% if form_mode == "create" %}Create Management Station{% else %}Update Management Station{% endif %}
+    </h1>
+{% endblock %}
+
+{% block overlay_body %}
+    <form method="post" class="flex flex-col gap-4 px-4 py-4">
+        {% csrf_token %}
+        <div class="grid grid-cols-1 gap-4">
+            {% for field in form %}
+                {% if field.name == "verify_tls" %}
+                    <div class="flex flex-col gap-1">
+                        <div class="pt-2">
+                            {% include "components/toggle.html" with field=field size="md" label_prefix="TLS Verify is" label_on="on" label_off="off" text_color="text-slate-600" text_weight="font-medium" text_size="text-xs" text_tracking="tracking-wide" %}
+                        </div>
+                        {% for error in field.errors %}
+                            <p class="text-xs text-red-700">{{ error }}</p>
+                        {% endfor %}
+                    </div>
+                {% else %}
+                    <div class="flex flex-col gap-1">
+                        <label for="{{ field.id_for_label }}"
+                               class="text-xs font-medium uppercase tracking-wide text-slate-600">
+                            {{ field.label }}
+                        </label>
+                        {{ field }}
+                        {% if field.help_text %}
+                            <p class="text-xs text-slate-500">{{ field.help_text }}</p>
+                        {% endif %}
+                        {% for error in field.errors %}
+                            <p class="text-xs text-red-700">{{ error }}</p>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            {% endfor %}
+        </div>
+        {% if form.non_field_errors %}
+            <div class="border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+                {% for error in form.non_field_errors %}
+                    <div>{{ error }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+        <div class="flex items-center gap-2">
+            <button type="submit"
+                    class="inline-flex h-8 items-center justify-center border border-blue-300 bg-blue-50 px-3 text-sm font-medium whitespace-nowrap text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20">
+                {% if form_mode == "create" %}Create{% else %}Save{% endif %}
+            </button>
+            <a
+                    href="{{ overlay_close_url }}"
+                    class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+            >
+                Cancel
+            </a>
+        </div>
+    </form>
+{% endblock %}

@@ -1,0 +1,64 @@
+<section class="flex h-full w-full min-h-0 min-w-0 flex-col">
+    <div class="min-h-0 flex-1 overflow-auto p-6">
+        <div class="mx-auto flex max-w-4xl flex-col gap-6">
+            <section class="border border-slate-200 bg-white">
+                <div class="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+                    <div>
+                        <p class="text-[11px] uppercase tracking-wide text-slate-500">Application Environment</p>
+                        <h1 class="text-sm font-semibold text-slate-900">Client Settings</h1>
+                    </div>
+                    <a
+                        href="{% url 'application_environment_settings' %}"
+                        class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                    >
+                        {% if application_environment %}Edit{% else %}Configure{% endif %}
+                    </a>
+                </div>
+                {% if messages %}
+                    <div class="flex flex-col gap-2 border-b border-slate-200 px-4 py-3">
+                        {% for message in messages %}
+                            <div class="border px-3 py-2 text-sm leading-5 {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-800{% else %}border-blue-200 bg-blue-50 text-blue-800{% endif %}">
+                                {{ message }}
+                            </div>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+                {% if application_environment %}
+                    <div class="grid gap-0 divide-y divide-slate-200">
+                        <div class="grid grid-cols-[8rem,minmax(0,1fr)] gap-3 px-4 py-3">
+                            <p class="text-[11px] uppercase tracking-wide text-slate-500">Client Name</p>
+                            <p class="text-sm text-slate-900">{{ application_environment.client_name }}</p>
+                        </div>
+                        <div class="grid grid-cols-[8rem,minmax(0,1fr)] gap-3 px-4 py-3">
+                            <p class="text-[11px] uppercase tracking-wide text-slate-500">Short Name</p>
+                            <p class="font-mono text-sm text-slate-900">{{ application_environment.client_short_name }}</p>
+                        </div>
+                        <div class="grid grid-cols-[8rem,minmax(0,1fr)] gap-3 px-4 py-3">
+                            <p class="text-[11px] uppercase tracking-wide text-slate-500">Opportunity</p>
+                            <p class="font-mono text-sm text-slate-900">{{ application_environment.opportunity_number }}</p>
+                        </div>
+                        <div class="grid grid-cols-[8rem,minmax(0,1fr)] gap-3 px-4 py-3">
+                            <p class="text-[11px] uppercase tracking-wide text-slate-500">Notes</p>
+                            <p class="text-sm whitespace-pre-wrap {% if application_environment.notes %}text-slate-900{% else %}text-slate-400{% endif %}">
+                                {% if application_environment.notes %}{{ application_environment.notes }}{% else %}-{% endif %}
+                            </p>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="px-4 py-8 text-sm text-slate-500">
+                        Client environment settings have not been configured yet.
+                    </div>
+                {% endif %}
+            </section>
+
+            <section class="border border-slate-200 bg-white">
+                <div class="px-4 py-6">
+                    <h2 class="text-sm font-semibold text-slate-900">Dashboard Ready</h2>
+                    <p class="mt-2 text-sm text-slate-600">
+                        The dashboard shell is wired through Django and ready for calibration workflow screens.
+                    </p>
+                </div>
+            </section>
+        </div>
+    </div>
+</section>

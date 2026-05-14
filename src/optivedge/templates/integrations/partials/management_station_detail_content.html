@@ -1,0 +1,321 @@
+{% load lucide %}
+<section class="flex h-full w-full min-h-0 min-w-0">
+    <div class="min-h-0 flex-1 overflow-auto">
+        <div class="flex flex-col px-4 py-3">
+            <div class="flex items-start justify-between gap-2 border-b border-slate-200 pb-2.5">
+                <div class="min-w-0 space-y-0.5">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Management Station</div>
+                    <div class="text-[15px] font-semibold leading-5 text-slate-950">
+                        {{ management_station.name|default:management_station.hostname }}
+                    </div>
+                </div>
+                <div class="flex shrink-0 items-center gap-1.5 pt-0.5">
+                    {% if management_station.station_type == "pan_panorama" %}
+                    <form method="post" action="/management-stations/{{ management_station.pk }}/sync/">
+                        {% csrf_token %}
+                        <button
+                            type="submit"
+                            class="inline-flex h-8 items-center justify-center border border-blue-200 bg-blue-50 px-3 text-sm font-medium whitespace-nowrap text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                        >
+                            Sync
+                        </button>
+                    </form>
+                    {% endif %}
+                    <a
+                        href="/management-stations/{{ management_station.pk }}/edit/"
+                        class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                    >
+                        Edit
+                    </a>
+                    <a
+                        href="/management-stations/{{ management_station.pk }}/delete/"
+                        class="inline-flex h-8 items-center justify-center border border-red-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-red-700 hover:bg-red-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                    >
+                        Delete
+                    </a>
+                </div>
+            </div>
+
+            {% if messages %}
+            <div class="flex flex-col gap-2 border-b border-slate-200 py-2.5">
+                {% for message in messages %}
+                <div class="border px-3 py-2 text-sm leading-5 {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-800{% else %}border-blue-200 bg-blue-50 text-blue-800{% endif %}">
+                    {{ message }}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <div class="grid grid-cols-1 gap-4 border-b border-slate-200 py-2.5 xl:grid-cols-2">
+                <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Name</div>
+                    <div class="text-sm leading-5 text-slate-900">
+                        {% if management_station.name %}
+                            {{ management_station.name }}
+                        {% else %}
+                            <span class="text-slate-400">-</span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Hostname</div>
+                    <div class="break-all text-sm leading-5 text-slate-900">{{ management_station.hostname }}</div>
+                </div>
+
+                <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Type</div>
+                    <div class="text-sm leading-5 text-slate-900">{{ management_station.get_station_type_display }}</div>
+                </div>
+
+                <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">TLS Verify</div>
+                    <div class="text-sm leading-5 text-slate-900">{% if management_station.verify_tls %}Enabled{% else %}Disabled{% endif %}</div>
+                </div>
+
+                <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">CA Bundle</div>
+                    <div class="text-sm leading-5 text-slate-900">
+                        {% if management_station.ca_bundle_path %}
+                            <span class="break-all">{{ management_station.ca_bundle_path }}</span>
+                        {% else %}
+                            <span class="text-slate-400">-</span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Notes</div>
+                    {% if management_station.notes %}
+                        <div class="whitespace-pre-wrap break-words text-left text-sm leading-5 text-slate-900">{{ management_station.notes }}</div>
+                    {% else %}
+                        <div class="text-left text-sm leading-5 text-slate-400">-</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <div class="pt-2.5">
+                <div class="flex items-center justify-between gap-3 pb-1.5">
+                    <h2 class="text-sm font-semibold text-slate-950">Appliance Groups</h2>
+                    <div class="flex items-center gap-2">
+                        {% if management_station.station_type == "pan_panorama" %}
+                        <form method="post" action="/management-stations/{{ management_station.pk }}/sync-in-scope/">
+                            {% csrf_token %}
+                            <button
+                                type="submit"
+                                class="inline-flex h-8 w-8 items-center justify-center border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                                title="Refresh in-scope configuration snapshots"
+                                aria-label="Refresh in-scope configuration snapshots"
+                            >
+                                {% lucide "refresh-cw" class="h-4 w-4" %}
+                            </button>
+                        </form>
+                        {% endif %}
+                        <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                            {{ appliance_groups|length }} row{{ appliance_groups|length|pluralize }}
+                        </div>
+                    </div>
+                </div>
+                <div class="overflow-auto border border-slate-200">
+                    <table class="min-w-full table-fixed border-separate border-spacing-0">
+                        <thead>
+                            <tr>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Name</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Type</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Appliances</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Active Appliance</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Last Synced</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for appliance_group in appliance_groups %}
+                            <tr>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-900">{{ appliance_group.name }}</td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">{{ appliance_group.get_group_type_display }}</td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">{{ appliance_group.appliances.count }}</td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                    {% if appliance_group.active_appliance %}
+                                        {{ appliance_group.active_appliance }}
+                                    {% else %}
+                                        <span class="text-slate-400">-</span>
+                                    {% endif %}
+                                </td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                    {% if appliance_group.last_synced_at %}
+                                        {{ appliance_group.last_synced_at }}
+                                    {% else %}
+                                        <span class="text-slate-400">-</span>
+                                    {% endif %}
+                                </td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                    <a
+                                        href="/management-stations/{{ management_station.pk }}/appliance-groups/{{ appliance_group.pk }}/snapshots/"
+                                        class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                                    >
+                                        Snapshots
+                                    </a>
+                                </td>
+                            </tr>
+                            {% empty %}
+                            <tr>
+                                <td colspan="6" class="px-4 py-8 text-center text-sm text-slate-500">
+                                    No appliance groups recorded for this station.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="pt-4">
+                <div class="flex items-center justify-between gap-3 pb-1.5">
+                    <h2 class="text-sm font-semibold text-slate-950">Enforcement Points</h2>
+                    <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                        {{ enforcement_points|length }} row{{ enforcement_points|length|pluralize }}
+                    </div>
+                </div>
+                <div class="overflow-auto border border-slate-200">
+                    <table class="min-w-full table-fixed border-separate border-spacing-0">
+                        <thead>
+                            <tr>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Appliance Names</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">VSYS</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Owner Type</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Appliance Group</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Last Synced</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Actions</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">In Scope</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for enforcement_point in enforcement_points %}
+                            <tr>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                    {% if enforcement_point.nodes.all %}
+                                        {% for node in enforcement_point.nodes.all %}
+                                            {{ node.appliance }}{% if not forloop.last %}, {% endif %}
+                                        {% endfor %}
+                                    {% elif enforcement_point.appliance %}
+                                        {{ enforcement_point.appliance }}
+                                    {% else %}
+                                        <span class="text-slate-400">-</span>
+                                    {% endif %}
+                                </td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-900">
+                                    {{ enforcement_point.vsys_name }}
+                                    {% if enforcement_point.vsys_display_name %}
+                                        <span class="text-slate-500">/ {{ enforcement_point.vsys_display_name }}</span>
+                                    {% endif %}
+                                </td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                    {% if enforcement_point.appliance_group %}
+                                        Appliance Group
+                                    {% else %}
+                                        Appliance
+                                    {% endif %}
+                                </td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                    {% if enforcement_point.appliance_group %}
+                                        {{ enforcement_point.appliance_group.name }}
+                                    {% else %}
+                                        <span class="text-slate-400">-</span>
+                                    {% endif %}
+                                </td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                    {% if enforcement_point.last_synced_at %}
+                                        {{ enforcement_point.last_synced_at }}
+                                    {% else %}
+                                        <span class="text-slate-400">-</span>
+                                    {% endif %}
+                                </td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 align-middle text-sm text-slate-800">
+                                    <div class="flex items-center gap-1.5">
+                                        <a
+                                            href="/management-stations/{{ management_station.pk }}/enforcement-points/{{ enforcement_point.pk }}/security-rules/"
+                                            class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                                        >
+                                            Rules
+                                        </a>
+                                        <a
+                                            href="/management-stations/{{ management_station.pk }}/enforcement-points/{{ enforcement_point.pk }}/addresses/"
+                                            class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                                        >
+                                            Addresses
+                                        </a>
+                                    </div>
+                                </td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 align-middle text-sm text-slate-800">
+                                    <form
+                                        method="post"
+                                        action="/management-stations/{{ management_station.pk }}/enforcement-points/{{ enforcement_point.pk }}/scope/"
+                                        class="flex h-full items-center"
+                                    >
+                                        {% csrf_token %}
+                                        <button
+                                            type="submit"
+                                            class="inline-flex h-7 items-center justify-center border px-2 text-xs font-medium whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 {% if enforcement_point.in_scope %}border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100{% else %}border-slate-200 bg-white text-slate-700 hover:bg-slate-50{% endif %}"
+                                        >
+                                            {% if enforcement_point.in_scope %}In Scope{% else %}Out of Scope{% endif %}
+                                        </button>
+                                    </form>
+                                </td>
+                            </tr>
+                            {% empty %}
+                            <tr>
+                                <td colspan="7" class="px-4 py-8 text-center text-sm text-slate-500">
+                                    No enforcement points recorded for this station.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <div class="pt-4">
+                <div class="flex items-center justify-between gap-3 pb-1.5">
+                    <h2 class="text-sm font-semibold text-slate-950">Recent Sync Runs</h2>
+                    <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                        {{ recent_sync_runs|length }} row{{ recent_sync_runs|length|pluralize }}
+                    </div>
+                </div>
+                <div class="overflow-auto border border-slate-200">
+                    <table class="min-w-full table-fixed border-separate border-spacing-0">
+                        <thead>
+                            <tr>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Type</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Status</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Started</th>
+                                <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Completed</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for sync_run in recent_sync_runs %}
+                            <tr>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-900">{{ sync_run.get_sync_type_display }}</td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">{{ sync_run.get_status_display }}</td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">{{ sync_run.started_at }}</td>
+                                <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                    {% if sync_run.completed_at %}
+                                        {{ sync_run.completed_at }}
+                                    {% else %}
+                                        <span class="text-slate-400">-</span>
+                                    {% endif %}
+                                </td>
+                            </tr>
+                            {% empty %}
+                            <tr>
+                                <td colspan="4" class="px-4 py-8 text-center text-sm text-slate-500">
+                                    No sync runs recorded for this station.
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>

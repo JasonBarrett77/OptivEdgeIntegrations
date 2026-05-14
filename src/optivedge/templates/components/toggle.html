@@ -1,0 +1,21 @@
+{% with resolved_text_color=text_color|default:"text-slate-900" resolved_text_weight=text_weight|default:"font-normal" resolved_text_tracking=text_tracking|default:"" %}
+    {% if size == "lg" %}
+        {% with default_toggle_text_classes="text-sm" toggle_track_classes="h-6 w-11 after:h-5 after:w-5 peer-checked:after:translate-x-5" toggle_focus_classes="peer-focus:ring-2 peer-focus:ring-blue-500/20" %}
+            {% with resolved_toggle_text_classes=text_size|default:default_toggle_text_classes %}
+                {% include "components/partials/toggle_control.html" with field=field label_prefix=label_prefix label_on=label_on label_off=label_off resolved_text_color=resolved_text_color resolved_text_weight=resolved_text_weight resolved_text_tracking=resolved_text_tracking toggle_track_classes=toggle_track_classes toggle_text_classes=resolved_toggle_text_classes toggle_focus_classes=toggle_focus_classes %}
+            {% endwith %}
+        {% endwith %}
+    {% elif size == "sm" %}
+        {% with default_toggle_text_classes="text-xs" toggle_track_classes="h-4 w-7 after:h-3 after:w-3 peer-checked:after:translate-x-3" toggle_focus_classes="peer-focus:ring-1 peer-focus:ring-blue-500/20" %}
+            {% with resolved_toggle_text_classes=text_size|default:default_toggle_text_classes %}
+                {% include "components/partials/toggle_control.html" with field=field label_prefix=label_prefix label_on=label_on label_off=label_off resolved_text_color=resolved_text_color resolved_text_weight=resolved_text_weight resolved_text_tracking=resolved_text_tracking toggle_track_classes=toggle_track_classes toggle_text_classes=resolved_toggle_text_classes toggle_focus_classes=toggle_focus_classes %}
+            {% endwith %}
+        {% endwith %}
+    {% else %}
+        {% with default_toggle_text_classes="text-sm" toggle_track_classes="h-5 w-9 after:h-4 after:w-4 peer-checked:after:translate-x-4" toggle_focus_classes="peer-focus:ring-2 peer-focus:ring-blue-500/20" %}
+            {% with resolved_toggle_text_classes=text_size|default:default_toggle_text_classes %}
+                {% include "components/partials/toggle_control.html" with field=field label_prefix=label_prefix label_on=label_on label_off=label_off resolved_text_color=resolved_text_color resolved_text_weight=resolved_text_weight resolved_text_tracking=resolved_text_tracking toggle_track_classes=toggle_track_classes toggle_text_classes=resolved_toggle_text_classes toggle_focus_classes=toggle_focus_classes %}
+            {% endwith %}
+        {% endwith %}
+    {% endif %}
+{% endwith %}

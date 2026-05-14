@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en" class="h-full">
+{% load lucide %}
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}OptivEdge{% endblock %}</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    {% block head %}{% endblock %}
+</head>
+<body class="h-full overflow-hidden bg-white text-slate-800">
+    <div class="flex h-full min-h-0">
+        <aside class="flex h-full min-h-0 w-60 shrink-0 flex-col border-r border-slate-200">
+            <div class="flex h-10 shrink-0 items-center border-b border-slate-200 px-4">
+                {% block brand_area %}
+                <div class="min-w-0">
+                    <p class="text-lg font-semibold text-slate-900">OptivEdge</p>
+                </div>
+                {% endblock %}
+            </div>
+            <nav class="min-h-0 flex-1 overflow-auto px-3 py-3">
+                {% block side_nav %}
+                <div class="flex flex-col gap-1">
+                    <a
+                        href="/"
+                        class="inline-flex h-8 items-center gap-2 px-3 text-sm transition-colors duration-300 {% if request.resolver_match.url_name == 'home' or request.resolver_match.url_name == 'application_environment_settings' %}bg-blue-200/75 font-medium text-slate-900{% else %}text-slate-600 hover:bg-blue-100/70 hover:text-slate-900{% endif %}"
+                    >
+                        {% lucide "layout-dashboard" class="h-4 w-4 shrink-0" %}
+                        Dashboard
+                    </a>
+                    <a
+                        href="/management-stations/"
+                        class="inline-flex h-8 items-center gap-2 px-3 text-sm transition-colors duration-300 {% if request.resolver_match.url_name == 'management_station_list' or request.resolver_match.url_name == 'management_station_detail' %}bg-blue-200/75 font-medium text-slate-900{% else %}text-slate-600 hover:bg-blue-100/70 hover:text-slate-900{% endif %}"
+                    >
+                        {% lucide "server" class="h-4 w-4 shrink-0" %}
+                        Management Stations
+                    </a>
+                    {% for section in optional_sidebar_sections %}
+                    <div class="mt-2 flex flex-col gap-1 border-t border-slate-200 pt-2">
+                        <div
+                            class="inline-flex h-8 items-center gap-2 px-3 text-sm transition-colors duration-300 {% if request.resolver_match.url_name in section.active_names %}text-slate-900{% else %}text-slate-600{% endif %}"
+                        >
+                            {% lucide section.icon class="h-4 w-4 shrink-0" %}
+                            <span class="font-medium">{{ section.label }}</span>
+                        </div>
+                        {% for item in section.items %}
+                        <a
+                            href="{{ item.href }}"
+                            class="inline-flex h-8 items-center gap-2 px-9 text-sm transition-colors duration-300 {% if request.resolver_match.url_name in item.active_names %}bg-blue-200/75 font-medium text-slate-900{% else %}text-slate-600 hover:bg-blue-100/70 hover:text-slate-900{% endif %}"
+                        >
+                            {{ item.label }}
+                        </a>
+                        {% endfor %}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endblock %}
+            </nav>
+        </aside>
+        <div class="relative flex min-h-0 min-w-0 flex-1 flex-col">
+            <header class="flex h-10 shrink-0 items-center border-b border-slate-200 px-3">
+                {% block top_nav %}{% endblock %}
+                <div class="ml-auto">
+                    {% block header_actions %}{% endblock %}
+                </div>
+            </header>
+            <main class="min-h-0 min-w-0 flex-1">
+                <div class="flex h-full w-full min-h-0 min-w-0">
+                    {% block content %}{% endblock %}
+                </div>
+            </main>
+            <div
+                data-overlay-root
+                data-overlay-open="{% if overlay_is_open %}true{% else %}false{% endif %}"
+                class="pointer-events-none absolute inset-x-0 bottom-0 top-10 z-30 hidden"
+                aria-hidden="{% if overlay_is_open %}false{% else %}true{% endif %}"
+            >
+                <div data-overlay-backdrop class="absolute inset-0 bg-slate-900/10 opacity-0 transition-opacity duration-300"></div>
+                <div class="absolute inset-y-0 right-0 flex max-w-full">
+                    <section
+                        data-overlay-panel
+                        class="flex h-full {{ overlay_panel_class|default:'w-[32rem] max-w-[calc(100vw-15rem)]' }} translate-x-full flex-col border-l border-slate-200 bg-white shadow-sm transition-transform duration-300 ease-out"
+                    >
+                        <div class="flex h-10 shrink-0 items-center justify-between border-b border-slate-200 px-3">
+                            <div class="min-w-0">
+                                {% block overlay_title %}{% endblock %}
+                                {% block overlay_subtitle %}{% endblock %}
+                            </div>
+                            {% if overlay_close_url %}
+                            <a
+                                href="{{ overlay_close_url }}"
+                                class="inline-flex h-8 items-center justify-center px-2 text-sm font-medium whitespace-nowrap text-slate-600 hover:bg-slate-50 hover:text-slate-900 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                            >
+                                Close
+                            </a>
+                            {% endif %}
+                        </div>
+                        <div class="min-h-0 flex-1 overflow-auto">
+                            {% block overlay_body %}{% endblock %}
+                        </div>
+                    </section>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        (function () {
+            const storageKey = "aegisgo.rightOverlayOpen";
+
+            function initializeOverlay() {
+                const root = document.querySelector("[data-overlay-root]");
+                if (!root) {
+                    return;
+                }
+
+                const panel = root.querySelector("[data-overlay-panel]");
+                const backdrop = root.querySelector("[data-overlay-backdrop]");
+                const isOpen = root.dataset.overlayOpen === "true";
+                const wasOpen = sessionStorage.getItem(storageKey) === "true";
+
+                function showImmediate() {
+                    root.classList.remove("hidden", "pointer-events-none");
+                    root.setAttribute("aria-hidden", "false");
+                    panel.classList.remove("translate-x-full");
+                    backdrop.classList.remove("opacity-0");
+                    backdrop.classList.add("opacity-100");
+                }
+
+                function hideImmediate() {
+                    panel.classList.add("translate-x-full");
+                    backdrop.classList.remove("opacity-100");
+                    backdrop.classList.add("opacity-0");
+                    root.classList.add("hidden", "pointer-events-none");
+                    root.setAttribute("aria-hidden", "true");
+                }
+
+                if (isOpen) {
+                    if (wasOpen) {
+                        showImmediate();
+                    } else {
+                        root.classList.remove("hidden", "pointer-events-none");
+                        root.setAttribute("aria-hidden", "false");
+                        requestAnimationFrame(function () {
+                            panel.classList.remove("translate-x-full");
+                            backdrop.classList.remove("opacity-0");
+                            backdrop.classList.add("opacity-100");
+                        });
+                    }
+                } else if (wasOpen) {
+                    showImmediate();
+                    requestAnimationFrame(function () {
+                        panel.classList.add("translate-x-full");
+                        backdrop.classList.remove("opacity-100");
+                        backdrop.classList.add("opacity-0");
+                        root.setAttribute("aria-hidden", "true");
+                    });
+                    window.setTimeout(function () {
+                        root.classList.add("hidden", "pointer-events-none");
+                    }, 320);
+                } else {
+                    hideImmediate();
+                }
+
+                sessionStorage.setItem(storageKey, isOpen ? "true" : "false");
+            }
+
+            if (document.readyState === "loading") {
+                document.addEventListener("DOMContentLoaded", initializeOverlay);
+            } else {
+                initializeOverlay();
+            }
+        }());
+    </script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}{{ appliance_group.name }} Snapshots{% endblock %}
+
+{% block content %}
+    {% include "integrations/partials/management_station_detail_content.html" %}
+{% endblock %}
+
+{% block overlay_title %}
+    <h1 class="truncate text-sm font-semibold text-slate-900">Appliance Group Snapshots</h1>
+{% endblock %}
+
+{% block overlay_subtitle %}
+    <div class="mt-0.5 text-xs text-slate-500">
+        {{ appliance_group.name }} / {{ appliance_group.get_group_type_display }}
+    </div>
+{% endblock %}
+
+{% block overlay_body %}
+    <div class="flex h-full min-h-0 flex-col">
+        <div class="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+            <div class="min-w-0">
+                <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Active Appliance</div>
+                <div class="truncate text-sm text-slate-900">
+                    {% if appliance_group.active_appliance %}
+                        {{ appliance_group.active_appliance }}
+                    {% else %}
+                        <span class="text-slate-400">-</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                {{ latest_snapshots|length }} config type{{ latest_snapshots|length|pluralize }}
+            </div>
+        </div>
+
+        <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-auto px-4 py-4">
+            {% for snapshot_item in latest_snapshots %}
+                <details class="border border-slate-200 bg-white" {% if forloop.first %}open{% endif %}>
+                    <summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium text-slate-900">
+                        <span>{{ snapshot_item.label }}</span>
+                        {% if snapshot_item.snapshot %}
+                            <span class="shrink-0 text-xs font-normal text-slate-500">{{ snapshot_item.snapshot.collected_at }}</span>
+                        {% else %}
+                            <span class="shrink-0 text-xs font-normal text-slate-400">No snapshot</span>
+                        {% endif %}
+                    </summary>
+                    <div class="border-t border-slate-200">
+                        {% if snapshot_item.snapshot %}
+                            <div class="grid grid-cols-1 gap-4 border-b border-slate-200 px-4 py-3 xl:grid-cols-2">
+                                <div class="flex min-w-0 flex-col gap-0.5">
+                                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Source Type</div>
+                                    <div class="text-sm text-slate-900">{{ snapshot_item.snapshot.source_type }}</div>
+                                </div>
+                                <div class="flex min-w-0 flex-col gap-0.5">
+                                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Scope Name</div>
+                                    <div class="text-sm text-slate-900">
+                                        {% if snapshot_item.snapshot.scope_name %}
+                                            {{ snapshot_item.snapshot.scope_name }}
+                                        {% else %}
+                                            <span class="text-slate-400">-</span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="border-b border-slate-200 px-4 py-3">
+                                <div class="pb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">Payload</div>
+                                <pre class="max-h-[42rem] overflow-auto overscroll-contain bg-slate-50 px-3 py-3 text-[11px] leading-tight text-slate-800">{{ snapshot_item.pretty_payload }}</pre>
+                            </div>
+                        {% else %}
+                            <div class="px-4 py-8 text-sm text-slate-500">
+                                No {{ snapshot_item.label|lower }} snapshot has been collected for this appliance group yet.
+                            </div>
+                        {% endif %}
+                    </div>
+                </details>
+            {% endfor %}
+        </div>
+    </div>
+{% endblock %}
