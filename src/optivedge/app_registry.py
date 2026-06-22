@@ -40,5 +40,8 @@ def sidebar_sections():
     for app_meta in iter_app_meta():
         section = getattr(app_meta, "SIDEBAR_SECTION", None)
         if section:
-            sections.append(section)
+            if isinstance(section, list):
+                sections.extend(section)
+            else:
+                sections.append(section)
     return sections
