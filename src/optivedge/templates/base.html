@@ -44,7 +44,7 @@
                             href="{{ item.href }}"
                             class="inline-flex h-8 items-center gap-2 pl-11 pr-3 text-sm transition-colors duration-300 {% if request.resolver_match.url_name in item.active_names %}bg-blue-200/75 font-medium text-slate-900{% else %}text-slate-600 hover:bg-blue-100/70 hover:text-slate-900{% endif %}"
                         >
-                            {{ item.label }}
+                            {% if item.icon %}{% lucide item.icon class="h-4 w-4 shrink-0" %}{% endif %}{{ item.label }}
                         </a>
                         {% endfor %}
                     </div>
