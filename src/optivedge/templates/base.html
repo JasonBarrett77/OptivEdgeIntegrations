@@ -38,10 +38,7 @@
                     </a>
                     {% for section in optional_sidebar_sections %}
                     <div class="mt-2 flex flex-col gap-1 border-t border-slate-200 pt-2">
-                        <div class="flex items-center gap-2 px-1 pb-0.5 pt-1 text-sm font-medium text-slate-600">
-                            {% lucide section.icon class="h-4 w-4 shrink-0" %}
-                            {{ section.label }}
-                        </div>
+                        <div class="px-1 pb-0.5 pt-1 text-sm font-medium text-slate-600">{{ section.label }}</div>
                         {% for item in section.items %}
                         <a
                             href="{{ item.href }}"
