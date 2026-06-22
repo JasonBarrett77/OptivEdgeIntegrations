@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{% if form_mode == "create" %}Create Management Station{% else %}Update Management Station
-{% endif %}{% endblock %}
+{% block title %} | {% if form_mode == "create" %}Create Management Station{% else %}Update Management Station{% endif %}{% endblock %}
 
 {% block content %}
     {% if form_mode == "create" %}

@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}{% if form_mode == "create" %}Set Client Settings{% else %}Update Client Settings{% endif %}{% endblock %}
+{% block title %} | {% if form_mode == "create" %}Set Client Settings{% else %}Update Client Settings{% endif %}{% endblock %}
 
 {% block content %}
 {% include "integrations/partials/workspace_content.html" %}
