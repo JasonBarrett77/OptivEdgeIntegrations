@@ -12,7 +12,7 @@ from optivedge.integrations.models import (
     Appliance,
     ApplianceGroup,
     EnforcementPoint,
-    ManagementPlaneProfile,
+    DeviceConfigurationProfile,
     ManagementStation,
     SecurityRule,
     SecurityRuleApplication,
@@ -23,7 +23,7 @@ from optivedge.integrations.models import (
     Snapshot,
 )
 from optivedge.integrations.platforms.pan_os.normalization import (
-    normalize_appliance_management_plane,
+    normalize_appliance_device_configuration,
     normalize_enforcement_point_addresses,
     normalize_enforcement_point_security_rules,
 )
@@ -862,15 +862,15 @@ class ManagementStationBulkInScopeSyncViewTests(TestCase):
 
         self.assertEqual(len(normalized.security_rules), 1)
         literal_object = enforcement_point.address_objects.get(name="10.0.0.0/8")
-        self.assertEqual(literal_object.provenance, "literal")
+        self.assertFalse(literal_object.field_provenance.filter(field_name="__entry__").exists())
         self.assertEqual(literal_object.address_type, literal_object.TYPE_IP_NETMASK)
         self.assertEqual(literal_object.normalized_value, "10.0.0.0/8")
         self.assertEqual(literal_object.namespace_type, "local_vsys")
         self.assertEqual(literal_object.namespace_value, "vsys1")
 
 
-class ManagementPlaneNormalizationTests(TestCase):
-    def test_normalize_appliance_management_plane_populates_effective_fields(self):
+class DeviceConfigurationNormalizationTests(TestCase):
+    def test_normalize_appliance_device_configuration_populates_effective_fields(self):
         station = ManagementStation.objects.create(
             station_type=ManagementStation.StationType.PAN_PANORAMA,
             hostname="panorama.local",
@@ -939,10 +939,10 @@ class ManagementPlaneNormalizationTests(TestCase):
             },
         )
 
-        normalized = normalize_appliance_management_plane(appliance)
+        normalized = normalize_appliance_device_configuration(appliance)
 
-        self.assertEqual(len(normalized.management_plane_profiles), 1)
-        profile = normalized.management_plane_profiles[0]
+        self.assertEqual(len(normalized.device_configuration_profiles), 1)
+        profile = normalized.device_configuration_profiles[0]
         self.assertTrue(profile.ha_required)
         self.assertTrue(profile.ha_enabled)
         self.assertFalse(profile.ha_state_sync_enabled)
@@ -959,7 +959,7 @@ class ManagementPlaneNormalizationTests(TestCase):
         self.assertEqual(profile.login_banner, "Authorized users only.")
         self.assertEqual(profile.idle_timeout_minutes, 10)
 
-    def test_normalize_appliance_management_plane_applies_intrinsic_defaults(self):
+    def test_normalize_appliance_device_configuration_applies_intrinsic_defaults(self):
         station = ManagementStation.objects.create(
             station_type=ManagementStation.StationType.PAN_PANORAMA,
             hostname="panorama.local",
@@ -1001,14 +1001,23 @@ class ManagementPlaneNormalizationTests(TestCase):
             },
         )
 
-        normalize_appliance_management_plane(appliance)
-        profile = ManagementPlaneProfile.objects.get(appliance=appliance)
+        normalize_appliance_device_configuration(appliance)
+        profile = DeviceConfigurationProfile.objects.get(appliance=appliance)
 
         self.assertFalse(profile.ha_required)
         self.assertFalse(profile.ha_enabled)
         self.assertFalse(profile.ha_state_sync_enabled)
         self.assertFalse(profile.ha_link_monitoring_enabled)
-        self.assertTrue(profile.http_disabled_explicit)
+        from django.contrib.contenttypes.models import ContentType
+        from optivedge.integrations.models import FieldProvenance
+        ct = ContentType.objects.get_for_model(DeviceConfigurationProfile)
+        self.assertTrue(
+            FieldProvenance.objects.filter(
+                content_type=ct,
+                object_id=profile.pk,
+                field_name="http_disabled",
+            ).exists()
+        )
         self.assertFalse(profile.http_disabled)
         self.assertFalse(profile.https_disabled)
         self.assertFalse(profile.ssh_disabled)

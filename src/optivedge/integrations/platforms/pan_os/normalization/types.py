@@ -11,7 +11,7 @@ from optivedge.integrations.models import (
     ApplianceGroup,
     EnforcementNode,
     EnforcementPoint,
-    ManagementPlaneProfile,
+    DeviceConfigurationProfile,
     SecurityRule,
 )
 
@@ -24,5 +24,5 @@ class PANOSNormalizedCollection:
     appliance_groups: list[ApplianceGroup]
     enforcement_points: list[EnforcementPoint]
     enforcement_nodes: list[EnforcementNode]
-    management_plane_profiles: list[ManagementPlaneProfile]
+    device_configuration_profiles: list[DeviceConfigurationProfile]
     security_rules: list[SecurityRule]

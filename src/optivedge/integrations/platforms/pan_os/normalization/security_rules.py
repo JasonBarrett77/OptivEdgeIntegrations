@@ -12,13 +12,14 @@ from dataclasses import dataclass
 import ipaddress
 from typing import Any
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
 from optivedge.integrations.models import (
     AddressGroup,
     AddressObject,
-    Appliance,
     EnforcementPoint,
+    FieldProvenance,
     PolicyObjectNamespace,
     SecurityRule,
     SecurityRuleApplication,
@@ -38,12 +39,25 @@ from optivedge.integrations.models import (
     Snapshot,
 )
 from optivedge.integrations.platforms.pan_os.normalization.addresses import derive_address_fields
-from optivedge.integrations.platforms.pan_os.normalization.common import ensure_list
+from optivedge.integrations.platforms.pan_os.normalization.common import (
+    ABSENT,
+    classify_prov_type,
+    ensure_list,
+    entry_provenance,
+    iter_member_values,
+    merged_vsys_entry,
+    parse_yes_no_field,
+    pushed_vsys_panorama,
+    scalar_value,
+)
+from optivedge.integrations.platforms.pan_os.normalization.snapshots import (
+    choose_local_appliance,
+    latest_merged_snapshot,
+    latest_pushed_vsys_snapshot,
+)
 from optivedge.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
 
 
-LOCAL_PROVENANCE = "local"
-NO_PUSHED_POLICY_MESSAGE = "No shared policy pushed to device"
 EFFECTIVE_ORDER_RANKS = {
     SecurityRule.SOURCE_PUSHED_PRE: 100000,
     SecurityRule.SOURCE_LOCAL: 200000,
@@ -69,25 +83,19 @@ class NormalizedSecurityRule:
     rule_position: int
     name: str
     uuid: str
-    provenance: str
     action: str
-    action_prov: str
     disabled: bool
-    disabled_prov: str
     rule_type: str
-    rule_type_prov: str
     description: str
-    description_prov: str
     log_start: bool | None
-    log_start_prov: str
     log_end: bool | None
-    log_end_prov: str
     log_setting: str
-    log_setting_prov: str
     raw_rule: dict[str, Any]
     members: list[NormalizedSecurityRuleMember]
     source_address_members: list[NormalizedSecurityRuleMember]
     destination_address_members: list[NormalizedSecurityRuleMember]
+    # (field_name, raw_key_or_ABSENT, raw_prov_value)
+    field_provenance_data: list[tuple[str, Any, str | None]]
 
 
 @dataclass(slots=True)
@@ -115,121 +123,14 @@ class LiteralAddressObjectSpec:
     num_hosts: int | None
 
 
-def choose_local_appliance(enforcement_point: EnforcementPoint) -> Appliance | None:
-    if enforcement_point.appliance is not None:
-        return enforcement_point.appliance
-
-    appliance_group = enforcement_point.appliance_group
-    if appliance_group is None:
-        return None
-
-    if appliance_group.active_appliance is not None:
-        return appliance_group.active_appliance
-
-    node = enforcement_point.nodes.select_related("appliance").order_by("id").first()
-    if node is not None:
-        return node.appliance
-
-    return appliance_group.appliances.order_by("hostname", "serial_number", "pk").first()
-
-
-def latest_merged_snapshot(enforcement_point: EnforcementPoint) -> Snapshot | None:
-    appliance = choose_local_appliance(enforcement_point)
-    if appliance is None:
-        return None
-    return (
-        Snapshot.objects.filter(
-            appliance=appliance,
-            source_type="show_merged_config",
-        )
-        .order_by("-collected_at", "-pk")
-        .first()
-    )
-
-
-def latest_pushed_vsys_snapshot(enforcement_point: EnforcementPoint) -> Snapshot | None:
-    return (
-        Snapshot.objects.filter(
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-        )
-        .order_by("-collected_at", "-pk")
-        .first()
-    )
-
-
-def rule_provenance(rule: dict[str, Any], default_prov: str) -> str:
-    if not isinstance(rule, dict):
-        return default_prov
-    return str(rule.get("@loc") or default_prov or "")
-
-
-def scalar_value(node: Any, default_prov: str) -> tuple[str, str]:
-    if node is None:
-        return "", ""
-    if isinstance(node, dict):
-        value = node.get("#text")
-        if value is None:
-            return "", str(node.get("@loc") or default_prov or "")
-        return str(value), str(node.get("@loc") or default_prov or "")
-    return str(node), default_prov
-
-
-def bool_value(node: Any, default_prov: str) -> tuple[bool | None, str]:
-    value, prov = scalar_value(node, default_prov)
-    if value == "":
-        return None, prov
-    lowered = value.lower()
-    if lowered in {"yes", "true"}:
-        return True, prov
-    if lowered in {"no", "false"}:
-        return False, prov
-    return None, prov
-
-
-def iter_member_values(node: Any, default_prov: str) -> list[tuple[str, str]]:
-    if node is None:
-        return []
-    if isinstance(node, dict):
-        members = ensure_list(node.get("member"))
-        node_prov = str(node.get("@loc") or default_prov or "")
-        values: list[tuple[str, str]] = []
-        for member in members:
-            if isinstance(member, dict):
-                value = member.get("#text")
-                if value is None:
-                    continue
-                values.append((str(value), str(member.get("@loc") or node_prov or "")))
-            else:
-                values.append((str(member), node_prov))
-        return values
-    if isinstance(node, list):
-        return [(str(member), default_prov) for member in node]
-    return [(str(node), default_prov)]
-
-
 def first_vsys_rulebase(payload: dict[str, Any], vsys_name: str) -> dict[str, Any]:
-    config = payload.get("config", {})
-    devices = config.get("devices", {}) if isinstance(config, dict) else {}
-    device_entry = ensure_list(devices.get("entry"))[0] if isinstance(devices, dict) and ensure_list(devices.get("entry")) else {}
-    vsys = device_entry.get("vsys", {}) if isinstance(device_entry, dict) else {}
-    for entry in ensure_list(vsys.get("entry")) if isinstance(vsys, dict) else []:
-        if isinstance(entry, dict) and entry.get("@name") == vsys_name:
-            return entry.get("rulebase", {}) if isinstance(entry.get("rulebase"), dict) else {}
-    return {}
+    entry = merged_vsys_entry(payload, vsys_name)
+    rulebase = entry.get("rulebase")
+    return rulebase if isinstance(rulebase, dict) else {}
 
 
 def pushed_rulebases(payload: dict[str, Any] | Any) -> tuple[dict[str, Any], dict[str, Any]]:
-    if payload == NO_PUSHED_POLICY_MESSAGE:
-        return {}, {}
-    if not isinstance(payload, dict):
-        raise ValueError(f"unexpected pushed policy payload type: {type(payload).__name__}")
-    policy = payload.get("policy", {})
-    if not isinstance(policy, dict):
-        raise ValueError(f"unexpected pushed policy root type: {type(policy).__name__}")
-    panorama = policy.get("panorama", {})
-    if not isinstance(panorama, dict):
-        raise ValueError(f"unexpected pushed panorama subtree type: {type(panorama).__name__}")
+    panorama = pushed_vsys_panorama(payload)
     pre = panorama.get("pre-rulebase", {})
     post = panorama.get("post-rulebase", {})
     if not isinstance(pre, dict):
@@ -336,16 +237,19 @@ def normalize_rule(
     config_source: str,
     rule_position: int,
     rule: dict[str, Any],
-    default_prov: str,
 ) -> NormalizedSecurityRule:
-    provenance = rule_provenance(rule, default_prov)
-    action, action_prov = scalar_value(rule.get("action"), provenance)
-    disabled, disabled_prov = bool_value(rule.get("disabled"), provenance)
-    rule_type, rule_type_prov = scalar_value(rule.get("rule-type"), provenance)
-    description, description_prov = scalar_value(rule.get("description"), provenance)
-    log_start, log_start_prov = bool_value(rule.get("log-start"), provenance)
-    log_end, log_end_prov = bool_value(rule.get("log-end"), provenance)
-    log_setting, log_setting_prov = scalar_value(rule.get("log-setting"), provenance)
+    entry_rk, entry_rv = entry_provenance(rule)
+    action, action_rk, action_rv = scalar_value(rule.get("action"))
+    disabled, disabled_rk, disabled_rv = parse_yes_no_field(rule.get("disabled"), default_effective=False)
+    rule_type, rule_type_rk, rule_type_rv = scalar_value(rule.get("rule-type"))
+    description, description_rk, description_rv = scalar_value(rule.get("description"))
+    log_start, log_start_rk, log_start_rv = parse_yes_no_field(rule.get("log-start"), default_effective=False)
+    log_end, log_end_rk, log_end_rv = parse_yes_no_field(rule.get("log-end"), default_effective=False)
+    log_setting, log_setting_rk, log_setting_rv = scalar_value(rule.get("log-setting"))
+
+    # log_start/log_end: treat ABSENT as null (not configured at all)
+    log_start_value: bool | None = None if log_start_rk is ABSENT else bool(log_start)
+    log_end_value: bool | None = None if log_end_rk is ABSENT else bool(log_end)
 
     members: list[NormalizedSecurityRuleMember] = []
 
@@ -361,7 +265,7 @@ def normalize_rule(
         (SecurityRuleSaasUser, "saas-user-list"),
         (SecurityRuleSaasTenant, "saas-tenant-list"),
     ]:
-        for position, (value, prov) in enumerate(iter_member_values(rule.get(field_name), provenance)):
+        for position, (value, prov) in enumerate(iter_member_values(rule.get(field_name))):
             members.append(
                 NormalizedSecurityRuleMember(
                     model=model,
@@ -378,7 +282,7 @@ def normalize_rule(
             prov=prov,
             position=position,
         )
-        for position, (value, prov) in enumerate(iter_member_values(rule.get("source"), provenance))
+        for position, (value, prov) in enumerate(iter_member_values(rule.get("source")))
     ]
     destination_address_members = [
         NormalizedSecurityRuleMember(
@@ -387,13 +291,13 @@ def normalize_rule(
             prov=prov,
             position=position,
         )
-        for position, (value, prov) in enumerate(iter_member_values(rule.get("destination"), provenance))
+        for position, (value, prov) in enumerate(iter_member_values(rule.get("destination")))
     ]
 
     profile_setting = rule.get("profile-setting")
     if isinstance(profile_setting, dict):
         group = profile_setting.get("group")
-        for position, (value, prov) in enumerate(iter_member_values(group, provenance)):
+        for position, (value, prov) in enumerate(iter_member_values(group)):
             members.append(
                 NormalizedSecurityRuleMember(
                     model=SecurityRuleProfileGroup,
@@ -406,7 +310,7 @@ def normalize_rule(
         profiles = profile_setting.get("profiles")
         if isinstance(profiles, dict):
             for profile_type, profile_value in profiles.items():
-                for position, (value, prov) in enumerate(iter_member_values(profile_value, provenance)):
+                for position, (value, prov) in enumerate(iter_member_values(profile_value)):
                     members.append(
                         NormalizedSecurityRuleMember(
                             model=SecurityRuleProfile,
@@ -424,25 +328,27 @@ def normalize_rule(
         rule_position=rule_position,
         name=str(rule.get("@name") or ""),
         uuid=str(rule.get("@uuid") or ""),
-        provenance=provenance,
         action=action,
-        action_prov=action_prov,
         disabled=bool(disabled),
-        disabled_prov=disabled_prov,
         rule_type=rule_type,
-        rule_type_prov=rule_type_prov,
         description=description,
-        description_prov=description_prov,
-        log_start=log_start,
-        log_start_prov=log_start_prov,
-        log_end=log_end,
-        log_end_prov=log_end_prov,
+        log_start=log_start_value,
+        log_end=log_end_value,
         log_setting=log_setting,
-        log_setting_prov=log_setting_prov,
         raw_rule=rule,
         members=members,
         source_address_members=source_address_members,
         destination_address_members=destination_address_members,
+        field_provenance_data=[
+            ("__entry__",   entry_rk,       entry_rv),
+            ("action",      action_rk,      action_rv),
+            ("disabled",    disabled_rk,    disabled_rv),
+            ("rule_type",   rule_type_rk,   rule_type_rv),
+            ("description", description_rk, description_rv),
+            ("log_start",   log_start_rk,   log_start_rv),
+            ("log_end",     log_end_rk,     log_end_rv),
+            ("log_setting", log_setting_rk, log_setting_rv),
+        ],
     )
 
 
@@ -523,12 +429,10 @@ def realize_literal_address_objects(
                 source_snapshot=spec.source_snapshot,
                 config_source=spec.config_source,
                 name=spec.name,
-                provenance="literal",
                 namespace_type=spec.namespace_type,
                 namespace_value=spec.namespace_value,
                 precedence_rank=spec.precedence_rank,
                 address_type=spec.address_type,
-                address_type_prov="literal",
                 value=spec.value,
                 normalized_value=spec.normalized_value,
                 ipv4_start_int=spec.ipv4_start_int,
@@ -536,9 +440,7 @@ def realize_literal_address_objects(
                 num_hosts=spec.num_hosts,
                 is_any=False,
                 is_builtin=False,
-                value_prov="literal",
                 description="Synthetic literal address reference",
-                description_prov="literal",
                 raw_object={"synthetic": True, "kind": "rule_literal", "raw_value": raw_value},
                 last_synced_at=spec.source_snapshot.collected_at,
             )
@@ -691,7 +593,6 @@ def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list
                 config_source=SecurityRule.SOURCE_LOCAL,
                 rule_position=position,
                 rule=rule,
-                default_prov=LOCAL_PROVENANCE,
             )
         )
 
@@ -704,7 +605,6 @@ def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 rule_position=position,
                 rule=rule,
-                default_prov=rule_provenance(rule, ""),
             )
         )
 
@@ -717,7 +617,6 @@ def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list
                 config_source=SecurityRule.SOURCE_PUSHED_POST,
                 rule_position=position,
                 rule=rule,
-                default_prov=rule_provenance(rule, ""),
             )
         )
 
@@ -726,14 +625,12 @@ def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list
             continue
         config_source, source_rule = default_rule_source(merged_rule, pushed_defaults_by_name)
         source_snapshot = pushed_snapshot if source_rule is not merged_rule else merged_snapshot
-        default_prov = rule_provenance(source_rule, LOCAL_PROVENANCE if source_snapshot == merged_snapshot else "")
         normalized_rules.append(
             normalize_rule(
                 source_snapshot=source_snapshot,
                 config_source=config_source,
                 rule_position=position,
                 rule=source_rule,
-                default_prov=default_prov,
             )
         )
 
@@ -757,6 +654,7 @@ def replace_security_rules(
     enforcement_point.security_rules.all().delete()
     realize_literal_address_objects(enforcement_point, normalized_rules)
     address_objects_by_name, address_groups_by_name = build_address_lookup_maps(enforcement_point)
+    sr_ct = ContentType.objects.get_for_model(SecurityRule)
     created_rules: list[SecurityRule] = []
 
     for normalized_rule in normalized_rules:
@@ -783,24 +681,30 @@ def replace_security_rules(
             rule_position=normalized_rule.rule_position,
             name=normalized_rule.name,
             uuid=normalized_rule.uuid,
-            provenance=normalized_rule.provenance,
             action=normalized_rule.action,
-            action_prov=normalized_rule.action_prov,
             disabled=normalized_rule.disabled,
-            disabled_prov=normalized_rule.disabled_prov,
             rule_type=normalized_rule.rule_type,
-            rule_type_prov=normalized_rule.rule_type_prov,
             description=normalized_rule.description,
-            description_prov=normalized_rule.description_prov,
             log_start=normalized_rule.log_start,
-            log_start_prov=normalized_rule.log_start_prov,
             log_end=normalized_rule.log_end,
-            log_end_prov=normalized_rule.log_end_prov,
             log_setting=normalized_rule.log_setting,
-            log_setting_prov=normalized_rule.log_setting_prov,
             raw_rule=normalized_rule.raw_rule,
             last_synced_at=normalized_rule.source_snapshot.collected_at,
         )
+        prov_rows = [
+            FieldProvenance(
+                content_type=sr_ct,
+                object_id=security_rule.pk,
+                field_name=fname,
+                provenance_type=classify_prov_type(rk),
+                raw_key=rk or "",
+                raw_value=rv or "",
+            )
+            for fname, rk, rv in normalized_rule.field_provenance_data
+            if rk is not ABSENT
+        ]
+        if prov_rows:
+            FieldProvenance.objects.bulk_create(prov_rows)
         for member in normalized_rule.members:
             extra_fields = member.extra_fields or {}
             member.model.objects.create(
@@ -847,6 +751,6 @@ def normalize_security_rules(enforcement_point: EnforcementPoint) -> PANOSNormal
         appliance_groups=[],
         enforcement_points=[],
         enforcement_nodes=[],
-        management_plane_profiles=[],
+        device_configuration_profiles=[],
         security_rules=created_rules,
     )

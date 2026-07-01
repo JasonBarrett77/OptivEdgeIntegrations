@@ -7,10 +7,11 @@ from django.db import models
 
 from ..base import SyncTrackedModel
 from ..collected import EnforcementPoint, ManagementStation
+from ..provenance import ProvenancedMixin
 from .base import CONFIG_SOURCE_CHOICES
 
 
-class SecurityRule(SyncTrackedModel):
+class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     SOURCE_LOCAL = "local"
     SOURCE_PUSHED_PRE = "pushed_pre"
     SOURCE_PUSHED_POST = "pushed_post"
@@ -38,21 +39,13 @@ class SecurityRule(SyncTrackedModel):
     rule_position = models.PositiveIntegerField()
     name = models.CharField(max_length=255)
     uuid = models.CharField(max_length=64, blank=True)
-    provenance = models.CharField(max_length=128, blank=True)
     action = models.CharField(max_length=32, blank=True)
-    action_prov = models.CharField(max_length=128, blank=True)
     disabled = models.BooleanField(default=False)
-    disabled_prov = models.CharField(max_length=128, blank=True)
     rule_type = models.CharField(max_length=64, blank=True)
-    rule_type_prov = models.CharField(max_length=128, blank=True)
     description = models.TextField(blank=True)
-    description_prov = models.CharField(max_length=128, blank=True)
     log_start = models.BooleanField(null=True, blank=True)
-    log_start_prov = models.CharField(max_length=128, blank=True)
     log_end = models.BooleanField(null=True, blank=True)
-    log_end_prov = models.CharField(max_length=128, blank=True)
     log_setting = models.CharField(max_length=128, blank=True)
-    log_setting_prov = models.CharField(max_length=128, blank=True)
     raw_rule = models.JSONField(default=dict, blank=True)
 
     class Meta:

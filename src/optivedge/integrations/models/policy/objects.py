@@ -84,7 +84,6 @@ class AddressObject(ScopedPolicyObject):
         related_name="address_objects",
     )
     address_type = models.CharField(max_length=32, choices=ADDRESS_TYPE_CHOICES)
-    address_type_prov = models.CharField(max_length=128, blank=True)
     value = models.TextField(blank=True)
     normalized_value = models.TextField(blank=True)
     ipv4_start_int = models.BigIntegerField(null=True, blank=True)
@@ -93,9 +92,7 @@ class AddressObject(ScopedPolicyObject):
     is_any = models.BooleanField(default=False)
     is_edl = models.BooleanField(default=False)
     is_builtin = models.BooleanField(default=False)
-    value_prov = models.CharField(max_length=128, blank=True)
     description = models.TextField(blank=True)
-    description_prov = models.CharField(max_length=128, blank=True)
     raw_object = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -185,7 +182,6 @@ class AddressGroup(ScopedPolicyObject):
         related_name="address_groups",
     )
     dynamic_filter = models.TextField(blank=True)
-    dynamic_filter_prov = models.CharField(max_length=128, blank=True)
     raw_group = models.JSONField(default=dict, blank=True)
 
     class Meta:

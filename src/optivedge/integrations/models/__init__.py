@@ -6,6 +6,7 @@ while the normalization model is still evolving.
 """
 
 from .base import SyncTrackedModel, TimestampedModel
+from .provenance import FieldProvenance, ProvenancedMixin
 from .collected import (
     Appliance,
     ApplianceGroup,
@@ -16,7 +17,7 @@ from .collected import (
     Snapshot,
 )
 from .environment import ApplicationEnvironment
-from .management import ManagementPlaneProfile
+from .device_configuration import DeviceConfigurationProfile
 from .policy import (
     AddressGroup,
     AddressGroupMember,
@@ -50,6 +51,8 @@ from .policy import (
 
 __all__ = [
     "Appliance",
+    "FieldProvenance",
+    "ProvenancedMixin",
     "ApplianceGroup",
     "AddressGroup",
     "AddressGroupMember",
@@ -62,7 +65,7 @@ __all__ = [
     "EnforcementPoint",
     "IntegrationSyncRun",
     "ManagementStation",
-    "ManagementPlaneProfile",
+    "DeviceConfigurationProfile",
     "PolicyObjectBase",
     "PolicyObjectNamespace",
     "PolicyObjectPrecedence",

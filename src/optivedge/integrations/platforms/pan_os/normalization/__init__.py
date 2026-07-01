@@ -18,8 +18,8 @@ from optivedge.integrations.platforms.pan_os.normalization.panorama import (
 from optivedge.integrations.platforms.pan_os.normalization.addresses import (
     normalize_addresses,
 )
-from optivedge.integrations.platforms.pan_os.normalization.management import (
-    normalize_management_plane_profile,
+from optivedge.integrations.platforms.pan_os.normalization.device_configuration import (
+    normalize_device_configuration_profile,
 )
 from optivedge.integrations.platforms.pan_os.normalization.security_rules import (
     normalize_security_rules,
@@ -41,13 +41,13 @@ def normalize_collected_response(
         appliance_groups=[],
         enforcement_points=[],
         enforcement_nodes=[],
-        management_plane_profiles=[],
+        device_configuration_profiles=[],
         security_rules=[],
     )
 
 
-def normalize_appliance_management_plane(appliance: Appliance) -> PANOSNormalizedCollection:
-    return normalize_management_plane_profile(appliance)
+def normalize_appliance_device_configuration(appliance: Appliance) -> PANOSNormalizedCollection:
+    return normalize_device_configuration_profile(appliance)
 
 
 def normalize_enforcement_point_security_rules(enforcement_point: EnforcementPoint) -> PANOSNormalizedCollection:
@@ -61,10 +61,10 @@ def normalize_enforcement_point_addresses(enforcement_point: EnforcementPoint) -
 __all__ = [
     "PANOSNormalizedCollection",
     "normalize_addresses",
-    "normalize_appliance_management_plane",
+    "normalize_appliance_device_configuration",
     "normalize_enforcement_point_addresses",
     "normalize_enforcement_point_security_rules",
-    "normalize_management_plane_profile",
+    "normalize_device_configuration_profile",
     "normalize_collected_response",
     "normalize_security_rules",
     "normalize_show_managed_devices",

@@ -17,7 +17,7 @@ from optivedge.integrations.models import (
     Appliance,
     ApplianceGroup,
     EnforcementPoint,
-    ManagementPlaneProfile,
+    DeviceConfigurationProfile,
     ManagementStation,
     SecurityRule,
 )
@@ -32,7 +32,7 @@ from optivedge.integrations.platforms.pan_os.normalization import (
     PANOSNormalizedCollection,
     normalize_enforcement_point_addresses,
     normalize_enforcement_point_security_rules,
-    normalize_appliance_management_plane,
+    normalize_appliance_device_configuration,
     normalize_collected_response,
 )
 from optivedge.integrations.platforms.pan_os.persistence import (
@@ -117,13 +117,13 @@ class PANOSAddressNormalizedPoint:
 
 
 @dataclass(slots=True)
-class PANOSManagementPlaneNormalizedAppliance:
+class PANOSDeviceConfigurationNormalizedAppliance:
     appliance: Appliance
-    management_plane_profiles: list[ManagementPlaneProfile]
+    device_configuration_profiles: list[DeviceConfigurationProfile]
 
 
 @dataclass(slots=True)
-class PANOSManagementPlaneNormalizationFailure:
+class PANOSDeviceConfigurationNormalizationFailure:
     appliance: Appliance
     error_text: str
 
@@ -145,8 +145,8 @@ class PANOSInScopeConfigCollection:
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure]
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot]
     vsys_policy_failures: list[PANOSEnforcementPointCollectionFailure]
-    management_plane_normalizations: list[PANOSManagementPlaneNormalizedAppliance]
-    management_plane_failures: list[PANOSManagementPlaneNormalizationFailure]
+    device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance]
+    device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure]
     address_normalizations: list[PANOSAddressNormalizedPoint]
     address_failures: list[PANOSAddressNormalizationFailure]
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint]
@@ -384,8 +384,8 @@ def collect_in_scope_configuration_snapshots(
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure] = []
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot] = []
     vsys_policy_failures: list[PANOSEnforcementPointCollectionFailure] = []
-    management_plane_normalizations: list[PANOSManagementPlaneNormalizedAppliance] = []
-    management_plane_failures: list[PANOSManagementPlaneNormalizationFailure] = []
+    device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance] = []
+    device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure] = []
     address_normalizations: list[PANOSAddressNormalizedPoint] = []
     address_failures: list[PANOSAddressNormalizationFailure] = []
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint] = []
@@ -462,19 +462,19 @@ def collect_in_scope_configuration_snapshots(
 
     for appliance in appliances:
         try:
-            normalized = normalize_appliance_management_plane(appliance)
+            normalized = normalize_appliance_device_configuration(appliance)
         except Exception as exc:
-            management_plane_failures.append(
-                PANOSManagementPlaneNormalizationFailure(
+            device_configuration_failures.append(
+                PANOSDeviceConfigurationNormalizationFailure(
                     appliance=appliance,
                     error_text=str(exc),
                 )
             )
             continue
-        management_plane_normalizations.append(
-            PANOSManagementPlaneNormalizedAppliance(
+        device_configuration_normalizations.append(
+            PANOSDeviceConfigurationNormalizedAppliance(
                 appliance=appliance,
-                management_plane_profiles=normalized.management_plane_profiles,
+                device_configuration_profiles=normalized.device_configuration_profiles,
             )
         )
 
@@ -525,8 +525,8 @@ def collect_in_scope_configuration_snapshots(
         shared_policy_failures=shared_policy_failures,
         vsys_policy_collections=vsys_policy_collections,
         vsys_policy_failures=vsys_policy_failures,
-        management_plane_normalizations=management_plane_normalizations,
-        management_plane_failures=management_plane_failures,
+        device_configuration_normalizations=device_configuration_normalizations,
+        device_configuration_failures=device_configuration_failures,
         address_normalizations=address_normalizations,
         address_failures=address_failures,
         security_rule_normalizations=security_rule_normalizations,

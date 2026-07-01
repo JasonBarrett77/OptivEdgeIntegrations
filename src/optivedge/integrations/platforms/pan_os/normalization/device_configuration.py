@@ -1,75 +1,62 @@
-"""PAN-OS management-plane normalization helpers."""
+"""PAN-OS device-configuration normalization helpers."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import ipaddress
 from typing import Any
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
 from optivedge.integrations.models import (
     Appliance,
     ApplianceGroup,
-    ManagementPlaneProfile,
+    DeviceConfigurationProfile,
+    FieldProvenance,
     SecurityRule,
     Snapshot,
 )
-from optivedge.integrations.platforms.pan_os.normalization.common import ensure_list
+from optivedge.integrations.platforms.pan_os.normalization.common import (
+    ABSENT,
+    classify_prov_type,
+    ensure_list,
+    entry_provenance,
+    parse_integer_field,
+    parse_yes_no_field,
+    scalar_value,
+)
 from optivedge.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
 
 
-LOCAL_PROVENANCE = "local"
 DEFAULT_IDLE_TIMEOUT_MINUTES = 60
 
 
 @dataclass(slots=True)
-class NormalizedManagementPlaneProfile:
+class NormalizedDeviceConfigurationProfile:
     source_snapshot: Snapshot
     config_source: str
-    provenance: str
     ha_required: bool
     ha_enabled: bool
-    ha_enabled_explicit: bool
-    ha_enabled_prov: str
     ha_state_sync_enabled: bool
-    ha_state_sync_explicit: bool
-    ha_state_sync_prov: str
     ha_link_monitoring_enabled: bool
-    ha_link_monitoring_explicit: bool
-    ha_link_monitoring_prov: str
     ntp_primary_server: str
-    ntp_primary_server_prov: str
     ntp_secondary_server: str
-    ntp_secondary_server_prov: str
     http_disabled: bool
-    http_disabled_explicit: bool
-    http_disabled_prov: str
     https_disabled: bool
-    https_disabled_explicit: bool
-    https_disabled_prov: str
     telnet_disabled: bool
-    telnet_disabled_explicit: bool
-    telnet_disabled_prov: str
     ssh_disabled: bool
-    ssh_disabled_explicit: bool
-    ssh_disabled_prov: str
     icmp_disabled: bool
-    icmp_disabled_explicit: bool
-    icmp_disabled_prov: str
     snmp_disabled: bool
-    snmp_disabled_explicit: bool
-    snmp_disabled_prov: str
     permitted_ip_values: list[str]
     permitted_ip_count: int
     has_permitted_ip_restrictions: bool
     has_unrestricted_permitted_ips: bool
     login_banner: str
-    login_banner_prov: str
     idle_timeout_minutes: int
-    idle_timeout_explicit: bool
-    idle_timeout_prov: str
     raw_profile: dict[str, Any]
+    # Each tuple: (field_name, raw_key_orABSENT, raw_provenance_value)
+    field_provenance_data: list[tuple[str, Any, str | None]] = field(default_factory=list)
 
 
 def latest_merged_snapshot(appliance: Appliance) -> Snapshot | None:
@@ -95,44 +82,6 @@ def device_entry_from_snapshot(snapshot: Snapshot) -> dict[str, Any]:
     if not entries or not isinstance(entries[0], dict):
         raise ValueError("merged config does not contain a device entry")
     return entries[0]
-
-
-def scalar_value(node: Any, default_prov: str = LOCAL_PROVENANCE) -> tuple[str, str]:
-    if node is None:
-        return "", ""
-    if isinstance(node, dict):
-        value = node.get("#text")
-        return (str(value or "").strip(), str(node.get("@ptpl") or node.get("@loc") or default_prov or ""))
-    return str(node).strip(), default_prov
-
-
-def parse_yes_no_field(
-    node: Any,
-    *,
-    default_effective: bool,
-    default_prov: str = LOCAL_PROVENANCE,
-) -> tuple[bool, bool, str]:
-    raw_value, provenance = scalar_value(node, default_prov)
-    if not raw_value:
-        return default_effective, False, provenance
-    normalized = raw_value.lower()
-    return normalized == "yes", True, provenance
-
-
-def parse_integer_field(
-    node: Any,
-    *,
-    default_effective: int,
-    default_prov: str = LOCAL_PROVENANCE,
-) -> tuple[int, bool, str]:
-    raw_value, provenance = scalar_value(node, default_prov)
-    if not raw_value:
-        return default_effective, False, provenance
-    try:
-        parsed = int(raw_value)
-    except ValueError:
-        return default_effective, True, provenance
-    return parsed, True, provenance
 
 
 def entry_names(node: Any) -> list[str]:
@@ -180,7 +129,7 @@ def value_is_unrestricted(value: str) -> bool:
     )
 
 
-def normalize_management_plane_profile(appliance: Appliance) -> PANOSNormalizedCollection:
+def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormalizedCollection:
     snapshot = latest_merged_snapshot(appliance)
     if snapshot is None:
         return PANOSNormalizedCollection(
@@ -190,7 +139,7 @@ def normalize_management_plane_profile(appliance: Appliance) -> PANOSNormalizedC
             appliance_groups=[],
             enforcement_points=[],
             enforcement_nodes=[],
-            management_plane_profiles=[],
+            device_configuration_profiles=[],
             security_rules=[],
         )
 
@@ -238,43 +187,47 @@ def normalize_management_plane_profile(appliance: Appliance) -> PANOSNormalizedC
     appliance_group = appliance.appliance_group
     ha_required = appliance_group is not None and appliance_group.group_type == ApplianceGroup.TYPE_HA_PAIR
 
-    ha_enabled, ha_enabled_explicit, ha_enabled_prov = parse_yes_no_field(
+    ha_enabled, ha_enabled_rk, ha_enabled_rv = parse_yes_no_field(
         high_availability.get("enabled"),
         default_effective=False,
     )
-    ha_state_sync_enabled, ha_state_sync_explicit, ha_state_sync_prov = parse_yes_no_field(
+    ha_state_sync_enabled, ha_state_sync_rk, ha_state_sync_rv = parse_yes_no_field(
         ha_state.get("enabled"),
         default_effective=ha_enabled,
     )
-    ha_link_monitoring_enabled, ha_link_monitoring_explicit, ha_link_monitoring_prov = parse_yes_no_field(
+    ha_link_monitoring_enabled, ha_link_monitoring_rk, ha_link_monitoring_rv = parse_yes_no_field(
         ha_link_monitoring.get("enabled"),
         default_effective=False,
     )
 
-    ntp_primary_server, ntp_primary_server_prov = scalar_value(primary_ntp.get("ntp-server-address"))
-    ntp_secondary_server, ntp_secondary_server_prov = scalar_value(secondary_ntp.get("ntp-server-address"))
+    ntp_primary_server, ntp_primary_rk, ntp_primary_rv = scalar_value(
+        primary_ntp.get("ntp-server-address")
+    )
+    ntp_secondary_server, ntp_secondary_rk, ntp_secondary_rv = scalar_value(
+        secondary_ntp.get("ntp-server-address")
+    )
 
-    http_disabled, http_disabled_explicit, http_disabled_prov = parse_yes_no_field(
+    http_disabled, http_disabled_rk, http_disabled_rv = parse_yes_no_field(
         service.get("disable-http"),
         default_effective=True,
     )
-    https_disabled, https_disabled_explicit, https_disabled_prov = parse_yes_no_field(
+    https_disabled, https_disabled_rk, https_disabled_rv = parse_yes_no_field(
         service.get("disable-https"),
         default_effective=False,
     )
-    telnet_disabled, telnet_disabled_explicit, telnet_disabled_prov = parse_yes_no_field(
+    telnet_disabled, telnet_disabled_rk, telnet_disabled_rv = parse_yes_no_field(
         service.get("disable-telnet"),
         default_effective=True,
     )
-    ssh_disabled, ssh_disabled_explicit, ssh_disabled_prov = parse_yes_no_field(
+    ssh_disabled, ssh_disabled_rk, ssh_disabled_rv = parse_yes_no_field(
         service.get("disable-ssh"),
         default_effective=False,
     )
-    icmp_disabled, icmp_disabled_explicit, icmp_disabled_prov = parse_yes_no_field(
+    icmp_disabled, icmp_disabled_rk, icmp_disabled_rv = parse_yes_no_field(
         service.get("disable-icmp"),
         default_effective=False,
     )
-    snmp_disabled, snmp_disabled_explicit, snmp_disabled_prov = parse_yes_no_field(
+    snmp_disabled, snmp_disabled_rk, snmp_disabled_rv = parse_yes_no_field(
         service.get("disable-snmp"),
         default_effective=True,
     )
@@ -282,115 +235,100 @@ def normalize_management_plane_profile(appliance: Appliance) -> PANOSNormalizedC
     permitted_ip_values = entry_names(system.get("permitted-ip"))
     permitted_ip_count = len(permitted_ip_values)
     has_permitted_ip_restrictions = permitted_ip_count > 0
-    has_unrestricted_permitted_ips = any(value_is_unrestricted(value) for value in permitted_ip_values)
+    has_unrestricted_permitted_ips = any(value_is_unrestricted(v) for v in permitted_ip_values)
 
-    login_banner, login_banner_prov = scalar_value(system.get("login-banner"))
-    idle_timeout_minutes, idle_timeout_explicit, idle_timeout_prov = parse_integer_field(
+    login_banner, login_banner_rk, login_banner_rv = scalar_value(system.get("login-banner"))
+    idle_timeout_minutes, idle_timeout_rk, idle_timeout_rv = parse_integer_field(
         management.get("idle-timeout"),
         default_effective=DEFAULT_IDLE_TIMEOUT_MINUTES,
     )
 
-    normalized = NormalizedManagementPlaneProfile(
+    normalized = NormalizedDeviceConfigurationProfile(
         source_snapshot=snapshot,
         config_source=SecurityRule.SOURCE_LOCAL,
-        provenance=LOCAL_PROVENANCE,
         ha_required=ha_required,
         ha_enabled=ha_enabled,
-        ha_enabled_explicit=ha_enabled_explicit,
-        ha_enabled_prov=ha_enabled_prov,
         ha_state_sync_enabled=ha_state_sync_enabled,
-        ha_state_sync_explicit=ha_state_sync_explicit,
-        ha_state_sync_prov=ha_state_sync_prov,
         ha_link_monitoring_enabled=ha_link_monitoring_enabled,
-        ha_link_monitoring_explicit=ha_link_monitoring_explicit,
-        ha_link_monitoring_prov=ha_link_monitoring_prov,
         ntp_primary_server=ntp_primary_server,
-        ntp_primary_server_prov=ntp_primary_server_prov,
         ntp_secondary_server=ntp_secondary_server,
-        ntp_secondary_server_prov=ntp_secondary_server_prov,
         http_disabled=http_disabled,
-        http_disabled_explicit=http_disabled_explicit,
-        http_disabled_prov=http_disabled_prov,
         https_disabled=https_disabled,
-        https_disabled_explicit=https_disabled_explicit,
-        https_disabled_prov=https_disabled_prov,
         telnet_disabled=telnet_disabled,
-        telnet_disabled_explicit=telnet_disabled_explicit,
-        telnet_disabled_prov=telnet_disabled_prov,
         ssh_disabled=ssh_disabled,
-        ssh_disabled_explicit=ssh_disabled_explicit,
-        ssh_disabled_prov=ssh_disabled_prov,
         icmp_disabled=icmp_disabled,
-        icmp_disabled_explicit=icmp_disabled_explicit,
-        icmp_disabled_prov=icmp_disabled_prov,
         snmp_disabled=snmp_disabled,
-        snmp_disabled_explicit=snmp_disabled_explicit,
-        snmp_disabled_prov=snmp_disabled_prov,
         permitted_ip_values=permitted_ip_values,
         permitted_ip_count=permitted_ip_count,
         has_permitted_ip_restrictions=has_permitted_ip_restrictions,
         has_unrestricted_permitted_ips=has_unrestricted_permitted_ips,
         login_banner=login_banner,
-        login_banner_prov=login_banner_prov,
         idle_timeout_minutes=idle_timeout_minutes,
-        idle_timeout_explicit=idle_timeout_explicit,
-        idle_timeout_prov=idle_timeout_prov,
         raw_profile=deviceconfig,
+        field_provenance_data=[
+            ("ha_enabled",               ha_enabled_rk,            ha_enabled_rv),
+            ("ha_state_sync_enabled",    ha_state_sync_rk,         ha_state_sync_rv),
+            ("ha_link_monitoring_enabled", ha_link_monitoring_rk,  ha_link_monitoring_rv),
+            ("ntp_primary_server",       ntp_primary_rk,           ntp_primary_rv),
+            ("ntp_secondary_server",     ntp_secondary_rk,         ntp_secondary_rv),
+            ("http_disabled",            http_disabled_rk,         http_disabled_rv),
+            ("https_disabled",           https_disabled_rk,        https_disabled_rv),
+            ("telnet_disabled",          telnet_disabled_rk,       telnet_disabled_rv),
+            ("ssh_disabled",             ssh_disabled_rk,          ssh_disabled_rv),
+            ("icmp_disabled",            icmp_disabled_rk,         icmp_disabled_rv),
+            ("snmp_disabled",            snmp_disabled_rk,         snmp_disabled_rv),
+            ("login_banner",             login_banner_rk,          login_banner_rv),
+            ("idle_timeout_minutes",     idle_timeout_rk,          idle_timeout_rv),
+        ],
     )
 
     with transaction.atomic():
-        profile, _created = ManagementPlaneProfile.objects.update_or_create(
+        profile, _created = DeviceConfigurationProfile.objects.update_or_create(
             appliance=appliance,
             defaults={
                 "management_station": appliance.management_station,
                 "appliance_group": appliance.appliance_group,
                 "source_snapshot": normalized.source_snapshot,
                 "config_source": normalized.config_source,
-                "provenance": normalized.provenance,
                 "ha_required": normalized.ha_required,
                 "ha_enabled": normalized.ha_enabled,
-                "ha_enabled_explicit": normalized.ha_enabled_explicit,
-                "ha_enabled_prov": normalized.ha_enabled_prov,
                 "ha_state_sync_enabled": normalized.ha_state_sync_enabled,
-                "ha_state_sync_explicit": normalized.ha_state_sync_explicit,
-                "ha_state_sync_prov": normalized.ha_state_sync_prov,
                 "ha_link_monitoring_enabled": normalized.ha_link_monitoring_enabled,
-                "ha_link_monitoring_explicit": normalized.ha_link_monitoring_explicit,
-                "ha_link_monitoring_prov": normalized.ha_link_monitoring_prov,
                 "ntp_primary_server": normalized.ntp_primary_server,
-                "ntp_primary_server_prov": normalized.ntp_primary_server_prov,
                 "ntp_secondary_server": normalized.ntp_secondary_server,
-                "ntp_secondary_server_prov": normalized.ntp_secondary_server_prov,
                 "http_disabled": normalized.http_disabled,
-                "http_disabled_explicit": normalized.http_disabled_explicit,
-                "http_disabled_prov": normalized.http_disabled_prov,
                 "https_disabled": normalized.https_disabled,
-                "https_disabled_explicit": normalized.https_disabled_explicit,
-                "https_disabled_prov": normalized.https_disabled_prov,
                 "telnet_disabled": normalized.telnet_disabled,
-                "telnet_disabled_explicit": normalized.telnet_disabled_explicit,
-                "telnet_disabled_prov": normalized.telnet_disabled_prov,
                 "ssh_disabled": normalized.ssh_disabled,
-                "ssh_disabled_explicit": normalized.ssh_disabled_explicit,
-                "ssh_disabled_prov": normalized.ssh_disabled_prov,
                 "icmp_disabled": normalized.icmp_disabled,
-                "icmp_disabled_explicit": normalized.icmp_disabled_explicit,
-                "icmp_disabled_prov": normalized.icmp_disabled_prov,
                 "snmp_disabled": normalized.snmp_disabled,
-                "snmp_disabled_explicit": normalized.snmp_disabled_explicit,
-                "snmp_disabled_prov": normalized.snmp_disabled_prov,
                 "permitted_ip_values": normalized.permitted_ip_values,
                 "permitted_ip_count": normalized.permitted_ip_count,
                 "has_permitted_ip_restrictions": normalized.has_permitted_ip_restrictions,
                 "has_unrestricted_permitted_ips": normalized.has_unrestricted_permitted_ips,
                 "login_banner": normalized.login_banner,
-                "login_banner_prov": normalized.login_banner_prov,
                 "idle_timeout_minutes": normalized.idle_timeout_minutes,
-                "idle_timeout_explicit": normalized.idle_timeout_explicit,
-                "idle_timeout_prov": normalized.idle_timeout_prov,
                 "raw_profile": normalized.raw_profile,
             },
         )
+
+        ct = ContentType.objects.get_for_model(DeviceConfigurationProfile)
+        FieldProvenance.objects.filter(content_type=ct, object_id=profile.pk).delete()
+
+        prov_rows = []
+        for fname, rk, rv in normalized.field_provenance_data:
+            if rk is ABSENT:
+                continue
+            prov_rows.append(FieldProvenance(
+                content_type=ct,
+                object_id=profile.pk,
+                field_name=fname,
+                provenance_type=classify_prov_type(rk),
+                raw_key=rk or "",
+                raw_value=rv or "",
+            ))
+        if prov_rows:
+            FieldProvenance.objects.bulk_create(prov_rows)
 
     return PANOSNormalizedCollection(
         address_objects=[],
@@ -399,6 +337,6 @@ def normalize_management_plane_profile(appliance: Appliance) -> PANOSNormalizedC
         appliance_groups=[],
         enforcement_points=[],
         enforcement_nodes=[],
-        management_plane_profiles=[profile],
+        device_configuration_profiles=[profile],
         security_rules=[],
     )

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from django.db import models
 
+from ..provenance import ProvenancedMixin
+
 
 CONFIG_SOURCE_CHOICES = [
     ("local", "Local"),
@@ -31,9 +33,8 @@ class PolicyObjectPrecedence:
     BUILTIN = 90
 
 
-class PolicyObjectBase(models.Model):
+class PolicyObjectBase(ProvenancedMixin, models.Model):
     name = models.CharField(max_length=255)
-    provenance = models.CharField(max_length=128, blank=True)
     namespace_type = models.CharField(max_length=64, choices=PolicyObjectNamespace.choices)
     namespace_value = models.CharField(max_length=255)
     precedence_rank = models.PositiveIntegerField()
