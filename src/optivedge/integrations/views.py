@@ -43,6 +43,13 @@ from optivedge.integrations.platforms.pan_os.collectors import collect_show_mana
 from optivedge.integrations.orchestration import refresh_all_panorama_in_scope_data
 
 
+TAB_DETAILS = "details"
+TAB_APPLIANCE_GROUPS = "appliance-groups"
+TAB_ENFORCEMENT_POINTS = "enforcement-points"
+TAB_EVENTS = "events"
+_VALID_TABS = {TAB_DETAILS, TAB_APPLIANCE_GROUPS, TAB_ENFORCEMENT_POINTS, TAB_EVENTS}
+
+
 def get_management_station_list_queryset():
     return ManagementStation.objects.annotate(
         appliance_group_count=Count("appliance_groups", distinct=True),
@@ -52,30 +59,41 @@ def get_management_station_list_queryset():
     ).order_by("hostname")
 
 
-def build_management_station_detail_context(management_station):
-    appliance_groups = management_station.appliance_groups.select_related(
-        "active_appliance",
-    ).prefetch_related("appliances")
-    enforcement_points = list(
-        management_station.enforcement_points.select_related(
-            "appliance_group",
-            "appliance",
-        ).prefetch_related("nodes__appliance")
-    )
-    enforcement_points.sort(
-        key=lambda enforcement_point: (
-            enforcement_point_appliance_sort_key(enforcement_point),
-            enforcement_point.vsys_name,
-            enforcement_point.pk,
-        )
-    )
+def build_management_station_detail_context(management_station, *, active_tab=TAB_DETAILS):
+    if active_tab not in _VALID_TABS:
+        active_tab = TAB_DETAILS
 
-    return {
-        "recent_sync_runs": management_station.sync_runs.all()[:10],
-        "appliance_groups": appliance_groups,
-        "appliances": management_station.appliances.select_related("appliance_group"),
-        "enforcement_points": enforcement_points,
-    }
+    context = {"active_tab": active_tab}
+
+    if active_tab == TAB_APPLIANCE_GROUPS:
+        context["appliance_groups"] = management_station.appliance_groups.select_related(
+            "active_appliance"
+        ).prefetch_related("appliances")
+
+    elif active_tab == TAB_ENFORCEMENT_POINTS:
+        enforcement_points = list(
+            management_station.enforcement_points.select_related(
+                "appliance_group",
+                "appliance",
+            ).prefetch_related("nodes__appliance")
+        )
+        enforcement_points.sort(
+            key=lambda ep: (
+                enforcement_point_appliance_sort_key(ep),
+                ep.vsys_name,
+                ep.pk,
+            )
+        )
+        context["enforcement_points"] = enforcement_points
+
+    elif active_tab == TAB_EVENTS:
+        context["integration_events"] = (
+            management_station.integration_events
+            .select_related("run", "appliance", "appliance_group", "enforcement_point")
+            .order_by("-occurred_at")[:200]
+        )
+
+    return context
 
 
 def enforcement_point_appliance_sort_key(enforcement_point):
@@ -264,7 +282,8 @@ class ManagementStationDetailView(DetailView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context.update(build_management_station_detail_context(self.object))
+        active_tab = self.request.GET.get("tab", TAB_DETAILS)
+        context.update(build_management_station_detail_context(self.object, active_tab=active_tab))
         return context
 
 
@@ -304,7 +323,7 @@ class ManagementStationDetailBackgroundMixin:
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         management_station = context["management_station"]
-        context.update(build_management_station_detail_context(management_station))
+        context.update(build_management_station_detail_context(management_station, active_tab=TAB_DETAILS))
         return context
 
 
