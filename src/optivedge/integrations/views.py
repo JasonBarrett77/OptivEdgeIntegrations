@@ -12,6 +12,7 @@ from django.db.models import Count
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse, reverse_lazy
+from django.utils import timezone
 from django.views import View
 from django.views.generic import DetailView, ListView, TemplateView
 from django.views.generic.edit import CreateView, DeleteView, UpdateView
@@ -21,6 +22,8 @@ from optivedge.integrations.models import (
     ApplicationEnvironment,
     ApplianceGroup,
     EnforcementPoint,
+    IntegrationEvent,
+    IntegrationRun,
     ManagementStation,
     SecurityRule,
     Snapshot,
@@ -45,7 +48,7 @@ def get_management_station_list_queryset():
         appliance_group_count=Count("appliance_groups", distinct=True),
         appliance_count=Count("appliances", distinct=True),
         enforcement_point_count=Count("enforcement_points", distinct=True),
-        sync_run_count=Count("sync_runs", distinct=True),
+        sync_run_count=Count("integration_runs", distinct=True),
     ).order_by("hostname")
 
 
@@ -454,15 +457,33 @@ class ManagementStationSyncView(View):
             messages.error(request, "Sync is currently only supported for Panorama management stations.")
             return HttpResponseRedirect(detail_url)
 
+        run = IntegrationRun.objects.create(
+            management_station=management_station,
+            run_scope=IntegrationRun.SCOPE_STATION,
+            status=IntegrationRun.STATUS_FAILED,
+        )
         try:
             collect_persist_and_normalize(
                 management_station,
                 collector=collect_show_managed_devices,
             )
         except Exception as exc:
+            IntegrationEvent.objects.create(
+                management_station=management_station,
+                run=run,
+                level=IntegrationEvent.LEVEL_ERROR,
+                stage="",
+                reason="InventoryCollectionFailed",
+                message=str(exc),
+            )
+            run.completed_at = timezone.now()
+            run.save(update_fields=["completed_at"])
             messages.error(request, f"Sync failed: {exc}")
             return HttpResponseRedirect(detail_url)
 
+        run.status = IntegrationRun.STATUS_SUCCEEDED
+        run.completed_at = timezone.now()
+        run.save(update_fields=["status", "completed_at"])
         messages.success(request, "Managed devices collected, persisted, and normalized.")
         return HttpResponseRedirect(detail_url)
 
@@ -479,13 +500,79 @@ class ManagementStationInScopeSyncView(View):
             )
             return HttpResponseRedirect(detail_url)
 
+        run = IntegrationRun.objects.create(
+            management_station=management_station,
+            run_scope=IntegrationRun.SCOPE_APPLIANCE,
+            status=IntegrationRun.STATUS_FAILED,
+        )
         try:
             refresh = refresh_in_scope_configuration_snapshots(management_station)
         except Exception as exc:
+            IntegrationEvent.objects.create(
+                management_station=management_station,
+                run=run,
+                level=IntegrationEvent.LEVEL_ERROR,
+                stage="",
+                reason="ApplianceSyncFailed",
+                message=str(exc),
+            )
+            run.completed_at = timezone.now()
+            run.save(update_fields=["completed_at"])
             messages.error(request, f"In-scope configuration refresh failed: {exc}")
             return HttpResponseRedirect(detail_url)
 
         batch = refresh.configuration_snapshots
+        events = []
+        for f in batch.merged_config_failures:
+            events.append(IntegrationEvent(
+                management_station=management_station, run=run,
+                level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
+                reason="MergedConfigCollectionFailed", message=f.error_text,
+                appliance=f.appliance,
+            ))
+        for f in batch.shared_policy_failures:
+            events.append(IntegrationEvent(
+                management_station=management_station, run=run,
+                level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
+                reason="SharedPolicyCollectionFailed", message=f.error_text,
+                appliance_group=f.appliance_group,
+            ))
+        for f in batch.vsys_policy_failures:
+            events.append(IntegrationEvent(
+                management_station=management_station, run=run,
+                level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
+                reason="VsysPolicyCollectionFailed", message=f.error_text,
+                enforcement_point=f.enforcement_point,
+            ))
+        for f in batch.device_configuration_failures:
+            events.append(IntegrationEvent(
+                management_station=management_station, run=run,
+                level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+                reason="DeviceConfigurationNormalizationFailed", message=f.error_text,
+                appliance=f.appliance,
+            ))
+        for f in batch.address_failures:
+            events.append(IntegrationEvent(
+                management_station=management_station, run=run,
+                level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+                reason="AddressNormalizationFailed", message=f.error_text,
+                enforcement_point=f.enforcement_point,
+            ))
+        for f in batch.security_rule_failures:
+            events.append(IntegrationEvent(
+                management_station=management_station, run=run,
+                level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+                reason="SecurityRuleNormalizationFailed", message=f.error_text,
+                enforcement_point=f.enforcement_point,
+            ))
+        if events:
+            IntegrationEvent.objects.bulk_create(events)
+
+        failure_count = len(events)
+        run.status = IntegrationRun.STATUS_PARTIAL if failure_count else IntegrationRun.STATUS_SUCCEEDED
+        run.completed_at = timezone.now()
+        run.save(update_fields=["status", "completed_at"])
+
         messages.success(
             request,
             "In-scope configuration refresh completed for "
@@ -496,17 +583,10 @@ class ManagementStationInScopeSyncView(View):
             f"and {sum(len(item.address_groups) for item in batch.address_normalizations)} address group(s). "
             f"Normalized {sum(len(item.security_rules) for item in batch.security_rule_normalizations)} security rule(s).",
         )
-        failure_count = (
-            len(batch.merged_config_failures)
-            + len(batch.shared_policy_failures)
-            + len(batch.vsys_policy_failures)
-            + len(batch.address_failures)
-            + len(batch.security_rule_failures)
-        )
         if failure_count:
             messages.error(
                 request,
-                f"{failure_count} in-scope collection task(s) failed. Review connectivity for disconnected appliances.",
+                f"{failure_count} in-scope collection task(s) failed. Review the Events tab for details.",
             )
         return HttpResponseRedirect(detail_url)
 
