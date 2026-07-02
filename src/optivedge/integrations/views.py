@@ -8,6 +8,7 @@ import json
 
 from django.contrib import messages
 from django.core.exceptions import ImproperlyConfigured
+from django.core.paginator import Paginator
 from django.db.models import Count
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
@@ -224,28 +225,43 @@ def build_enforcement_point_security_rule_context(enforcement_point):
     }
 
 
-def build_enforcement_point_address_context(enforcement_point):
-    address_objects = (
-        enforcement_point.address_objects.select_related("source_snapshot")
-        .prefetch_related("tags")
-        .order_by("name", "pk")
-    )
-    address_groups = (
-        enforcement_point.address_groups.select_related("source_snapshot")
-        .prefetch_related("tags", "members")
-        .order_by("name", "pk")
-    )
-    rows = []
+_ADDRESS_PAGE_SIZE = 100
+_ADDRESS_KIND_OBJECT = "object"
+_ADDRESS_KIND_GROUP = "group"
 
-    for address_object in address_objects:
-        rows.append(build_address_object_row(address_object))
 
-    for address_group in address_groups:
-        rows.append(build_address_group_row(address_group))
+def build_enforcement_point_address_context(enforcement_point, *, kind=_ADDRESS_KIND_OBJECT, q="", page=1):
+    if kind not in (_ADDRESS_KIND_OBJECT, _ADDRESS_KIND_GROUP):
+        kind = _ADDRESS_KIND_OBJECT
 
-    rows.sort(key=lambda row: (row["kind"] != "Object", row["name"], row["source_snapshot"].pk))
+    if kind == _ADDRESS_KIND_GROUP:
+        qs = (
+            enforcement_point.address_groups
+            .select_related("source_snapshot")
+            .prefetch_related("tags", "members")
+            .order_by("name", "pk")
+        )
+        if q:
+            qs = qs.filter(name__icontains=q)
+        page_obj = Paginator(qs, _ADDRESS_PAGE_SIZE).get_page(page)
+        rows = [build_address_group_row(ag) for ag in page_obj]
+    else:
+        qs = (
+            enforcement_point.address_objects
+            .select_related("source_snapshot")
+            .prefetch_related("tags")
+            .order_by("name", "pk")
+        )
+        if q:
+            qs = qs.filter(name__icontains=q)
+        page_obj = Paginator(qs, _ADDRESS_PAGE_SIZE).get_page(page)
+        rows = [build_address_object_row(ao) for ao in page_obj]
+
     return {
         "address_rows": rows,
+        "page_obj": page_obj,
+        "kind": kind,
+        "q": q,
     }
 
 
@@ -380,7 +396,12 @@ class EnforcementPointAddressListView(TemplateView):
         context = super().get_context_data(**kwargs)
         context["management_station"] = management_station
         context["enforcement_point"] = enforcement_point
-        context.update(build_enforcement_point_address_context(enforcement_point))
+        context.update(build_enforcement_point_address_context(
+            enforcement_point,
+            kind=self.request.GET.get("kind", _ADDRESS_KIND_OBJECT),
+            q=self.request.GET.get("q", ""),
+            page=self.request.GET.get("page", 1),
+        ))
         return context
 
 

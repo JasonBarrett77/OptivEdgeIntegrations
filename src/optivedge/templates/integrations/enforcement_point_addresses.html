@@ -19,6 +19,7 @@
 <section class="flex h-full w-full min-h-0 min-w-0 overflow-hidden">
     <div class="min-h-0 flex-1 overflow-hidden">
         <div class="flex h-full min-h-0 flex-col px-3 py-2">
+
             <div class="flex items-start justify-between gap-3 border-b border-slate-200 pb-2">
                 <div class="min-w-0">
                     <div class="text-[10px] font-medium uppercase tracking-wide text-slate-500">Addresses</div>
@@ -30,8 +31,50 @@
                     </div>
                 </div>
                 <div class="shrink-0 text-[10px] uppercase tracking-wide text-slate-500">
-                    {{ address_rows|length }} row{{ address_rows|length|pluralize }}
+                    {% if page_obj.paginator.count %}
+                        {{ page_obj.start_index }}–{{ page_obj.end_index }} of {{ page_obj.paginator.count }}
+                    {% else %}
+                        0 rows
+                    {% endif %}
                 </div>
+            </div>
+
+            <div class="flex items-center gap-3 border-b border-slate-200 py-2">
+                <div class="flex gap-0">
+                    <a href="?kind=object&q={{ q|urlencode }}"
+                       class="inline-flex h-7 items-center border px-3 text-[11px] font-medium {% if kind == 'object' %}border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                        Objects
+                    </a>
+                    <a href="?kind=group&q={{ q|urlencode }}"
+                       class="inline-flex h-7 items-center border-y border-r px-3 text-[11px] font-medium {% if kind == 'group' %}border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                        Groups
+                    </a>
+                </div>
+
+                <form method="get" action="" class="flex min-w-0 flex-1 items-center gap-2">
+                    <input type="hidden" name="kind" value="{{ kind }}">
+                    <input
+                        type="text"
+                        name="q"
+                        value="{{ q }}"
+                        placeholder="Filter by name…"
+                        class="h-7 min-w-0 flex-1 border border-slate-200 bg-white px-2 text-[11px] text-slate-900 placeholder:text-slate-400 focus:border-blue-400 focus:outline-none"
+                    >
+                    <button
+                        type="submit"
+                        class="inline-flex h-7 shrink-0 items-center border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                        Filter
+                    </button>
+                    {% if q %}
+                    <a
+                        href="?kind={{ kind }}"
+                        class="inline-flex h-7 shrink-0 items-center border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-500 hover:bg-slate-50"
+                    >
+                        Clear
+                    </a>
+                    {% endif %}
+                </form>
             </div>
 
             <div class="min-h-0 flex-1 pt-2 overflow-hidden">
@@ -74,6 +117,33 @@
                     </table>
                 </div>
             </div>
+
+            {% if page_obj.paginator.num_pages > 1 %}
+            <div class="flex items-center justify-between gap-3 border-t border-slate-200 pt-2">
+                <div class="text-[11px] text-slate-500">
+                    Page {{ page_obj.number }} of {{ page_obj.paginator.num_pages }}
+                </div>
+                <div class="flex gap-1">
+                    {% if page_obj.has_previous %}
+                    <a
+                        href="?kind={{ kind }}&q={{ q|urlencode }}&page={{ page_obj.previous_page_number }}"
+                        class="inline-flex h-7 items-center border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                        Previous
+                    </a>
+                    {% endif %}
+                    {% if page_obj.has_next %}
+                    <a
+                        href="?kind={{ kind }}&q={{ q|urlencode }}&page={{ page_obj.next_page_number }}"
+                        class="inline-flex h-7 items-center border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+                    >
+                        Next
+                    </a>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+
         </div>
     </div>
 </section>
