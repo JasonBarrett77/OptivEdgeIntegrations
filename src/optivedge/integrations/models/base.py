@@ -14,7 +14,7 @@ class TimestampedModel(models.Model):
 class SyncTrackedModel(TimestampedModel):
     last_synced_at = models.DateTimeField(null=True, blank=True)
     last_sync_run = models.ForeignKey(
-        "integrations.IntegrationSyncRun",
+        "integrations.IntegrationRun",
         on_delete=models.SET_NULL,
         related_name="%(app_label)s_%(class)ss",
         null=True,

@@ -4,49 +4,8 @@ from __future__ import annotations
 
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.utils import timezone
 
 from .base import SyncTrackedModel, TimestampedModel
-
-
-class IntegrationSyncRun(TimestampedModel):
-    TYPE_APPLIANCE_INVENTORY = "appliance_inventory"
-    TYPE_ENFORCEMENT_INVENTORY = "enforcement_inventory"
-    TYPE_SNAPSHOT_COLLECTION = "snapshot_collection"
-
-    SYNC_TYPE_CHOICES = [
-        (TYPE_APPLIANCE_INVENTORY, "Appliance Inventory"),
-        (TYPE_ENFORCEMENT_INVENTORY, "Enforcement Inventory"),
-        (TYPE_SNAPSHOT_COLLECTION, "Snapshot Collection"),
-    ]
-
-    STATUS_RUNNING = "running"
-    STATUS_SUCCEEDED = "succeeded"
-    STATUS_FAILED = "failed"
-
-    STATUS_CHOICES = [
-        (STATUS_RUNNING, "Running"),
-        (STATUS_SUCCEEDED, "Succeeded"),
-        (STATUS_FAILED, "Failed"),
-    ]
-
-    management_station = models.ForeignKey(
-        "integrations.ManagementStation",
-        on_delete=models.CASCADE,
-        related_name="sync_runs",
-    )
-    sync_type = models.CharField(max_length=32, choices=SYNC_TYPE_CHOICES)
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_RUNNING)
-    started_at = models.DateTimeField(default=timezone.now)
-    completed_at = models.DateTimeField(null=True, blank=True)
-    summary = models.JSONField(default=dict, blank=True)
-    error_text = models.TextField(blank=True)
-
-    class Meta:
-        ordering = ["-started_at"]
-
-    def __str__(self) -> str:
-        return f"{self.management_station} / {self.sync_type} / {self.status}"
 
 
 class ManagementStation(TimestampedModel):

@@ -12,10 +12,10 @@ from .collected import (
     ApplianceGroup,
     EnforcementNode,
     EnforcementPoint,
-    IntegrationSyncRun,
     ManagementStation,
     Snapshot,
 )
+from .events import IntegrationEvent, IntegrationRun
 from .environment import ApplicationEnvironment
 from .device_configuration import DeviceConfigurationProfile
 from .policy import (
@@ -63,7 +63,8 @@ __all__ = [
     "CONFIG_SOURCE_CHOICES",
     "EnforcementNode",
     "EnforcementPoint",
-    "IntegrationSyncRun",
+    "IntegrationEvent",
+    "IntegrationRun",
     "ManagementStation",
     "DeviceConfigurationProfile",
     "PolicyObjectBase",
