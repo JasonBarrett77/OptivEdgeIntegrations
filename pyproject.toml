@@ -3,7 +3,7 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "optivedge"
+name = "optivedge-integrations"
 version = "0.1.0"
 description = "Reusable Django firewall integration framework"
 requires-python = ">=3.12"
@@ -11,14 +11,13 @@ dependencies = [
     "Django>=6.0,<6.1",
     "requests>=2.31",
     "xmltodict>=0.13",
+    "optivedge @ git+https://github.com/JasonBarrett77/OptivEdge.git@main",
 ]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"optivedge" = [
+"optivedge_integrations.integrations" = [
     "templates/**/*.html",
-    "templates/**/*.svg",
-    "static/**/*",
 ]
