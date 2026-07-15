@@ -658,16 +658,26 @@ def replace_security_rules(
     created_rules: list[SecurityRule] = []
 
     for normalized_rule in normalized_rules:
-        source_resolved_refs = resolve_rule_address_refs(
-            members=normalized_rule.source_address_members,
-            address_objects_by_name=address_objects_by_name,
-            address_groups_by_name=address_groups_by_name,
+        rule_context = (
+            f"rule='{normalized_rule.name}', uuid={normalized_rule.uuid or 'n/a'}, "
+            f"config_source={normalized_rule.config_source}, position={normalized_rule.rule_position}"
         )
-        destination_resolved_refs = resolve_rule_address_refs(
-            members=normalized_rule.destination_address_members,
-            address_objects_by_name=address_objects_by_name,
-            address_groups_by_name=address_groups_by_name,
-        )
+        try:
+            source_resolved_refs = resolve_rule_address_refs(
+                members=normalized_rule.source_address_members,
+                address_objects_by_name=address_objects_by_name,
+                address_groups_by_name=address_groups_by_name,
+            )
+        except ValueError as exc:
+            raise ValueError(f"{exc} (field=source_address, {rule_context})") from exc
+        try:
+            destination_resolved_refs = resolve_rule_address_refs(
+                members=normalized_rule.destination_address_members,
+                address_objects_by_name=address_objects_by_name,
+                address_groups_by_name=address_groups_by_name,
+            )
+        except ValueError as exc:
+            raise ValueError(f"{exc} (field=destination_address, {rule_context})") from exc
 
         if rule_uses_edl(source_resolved_refs) or rule_uses_edl(destination_resolved_refs):
             continue
