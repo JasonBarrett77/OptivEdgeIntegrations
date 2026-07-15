@@ -61,11 +61,20 @@ def joined_address_ref_values(
     return ", ".join(listed_address_ref_values(security_rule, related_name))
 
 
+def entry_provenance_label(scoped_object) -> str:
+    """Read the entry-level FieldProvenance row (field_name="__entry__") off a prefetched
+    `field_provenance` GenericRelation, without issuing a fresh query per object."""
+    for record in scoped_object.field_provenance.all():
+        if record.field_name == "__entry__":
+            return record.get_provenance_type_display()
+    return ""
+
+
 def build_address_object_row(address_object: AddressObject) -> dict:
     return {
         "kind": "Object",
         "config_source_label": address_config_source_label(address_object.config_source),
-        "provenance": address_object.provenance,
+        "provenance": entry_provenance_label(address_object),
         "name": address_object.name,
         "value_type": address_object.get_address_type_display(),
         "value": address_object.value,
@@ -77,15 +86,16 @@ def build_address_object_row(address_object: AddressObject) -> dict:
 
 
 def build_address_group_row(address_group: AddressGroup) -> dict:
+    members = [member.value for member in address_group.members.all()]
     return {
         "kind": "Group",
         "config_source_label": address_config_source_label(address_group.config_source),
-        "provenance": address_group.provenance,
+        "provenance": entry_provenance_label(address_group),
         "name": address_group.name,
-        "value_type": "Static Group" if address_group.members.exists() else "Dynamic Group",
+        "value_type": "Static Group" if members else "Dynamic Group",
         "value": address_group.dynamic_filter,
         "tags": [tag.value for tag in address_group.tags.all()],
-        "members": [member.value for member in address_group.members.all()],
+        "members": members,
         "description": "",
         "source_snapshot": address_group.source_snapshot,
     }

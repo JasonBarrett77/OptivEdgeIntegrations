@@ -237,7 +237,7 @@ def build_enforcement_point_address_context(enforcement_point, *, kind=_ADDRESS_
         qs = (
             enforcement_point.address_groups
             .select_related("source_snapshot")
-            .prefetch_related("tags", "members")
+            .prefetch_related("tags", "members", "field_provenance")
             .order_by("name", "pk")
         )
         if q:
@@ -248,7 +248,7 @@ def build_enforcement_point_address_context(enforcement_point, *, kind=_ADDRESS_
         qs = (
             enforcement_point.address_objects
             .select_related("source_snapshot")
-            .prefetch_related("tags")
+            .prefetch_related("tags", "field_provenance")
             .order_by("name", "pk")
         )
         if q:
