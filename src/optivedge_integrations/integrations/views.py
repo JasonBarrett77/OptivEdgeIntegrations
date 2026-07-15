@@ -224,7 +224,7 @@ def build_enforcement_point_security_rule_context(enforcement_point):
     }
 
 
-_ADDRESS_PAGE_SIZE = 100
+_ADDRESS_PAGE_SIZE = 20
 _ADDRESS_KIND_OBJECT = "object"
 _ADDRESS_KIND_GROUP = "group"
 

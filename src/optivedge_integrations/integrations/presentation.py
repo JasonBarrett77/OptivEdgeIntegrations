@@ -7,6 +7,7 @@ when multiple apps render the same normalized integration models.
 from optivedge_integrations.integrations.models import (
     AddressGroup,
     AddressObject,
+    FieldProvenance,
     SecurityRule,
     SecurityRuleAddressRef,
 )
@@ -61,12 +62,24 @@ def joined_address_ref_values(
     return ", ".join(listed_address_ref_values(security_rule, related_name))
 
 
-def entry_provenance_label(scoped_object) -> str:
+def _entry_provenance_record(scoped_object) -> FieldProvenance | None:
     """Read the entry-level FieldProvenance row (field_name="__entry__") off a prefetched
     `field_provenance` GenericRelation, without issuing a fresh query per object."""
     for record in scoped_object.field_provenance.all():
         if record.field_name == "__entry__":
-            return record.get_provenance_type_display()
+            return record
+    return None
+
+
+def entry_provenance_label(scoped_object) -> str:
+    record = _entry_provenance_record(scoped_object)
+    return record.get_provenance_type_display() if record else ""
+
+
+def entry_device_group_name(scoped_object) -> str:
+    record = _entry_provenance_record(scoped_object)
+    if record and record.provenance_type == FieldProvenance.ProvenanceType.DEVICE_GROUP:
+        return record.raw_value
     return ""
 
 
@@ -74,7 +87,8 @@ def build_address_object_row(address_object: AddressObject) -> dict:
     return {
         "kind": "Object",
         "config_source_label": address_config_source_label(address_object.config_source),
-        "provenance": entry_provenance_label(address_object),
+        "location": entry_provenance_label(address_object),
+        "device_group_name": entry_device_group_name(address_object),
         "name": address_object.name,
         "value_type": address_object.get_address_type_display(),
         "value": address_object.value,
@@ -90,7 +104,8 @@ def build_address_group_row(address_group: AddressGroup) -> dict:
     return {
         "kind": "Group",
         "config_source_label": address_config_source_label(address_group.config_source),
-        "provenance": entry_provenance_label(address_group),
+        "location": entry_provenance_label(address_group),
+        "device_group_name": entry_device_group_name(address_group),
         "name": address_group.name,
         "value_type": "Static Group" if members else "Dynamic Group",
         "value": address_group.dynamic_filter,
