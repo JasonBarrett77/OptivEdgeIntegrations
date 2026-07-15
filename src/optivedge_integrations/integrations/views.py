@@ -367,7 +367,9 @@ class ManagementStationCreateView(RightOverlayMixin, ManagementStationListBackgr
     form_class = ManagementStationForm
     model = ManagementStation
     template_name = "integrations/management_station_form.html"
-    overlay_close_url = "/management-stations/"
+
+    def get_overlay_close_url(self):
+        return reverse("management_station_list")
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

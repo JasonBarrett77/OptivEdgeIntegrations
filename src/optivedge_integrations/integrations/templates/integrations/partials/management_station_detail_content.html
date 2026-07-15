@@ -11,7 +11,7 @@
                 </div>
                 <div class="flex shrink-0 items-center gap-1.5 pt-0.5">
                     {% if management_station.station_type == "pan_panorama" %}
-                    <form method="post" action="/management-stations/{{ management_station.pk }}/sync/">
+                    <form method="post" action="{% url 'management_station_sync' pk=management_station.pk %}">
                         {% csrf_token %}
                         <button
                             type="submit"
@@ -22,13 +22,13 @@
                     </form>
                     {% endif %}
                     <a
-                        href="/management-stations/{{ management_station.pk }}/edit/"
+                        href="{% url 'management_station_update' pk=management_station.pk %}"
                         class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
                     >
                         Edit
                     </a>
                     <a
-                        href="/management-stations/{{ management_station.pk }}/delete/"
+                        href="{% url 'management_station_delete' pk=management_station.pk %}"
                         class="inline-flex h-8 items-center justify-center border border-red-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-red-700 hover:bg-red-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
                     >
                         Delete
@@ -122,7 +122,7 @@
                         <h2 class="text-sm font-semibold text-slate-950">Appliance Groups</h2>
                         <div class="flex items-center gap-2">
                             {% if management_station.station_type == "pan_panorama" %}
-                            <form method="post" action="/management-stations/{{ management_station.pk }}/sync-in-scope/">
+                            <form method="post" action="{% url 'management_station_in_scope_sync' pk=management_station.pk %}">
                                 {% csrf_token %}
                                 <button
                                     type="submit"
@@ -173,7 +173,7 @@
                                     </td>
                                     <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
                                         <a
-                                            href="/management-stations/{{ management_station.pk }}/appliance-groups/{{ appliance_group.pk }}/snapshots/"
+                                            href="{% url 'appliance_group_snapshots' pk=management_station.pk appliance_group_pk=appliance_group.pk %}"
                                             class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
                                         >
                                             Snapshots
@@ -257,13 +257,13 @@
                                     <td class="h-8 border-b border-slate-200 px-3 py-1.5 align-middle text-sm text-slate-800">
                                         <div class="flex items-center gap-1.5">
                                             <a
-                                                href="/management-stations/{{ management_station.pk }}/enforcement-points/{{ enforcement_point.pk }}/security-rules/"
+                                                href="{% url 'enforcement_point_security_rules' pk=management_station.pk enforcement_point_pk=enforcement_point.pk %}"
                                                 class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
                                             >
                                                 Rules
                                             </a>
                                             <a
-                                                href="/management-stations/{{ management_station.pk }}/enforcement-points/{{ enforcement_point.pk }}/addresses/"
+                                                href="{% url 'enforcement_point_addresses' pk=management_station.pk enforcement_point_pk=enforcement_point.pk %}"
                                                 class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
                                             >
                                                 Addresses
@@ -273,7 +273,7 @@
                                     <td class="h-8 border-b border-slate-200 px-3 py-1.5 align-middle text-sm text-slate-800">
                                         <form
                                             method="post"
-                                            action="/management-stations/{{ management_station.pk }}/enforcement-points/{{ enforcement_point.pk }}/scope/"
+                                            action="{% url 'enforcement_point_scope_toggle' pk=management_station.pk enforcement_point_pk=enforcement_point.pk %}"
                                             class="flex h-full items-center"
                                         >
                                             {% csrf_token %}

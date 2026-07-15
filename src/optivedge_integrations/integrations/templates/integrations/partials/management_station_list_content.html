@@ -4,13 +4,13 @@
             <div class="flex shrink-0 items-center justify-between bg-white px-4 py-2">
                 <h1 class="text-sm font-semibold text-slate-900">Management Stations</h1>
                 <div class="flex items-center gap-2">
-                    <form method="post" action="/management-stations/sync-in-scope-all/">
+                    <form method="post" action="{% url 'management_station_bulk_in_scope_sync' %}">
                         {% csrf_token %}
                         <button type="submit" class="inline-flex h-8 items-center justify-center border border-emerald-300 bg-emerald-50 px-3 text-sm font-medium whitespace-nowrap text-emerald-700 hover:bg-emerald-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-emerald-500/20">
                             Refresh All In Scope
                         </button>
                     </form>
-                    <a href="/management-stations/create/" class="inline-flex h-8 items-center justify-center border border-blue-300 bg-blue-50 px-3 text-sm font-medium whitespace-nowrap text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20">Create</a>
+                    <a href="{% url 'management_station_create' %}" class="inline-flex h-8 items-center justify-center border border-blue-300 bg-blue-50 px-3 text-sm font-medium whitespace-nowrap text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20">Create</a>
                 </div>
             </div>
             <div class="min-h-0 flex-1 overflow-auto">
@@ -27,8 +27,8 @@
                         {% for station in management_stations %}
                         <tr
                             class="cursor-pointer transition-colors duration-150 hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
-                            onclick="window.location.href='/management-stations/{{ station.pk }}/'"
-                            onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); window.location.href='/management-stations/{{ station.pk }}/'; }"
+                            onclick="window.location.href='{% url 'management_station_detail' pk=station.pk %}'"
+                            onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); window.location.href='{% url 'management_station_detail' pk=station.pk %}'; }"
                             tabindex="0"
                             role="link"
                         >
