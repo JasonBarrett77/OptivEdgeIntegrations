@@ -12,6 +12,7 @@ from .objects import (
     AddressGroupTag,
     AddressObject,
     AddressObjectTag,
+    Region,
     ScopedPolicyObject,
 )
 from .rules import (
@@ -45,6 +46,7 @@ __all__ = [
     "PolicyObjectBase",
     "PolicyObjectNamespace",
     "PolicyObjectPrecedence",
+    "Region",
     "ScopedPolicyObject",
     "SecurityRule",
     "SecurityRuleAddressRef",

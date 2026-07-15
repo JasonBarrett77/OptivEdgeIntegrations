@@ -33,9 +33,15 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     ensure_list,
     entry_provenance,
     member_values,
+    merged_shared,
     merged_vsys_entry,
+    pushed_shared,
     pushed_vsys_panorama,
     scalar_value,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.regions import (
+    build_normalized_regions,
+    replace_regions,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     choose_local_appliance,
@@ -96,14 +102,6 @@ class NormalizedAddressGroup:
     field_provenance_data: list[tuple[str, Any, str | None]]
 
 
-def merged_shared(payload: dict[str, Any]) -> dict[str, Any]:
-    config = payload.get("config", {})
-    if not isinstance(config, dict):
-        return {}
-    shared = config.get("shared", {})
-    return shared if isinstance(shared, dict) else {}
-
-
 def external_list_value(entry: dict[str, Any]) -> tuple[str, Any, str | None]:
     """Return (value, raw_key, raw_prov_value) for an EDL address object entry."""
     type_node = entry.get("type")
@@ -122,15 +120,6 @@ def external_list_value(entry: dict[str, Any]) -> tuple[str, Any, str | None]:
         return list_type, rk, rv
 
     return "", ABSENT, None
-
-
-def pushed_shared(payload: dict[str, Any] | Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise ValueError(f"unexpected pushed shared payload type: {type(payload).__name__}")
-    shared = payload.get("shared", {})
-    if not isinstance(shared, dict):
-        raise ValueError(f"unexpected pushed shared subtree type: {type(shared).__name__}")
-    return shared
 
 
 def derive_address_fields(address_type: str, value: str) -> tuple[str, int | None, int | None, int | None, bool]:
@@ -644,10 +633,13 @@ def normalize_addresses(enforcement_point: EnforcementPoint) -> PANOSNormalizedC
             normalized_objects,
             normalized_groups,
         )
+        normalized_regions = build_normalized_regions(enforcement_point)
+        created_regions = replace_regions(enforcement_point, normalized_regions)
 
     return PANOSNormalizedCollection(
         address_objects=created_objects,
         address_groups=created_groups,
+        regions=created_regions,
         appliances=[],
         appliance_groups=[],
         enforcement_points=[],

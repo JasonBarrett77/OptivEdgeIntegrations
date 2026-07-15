@@ -106,6 +106,7 @@ class SecurityRuleAddressRef(models.Model):
         STATIC_ADDRESS_GROUP = "static_address_group", "Static Address Group"
         DYNAMIC_ADDRESS_GROUP = "dynamic_address_group", "Dynamic Address Group"
         ANY = "any", "Any"
+        REGION = "region", "Region"
 
     raw_value = models.CharField(max_length=255)
     position = models.PositiveIntegerField()
@@ -118,6 +119,12 @@ class SecurityRuleAddressRef(models.Model):
     )
     address_group = models.ForeignKey(
         "integrations.AddressGroup",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+    )
+    region = models.ForeignKey(
+        "integrations.Region",
         on_delete=models.CASCADE,
         null=True,
         blank=True,
@@ -158,10 +165,18 @@ class SecurityRuleAddressRef(models.Model):
                 raise ValidationError("Any refs must point to an address object marked is_any.")
             return
 
+        if self.ref_type == self.RefType.REGION:
+            if self.address_object is not None or self.address_group is not None:
+                raise ValidationError(
+                    "Region refs must not set address_object or address_group. "
+                    "region may be null (builtin country/region code) or set (custom region object)."
+                )
+            return
+
         raise ValidationError("Unsupported address ref type.")
 
     def __str__(self) -> str:
-        target = self.address_group or self.address_object
+        target = self.address_group or self.address_object or self.region or self.raw_value
         return f"{self.raw_value} -> {target}"
 
 
@@ -177,6 +192,7 @@ class SecurityRuleSourceAddressRef(SecurityRuleAddressRef):
             models.Index(fields=["security_rule", "ref_type"]),
             models.Index(fields=["address_object"]),
             models.Index(fields=["address_group"]),
+            models.Index(fields=["region"]),
         ]
         constraints = [
             models.CheckConstraint(
@@ -199,6 +215,11 @@ class SecurityRuleSourceAddressRef(SecurityRuleAddressRef):
                     | models.Q(
                         ref_type=SecurityRuleAddressRef.RefType.ANY,
                         address_object__isnull=False,
+                        address_group__isnull=True,
+                    )
+                    | models.Q(
+                        ref_type=SecurityRuleAddressRef.RefType.REGION,
+                        address_object__isnull=True,
                         address_group__isnull=True,
                     )
                 ),
@@ -219,6 +240,7 @@ class SecurityRuleDestinationAddressRef(SecurityRuleAddressRef):
             models.Index(fields=["security_rule", "ref_type"]),
             models.Index(fields=["address_object"]),
             models.Index(fields=["address_group"]),
+            models.Index(fields=["region"]),
         ]
         constraints = [
             models.CheckConstraint(
@@ -241,6 +263,11 @@ class SecurityRuleDestinationAddressRef(SecurityRuleAddressRef):
                     | models.Q(
                         ref_type=SecurityRuleAddressRef.RefType.ANY,
                         address_object__isnull=False,
+                        address_group__isnull=True,
+                    )
+                    | models.Q(
+                        ref_type=SecurityRuleAddressRef.RefType.REGION,
+                        address_object__isnull=True,
                         address_group__isnull=True,
                     )
                 ),

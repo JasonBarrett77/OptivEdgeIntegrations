@@ -21,6 +21,7 @@ from optivedge_integrations.integrations.models import (
     EnforcementPoint,
     FieldProvenance,
     PolicyObjectNamespace,
+    Region,
     SecurityRule,
     SecurityRuleApplication,
     SecurityRuleCategory,
@@ -41,6 +42,7 @@ from optivedge_integrations.integrations.models import (
 from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import derive_address_fields
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     ABSENT,
+    ISO_3166_1_ALPHA2_REGIONS,
     classify_prov_type,
     ensure_list,
     entry_provenance,
@@ -105,6 +107,7 @@ class ResolvedAddressRef:
     ref_type: str
     address_object: AddressObject | None
     address_group: AddressGroup | None
+    region: Region | None = None
 
 
 @dataclass(slots=True)
@@ -382,7 +385,7 @@ def default_rule_source(
 
 def build_address_lookup_maps(
     enforcement_point: EnforcementPoint,
-) -> tuple[dict[str, list[AddressObject]], dict[str, list[AddressGroup]]]:
+) -> tuple[dict[str, list[AddressObject]], dict[str, list[AddressGroup]], dict[str, list[Region]]]:
     address_objects: dict[str, list[AddressObject]] = {}
     for address_object in enforcement_point.address_objects.all().order_by("precedence_rank", "id"):
         address_objects.setdefault(address_object.name, []).append(address_object)
@@ -390,7 +393,12 @@ def build_address_lookup_maps(
     address_groups: dict[str, list[AddressGroup]] = {}
     for address_group in enforcement_point.address_groups.prefetch_related("members").order_by("precedence_rank", "id"):
         address_groups.setdefault(address_group.name, []).append(address_group)
-    return address_objects, address_groups
+
+    regions: dict[str, list[Region]] = {}
+    for region in enforcement_point.regions.all().order_by("precedence_rank", "id"):
+        regions.setdefault(region.name, []).append(region)
+
+    return address_objects, address_groups, regions
 
 
 def realize_literal_address_objects(
@@ -463,6 +471,14 @@ def first_effective_group(
     return candidates[0] if candidates else None
 
 
+def first_effective_region(
+    name: str,
+    regions_by_name: dict[str, list[Region]],
+) -> Region | None:
+    candidates = regions_by_name.get(name, [])
+    return candidates[0] if candidates else None
+
+
 def resolve_group_member_object(
     *,
     member_name: str,
@@ -493,11 +509,24 @@ def resolve_rule_address_refs(
     members: list[NormalizedSecurityRuleMember],
     address_objects_by_name: dict[str, list[AddressObject]],
     address_groups_by_name: dict[str, list[AddressGroup]],
+    regions_by_name: dict[str, list[Region]],
 ) -> list[ResolvedAddressRef]:
     resolved: list[ResolvedAddressRef] = []
     for member in members:
         raw_value = member.value
         address_object = first_effective_object(raw_value, address_objects_by_name)
+        address_group = first_effective_group(raw_value, address_groups_by_name)
+        region = first_effective_region(raw_value, regions_by_name)
+        is_region = region is not None or raw_value in ISO_3166_1_ALPHA2_REGIONS
+
+        namespace_hits = sum([address_object is not None, address_group is not None, is_region])
+        if namespace_hits > 1:
+            raise ValueError(
+                f"ambiguous address reference: {raw_value} matches multiple namespaces "
+                f"(address_object={address_object is not None}, address_group={address_group is not None}, "
+                f"region={is_region})"
+            )
+
         if address_object is not None:
             ref_type = (
                 SecurityRuleSourceAddressRef.RefType.ANY
@@ -515,7 +544,19 @@ def resolve_rule_address_refs(
             )
             continue
 
-        address_group = first_effective_group(raw_value, address_groups_by_name)
+        if address_group is None and is_region:
+            resolved.append(
+                ResolvedAddressRef(
+                    raw_value=raw_value,
+                    position=member.position,
+                    ref_type=SecurityRuleSourceAddressRef.RefType.REGION,
+                    address_object=None,
+                    address_group=None,
+                    region=region,
+                )
+            )
+            continue
+
         if address_group is None:
             raise ValueError(f"unresolved address reference: {raw_value}")
 
@@ -653,7 +694,7 @@ def replace_security_rules(
 ) -> list[SecurityRule]:
     enforcement_point.security_rules.all().delete()
     realize_literal_address_objects(enforcement_point, normalized_rules)
-    address_objects_by_name, address_groups_by_name = build_address_lookup_maps(enforcement_point)
+    address_objects_by_name, address_groups_by_name, regions_by_name = build_address_lookup_maps(enforcement_point)
     sr_ct = ContentType.objects.get_for_model(SecurityRule)
     created_rules: list[SecurityRule] = []
 
@@ -667,6 +708,7 @@ def replace_security_rules(
                 members=normalized_rule.source_address_members,
                 address_objects_by_name=address_objects_by_name,
                 address_groups_by_name=address_groups_by_name,
+                regions_by_name=regions_by_name,
             )
         except ValueError as exc:
             raise ValueError(f"{exc} (field=source_address, {rule_context})") from exc
@@ -675,6 +717,7 @@ def replace_security_rules(
                 members=normalized_rule.destination_address_members,
                 address_objects_by_name=address_objects_by_name,
                 address_groups_by_name=address_groups_by_name,
+                regions_by_name=regions_by_name,
             )
         except ValueError as exc:
             raise ValueError(f"{exc} (field=destination_address, {rule_context})") from exc
@@ -733,6 +776,7 @@ def replace_security_rules(
                 ref_type=resolved_ref.ref_type,
                 address_object=resolved_ref.address_object,
                 address_group=resolved_ref.address_group,
+                region=resolved_ref.region,
             )
 
         for resolved_ref in destination_resolved_refs:
@@ -743,6 +787,7 @@ def replace_security_rules(
                 ref_type=resolved_ref.ref_type,
                 address_object=resolved_ref.address_object,
                 address_group=resolved_ref.address_group,
+                region=resolved_ref.region,
             )
         created_rules.append(security_rule)
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from optivedge_integrations.integrations.models import (
     AddressGroup,
@@ -12,6 +12,7 @@ from optivedge_integrations.integrations.models import (
     EnforcementNode,
     EnforcementPoint,
     DeviceConfigurationProfile,
+    Region,
     SecurityRule,
 )
 
@@ -26,3 +27,4 @@ class PANOSNormalizedCollection:
     enforcement_nodes: list[EnforcementNode]
     device_configuration_profiles: list[DeviceConfigurationProfile]
     security_rules: list[SecurityRule]
+    regions: list[Region] = field(default_factory=list)

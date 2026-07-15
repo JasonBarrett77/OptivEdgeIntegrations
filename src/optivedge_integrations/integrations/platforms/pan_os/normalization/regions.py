@@ -1,0 +1,208 @@
+"""PAN-OS custom Region normalization helpers.
+
+This module owns normalization of merged and pushed PAN-OS custom Region objects
+(Objects > Regions) into enforcement-point scoped Django models. Mirrors
+`addresses.py`'s address-group handling, but name-only — no member IP ranges or
+geo-location, since rule resolution only needs to know the region exists and which
+object it is.
+"""
+
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from typing import Any
+
+from django.contrib.contenttypes.models import ContentType
+
+from optivedge_integrations.integrations.models import (
+    EnforcementPoint,
+    FieldProvenance,
+    PolicyObjectNamespace,
+    PolicyObjectPrecedence,
+    Region,
+    SecurityRule,
+    Snapshot,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ABSENT,
+    classify_prov_type,
+    ensure_list,
+    entry_provenance,
+    merged_shared,
+    merged_vsys_entry,
+    pushed_shared,
+    pushed_vsys_panorama,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
+    latest_merged_snapshot,
+    latest_pushed_shared_snapshot,
+    latest_pushed_vsys_snapshot,
+)
+
+
+@dataclass(slots=True)
+class NormalizedRegion:
+    source_snapshot: Snapshot
+    config_source: str
+    name: str
+    namespace_type: str
+    namespace_value: str
+    precedence_rank: int
+    raw_region: dict[str, Any]
+    # (field_name, raw_key_or_ABSENT, raw_prov_value)
+    field_provenance_data: list[tuple[str, Any, str | None]]
+
+
+def normalize_region(
+    *,
+    source_snapshot: Snapshot,
+    config_source: str,
+    namespace_type: str,
+    namespace_value: str,
+    precedence_rank: int,
+    entry: dict[str, Any],
+) -> NormalizedRegion:
+    entry_rk, entry_rv = entry_provenance(entry)
+    return NormalizedRegion(
+        source_snapshot=source_snapshot,
+        config_source=config_source,
+        name=str(entry.get("@name") or ""),
+        namespace_type=namespace_type,
+        namespace_value=namespace_value,
+        precedence_rank=precedence_rank,
+        raw_region=entry,
+        field_provenance_data=[
+            ("__entry__", entry_rk, entry_rv),
+        ],
+    )
+
+
+def _region_entries(root: dict[str, Any]) -> list[dict[str, Any]]:
+    region_node = root.get("region")
+    if not isinstance(region_node, dict):
+        return []
+    return [entry for entry in ensure_list(region_node.get("entry")) if isinstance(entry, dict)]
+
+
+def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[NormalizedRegion]:
+    merged_snapshot = latest_merged_snapshot(enforcement_point)
+    pushed_shared_snapshot = latest_pushed_shared_snapshot(enforcement_point)
+    pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
+    if merged_snapshot is None:
+        raise ValueError(f"missing merged config snapshot for {enforcement_point}")
+    if enforcement_point.appliance_group_id is not None and pushed_shared_snapshot is None:
+        raise ValueError(f"missing pushed shared policy snapshot for {enforcement_point}")
+    if pushed_snapshot is None:
+        raise ValueError(f"missing pushed VSYS snapshot for {enforcement_point}")
+
+    merged_root = merged_vsys_entry(merged_snapshot.payload, enforcement_point.vsys_name)
+    merged_shared_root = merged_shared(merged_snapshot.payload)
+    pushed_shared_root = pushed_shared(pushed_shared_snapshot.payload) if pushed_shared_snapshot is not None else {}
+    pushed_root = pushed_vsys_panorama(pushed_snapshot.payload)
+
+    normalized_regions: list[NormalizedRegion] = []
+
+    for entry in _region_entries(merged_root):
+        normalized_regions.append(
+            normalize_region(
+                source_snapshot=merged_snapshot,
+                config_source=SecurityRule.SOURCE_LOCAL,
+                namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
+                namespace_value=enforcement_point.vsys_name,
+                precedence_rank=PolicyObjectPrecedence.LOCAL_VSYS,
+                entry=entry,
+            )
+        )
+
+    for entry in _region_entries(merged_shared_root):
+        normalized_regions.append(
+            normalize_region(
+                source_snapshot=merged_snapshot,
+                config_source=SecurityRule.SOURCE_LOCAL,
+                namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
+                namespace_value="shared",
+                precedence_rank=PolicyObjectPrecedence.LOCAL_SHARED,
+                entry=entry,
+            )
+        )
+
+    for entry in _region_entries(pushed_shared_root):
+        normalized_regions.append(
+            normalize_region(
+                source_snapshot=pushed_shared_snapshot,
+                config_source=SecurityRule.SOURCE_PUSHED_PRE,
+                namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
+                namespace_value="shared",
+                precedence_rank=PolicyObjectPrecedence.PANORAMA_SHARED,
+                entry=entry,
+            )
+        )
+
+    for entry in _region_entries(pushed_root):
+        normalized_regions.append(
+            normalize_region(
+                source_snapshot=pushed_snapshot,
+                config_source=SecurityRule.SOURCE_PUSHED_PRE,
+                namespace_type=PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE,
+                namespace_value=enforcement_point.vsys_name,
+                precedence_rank=PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
+                entry=entry,
+            )
+        )
+
+    if any(not region.name for region in normalized_regions):
+        raise ValueError(f"encountered region without a name for {enforcement_point}")
+
+    duplicate_region_keys = [
+        key for key, count in Counter(
+            (region.name, region.namespace_type, region.namespace_value) for region in normalized_regions
+        ).items() if count > 1
+    ]
+    if duplicate_region_keys:
+        raise ValueError(
+            f"duplicate region namespaces for {enforcement_point}: {', '.join(sorted('/'.join(key) for key in duplicate_region_keys))}"
+        )
+
+    return normalized_regions
+
+
+def replace_regions(
+    enforcement_point: EnforcementPoint,
+    normalized_regions: list[NormalizedRegion],
+) -> list[Region]:
+    enforcement_point.regions.all().delete()
+
+    region_ct = ContentType.objects.get_for_model(Region)
+
+    created_regions: list[Region] = []
+    for normalized in normalized_regions:
+        region = Region.objects.create(
+            management_station=enforcement_point.management_station,
+            enforcement_point=enforcement_point,
+            source_snapshot=normalized.source_snapshot,
+            config_source=normalized.config_source,
+            name=normalized.name,
+            namespace_type=normalized.namespace_type,
+            namespace_value=normalized.namespace_value,
+            precedence_rank=normalized.precedence_rank,
+            raw_region=normalized.raw_region,
+            last_synced_at=normalized.source_snapshot.collected_at,
+        )
+        prov_rows = [
+            FieldProvenance(
+                content_type=region_ct,
+                object_id=region.pk,
+                field_name=fname,
+                provenance_type=classify_prov_type(rk),
+                raw_key=rk or "",
+                raw_value=rv or "",
+            )
+            for fname, rk, rv in normalized.field_provenance_data
+            if rk is not ABSENT
+        ]
+        if prov_rows:
+            FieldProvenance.objects.bulk_create(prov_rows)
+        created_regions.append(region)
+
+    return created_regions

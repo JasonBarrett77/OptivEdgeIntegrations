@@ -236,3 +236,45 @@ class AddressGroupMember(models.Model):
 
     def __str__(self) -> str:
         return self.value
+
+
+class Region(ScopedPolicyObject):
+    """A PAN-OS custom Region object (Objects > Regions), collected as a named
+    reference only — no member IP ranges or geo-location, since rule resolution
+    only needs to know the region exists and which object it is."""
+
+    management_station = models.ForeignKey(
+        ManagementStation,
+        on_delete=models.CASCADE,
+        related_name="regions",
+    )
+    enforcement_point = models.ForeignKey(
+        EnforcementPoint,
+        on_delete=models.CASCADE,
+        related_name="regions",
+    )
+    source_snapshot = models.ForeignKey(
+        "integrations.Snapshot",
+        on_delete=models.CASCADE,
+        related_name="regions",
+    )
+    raw_region = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ["name", "precedence_rank", "id"]
+        indexes = [
+            models.Index(fields=["enforcement_point", "name", "precedence_rank"]),
+            models.Index(fields=["enforcement_point", "namespace_type", "namespace_value"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["enforcement_point", "name", "namespace_type", "namespace_value"],
+                name="integrations_unique_region_per_point_namespace",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.enforcement_point} / {self.namespace_key} / {self.name}"
+
+    def clean(self) -> None:
+        super().clean()
