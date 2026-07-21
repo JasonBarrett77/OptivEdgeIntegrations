@@ -41,8 +41,10 @@ from optivedge_integrations.integrations.presentation import (
 )
 from optivedge_integrations.integrations.platforms.pan_os import (
     PANOSInScopeRefreshCollection,
+    PANOSInScopeRenormalizationResult,
     collect_persist_and_normalize,
     refresh_in_scope_configuration_snapshots,
+    renormalize_in_scope_configuration,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors import collect_show_managed_devices
 from optivedge_integrations.integrations.search_vocabulary import rebuild_all_security_rule_search_vocabulary
@@ -642,6 +644,79 @@ class ManagementStationBulkInScopeSyncView(View):
             "stations. Watch this page's Last Refresh column, or each station's Events tab, "
             "for results.",
         )
+        return HttpResponseRedirect(list_url)
+
+
+@dataclass(slots=True)
+class RenormalizationTrackingResult:
+    run: IntegrationRun
+    renormalized: PANOSInScopeRenormalizationResult
+    failure_count: int
+
+
+def _renormalize_station_with_tracking(management_station: ManagementStation) -> RenormalizationTrackingResult:
+    """Re-run normalization for a station's in-scope appliances/enforcement points against
+    already-collected snapshots (no device connection), recording an IntegrationRun and any
+    per-item IntegrationEvents the same way the in-scope refresh views do."""
+    run = IntegrationRun.objects.create(
+        management_station=management_station,
+        run_scope=IntegrationRun.SCOPE_APPLIANCE,
+        status=IntegrationRun.STATUS_RUNNING,
+    )
+    renormalized = renormalize_in_scope_configuration(management_station)
+
+    events = []
+    for f in renormalized.device_configuration_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="DeviceConfigurationNormalizationFailed", message=f.error_text,
+            appliance=f.appliance,
+        ))
+    for f in renormalized.address_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="AddressNormalizationFailed", message=f.error_text,
+            enforcement_point=f.enforcement_point,
+        ))
+    for f in renormalized.security_rule_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="SecurityRuleNormalizationFailed", message=f.error_text,
+            enforcement_point=f.enforcement_point,
+        ))
+    if events:
+        IntegrationEvent.objects.bulk_create(events)
+
+    failure_count = len(events)
+    run.status = IntegrationRun.STATUS_PARTIAL if failure_count else IntegrationRun.STATUS_SUCCEEDED
+    run.completed_at = timezone.now()
+    run.save(update_fields=["status", "completed_at"])
+
+    return RenormalizationTrackingResult(run=run, renormalized=renormalized, failure_count=failure_count)
+
+
+class ManagementStationRenormalizeView(View):
+    def post(self, request, pk):
+        management_station = get_object_or_404(ManagementStation, pk=pk)
+        list_url = reverse("management_station_list")
+
+        outcome = _renormalize_station_with_tracking(management_station)
+
+        messages.success(
+            request,
+            "Renormalization completed for "
+            f"{len(outcome.renormalized.appliances)} appliance(s) and "
+            f"{len(outcome.renormalized.enforcement_points)} enforcement point(s), "
+            "using already-collected data (no device connection made).",
+        )
+        if outcome.failure_count:
+            messages.error(
+                request,
+                f"{outcome.failure_count} normalization task(s) failed. Review the Events tab for details.",
+            )
         return HttpResponseRedirect(list_url)
 
 

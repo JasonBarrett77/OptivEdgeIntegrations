@@ -518,3 +518,18 @@ ISO_3166_1_ALPHA2_REGIONS: dict[str, str] = {
     "ZM": "Zambia",
     "ZW": "Zimbabwe",
 }
+
+# PAN-OS's own region/geo-IP content data includes codes beyond the current ISO 3166-1
+# list — some withdrawn-but-retained-for-legacy-IP-ranges country codes, and possibly
+# others whose exact meaning isn't confirmed. Kept separate from the table above so that
+# one stays a clean, verifiable mirror of the current ISO 3166-1 standard. Add entries
+# here (not above) as real rules are found referencing a code neither table covers yet.
+PANOS_LEGACY_REGION_CODES: dict[str, str] = {
+    # Netherlands Antilles — withdrawn from ISO 3166-1 in 2010 (dissolved into BQ/CW/SX),
+    # but still emitted by PAN-OS's geo-IP data for some IP ranges not yet reclassified.
+    "AN": "Netherlands Antilles (legacy)",
+    # Observed as a real rule's region reference; exact meaning not confirmed against
+    # Palo Alto's own documentation — verify via Panorama's Region picker or
+    # `show location ip <address>` before assuming this label.
+    "CE": "Unconfirmed PAN-OS region code",
+}

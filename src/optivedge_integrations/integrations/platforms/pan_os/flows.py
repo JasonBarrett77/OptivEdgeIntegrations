@@ -159,6 +159,18 @@ class PANOSInScopeRefreshCollection:
     configuration_snapshots: PANOSInScopeConfigCollection
 
 
+@dataclass(slots=True)
+class PANOSInScopeRenormalizationResult:
+    appliances: list[Appliance]
+    enforcement_points: list[EnforcementPoint]
+    device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance]
+    device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure]
+    address_normalizations: list[PANOSAddressNormalizedPoint]
+    address_failures: list[PANOSAddressNormalizationFailure]
+    security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint]
+    security_rule_failures: list[PANOSSecurityRuleNormalizationFailure]
+
+
 def get_in_scope_appliances(management_station: ManagementStation) -> list[Appliance]:
     enforcement_points = management_station.enforcement_points.filter(in_scope=True).select_related(
         "appliance",
@@ -368,6 +380,93 @@ def collect_enforcement_point_pushed_shared_policy(
     return persist_enforcement_point_collected_response(enforcement_point, collected)
 
 
+def renormalize_in_scope_configuration(
+    management_station: ManagementStation,
+) -> PANOSInScopeRenormalizationResult:
+    """Re-run normalization for a station's in-scope appliances/enforcement points against
+    already-collected snapshots, without contacting the device at all.
+
+    Each normalize_* call independently re-queries the latest stored Snapshot rather than
+    using anything collected in this same call, so this is safe to run any time normalized
+    data needs reprocessing (e.g. after a normalization bug fix) without re-running the
+    much slower network collection.
+    """
+    appliances = get_in_scope_appliances(management_station)
+    enforcement_points = get_in_scope_enforcement_points(management_station)
+    device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance] = []
+    device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure] = []
+    address_normalizations: list[PANOSAddressNormalizedPoint] = []
+    address_failures: list[PANOSAddressNormalizationFailure] = []
+    security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint] = []
+    security_rule_failures: list[PANOSSecurityRuleNormalizationFailure] = []
+
+    for appliance in appliances:
+        try:
+            normalized = normalize_appliance_device_configuration(appliance)
+        except Exception as exc:
+            device_configuration_failures.append(
+                PANOSDeviceConfigurationNormalizationFailure(
+                    appliance=appliance,
+                    error_text=str(exc),
+                )
+            )
+            continue
+        device_configuration_normalizations.append(
+            PANOSDeviceConfigurationNormalizedAppliance(
+                appliance=appliance,
+                device_configuration_profiles=normalized.device_configuration_profiles,
+            )
+        )
+
+    for enforcement_point in enforcement_points:
+        try:
+            normalized = normalize_enforcement_point_addresses(enforcement_point)
+        except Exception as exc:
+            address_failures.append(
+                PANOSAddressNormalizationFailure(
+                    enforcement_point=enforcement_point,
+                    error_text=str(exc),
+                )
+            )
+            continue
+        address_normalizations.append(
+            PANOSAddressNormalizedPoint(
+                enforcement_point=enforcement_point,
+                address_objects=normalized.address_objects,
+                address_groups=normalized.address_groups,
+            )
+        )
+
+    for enforcement_point in enforcement_points:
+        try:
+            normalized = normalize_enforcement_point_security_rules(enforcement_point)
+        except Exception as exc:
+            security_rule_failures.append(
+                PANOSSecurityRuleNormalizationFailure(
+                    enforcement_point=enforcement_point,
+                    error_text=str(exc),
+                )
+            )
+            continue
+        security_rule_normalizations.append(
+            PANOSSecurityRuleNormalizedPoint(
+                enforcement_point=enforcement_point,
+                security_rules=normalized.security_rules,
+            )
+        )
+
+    return PANOSInScopeRenormalizationResult(
+        appliances=appliances,
+        enforcement_points=enforcement_points,
+        device_configuration_normalizations=device_configuration_normalizations,
+        device_configuration_failures=device_configuration_failures,
+        address_normalizations=address_normalizations,
+        address_failures=address_failures,
+        security_rule_normalizations=security_rule_normalizations,
+        security_rule_failures=security_rule_failures,
+    )
+
+
 def collect_in_scope_configuration_snapshots(
     management_station: ManagementStation,
     *,
@@ -384,12 +483,6 @@ def collect_in_scope_configuration_snapshots(
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure] = []
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot] = []
     vsys_policy_failures: list[PANOSEnforcementPointCollectionFailure] = []
-    device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance] = []
-    device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure] = []
-    address_normalizations: list[PANOSAddressNormalizedPoint] = []
-    address_failures: list[PANOSAddressNormalizationFailure] = []
-    security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint] = []
-    security_rule_failures: list[PANOSSecurityRuleNormalizationFailure] = []
 
     for appliance in appliances:
         try:
@@ -460,60 +553,7 @@ def collect_in_scope_configuration_snapshots(
             )
         )
 
-    for appliance in appliances:
-        try:
-            normalized = normalize_appliance_device_configuration(appliance)
-        except Exception as exc:
-            device_configuration_failures.append(
-                PANOSDeviceConfigurationNormalizationFailure(
-                    appliance=appliance,
-                    error_text=str(exc),
-                )
-            )
-            continue
-        device_configuration_normalizations.append(
-            PANOSDeviceConfigurationNormalizedAppliance(
-                appliance=appliance,
-                device_configuration_profiles=normalized.device_configuration_profiles,
-            )
-        )
-
-    for enforcement_point in enforcement_points:
-        try:
-            normalized = normalize_enforcement_point_addresses(enforcement_point)
-        except Exception as exc:
-            address_failures.append(
-                PANOSAddressNormalizationFailure(
-                    enforcement_point=enforcement_point,
-                    error_text=str(exc),
-                )
-            )
-            continue
-        address_normalizations.append(
-            PANOSAddressNormalizedPoint(
-                enforcement_point=enforcement_point,
-                address_objects=normalized.address_objects,
-                address_groups=normalized.address_groups,
-            )
-        )
-
-    for enforcement_point in enforcement_points:
-        try:
-            normalized = normalize_enforcement_point_security_rules(enforcement_point)
-        except Exception as exc:
-            security_rule_failures.append(
-                PANOSSecurityRuleNormalizationFailure(
-                    enforcement_point=enforcement_point,
-                    error_text=str(exc),
-                )
-            )
-            continue
-        security_rule_normalizations.append(
-            PANOSSecurityRuleNormalizedPoint(
-                enforcement_point=enforcement_point,
-                security_rules=normalized.security_rules,
-            )
-        )
+    renormalized = renormalize_in_scope_configuration(management_station)
 
     return PANOSInScopeConfigCollection(
         appliances=appliances,
@@ -525,12 +565,12 @@ def collect_in_scope_configuration_snapshots(
         shared_policy_failures=shared_policy_failures,
         vsys_policy_collections=vsys_policy_collections,
         vsys_policy_failures=vsys_policy_failures,
-        device_configuration_normalizations=device_configuration_normalizations,
-        device_configuration_failures=device_configuration_failures,
-        address_normalizations=address_normalizations,
-        address_failures=address_failures,
-        security_rule_normalizations=security_rule_normalizations,
-        security_rule_failures=security_rule_failures,
+        device_configuration_normalizations=renormalized.device_configuration_normalizations,
+        device_configuration_failures=renormalized.device_configuration_failures,
+        address_normalizations=renormalized.address_normalizations,
+        address_failures=renormalized.address_failures,
+        security_rule_normalizations=renormalized.security_rule_normalizations,
+        security_rule_failures=renormalized.security_rule_failures,
     )
 
 

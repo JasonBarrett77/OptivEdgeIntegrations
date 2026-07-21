@@ -11,6 +11,7 @@ from optivedge_integrations.integrations.views import (
     ManagementStationDetailView,
     ManagementStationInScopeSyncView,
     ManagementStationListView,
+    ManagementStationRenormalizeView,
     ManagementStationSyncView,
     ManagementStationUpdateView,
 )
@@ -55,6 +56,11 @@ urlpatterns = [
         "management-stations/<int:pk>/sync-in-scope/",
         ManagementStationInScopeSyncView.as_view(),
         name="management_station_in_scope_sync",
+    ),
+    path(
+        "management-stations/<int:pk>/renormalize/",
+        ManagementStationRenormalizeView.as_view(),
+        name="management_station_renormalize",
     ),
     path(
         "management-stations/<int:pk>/appliance-groups/<int:appliance_group_pk>/snapshots/",

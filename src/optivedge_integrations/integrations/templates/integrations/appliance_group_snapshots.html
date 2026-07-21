@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load local_time %}
 
 {% block title %} | {{ appliance_group.name }} Snapshots{% endblock %}
 
@@ -40,7 +41,7 @@
                     <summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3 text-sm font-medium text-slate-900">
                         <span>{{ snapshot_item.label }}</span>
                         {% if snapshot_item.snapshot %}
-                            <span class="shrink-0 text-xs font-normal text-slate-500">{{ snapshot_item.snapshot.collected_at }}</span>
+                            <span class="shrink-0 text-xs font-normal text-slate-500">{{ snapshot_item.snapshot.collected_at|local_time }}</span>
                         {% else %}
                             <span class="shrink-0 text-xs font-normal text-slate-400">No snapshot</span>
                         {% endif %}
