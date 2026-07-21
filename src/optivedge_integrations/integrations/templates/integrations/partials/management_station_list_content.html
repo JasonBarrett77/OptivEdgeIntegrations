@@ -20,7 +20,7 @@
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Name</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Type</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Host</th>
-                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Sync Runs</th>
+                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Last Refresh</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -37,7 +37,25 @@
                             </td>
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">{{ station.get_station_type_display }}</td>
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">{{ station.hostname }}:{{ station.port }}</td>
-                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">{{ station.sync_run_count }}</td>
+                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
+                                {% if station.latest_run_status == "running" %}
+                                    <span class="inline-flex items-center gap-1 text-blue-700">
+                                        <span class="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-600"></span>
+                                        Refreshing…
+                                    </span>
+                                {% elif station.latest_run_status == "succeeded" %}
+                                    <span class="text-emerald-700">Succeeded</span>
+                                    <span class="text-slate-500">{{ station.latest_run_completed_at|timesince }} ago</span>
+                                {% elif station.latest_run_status == "partial" %}
+                                    <span class="text-amber-700">Partial</span>
+                                    <span class="text-slate-500">{{ station.latest_run_completed_at|timesince }} ago</span>
+                                {% elif station.latest_run_status == "failed" %}
+                                    <span class="text-red-700">Failed</span>
+                                    <span class="text-slate-500">{{ station.latest_run_completed_at|timesince }} ago</span>
+                                {% else %}
+                                    <span class="text-slate-400">Never synced</span>
+                                {% endif %}
+                            </td>
                         </tr>
                         {% empty %}
                         <tr>

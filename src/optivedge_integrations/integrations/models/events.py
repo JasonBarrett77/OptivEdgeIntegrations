@@ -11,10 +11,12 @@ class IntegrationRun(models.Model):
         (SCOPE_APPLIANCE, "Appliance"),
     ]
 
+    STATUS_RUNNING = "running"
     STATUS_SUCCEEDED = "succeeded"
     STATUS_PARTIAL = "partial"
     STATUS_FAILED = "failed"
     STATUS_CHOICES = [
+        (STATUS_RUNNING, "Running"),
         (STATUS_SUCCEEDED, "Succeeded"),
         (STATUS_PARTIAL, "Partial"),
         (STATUS_FAILED, "Failed"),

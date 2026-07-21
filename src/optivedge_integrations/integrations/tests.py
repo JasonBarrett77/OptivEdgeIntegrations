@@ -664,14 +664,23 @@ class IntegrationOrchestrationTests(TestCase):
 
 class ManagementStationBulkInScopeSyncViewTests(TestCase):
     def test_post_starts_background_refresh_and_redirects_immediately(self):
-        ManagementStation.objects.create(
+        panorama_one = ManagementStation.objects.create(
             station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama-view.local",
+            hostname="panorama-view-one.local",
+        )
+        panorama_two = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-view-two.local",
+        )
+        ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_FIREWALL,
+            hostname="firewall-view.local",
         )
 
         with (
             patch("optivedge_integrations.integrations.views.threading.Thread") as mocked_thread_cls,
-            patch("optivedge_integrations.integrations.views.refresh_all_panorama_in_scope_data") as mocked_refresh,
+            patch("optivedge_integrations.integrations.views._refresh_station_in_scope_with_tracking") as mocked_refresh,
+            patch("optivedge_integrations.integrations.views.rebuild_all_security_rule_search_vocabulary") as mocked_vocab,
         ):
             response = self.client.post(reverse("management_station_bulk_in_scope_sync"))
 
@@ -681,11 +690,19 @@ class ManagementStationBulkInScopeSyncViewTests(TestCase):
             self.assertTrue(kwargs["daemon"])
             mocked_thread_cls.return_value.start.assert_called_once()
             mocked_refresh.assert_not_called()
+            mocked_vocab.assert_not_called()
 
             # Invoking the thread's target directly simulates the background thread running,
             # while the patches above are still active.
             kwargs["target"]()
-            mocked_refresh.assert_called_once_with()
+
+            # Only the Panorama stations are refreshed, one call each, in hostname order;
+            # the vocabulary rebuild runs once afterward, covering all stations.
+            self.assertEqual(
+                [call_args.args[0] for call_args in mocked_refresh.call_args_list],
+                [panorama_one, panorama_two],
+            )
+            mocked_vocab.assert_called_once_with()
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], reverse("management_station_list"))
@@ -693,6 +710,35 @@ class ManagementStationBulkInScopeSyncViewTests(TestCase):
         messages = list(response.wsgi_request._messages)
         self.assertEqual(len(messages), 1)
         self.assertIn("started in the background", messages[0].message)
+
+    def test_post_continues_remaining_stations_when_one_fails(self):
+        panorama_one = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-view-one.local",
+        )
+        panorama_two = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-view-two.local",
+        )
+
+        with (
+            patch("optivedge_integrations.integrations.views.threading.Thread") as mocked_thread_cls,
+            patch(
+                "optivedge_integrations.integrations.views._refresh_station_in_scope_with_tracking",
+                side_effect=[RuntimeError("boom"), None],
+            ) as mocked_refresh,
+            patch("optivedge_integrations.integrations.views.rebuild_all_security_rule_search_vocabulary") as mocked_vocab,
+        ):
+            self.client.post(reverse("management_station_bulk_in_scope_sync"))
+            _, kwargs = mocked_thread_cls.call_args
+            kwargs["target"]()
+
+        # The second station is still refreshed even though the first raised.
+        self.assertEqual(
+            [call_args.args[0] for call_args in mocked_refresh.call_args_list],
+            [panorama_one, panorama_two],
+        )
+        mocked_vocab.assert_called_once_with()
 
     def test_get_renders_bulk_refresh_button(self):
         response = self.client.get(reverse("management_station_list"))
