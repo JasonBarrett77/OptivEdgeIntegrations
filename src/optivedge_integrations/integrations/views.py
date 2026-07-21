@@ -585,7 +585,7 @@ class EnforcementPointScopeToggleView(View):
             pk=enforcement_point_pk,
             management_station=management_station,
         )
-        detail_url = reverse("management_station_detail", kwargs={"pk": management_station.pk})
+        detail_url = f"{reverse('management_station_detail', kwargs={'pk': management_station.pk})}?tab={TAB_ENFORCEMENT_POINTS}"
         enforcement_point.in_scope = not enforcement_point.in_scope
         enforcement_point.save(update_fields=["in_scope"])
         if enforcement_point.in_scope:
