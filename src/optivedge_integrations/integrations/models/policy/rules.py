@@ -50,6 +50,11 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
 
     class Meta:
         ordering = ["effective_order", "name", "id"]
+        indexes = [
+            models.Index(
+                fields=["management_station", "enforcement_point", "effective_order", "name", "id"],
+            ),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["enforcement_point", "name"],
