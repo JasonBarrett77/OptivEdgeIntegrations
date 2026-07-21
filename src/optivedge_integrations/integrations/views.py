@@ -5,9 +5,12 @@ workflow. Keep vendor session, collection, and persistence logic out of this lay
 """
 
 import json
+import logging
+import threading
 
 from django.contrib import messages
 from django.core.paginator import Paginator
+from django.db import connections
 from django.db.models import Count
 from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
@@ -42,6 +45,8 @@ from optivedge_integrations.integrations.platforms.pan_os import (
 from optivedge_integrations.integrations.platforms.pan_os.collectors import collect_show_managed_devices
 from optivedge_integrations.integrations.orchestration import refresh_all_panorama_in_scope_data
 
+
+logger = logging.getLogger(__name__)
 
 TAB_DETAILS = "details"
 TAB_APPLIANCE_GROUPS = "appliance-groups"
@@ -553,26 +558,36 @@ class ManagementStationInScopeSyncView(View):
         return HttpResponseRedirect(detail_url)
 
 
+def _run_bulk_in_scope_refresh_in_background() -> None:
+    """Entry point for the background thread spawned by ManagementStationBulkInScopeSyncView.
+
+    Runs outside the request/response cycle, so exceptions here would otherwise vanish
+    silently — log them instead. Each new thread gets its own thread-local DB connection
+    via the ORM; explicitly closing it when done avoids leaking an idle connection for the
+    lifetime of the process.
+    """
+    try:
+        refresh_all_panorama_in_scope_data()
+    except Exception:
+        logger.exception("Background bulk in-scope configuration refresh failed")
+    finally:
+        connections.close_all()
+
+
 class ManagementStationBulkInScopeSyncView(View):
     def post(self, request):
         list_url = reverse("management_station_list")
 
-        try:
-            result = refresh_all_panorama_in_scope_data()
-        except Exception as exc:
-            messages.error(request, f"Bulk in-scope configuration refresh failed: {exc}")
-            return HttpResponseRedirect(list_url)
+        threading.Thread(
+            target=_run_bulk_in_scope_refresh_in_background,
+            name="bulk-in-scope-refresh",
+            daemon=True,
+        ).start()
 
         messages.success(
             request,
-            (
-                "Bulk in-scope configuration refresh completed for "
-                f"{len(result.platform_refreshes)} Panorama station"
-                f"{'' if len(result.platform_refreshes) == 1 else 's'}, "
-                "then rebuilt security-rule vocabulary for "
-                f"{len(result.security_rule_search_vocabulary)} station"
-                f"{'' if len(result.security_rule_search_vocabulary) == 1 else 's'}."
-            ),
+            "Bulk in-scope configuration refresh started in the background for all Panorama "
+            "stations. Check each station's Events tab for results once it completes.",
         )
         return HttpResponseRedirect(list_url)
 

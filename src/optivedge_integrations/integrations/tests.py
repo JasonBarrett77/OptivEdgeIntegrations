@@ -663,34 +663,36 @@ class IntegrationOrchestrationTests(TestCase):
 
 
 class ManagementStationBulkInScopeSyncViewTests(TestCase):
-    def test_post_runs_bulk_refresh_and_redirects_to_list(self):
+    def test_post_starts_background_refresh_and_redirects_immediately(self):
         ManagementStation.objects.create(
             station_type=ManagementStation.StationType.PAN_PANORAMA,
             hostname="panorama-view.local",
         )
 
-        fake_result = type(
-            "FakeBulkResult",
-            (),
-            {
-                "platform_refreshes": [object()],
-                "security_rule_search_vocabulary": [object()],
-            },
-        )()
-
-        with patch(
-            "integrations.views.refresh_all_panorama_in_scope_data",
-            return_value=fake_result,
-        ) as mocked_refresh:
+        with (
+            patch("optivedge_integrations.integrations.views.threading.Thread") as mocked_thread_cls,
+            patch("optivedge_integrations.integrations.views.refresh_all_panorama_in_scope_data") as mocked_refresh,
+        ):
             response = self.client.post(reverse("management_station_bulk_in_scope_sync"))
+
+            # The view starts a background thread instead of running the refresh inline.
+            mocked_thread_cls.assert_called_once()
+            _, kwargs = mocked_thread_cls.call_args
+            self.assertTrue(kwargs["daemon"])
+            mocked_thread_cls.return_value.start.assert_called_once()
+            mocked_refresh.assert_not_called()
+
+            # Invoking the thread's target directly simulates the background thread running,
+            # while the patches above are still active.
+            kwargs["target"]()
+            mocked_refresh.assert_called_once_with()
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], reverse("management_station_list"))
-        mocked_refresh.assert_called_once_with()
 
         messages = list(response.wsgi_request._messages)
         self.assertEqual(len(messages), 1)
-        self.assertIn("Bulk in-scope configuration refresh completed", messages[0].message)
+        self.assertIn("started in the background", messages[0].message)
 
     def test_get_renders_bulk_refresh_button(self):
         response = self.client.get(reverse("management_station_list"))
