@@ -522,6 +522,11 @@ def resolve_rule_address_refs(
             region is not None
             or raw_value in ISO_3166_1_ALPHA2_REGIONS
             or raw_value in PANOS_LEGACY_REGION_CODES
+            # TEMPORARY stopgap: treat any unresolved two-uppercase-letter value as a region
+            # rather than raising. Added under time pressure in place of a real fix for why
+            # custom Region objects (e.g. observed: "DN") aren't being picked up by
+            # regions_by_name. Revisit and remove once that's root-caused.
+            or (len(raw_value) == 2 and raw_value.isalpha() and raw_value.isupper())
         )
 
         namespace_hits = sum([address_object is not None, address_group is not None, is_region])
