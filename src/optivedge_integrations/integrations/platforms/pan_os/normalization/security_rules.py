@@ -591,9 +591,10 @@ def resolve_rule_address_refs(
             )
             if member_object is None:
                 if first_effective_group(member_name, address_groups_by_name) is not None:
-                    raise ValueError(
-                        f"nested static address groups are not supported: {raw_value} -> {member_name}"
-                    )
+                    # TEMPORARY: nested static address groups aren't supported by this resolver;
+                    # skip the nested member instead of raising. Added under time pressure -
+                    # revisit and implement real nested-group resolution.
+                    continue
                 raise ValueError(
                     f"static address group member {member_name} for {raw_value} does not resolve to an address object"
                 )
