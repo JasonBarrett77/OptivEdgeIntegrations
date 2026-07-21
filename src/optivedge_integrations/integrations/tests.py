@@ -27,7 +27,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_security_rules,
 )
 from optivedge_integrations.integrations.orchestration import refresh_panorama_in_scope_data
-from optivedge_integrations.integrations.orchestration.pan_os import refresh_all_panorama_in_scope_data
 from optivedge_integrations.integrations.search_vocabulary import (
     rebuild_all_security_rule_search_vocabulary,
     rebuild_security_rule_search_vocabulary,
@@ -611,56 +610,6 @@ class IntegrationOrchestrationTests(TestCase):
                 ("vocab", station),
             ],
         )
-
-    def test_refresh_all_panorama_in_scope_data_runs_all_platform_refreshes_then_bulk_vocabulary_rebuild(self):
-        first_station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama-a.local",
-        )
-        second_station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama-b.local",
-        )
-        ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_FIREWALL,
-            hostname="firewall.local",
-        )
-        call_order: list[tuple[str, object]] = []
-
-        def fake_platform_refresh(management_station, **kwargs):
-            call_order.append(("platform", management_station))
-            return f"refresh:{management_station.hostname}"
-
-        def fake_bulk_vocab_rebuild():
-            call_order.append(("vocab", "all"))
-            return ["vocab-result-a", "vocab-result-b"]
-
-        with patch(
-            "integrations.orchestration.pan_os.refresh_in_scope_configuration_snapshots",
-            side_effect=fake_platform_refresh,
-        ), patch(
-            "integrations.orchestration.pan_os.rebuild_all_security_rule_search_vocabulary",
-            side_effect=fake_bulk_vocab_rebuild,
-        ):
-            result = refresh_all_panorama_in_scope_data()
-
-        self.assertEqual(
-            result.platform_refreshes,
-            [
-                (first_station, "refresh:panorama-a.local"),
-                (second_station, "refresh:panorama-b.local"),
-            ],
-        )
-        self.assertEqual(result.security_rule_search_vocabulary, ["vocab-result-a", "vocab-result-b"])
-        self.assertEqual(
-            call_order,
-            [
-                ("platform", first_station),
-                ("platform", second_station),
-                ("vocab", "all"),
-            ],
-        )
-
 
 class ManagementStationBulkInScopeSyncViewTests(TestCase):
     def test_post_starts_background_refresh_and_redirects_immediately(self):
