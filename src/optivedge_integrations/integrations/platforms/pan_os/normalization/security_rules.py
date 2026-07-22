@@ -611,13 +611,6 @@ def resolve_rule_address_refs(
     return resolved
 
 
-def rule_uses_edl(resolved_refs: list[ResolvedAddressRef]) -> bool:
-    for resolved_ref in resolved_refs:
-        if resolved_ref.address_object is not None and resolved_ref.address_object.is_edl:
-            return True
-    return False
-
-
 def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list[NormalizedSecurityRule]:
     merged_snapshot = latest_merged_snapshot(enforcement_point)
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
@@ -732,9 +725,6 @@ def replace_security_rules(
             )
         except ValueError as exc:
             raise ValueError(f"{exc} (field=destination_address, {rule_context})") from exc
-
-        if rule_uses_edl(source_resolved_refs) or rule_uses_edl(destination_resolved_refs):
-            continue
 
         security_rule = SecurityRule.objects.create(
             management_station=enforcement_point.management_station,

@@ -936,7 +936,7 @@ class DeviceConfigurationNormalizationTests(TestCase):
         self.assertTrue(profile.has_unrestricted_permitted_ips)
         self.assertEqual(profile.idle_timeout_minutes, 60)
 
-    def test_normalize_enforcement_point_security_rules_skips_rules_with_edl_objects(self):
+    def test_normalize_enforcement_point_security_rules_persists_rules_with_edl_objects(self):
         station = ManagementStation.objects.create(
             station_type=ManagementStation.StationType.PAN_PANORAMA,
             hostname="panorama.local",
@@ -1041,8 +1041,21 @@ class DeviceConfigurationNormalizationTests(TestCase):
         self.assertEqual(edl_object.address_type, edl_object.TYPE_EDL)
         self.assertEqual(edl_object.namespace_type, "pushed_vsys_effective")
 
-        self.assertEqual(len(normalized.security_rules), 1)
-        self.assertEqual(normalized.security_rules[0].name, "rule-plain")
+        # Rules referencing an EDL must still be persisted, not silently dropped - only IP
+        # semantic matching is unsupported for EDL address objects (same as FQDNs), not
+        # existence in the list/search/findings/export pipeline.
+        self.assertEqual(
+            {rule.name for rule in normalized.security_rules},
+            {"rule-plain", "rule-edl"},
+        )
+
+        edl_rule = SecurityRule.objects.get(enforcement_point=enforcement_point, name="rule-edl")
+        source_ref = edl_rule.source_address_refs.get()
+        destination_ref = edl_rule.destination_address_refs.get()
+        self.assertEqual(source_ref.ref_type, SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT)
+        self.assertEqual(source_ref.address_object, edl_object)
+        self.assertEqual(destination_ref.ref_type, SecurityRuleDestinationAddressRef.RefType.ADDRESS_OBJECT)
+        self.assertEqual(destination_ref.address_object, edl_object)
 
     def test_normalization_tolerates_string_pushed_policy_payload(self):
         station = ManagementStation.objects.create(
