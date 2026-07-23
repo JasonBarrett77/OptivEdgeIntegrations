@@ -274,6 +274,234 @@ class AddressNormalizationTests(TestCase):
         self.assertIsNone(dynamic_source_refs[0].address_object)
         self.assertEqual(dynamic_source_refs[0].address_group.name, "dag-src")
 
+    def test_normalize_enforcement_point_security_rules_resolves_nested_static_address_groups(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.local",
+        )
+        appliance = Appliance.objects.create(
+            management_station=station,
+            serial_number="SERIAL-003",
+            hostname="fw-03",
+        )
+        enforcement_point = EnforcementPoint.objects.create(
+            management_station=station,
+            appliance=appliance,
+            vsys_name="vsys1",
+        )
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "address": {
+                                        "entry": [
+                                            {"@name": "host-a", "ip-netmask": "10.10.10.10/32"},
+                                            {"@name": "host-b", "ip-netmask": "10.10.10.11/32"},
+                                            {"@name": "host-c", "ip-netmask": "10.10.10.12/32"},
+                                            {"@name": "host-d", "ip-netmask": "10.10.10.13/32"},
+                                        ]
+                                    },
+                                    "address-group": {
+                                        "entry": [
+                                            {
+                                                "@name": "leaf-shared",
+                                                "static": {"member": ["host-d"]},
+                                            },
+                                            {
+                                                "@name": "branch-a",
+                                                "static": {"member": ["host-a", "leaf-shared"]},
+                                            },
+                                            {
+                                                "@name": "branch-b",
+                                                "static": {"member": ["host-b", "leaf-shared"]},
+                                            },
+                                            {
+                                                "@name": "nested-dynamic",
+                                                "dynamic": {"filter": "'tag2'"},
+                                            },
+                                            {
+                                                "@name": "top-group",
+                                                "static": {
+                                                    "member": [
+                                                        "branch-a",
+                                                        "branch-b",
+                                                        "host-c",
+                                                        "nested-dynamic",
+                                                    ]
+                                                },
+                                            },
+                                        ]
+                                    },
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-nested-static-group",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["top-group"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        Snapshot.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_type="show_pushed_shared_policy_vsys",
+            collected_at=timezone.now(),
+            payload={
+                "policy": {
+                    "panorama": {
+                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
+                        "post-rulebase": {
+                            "security": {"rules": {"entry": []}},
+                            "default-security-rules": {"rules": {"entry": []}},
+                        },
+                    }
+                }
+            },
+        )
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        rule = next(rule for rule in normalized.security_rules if rule.name == "rule-nested-static-group")
+        source_refs = list(rule.source_address_refs.order_by("id"))
+
+        # host-a, host-b, host-c direct/nested, host-d once despite being reachable via both
+        # branch-a and branch-b (diamond de-duplication), plus one dynamic ref for nested-dynamic.
+        self.assertEqual(len(source_refs), 5)
+
+        static_refs = [
+            ref for ref in source_refs if ref.ref_type == SecurityRuleSourceAddressRef.RefType.STATIC_ADDRESS_GROUP
+        ]
+        self.assertEqual(
+            {ref.address_object.name for ref in static_refs},
+            {"host-a", "host-b", "host-c", "host-d"},
+        )
+        # every static ref is attributed to the top-level group named by the rule, never
+        # an intermediate nested group.
+        self.assertEqual({ref.address_group.name for ref in static_refs}, {"top-group"})
+
+        dynamic_refs = [
+            ref for ref in source_refs if ref.ref_type == SecurityRuleSourceAddressRef.RefType.DYNAMIC_ADDRESS_GROUP
+        ]
+        self.assertEqual(len(dynamic_refs), 1)
+        self.assertIsNone(dynamic_refs[0].address_object)
+        self.assertEqual(dynamic_refs[0].address_group.name, "nested-dynamic")
+
+    def test_normalize_enforcement_point_security_rules_raises_on_circular_static_address_group(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.local",
+        )
+        appliance = Appliance.objects.create(
+            management_station=station,
+            serial_number="SERIAL-004",
+            hostname="fw-04",
+        )
+        enforcement_point = EnforcementPoint.objects.create(
+            management_station=station,
+            appliance=appliance,
+            vsys_name="vsys1",
+        )
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "address": {"entry": []},
+                                    "address-group": {
+                                        "entry": [
+                                            {
+                                                "@name": "cycle-a",
+                                                "static": {"member": ["cycle-b"]},
+                                            },
+                                            {
+                                                "@name": "cycle-b",
+                                                "static": {"member": ["cycle-a"]},
+                                            },
+                                        ]
+                                    },
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-cycle",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["cycle-a"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        Snapshot.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_type="show_pushed_shared_policy_vsys",
+            collected_at=timezone.now(),
+            payload={
+                "policy": {
+                    "panorama": {
+                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
+                        "post-rulebase": {
+                            "security": {"rules": {"entry": []}},
+                            "default-security-rules": {"rules": {"entry": []}},
+                        },
+                    }
+                }
+            },
+        )
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        with self.assertRaises(ValueError):
+            normalize_enforcement_point_security_rules(enforcement_point)
+
 
 class SecurityRuleSearchVocabularyEntryTests(TestCase):
     def test_save_populates_lookup_fields(self):

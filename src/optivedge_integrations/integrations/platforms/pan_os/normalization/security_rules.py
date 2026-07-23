@@ -505,6 +505,90 @@ def resolve_group_member_object(
     return candidates[0]
 
 
+def resolve_static_group_members(
+    *,
+    current_group: AddressGroup,
+    top_level_group: AddressGroup,
+    raw_value: str,
+    position: int,
+    address_objects_by_name: dict[str, list[AddressObject]],
+    address_groups_by_name: dict[str, list[AddressGroup]],
+    visited_group_ids: set[int],
+    seen_targets: set[tuple[str, int]],
+) -> list[ResolvedAddressRef]:
+    """Recursively resolve a static address group's members, including nested groups.
+
+    Nested static groups are expanded inline (their objects are attributed to
+    top_level_group, matching the existing stored-data shape). A nested group that is
+    itself dynamic produces its own DYNAMIC_ADDRESS_GROUP ref pointing at that nested
+    group. seen_targets de-dupes a diamond-shaped nesting graph within one raw_value;
+    visited_group_ids raises on a cycle instead of looping forever.
+    """
+    if current_group.pk in visited_group_ids:
+        raise ValueError(
+            f"circular static address group reference detected: {raw_value} involves {current_group.name} more than once"
+        )
+    visited_group_ids = visited_group_ids | {current_group.pk}
+
+    resolved: list[ResolvedAddressRef] = []
+    for group_member in current_group.members.all():
+        member_name = group_member.value
+        member_object = resolve_group_member_object(
+            member_name=member_name,
+            address_group=current_group,
+            address_objects_by_name=address_objects_by_name,
+        )
+        if member_object is not None:
+            key = ("object", member_object.pk)
+            if key not in seen_targets:
+                seen_targets.add(key)
+                resolved.append(
+                    ResolvedAddressRef(
+                        raw_value=raw_value,
+                        position=position,
+                        ref_type=SecurityRuleSourceAddressRef.RefType.STATIC_ADDRESS_GROUP,
+                        address_object=member_object,
+                        address_group=top_level_group,
+                    )
+                )
+            continue
+
+        nested_group = first_effective_group(member_name, address_groups_by_name)
+        if nested_group is None:
+            raise ValueError(
+                f"static address group member {member_name} for {raw_value} does not resolve to an address object or group"
+            )
+
+        if nested_group.dynamic_filter:
+            key = ("dynamic_group", nested_group.pk)
+            if key not in seen_targets:
+                seen_targets.add(key)
+                resolved.append(
+                    ResolvedAddressRef(
+                        raw_value=raw_value,
+                        position=position,
+                        ref_type=SecurityRuleSourceAddressRef.RefType.DYNAMIC_ADDRESS_GROUP,
+                        address_object=None,
+                        address_group=nested_group,
+                    )
+                )
+            continue
+
+        resolved.extend(
+            resolve_static_group_members(
+                current_group=nested_group,
+                top_level_group=top_level_group,
+                raw_value=raw_value,
+                position=position,
+                address_objects_by_name=address_objects_by_name,
+                address_groups_by_name=address_groups_by_name,
+                visited_group_ids=visited_group_ids,
+                seen_targets=seen_targets,
+            )
+        )
+    return resolved
+
+
 def resolve_rule_address_refs(
     *,
     members: list[NormalizedSecurityRuleMember],
@@ -582,31 +666,18 @@ def resolve_rule_address_refs(
             )
             continue
 
-        for group_member in address_group.members.all():
-            member_name = group_member.value
-            member_object = resolve_group_member_object(
-                member_name=member_name,
-                address_group=address_group,
+        resolved.extend(
+            resolve_static_group_members(
+                current_group=address_group,
+                top_level_group=address_group,
+                raw_value=raw_value,
+                position=member.position,
                 address_objects_by_name=address_objects_by_name,
+                address_groups_by_name=address_groups_by_name,
+                visited_group_ids=set(),
+                seen_targets=set(),
             )
-            if member_object is None:
-                if first_effective_group(member_name, address_groups_by_name) is not None:
-                    # TEMPORARY: nested static address groups aren't supported by this resolver;
-                    # skip the nested member instead of raising. Added under time pressure -
-                    # revisit and implement real nested-group resolution.
-                    continue
-                raise ValueError(
-                    f"static address group member {member_name} for {raw_value} does not resolve to an address object"
-                )
-            resolved.append(
-                ResolvedAddressRef(
-                    raw_value=raw_value,
-                    position=member.position,
-                    ref_type=SecurityRuleSourceAddressRef.RefType.STATIC_ADDRESS_GROUP,
-                    address_object=member_object,
-                    address_group=address_group,
-                )
-            )
+        )
 
     return resolved
 
