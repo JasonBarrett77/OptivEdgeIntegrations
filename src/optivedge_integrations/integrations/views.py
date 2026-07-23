@@ -35,9 +35,6 @@ from optivedge_integrations.integrations.models import (
 from optivedge_integrations.integrations.presentation import (
     build_address_group_row,
     build_address_object_row,
-    joined_member_values,
-    listed_member_values,
-    security_rule_config_source_label,
 )
 from optivedge_integrations.integrations.platforms.pan_os import (
     PANOSInScopeRefreshCollection,
@@ -187,54 +184,6 @@ def build_appliance_group_snapshot_context(appliance_group):
     }
 
 
-def build_enforcement_point_security_rule_context(enforcement_point):
-    security_rules = (
-        enforcement_point.security_rules.select_related("source_snapshot")
-        .prefetch_related(
-            "securityrulefromzones",
-            "securityruletozones",
-            "securityrulesourceaddresss",
-            "securityruledestinationaddresss",
-            "securityrulesourceusers",
-            "securityruleapplications",
-            "securityruleservices",
-            "securityrulecategorys",
-            "securityrulesourcehips",
-            "securityruledestinationhips",
-            "securityrulesaasusers",
-            "securityrulesaastenants",
-            "securityruleprofilegroups",
-            "securityruleprofiles",
-        )
-        .order_by("effective_order", "name", "pk")
-    )
-    rows = []
-    for security_rule in security_rules:
-        profile_groups = joined_member_values(security_rule, "securityruleprofilegroups")
-        profiles = ", ".join(
-            f"{profile.profile_type}: {profile.value}"
-            for profile in security_rule.securityruleprofiles.all()
-        )
-        rows.append(
-            {
-                "security_rule": security_rule,
-                "config_source_label": security_rule_config_source_label(security_rule.config_source),
-                "from_zones": listed_member_values(security_rule, "securityrulefromzones"),
-                "to_zones": listed_member_values(security_rule, "securityruletozones"),
-                "source_addresses": listed_member_values(security_rule, "securityrulesourceaddresss"),
-                "destination_addresses": listed_member_values(security_rule, "securityruledestinationaddresss"),
-                "applications": listed_member_values(security_rule, "securityruleapplications"),
-                "services": listed_member_values(security_rule, "securityruleservices"),
-                "categories": listed_member_values(security_rule, "securityrulecategorys"),
-                "profile_groups": profile_groups,
-                "profiles": profiles,
-            }
-        )
-    return {
-        "security_rule_rows": rows,
-    }
-
-
 _ADDRESS_PAGE_SIZE = 20
 _ADDRESS_KIND_OBJECT = "object"
 _ADDRESS_KIND_GROUP = "group"
@@ -333,23 +282,6 @@ class ApplianceGroupSnapshotView(RightOverlayMixin, ManagementStationDetailBackg
 
     def get_overlay_close_url(self):
         return reverse("management_station_detail", kwargs={"pk": self.kwargs["pk"]})
-
-
-class EnforcementPointSecurityRuleListView(TemplateView):
-    template_name = "integrations/enforcement_point_security_rules.html"
-
-    def get_context_data(self, **kwargs):
-        management_station = get_object_or_404(ManagementStation, pk=self.kwargs["pk"])
-        enforcement_point = get_object_or_404(
-            EnforcementPoint.objects.select_related("appliance_group", "appliance").prefetch_related("nodes__appliance"),
-            pk=self.kwargs["enforcement_point_pk"],
-            management_station=management_station,
-        )
-        context = super().get_context_data(**kwargs)
-        context["management_station"] = management_station
-        context["enforcement_point"] = enforcement_point
-        context.update(build_enforcement_point_security_rule_context(enforcement_point))
-        return context
 
 
 class EnforcementPointAddressListView(TemplateView):

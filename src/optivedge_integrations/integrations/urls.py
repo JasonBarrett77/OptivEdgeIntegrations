@@ -3,7 +3,6 @@ from django.urls import path
 from optivedge_integrations.integrations.views import (
     ApplianceGroupSnapshotView,
     EnforcementPointAddressListView,
-    EnforcementPointSecurityRuleListView,
     EnforcementPointScopeToggleView,
     ManagementStationBulkInScopeSyncView,
     ManagementStationCreateView,
@@ -71,11 +70,6 @@ urlpatterns = [
         "management-stations/<int:pk>/enforcement-points/<int:enforcement_point_pk>/scope/",
         EnforcementPointScopeToggleView.as_view(),
         name="enforcement_point_scope_toggle",
-    ),
-    path(
-        "management-stations/<int:pk>/enforcement-points/<int:enforcement_point_pk>/security-rules/",
-        EnforcementPointSecurityRuleListView.as_view(),
-        name="enforcement_point_security_rules",
     ),
     path(
         "management-stations/<int:pk>/enforcement-points/<int:enforcement_point_pk>/addresses/",
