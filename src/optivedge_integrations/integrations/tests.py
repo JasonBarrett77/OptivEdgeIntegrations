@@ -502,6 +502,172 @@ class AddressNormalizationTests(TestCase):
         with self.assertRaises(ValueError):
             normalize_enforcement_point_security_rules(enforcement_point)
 
+    def test_normalize_enforcement_point_security_rules_resolves_vendor_region_codes(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.local",
+        )
+        appliance = Appliance.objects.create(
+            management_station=station,
+            serial_number="SERIAL-005",
+            hostname="fw-05",
+        )
+        enforcement_point = EnforcementPoint.objects.create(
+            management_station=station,
+            appliance=appliance,
+            vsys_name="vsys1",
+        )
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "address": {"entry": []},
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-vendor-region",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["BY", "DN"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        Snapshot.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_type="show_pushed_shared_policy_vsys",
+            collected_at=timezone.now(),
+            payload={
+                "policy": {
+                    "panorama": {
+                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
+                        "post-rulebase": {
+                            "security": {"rules": {"entry": []}},
+                            "default-security-rules": {"rules": {"entry": []}},
+                        },
+                    }
+                }
+            },
+        )
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        rule = next(rule for rule in normalized.security_rules if rule.name == "rule-vendor-region")
+        source_refs = list(rule.source_address_refs.order_by("id"))
+        self.assertEqual(len(source_refs), 2)
+        self.assertEqual(
+            {ref.ref_type for ref in source_refs},
+            {SecurityRuleSourceAddressRef.RefType.REGION},
+        )
+        self.assertEqual({ref.raw_value for ref in source_refs}, {"BY", "DN"})
+
+    def test_normalize_enforcement_point_security_rules_raises_on_unresolved_two_letter_value(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.local",
+        )
+        appliance = Appliance.objects.create(
+            management_station=station,
+            serial_number="SERIAL-006",
+            hostname="fw-06",
+        )
+        enforcement_point = EnforcementPoint.objects.create(
+            management_station=station,
+            appliance=appliance,
+            vsys_name="vsys1",
+        )
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "address": {"entry": []},
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-bad-ref",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        # ZZ is not a real ISO code, a PAN-OS
+                                                        # vendor code, or a configured object/group -
+                                                        # should surface as an unresolved reference,
+                                                        # not be silently treated as a region.
+                                                        "source": {"member": ["ZZ"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        Snapshot.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_type="show_pushed_shared_policy_vsys",
+            collected_at=timezone.now(),
+            payload={
+                "policy": {
+                    "panorama": {
+                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
+                        "post-rulebase": {
+                            "security": {"rules": {"entry": []}},
+                            "default-security-rules": {"rules": {"entry": []}},
+                        },
+                    }
+                }
+            },
+        )
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        with self.assertRaises(ValueError):
+            normalize_enforcement_point_security_rules(enforcement_point)
+
 
 class SecurityRuleSearchVocabularyEntryTests(TestCase):
     def test_save_populates_lookup_fields(self):

@@ -519,17 +519,25 @@ ISO_3166_1_ALPHA2_REGIONS: dict[str, str] = {
     "ZW": "Zimbabwe",
 }
 
-# PAN-OS's own region/geo-IP content data includes codes beyond the current ISO 3166-1
-# list — some withdrawn-but-retained-for-legacy-IP-ranges country codes, and possibly
-# others whose exact meaning isn't confirmed. Kept separate from the table above so that
-# one stays a clean, verifiable mirror of the current ISO 3166-1 standard. Add entries
-# here (not above) as real rules are found referencing a code neither table covers yet.
-PANOS_LEGACY_REGION_CODES: dict[str, str] = {
-    # Netherlands Antilles — withdrawn from ISO 3166-1 in 2010 (dissolved into BQ/CW/SX),
-    # but still emitted by PAN-OS's geo-IP data for some IP ranges not yet reclassified.
-    "AN": "Netherlands Antilles (legacy)",
-    # Observed as a real rule's region reference; exact meaning not confirmed against
-    # Palo Alto's own documentation — verify via Panorama's Region picker or
-    # `show location ip <address>` before assuming this label.
-    "CE": "Unconfirmed PAN-OS region code",
+# Palo Alto's builtin region namespace is ISO-derived but not strictly current ISO
+# 3166-1: it retains a withdrawn code for legacy IP ranges, and adds several
+# vendor-specific pseudo-country codes for geolocation cases that don't map to a real
+# country. Kept separate from the table above so that one stays a clean, verifiable
+# mirror of the current ISO 3166-1 standard. Add entries here (not above) as real rules
+# are found referencing a code neither table covers yet.
+PANOS_VENDOR_REGION_CODES: dict[str, str] = {
+    # Withdrawn ISO 3166-1 code, retained by PAN-OS: Netherlands Antilles dissolved in
+    # 2010 into BQ/CW/SX, but PAN-OS still emits AN for IP ranges not yet reclassified.
+    "AN": "Netherlands Antilles (withdrawn ISO code)",
+    # Vendor-specific geolocation fallback classifications - not ISO 3166-1 codes, and
+    # (per Palo Alto's own documentation) AP/EU are fallback classifications rather than
+    # geographic supersets of their member countries.
+    "A1": "Anonymous Proxy",
+    "A2": "Satellite Provider",
+    "AP": "Asia Pacific",
+    "EU": "European Union",
+    # Vendor-specific codes for contested Ukrainian territories, not ISO 3166-1 codes.
+    "CE": "Crimea",
+    "DN": "Donetsk",
+    "LN": "Luhansk",
 }
