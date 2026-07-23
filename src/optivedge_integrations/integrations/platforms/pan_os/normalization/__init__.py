@@ -21,6 +21,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.addresse
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     normalize_device_configuration_profile,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
+    NormalizedDynamicAddressContent,
+    normalize_enforcement_point_dynamic_address_content,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     normalize_security_rules,
 )
@@ -59,10 +63,12 @@ def normalize_enforcement_point_addresses(enforcement_point: EnforcementPoint) -
 
 
 __all__ = [
+    "NormalizedDynamicAddressContent",
     "PANOSNormalizedCollection",
     "normalize_addresses",
     "normalize_appliance_device_configuration",
     "normalize_enforcement_point_addresses",
+    "normalize_enforcement_point_dynamic_address_content",
     "normalize_enforcement_point_security_rules",
     "normalize_device_configuration_profile",
     "normalize_collected_response",

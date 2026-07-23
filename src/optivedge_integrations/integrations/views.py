@@ -37,10 +37,12 @@ from optivedge_integrations.integrations.presentation import (
     build_address_object_row,
 )
 from optivedge_integrations.integrations.platforms.pan_os import (
+    PANOSDynamicContentRefreshResult,
     PANOSInScopeRefreshCollection,
     PANOSInScopeRenormalizationResult,
     collect_persist_and_normalize,
     refresh_in_scope_configuration_snapshots,
+    refresh_in_scope_dynamic_content,
     renormalize_in_scope_configuration,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors import collect_show_managed_devices
@@ -208,7 +210,7 @@ def build_enforcement_point_address_context(enforcement_point, *, kind=_ADDRESS_
         qs = (
             enforcement_point.address_objects
             .select_related("source_snapshot")
-            .prefetch_related("tags", "field_provenance")
+            .prefetch_related("tags", "field_provenance", "resolved_entries")
             .order_by("name", "pk")
         )
         if q:
@@ -648,6 +650,93 @@ class ManagementStationRenormalizeView(View):
             messages.error(
                 request,
                 f"{outcome.failure_count} normalization task(s) failed. Review the Events tab for details.",
+            )
+        return HttpResponseRedirect(list_url)
+
+
+@dataclass(slots=True)
+class DynamicContentRefreshTrackingResult:
+    run: IntegrationRun
+    refresh: PANOSDynamicContentRefreshResult
+    failure_count: int
+
+
+def _refresh_station_dynamic_content_with_tracking(
+    management_station: ManagementStation,
+) -> DynamicContentRefreshTrackingResult:
+    """Collect and normalize runtime EDL/FQDN content for a station's in-scope
+    appliances/enforcement points, recording an IntegrationRun and any per-item
+    IntegrationEvents the same way the config sync/renormalize views do.
+
+    A distinct, explicitly-triggered action rather than part of the regular sync - EDL
+    collection is one API call per referenced EDL name (each potentially paginated), a
+    fundamentally different cost profile than the fixed handful of calls the regular sync
+    makes, so it stays opt-in rather than automatic."""
+    run = IntegrationRun.objects.create(
+        management_station=management_station,
+        run_scope=IntegrationRun.SCOPE_APPLIANCE,
+        status=IntegrationRun.STATUS_RUNNING,
+    )
+    refresh = refresh_in_scope_dynamic_content(management_station)
+
+    events = []
+    for f in refresh.fqdn_cache_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="FqdnCacheCollectionFailed", message=f.error_text,
+            appliance=f.appliance,
+        ))
+    for f in refresh.external_list_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="ExternalListCollectionFailed", message=f.error_text,
+            enforcement_point=f.enforcement_point,
+        ))
+    for f in refresh.dynamic_content_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="DynamicAddressContentNormalizationFailed", message=f.error_text,
+            enforcement_point=f.enforcement_point,
+        ))
+    if events:
+        IntegrationEvent.objects.bulk_create(events)
+
+    failure_count = len(events)
+    run.status = IntegrationRun.STATUS_PARTIAL if failure_count else IntegrationRun.STATUS_SUCCEEDED
+    run.completed_at = timezone.now()
+    run.save(update_fields=["status", "completed_at"])
+
+    return DynamicContentRefreshTrackingResult(run=run, refresh=refresh, failure_count=failure_count)
+
+
+class ManagementStationRefreshDynamicContentView(View):
+    def post(self, request, pk):
+        management_station = get_object_or_404(ManagementStation, pk=pk)
+        list_url = reverse("management_station_list")
+
+        outcome = _refresh_station_dynamic_content_with_tracking(management_station)
+        refresh = outcome.refresh
+
+        total_resolved_entries = sum(
+            item.total_resolved_entries for item in refresh.dynamic_content_normalizations
+        )
+        updated_object_count = sum(
+            len(item.updated_address_objects) for item in refresh.dynamic_content_normalizations
+        )
+        messages.success(
+            request,
+            "EDL/FQDN cache refresh completed: "
+            f"{len(refresh.fqdn_cache_collections)} appliance FQDN cache snapshot(s) collected, "
+            f"{updated_object_count} address object(s) resolved to {total_resolved_entries} "
+            "IP range(s).",
+        )
+        if outcome.failure_count:
+            messages.error(
+                request,
+                f"{outcome.failure_count} EDL/FQDN refresh task(s) failed. Review the Events tab for details.",
             )
         return HttpResponseRedirect(list_url)
 

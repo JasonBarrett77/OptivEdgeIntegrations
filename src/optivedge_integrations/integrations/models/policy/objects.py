@@ -92,6 +92,7 @@ class AddressObject(ScopedPolicyObject):
     is_any = models.BooleanField(default=False)
     is_edl = models.BooleanField(default=False)
     is_builtin = models.BooleanField(default=False)
+    edl_list_type = models.CharField(max_length=16, blank=True, default="")
     description = models.TextField(blank=True)
     raw_object = models.JSONField(default=dict, blank=True)
 
@@ -163,6 +164,41 @@ class AddressObjectTag(models.Model):
 
     def __str__(self) -> str:
         return self.value
+
+
+class AddressObjectResolvedEntry(models.Model):
+    """A merged, disjoint IPv4 interval resolved at runtime for an EDL(ip)/FQDN AddressObject.
+
+    Populated only by the explicit "Refresh EDL/FQDN cache" action, never by regular
+    config normalization - this is operational/cached state (EDL download cache, DNS
+    resolution cache), not committed configuration, and can go stale independently of
+    address_object.last_synced_at. An EDL/FQDN object with zero rows here has simply
+    never been refreshed (or resolved to nothing), and is excluded from IP-semantic
+    matching exactly like it is today.
+    """
+
+    address_object = models.ForeignKey(
+        AddressObject,
+        on_delete=models.CASCADE,
+        related_name="resolved_entries",
+    )
+    ipv4_start_int = models.BigIntegerField()
+    ipv4_end_int = models.BigIntegerField()
+    source_snapshot = models.ForeignKey(
+        "integrations.Snapshot",
+        on_delete=models.CASCADE,
+        related_name="address_object_resolved_entries",
+    )
+    collected_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ["ipv4_start_int", "id"]
+        indexes = [
+            models.Index(fields=["address_object", "ipv4_start_int", "ipv4_end_int"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.address_object} / {self.ipv4_start_int}-{self.ipv4_end_int}"
 
 
 class AddressGroup(ScopedPolicyObject):

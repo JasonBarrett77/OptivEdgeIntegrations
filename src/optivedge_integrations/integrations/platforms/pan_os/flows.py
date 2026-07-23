@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from django.db import transaction
+from django.db.models import Q
 
 from optivedge_integrations.integrations.models import (
     AddressGroup,
@@ -20,17 +21,24 @@ from optivedge_integrations.integrations.models import (
     DeviceConfigurationProfile,
     ManagementStation,
     SecurityRule,
+    SecurityRuleDestinationAddressRef,
+    SecurityRuleSourceAddressRef,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors import (
+    clear_target_vsys,
+    collect_show_dns_proxy_fqdn_all,
+    collect_show_external_list,
     collect_show_managed_devices,
     collect_show_merged_config,
     collect_show_pushed_shared_policy,
     collect_show_pushed_shared_policy_vsys,
+    set_target_vsys,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import PANOSCollectedResponse
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     PANOSNormalizedCollection,
     normalize_enforcement_point_addresses,
+    normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
     normalize_appliance_device_configuration,
     normalize_collected_response,
@@ -132,6 +140,30 @@ class PANOSDeviceConfigurationNormalizationFailure:
 class PANOSAddressNormalizationFailure:
     enforcement_point: EnforcementPoint
     error_text: str
+
+
+@dataclass(slots=True)
+class PANOSDynamicAddressContentNormalizedPoint:
+    enforcement_point: EnforcementPoint
+    updated_address_objects: list[AddressObject]
+    total_resolved_entries: int
+
+
+@dataclass(slots=True)
+class PANOSDynamicAddressContentNormalizationFailure:
+    enforcement_point: EnforcementPoint
+    error_text: str
+
+
+@dataclass(slots=True)
+class PANOSDynamicContentRefreshResult:
+    appliances: list[Appliance]
+    enforcement_points: list[EnforcementPoint]
+    fqdn_cache_collections: list[PANOSApplianceCollectedSnapshot]
+    fqdn_cache_failures: list[PANOSApplianceCollectionFailure]
+    external_list_failures: list[PANOSEnforcementPointCollectionFailure]
+    dynamic_content_normalizations: list[PANOSDynamicAddressContentNormalizedPoint]
+    dynamic_content_failures: list[PANOSDynamicAddressContentNormalizationFailure]
 
 
 @dataclass(slots=True)
@@ -599,4 +631,174 @@ def refresh_in_scope_configuration_snapshots(
     return PANOSInScopeRefreshCollection(
         inventory=inventory,
         configuration_snapshots=configuration_snapshots,
+    )
+
+
+def collect_appliance_fqdn_cache(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = "AegisGo/1.0",
+) -> PANOSPersistedCollection:
+    session = open_session(
+        appliance.management_station,
+        credentials_provider=credentials_provider,
+        target=appliance.serial_number,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    collected = collect_show_dns_proxy_fqdn_all(session)
+    return persist_appliance_collected_response(appliance, collected)
+
+
+def _candidate_edl_names(enforcement_point: EnforcementPoint) -> list[str]:
+    """Distinct ip-type EDL address object names actually referenced by this enforcement
+    point's rules - directly or via any level of nested static group, already flattened onto
+    ref rows by resolve_static_group_members. Excludes FQDN (handled by the bulk appliance-wide
+    FQDN cache call, not a per-name EDL show command)."""
+    candidate_filter = Q(
+        address_object__address_type=AddressObject.TYPE_EDL,
+        address_object__edl_list_type="ip",
+    )
+    source_names = (
+        SecurityRuleSourceAddressRef.objects.filter(security_rule__enforcement_point=enforcement_point)
+        .filter(candidate_filter)
+        .values_list("address_object__name", flat=True)
+    )
+    destination_names = (
+        SecurityRuleDestinationAddressRef.objects.filter(security_rule__enforcement_point=enforcement_point)
+        .filter(candidate_filter)
+        .values_list("address_object__name", flat=True)
+    )
+    return sorted(set(source_names) | set(destination_names))
+
+
+def collect_enforcement_point_external_lists(
+    enforcement_point: EnforcementPoint,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = "AegisGo/1.0",
+) -> list[PANOSPersistedCollection]:
+    """Collect every candidate EDL for one enforcement point (vsys).
+
+    EDL collection is vsys-scoped at the device level (confirmed against a real device -
+    `request system external-list show` requires a prior `set system setting target-vsys`
+    on the same connection, and that setting is connection-scoped, not account-scoped). This
+    always opens its own fresh PANSession, sets target-vsys once, collects every candidate name
+    on it, then clears target-vsys before returning - never reuse this session for anything
+    else, and never call this same vsys context from more than one session concurrently.
+    """
+    candidate_names = _candidate_edl_names(enforcement_point)
+    if not candidate_names:
+        return []
+
+    appliance = resolve_enforcement_point_collection_appliance(enforcement_point)
+    session = open_session(
+        appliance.management_station,
+        credentials_provider=credentials_provider,
+        target=appliance.serial_number,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    set_target_vsys(session, vsys_name=enforcement_point.vsys_name)
+    try:
+        persisted: list[PANOSPersistedCollection] = []
+        for name in candidate_names:
+            collected = collect_show_external_list(session, name=name)
+            persisted.append(
+                persist_appliance_collected_response(
+                    appliance,
+                    collected,
+                    scope_name=f"{enforcement_point.vsys_name}:{name}",
+                )
+            )
+        return persisted
+    finally:
+        clear_target_vsys(session)
+
+
+def refresh_in_scope_dynamic_content(
+    management_station: ManagementStation,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = "AegisGo/1.0",
+) -> PANOSDynamicContentRefreshResult:
+    """Collect and normalize runtime EDL/FQDN resolved content for a station's in-scope
+    appliances/enforcement points.
+
+    Deliberately separate from refresh_in_scope_configuration_snapshots(): FQDN cache is one
+    cheap bulk call per appliance, but EDL collection is one API call per referenced EDL name
+    (each potentially paginated) - a fundamentally different cost profile, so this stays an
+    explicitly-triggered action rather than riding along on every regular sync. Requires
+    security rules to already be normalized (candidate selection reads existing address-ref
+    rows) - a precondition of running this after a regular sync, not enforced here since an
+    empty candidate set degrades gracefully to "nothing to do" rather than an error.
+    """
+    appliances = get_in_scope_appliances(management_station)
+    enforcement_points = get_in_scope_enforcement_points(management_station)
+
+    fqdn_cache_collections: list[PANOSApplianceCollectedSnapshot] = []
+    fqdn_cache_failures: list[PANOSApplianceCollectionFailure] = []
+    for appliance in appliances:
+        try:
+            persisted = collect_appliance_fqdn_cache(
+                appliance,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            fqdn_cache_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=str(exc))
+            )
+            continue
+        fqdn_cache_collections.append(
+            PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
+        )
+
+    external_list_failures: list[PANOSEnforcementPointCollectionFailure] = []
+    for enforcement_point in enforcement_points:
+        try:
+            collect_enforcement_point_external_lists(
+                enforcement_point,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            external_list_failures.append(
+                PANOSEnforcementPointCollectionFailure(enforcement_point=enforcement_point, error_text=str(exc))
+            )
+
+    dynamic_content_normalizations: list[PANOSDynamicAddressContentNormalizedPoint] = []
+    dynamic_content_failures: list[PANOSDynamicAddressContentNormalizationFailure] = []
+    for enforcement_point in enforcement_points:
+        try:
+            normalized = normalize_enforcement_point_dynamic_address_content(enforcement_point)
+        except Exception as exc:
+            dynamic_content_failures.append(
+                PANOSDynamicAddressContentNormalizationFailure(
+                    enforcement_point=enforcement_point, error_text=str(exc),
+                )
+            )
+            continue
+        dynamic_content_normalizations.append(
+            PANOSDynamicAddressContentNormalizedPoint(
+                enforcement_point=enforcement_point,
+                updated_address_objects=normalized.updated_address_objects,
+                total_resolved_entries=normalized.total_resolved_entries,
+            )
+        )
+
+    return PANOSDynamicContentRefreshResult(
+        appliances=appliances,
+        enforcement_points=enforcement_points,
+        fqdn_cache_collections=fqdn_cache_collections,
+        fqdn_cache_failures=fqdn_cache_failures,
+        external_list_failures=external_list_failures,
+        dynamic_content_normalizations=dynamic_content_normalizations,
+        dynamic_content_failures=dynamic_content_failures,
     )

@@ -1,3 +1,4 @@
+import ipaddress
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
@@ -8,6 +9,7 @@ from django.utils import timezone
 from optivedge_integrations.integrations.models import (
     AddressGroup,
     AddressObject,
+    AddressObjectResolvedEntry,
     Appliance,
     ApplianceGroup,
     EnforcementPoint,
@@ -24,6 +26,7 @@ from optivedge_integrations.integrations.models import (
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_device_configuration,
     normalize_enforcement_point_addresses,
+    normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
 )
 from optivedge_integrations.integrations.orchestration import refresh_panorama_in_scope_data
@@ -667,6 +670,237 @@ class AddressNormalizationTests(TestCase):
         normalize_enforcement_point_addresses(enforcement_point)
         with self.assertRaises(ValueError):
             normalize_enforcement_point_security_rules(enforcement_point)
+
+
+class DynamicAddressContentNormalizationTests(TestCase):
+    def _build_enforcement_point(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.local",
+        )
+        appliance = Appliance.objects.create(
+            management_station=station,
+            serial_number="SERIAL-EDL-001",
+            hostname="fw-edl-01",
+        )
+        enforcement_point = EnforcementPoint.objects.create(
+            management_station=station,
+            appliance=appliance,
+            vsys_name="vsys1",
+        )
+        return station, appliance, enforcement_point
+
+    def _build_candidate_rule(self, *, enforcement_point, source_address_object, destination_address_object):
+        snapshot = Snapshot.objects.create(
+            management_station=enforcement_point.management_station,
+            appliance=enforcement_point.appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={},
+        )
+        rule = SecurityRule.objects.create(
+            management_station=enforcement_point.management_station,
+            enforcement_point=enforcement_point,
+            source_snapshot=snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            effective_order=100000,
+            rule_position=0,
+            name="rule-dynamic-content",
+            action="allow",
+        )
+        SecurityRuleSourceAddressRef.objects.create(
+            security_rule=rule,
+            raw_value=source_address_object.name,
+            position=0,
+            ref_type=SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT,
+            address_object=source_address_object,
+        )
+        SecurityRuleDestinationAddressRef.objects.create(
+            security_rule=rule,
+            raw_value=destination_address_object.name,
+            position=0,
+            ref_type=SecurityRuleDestinationAddressRef.RefType.ADDRESS_OBJECT,
+            address_object=destination_address_object,
+        )
+        return rule
+
+    def test_normalize_enforcement_point_dynamic_address_content_merges_and_resolves(self):
+        station, appliance, enforcement_point = self._build_enforcement_point()
+
+        edl_object = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station,
+                appliance=appliance,
+                source_type="show_pushed_shared_policy_vsys",
+                collected_at=timezone.now(),
+                payload={},
+            ),
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="my-edl",
+            namespace_type="pushed_vsys_effective",
+            namespace_value="vsys1",
+            precedence_rank=30,
+            address_type=AddressObject.TYPE_EDL,
+            is_edl=True,
+            edl_list_type="ip",
+            value="ip",
+            normalized_value="ip",
+        )
+        fqdn_object = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station,
+                appliance=appliance,
+                source_type="show_merged_config",
+                collected_at=timezone.now(),
+                payload={},
+            ),
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name="www.example.com",
+            namespace_type="local_vsys",
+            namespace_value="vsys1",
+            precedence_rank=10,
+            address_type=AddressObject.TYPE_FQDN,
+            value="www.example.com",
+            normalized_value="www.example.com",
+        )
+        # Never-collected candidate, to prove graceful "no snapshot yet" degradation.
+        never_refreshed_edl = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=edl_object.source_snapshot,
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="unrefreshed-edl",
+            namespace_type="pushed_vsys_effective",
+            namespace_value="vsys1",
+            precedence_rank=30,
+            address_type=AddressObject.TYPE_EDL,
+            is_edl=True,
+            edl_list_type="ip",
+            value="ip",
+            normalized_value="ip",
+        )
+
+        self._build_candidate_rule(
+            enforcement_point=enforcement_point,
+            source_address_object=edl_object,
+            destination_address_object=fqdn_object,
+        )
+        rule2 = SecurityRule.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=edl_object.source_snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            effective_order=100001,
+            rule_position=1,
+            name="rule-unrefreshed",
+            action="allow",
+        )
+        SecurityRuleSourceAddressRef.objects.create(
+            security_rule=rule2,
+            raw_value=never_refreshed_edl.name,
+            position=0,
+            ref_type=SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT,
+            address_object=never_refreshed_edl,
+        )
+
+        # Adjacent host entries (1.2.3.4 and 1.2.3.5) should merge into a single range.
+        Snapshot.objects.create(
+            appliance=appliance,
+            source_type="show_external_list",
+            scope_name="vsys1:my-edl",
+            collected_at=timezone.now(),
+            payload={"entry": [{"member": "1.2.3.4"}, {"member": "1.2.3.5"}]},
+        )
+        Snapshot.objects.create(
+            appliance=appliance,
+            source_type="show_dns_proxy_fqdn_all",
+            collected_at=timezone.now(),
+            payload={
+                "entry": [
+                    {"fqdn": "www.example.com", "ip": "5.6.7.8"},
+                    {"fqdn": "other.example.com", "ip": "9.9.9.9"},
+                ]
+            },
+        )
+
+        result = normalize_enforcement_point_dynamic_address_content(enforcement_point)
+
+        self.assertEqual(result.total_resolved_entries, 2)
+        self.assertEqual(
+            {obj.name for obj in result.updated_address_objects},
+            {"my-edl", "www.example.com"},
+        )
+
+        edl_entries = list(edl_object.resolved_entries.order_by("ipv4_start_int"))
+        self.assertEqual(len(edl_entries), 1)
+        self.assertEqual(
+            (edl_entries[0].ipv4_start_int, edl_entries[0].ipv4_end_int),
+            (
+                int(ipaddress.IPv4Address("1.2.3.4")),
+                int(ipaddress.IPv4Address("1.2.3.5")),
+            ),
+        )
+
+        fqdn_entries = list(fqdn_object.resolved_entries.all())
+        self.assertEqual(len(fqdn_entries), 1)
+        expected_ip = int(ipaddress.IPv4Address("5.6.7.8"))
+        self.assertEqual(fqdn_entries[0].ipv4_start_int, expected_ip)
+        self.assertEqual(fqdn_entries[0].ipv4_end_int, expected_ip)
+
+        self.assertEqual(never_refreshed_edl.resolved_entries.count(), 0)
+
+    def test_normalize_enforcement_point_dynamic_address_content_replaces_stale_entries(self):
+        station, appliance, enforcement_point = self._build_enforcement_point()
+        edl_object = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station,
+                appliance=appliance,
+                source_type="show_pushed_shared_policy_vsys",
+                collected_at=timezone.now(),
+                payload={},
+            ),
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="my-edl",
+            namespace_type="pushed_vsys_effective",
+            namespace_value="vsys1",
+            precedence_rank=30,
+            address_type=AddressObject.TYPE_EDL,
+            is_edl=True,
+            edl_list_type="ip",
+            value="ip",
+            normalized_value="ip",
+        )
+        self._build_candidate_rule(
+            enforcement_point=enforcement_point,
+            source_address_object=edl_object,
+            destination_address_object=edl_object,
+        )
+        AddressObjectResolvedEntry.objects.create(
+            address_object=edl_object,
+            ipv4_start_int=1,
+            ipv4_end_int=2,
+            source_snapshot=edl_object.source_snapshot,
+            collected_at=timezone.now(),
+        )
+        Snapshot.objects.create(
+            appliance=appliance,
+            source_type="show_external_list",
+            scope_name="vsys1:my-edl",
+            collected_at=timezone.now(),
+            payload={"entry": [{"member": "10.0.0.0/24"}]},
+        )
+
+        normalize_enforcement_point_dynamic_address_content(enforcement_point)
+
+        entries = list(edl_object.resolved_entries.all())
+        self.assertEqual(len(entries), 1)
+        self.assertNotEqual(entries[0].ipv4_start_int, 1)
 
 
 class SecurityRuleSearchVocabularyEntryTests(TestCase):

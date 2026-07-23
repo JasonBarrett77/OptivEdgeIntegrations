@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load local_time %}
 
 {% block title %} | {{ enforcement_point.vsys_name }} Addresses{% endblock %}
 
@@ -92,6 +93,7 @@
                                 <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Members</th>
                                 <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Tags</th>
                                 <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600">Description</th>
+                                <th class="sticky top-0 z-10 h-7 border-b border-slate-200 bg-slate-50 px-2 text-left text-[10px] font-medium uppercase tracking-wide text-slate-600" title="EDL/FQDN runtime cache content - collected separately via the &quot;Refresh EDL/FQDN Cache&quot; action, not regular config sync">EDL/FQDN Resolved</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -107,10 +109,18 @@
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.members %}{% for value in row.members %}<div>{{ value }}</div>{% endfor %}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.tags %}{% for value in row.tags %}<div>{{ value }}</div>{% endfor %}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.description %}{{ row.description }}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">
+                                    {% if row.resolved_entry_count %}
+                                        {{ row.resolved_entry_count }} range{{ row.resolved_entry_count|pluralize }}
+                                        <span class="text-slate-500">as of {{ row.resolved_as_of|local_time }}</span>
+                                    {% else %}
+                                        <span class="text-slate-400">-</span>
+                                    {% endif %}
+                                </td>
                             </tr>
                             {% empty %}
                             <tr>
-                                <td colspan="10" class="px-4 py-8 text-center text-sm text-slate-500">
+                                <td colspan="11" class="px-4 py-8 text-center text-sm text-slate-500">
                                     No normalized addresses available for this enforcement point.
                                 </td>
                             </tr>

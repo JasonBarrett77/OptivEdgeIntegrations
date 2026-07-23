@@ -79,6 +79,7 @@ class NormalizedAddressObject:
     is_any: bool
     is_edl: bool
     is_builtin: bool
+    edl_list_type: str
     description: str
     raw_object: dict[str, Any]
     tags: list[NormalizedAddressTag]
@@ -102,11 +103,17 @@ class NormalizedAddressGroup:
     field_provenance_data: list[tuple[str, Any, str | None]]
 
 
-def external_list_value(entry: dict[str, Any]) -> tuple[str, Any, str | None]:
-    """Return (value, raw_key, raw_prov_value) for an EDL address object entry."""
+def external_list_value(entry: dict[str, Any]) -> tuple[str, Any, str | None, str]:
+    """Return (value, raw_key, raw_prov_value, list_type) for an EDL address object entry.
+
+    list_type is one of "ip"/"domain"/"url"/"imei"/"imsi" (whichever type node matched), or ""
+    if no type node was recognized. Callers that only need the value/provenance can ignore the
+    fourth element; it exists so config-normalization can record which runtime command variant
+    (`request system external-list show type <list_type> ...`) applies to this EDL.
+    """
     type_node = entry.get("type")
     if not isinstance(type_node, dict):
-        return "", ABSENT, None
+        return "", ABSENT, None, ""
 
     for list_type in ("ip", "domain", "url", "imei", "imsi"):
         list_node = type_node.get(list_type)
@@ -114,12 +121,13 @@ def external_list_value(entry: dict[str, Any]) -> tuple[str, Any, str | None]:
             continue
         url_node = list_node.get("url")
         if url_node is not None:
-            return scalar_value(url_node)
+            value, rk, rv = scalar_value(url_node)
+            return value, rk, rv, list_type
         # list_type name itself is the value; provenance from list_node's @loc
         rk, rv = entry_provenance(list_node)
-        return list_type, rk, rv
+        return list_type, rk, rv, list_type
 
-    return "", ABSENT, None
+    return "", ABSENT, None, ""
 
 
 def derive_address_fields(address_type: str, value: str) -> tuple[str, int | None, int | None, int | None, bool]:
@@ -194,6 +202,7 @@ def build_builtin_any_object(source_snapshot: Snapshot) -> NormalizedAddressObje
         is_any=is_any,
         is_edl=False,
         is_builtin=True,
+        edl_list_type="",
         description="Built-in any match",
         raw_object={"builtin": True, "kind": "any"},
         tags=[],
@@ -252,6 +261,7 @@ def normalize_address_object(
         is_any=is_any,
         is_edl=False,
         is_builtin=False,
+        edl_list_type="",
         description=description,
         raw_object=entry,
         tags=tags,
@@ -274,7 +284,7 @@ def normalize_external_list_object(
 ) -> NormalizedAddressObject:
     entry_rk, entry_rv = entry_provenance(entry)
     description, description_rk, description_rv = scalar_value(entry.get("description"))
-    value, value_rk, value_rv = external_list_value(entry)
+    value, value_rk, value_rv, list_type = external_list_value(entry)
     normalized_value, start_int, end_int, num_hosts, is_any = derive_address_fields(AddressObject.TYPE_EDL, value)
 
     return NormalizedAddressObject(
@@ -293,6 +303,7 @@ def normalize_external_list_object(
         is_any=is_any,
         is_edl=True,
         is_builtin=False,
+        edl_list_type=list_type,
         description=description,
         raw_object=entry,
         tags=[],
@@ -550,6 +561,7 @@ def replace_addresses(
             is_any=normalized.is_any,
             is_edl=normalized.is_edl,
             is_builtin=normalized.is_builtin,
+            edl_list_type=normalized.edl_list_type,
             description=normalized.description,
             raw_object=normalized.raw_object,
             last_synced_at=normalized.source_snapshot.collected_at,

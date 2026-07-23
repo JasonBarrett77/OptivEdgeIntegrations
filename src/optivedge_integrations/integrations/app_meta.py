@@ -24,6 +24,7 @@ SIDEBAR_SECTION = {
                 "management_station_sync",
                 "management_station_in_scope_sync",
                 "management_station_bulk_in_scope_sync",
+                "management_station_refresh_dynamic_content",
                 "appliance_group_snapshots",
                 "enforcement_point_scope_toggle",
                 "enforcement_point_addresses",

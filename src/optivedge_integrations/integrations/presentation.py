@@ -84,6 +84,8 @@ def entry_device_group_name(scoped_object) -> str:
 
 
 def build_address_object_row(address_object: AddressObject) -> dict:
+    resolved_entries = list(address_object.resolved_entries.all())
+    resolved_as_of = max((entry.collected_at for entry in resolved_entries), default=None)
     return {
         "kind": "Object",
         "config_source_label": address_config_source_label(address_object.config_source),
@@ -96,6 +98,12 @@ def build_address_object_row(address_object: AddressObject) -> dict:
         "members": [],
         "description": address_object.description,
         "source_snapshot": address_object.source_snapshot,
+        # EDL(ip)/FQDN only: resolved via the separate "Refresh EDL/FQDN Cache" action, not
+        # regular config sync - this is cached runtime state (EDL download cache, DNS
+        # resolution), so it's surfaced with its own timestamp rather than implied to be as
+        # current as the rest of this row.
+        "resolved_entry_count": len(resolved_entries),
+        "resolved_as_of": resolved_as_of,
     }
 
 
@@ -113,4 +121,6 @@ def build_address_group_row(address_group: AddressGroup) -> dict:
         "members": members,
         "description": "",
         "source_snapshot": address_group.source_snapshot,
+        "resolved_entry_count": 0,
+        "resolved_as_of": None,
     }

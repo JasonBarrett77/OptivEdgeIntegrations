@@ -46,3 +46,53 @@ def persist_show_merged_config(
     collected: PANOSCollectedResponse,
 ) -> PANOSPersistedCollection:
     return persist_appliance_snapshot(appliance, collected)
+
+
+def persist_appliance_dynamic_content_snapshot(
+    appliance: Appliance,
+    collected: PANOSCollectedResponse,
+    *,
+    scope_name: str,
+) -> PANOSPersistedCollection:
+    """Persist a snapshot of appliance-scoped dynamic/runtime content (EDL cache, DNS proxy
+    FQDN cache) collected via the "Refresh EDL/FQDN cache" action.
+
+    Deliberately does NOT update appliance.last_synced_at - that field reflects config sync
+    time (merged config/pushed policy), a different freshness signal from this operational
+    cache data, which must stay independently visible via AddressObjectResolvedEntry.collected_at.
+    """
+    payload = extract_result_payload(collected)
+    collected_at = timezone.now()
+    snapshot = Snapshot.objects.create(
+        appliance=appliance,
+        source_type=collected.source_type,
+        scope_name=scope_name,
+        payload=payload,
+        metadata={
+            "target": collected.request.target or appliance.serial_number,
+            "command_name": collected.request.metadata.get("command_name", ""),
+        },
+        collected_at=collected_at,
+    )
+    return PANOSPersistedCollection(
+        snapshot=snapshot,
+        payload=payload,
+    )
+
+
+def persist_show_dns_proxy_fqdn_all(
+    appliance: Appliance,
+    collected: PANOSCollectedResponse,
+) -> PANOSPersistedCollection:
+    return persist_appliance_dynamic_content_snapshot(
+        appliance, collected, scope_name=appliance.serial_number,
+    )
+
+
+def persist_show_external_list(
+    appliance: Appliance,
+    collected: PANOSCollectedResponse,
+    *,
+    scope_name: str,
+) -> PANOSPersistedCollection:
+    return persist_appliance_dynamic_content_snapshot(appliance, collected, scope_name=scope_name)

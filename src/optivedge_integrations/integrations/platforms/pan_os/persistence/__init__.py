@@ -10,7 +10,10 @@ from __future__ import annotations
 from optivedge_integrations.integrations.models import Appliance, ApplianceGroup, EnforcementPoint, ManagementStation
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import PANOSCollectedResponse
 from optivedge_integrations.integrations.platforms.pan_os.persistence.appliance import (
+    persist_appliance_dynamic_content_snapshot,
     persist_appliance_snapshot,
+    persist_show_dns_proxy_fqdn_all,
+    persist_show_external_list,
     persist_show_merged_config,
 )
 from optivedge_integrations.integrations.platforms.pan_os.persistence.appliance_group import (
@@ -43,9 +46,19 @@ def persist_collected_response(
 def persist_appliance_collected_response(
     appliance: Appliance,
     collected: PANOSCollectedResponse,
+    *,
+    scope_name: str | None = None,
 ) -> PANOSPersistedCollection:
     if collected.source_type == "show_merged_config":
         return persist_show_merged_config(appliance, collected)
+
+    if collected.source_type == "show_dns_proxy_fqdn_all":
+        return persist_show_dns_proxy_fqdn_all(appliance, collected)
+
+    if collected.source_type == "show_external_list":
+        if scope_name is None:
+            raise ValueError("scope_name is required to persist a show_external_list snapshot")
+        return persist_show_external_list(appliance, collected, scope_name=scope_name)
 
     return persist_appliance_snapshot(appliance, collected)
 
@@ -73,6 +86,7 @@ def persist_enforcement_point_collected_response(
 __all__ = [
     "PANOSPersistedCollection",
     "persist_appliance_collected_response",
+    "persist_appliance_dynamic_content_snapshot",
     "persist_appliance_snapshot",
     "persist_appliance_group_collected_response",
     "persist_appliance_group_snapshot",
@@ -80,6 +94,8 @@ __all__ = [
     "persist_enforcement_point_collected_response",
     "persist_enforcement_point_snapshot",
     "persist_management_station_snapshot",
+    "persist_show_dns_proxy_fqdn_all",
+    "persist_show_external_list",
     "persist_show_merged_config",
     "persist_show_pushed_shared_policy",
     "persist_show_pushed_shared_policy_vsys",
