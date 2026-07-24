@@ -14,10 +14,12 @@ from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
+from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
     AddressGroup,
     AddressObject,
+    AddressObjectResolvedEntry,
     EnforcementPoint,
     FieldProvenance,
     PolicyObjectNamespace,
@@ -48,6 +50,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     ensure_list,
     entry_provenance,
     iter_member_values,
+    merge_intervals,
     merged_vsys_entry,
     parse_yes_no_field,
     pushed_vsys_panorama,
@@ -93,6 +96,8 @@ class NormalizedSecurityRule:
     log_start: bool | None
     log_end: bool | None
     log_setting: str
+    negate_source: bool
+    negate_destination: bool
     raw_rule: dict[str, Any]
     members: list[NormalizedSecurityRuleMember]
     source_address_members: list[NormalizedSecurityRuleMember]
@@ -250,6 +255,12 @@ def normalize_rule(
     log_start, log_start_rk, log_start_rv = parse_yes_no_field(rule.get("log-start"), default_effective=False)
     log_end, log_end_rk, log_end_rv = parse_yes_no_field(rule.get("log-end"), default_effective=False)
     log_setting, log_setting_rk, log_setting_rv = scalar_value(rule.get("log-setting"))
+    negate_source, negate_source_rk, negate_source_rv = parse_yes_no_field(
+        rule.get("negate-source"), default_effective=False
+    )
+    negate_destination, negate_destination_rk, negate_destination_rv = parse_yes_no_field(
+        rule.get("negate-destination"), default_effective=False
+    )
 
     # log_start/log_end: treat ABSENT as null (not configured at all)
     log_start_value: bool | None = None if log_start_rk is ABSENT else bool(log_start)
@@ -339,6 +350,8 @@ def normalize_rule(
         log_start=log_start_value,
         log_end=log_end_value,
         log_setting=log_setting,
+        negate_source=bool(negate_source),
+        negate_destination=bool(negate_destination),
         raw_rule=rule,
         members=members,
         source_address_members=source_address_members,
@@ -352,6 +365,8 @@ def normalize_rule(
             ("log_start",   log_start_rk,   log_start_rv),
             ("log_end",     log_end_rk,     log_end_rv),
             ("log_setting", log_setting_rk, log_setting_rv),
+            ("negate_source", negate_source_rk, negate_source_rv),
+            ("negate_destination", negate_destination_rk, negate_destination_rv),
         ],
     )
 
@@ -449,6 +464,8 @@ def realize_literal_address_objects(
                 num_hosts=spec.num_hosts,
                 is_any=False,
                 is_builtin=False,
+                is_synthetic=True,
+                synthetic_kind=AddressObject.SYNTHETIC_KIND_RULE_LITERAL,
                 description="Synthetic literal address reference",
                 raw_object={"synthetic": True, "kind": "rule_literal", "raw_value": raw_value},
                 last_synced_at=spec.source_snapshot.collected_at,
@@ -677,6 +694,67 @@ def resolve_rule_address_refs(
     return resolved
 
 
+IPV4_MAX = 4_294_967_295
+
+
+def _member_intervals_or_none(ref: ResolvedAddressRef) -> list[tuple[int, int]] | None:
+    """The IPv4 interval(s) a single resolved ref represents, or None if unresolvable.
+
+    None means: a dynamic address group or region member (unknowable statically), or an
+    address object with no known IPv4 data at all (e.g. an EDL/FQDN never refreshed via
+    "Refresh EDL/FQDN Cache"). Callers computing a negate complement must treat None as
+    "can't soundly compute this" and skip materializing a complement, not guess.
+    """
+    if ref.ref_type in (
+        SecurityRuleSourceAddressRef.RefType.DYNAMIC_ADDRESS_GROUP,
+        SecurityRuleSourceAddressRef.RefType.REGION,
+    ):
+        return None
+    address_object = ref.address_object
+    if address_object is None:
+        return None
+    resolved_entries = list(address_object.resolved_entries.all())
+    if resolved_entries:
+        return [(entry.ipv4_start_int, entry.ipv4_end_int) for entry in resolved_entries]
+    if address_object.ipv4_start_int is not None and address_object.ipv4_end_int is not None:
+        return [(address_object.ipv4_start_int, address_object.ipv4_end_int)]
+    return None
+
+
+def _complement_of(merged_intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Gaps in [0, IPV4_MAX] left uncovered by a sorted, merged, disjoint interval list."""
+    if not merged_intervals:
+        return [(0, IPV4_MAX)]
+    complement: list[tuple[int, int]] = []
+    cursor = 0
+    for start, end in merged_intervals:
+        if start > cursor:
+            complement.append((cursor, start - 1))
+        cursor = max(cursor, end + 1)
+    if cursor <= IPV4_MAX:
+        complement.append((cursor, IPV4_MAX))
+    return complement
+
+
+def compute_negated_complement_intervals(
+    resolved_refs: list[ResolvedAddressRef],
+) -> list[tuple[int, int]] | None:
+    """The effective (post-negation) IPv4 range for a negated source/destination member list.
+
+    Returns None if any member is unresolvable (dynamic group, region, or an EDL/FQDN with no
+    resolved entries yet) - the caller must skip materializing a complement for this rule/side
+    rather than guess. A negated "any" member degrades correctly for free: its own interval is
+    the full [0, IPV4_MAX] range, so its complement is empty (matches nothing).
+    """
+    all_intervals: list[tuple[int, int]] = []
+    for ref in resolved_refs:
+        intervals = _member_intervals_or_none(ref)
+        if intervals is None:
+            return None
+        all_intervals.extend(intervals)
+    return _complement_of(merge_intervals(all_intervals))
+
+
 def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list[NormalizedSecurityRule]:
     merged_snapshot = latest_merged_snapshot(enforcement_point)
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
@@ -758,11 +836,96 @@ def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list
     return normalized_rules
 
 
+def _materialize_negated_complement_ref(
+    *,
+    enforcement_point: EnforcementPoint,
+    normalized_rule: NormalizedSecurityRule,
+    side: str,
+    resolved_refs: list[ResolvedAddressRef],
+) -> ResolvedAddressRef | None:
+    """Create a synthetic AddressObject representing the effective (post-negation) IPv4 range
+    for one side of a negated rule.
+
+    Returns None if the complement isn't computable (see compute_negated_complement_intervals -
+    a dynamic group/region member, or an EDL/FQDN member with no resolved entries yet) or if it
+    computes to "matches nothing" (e.g. a negated "any"). In either case the caller leaves this
+    side without a complement ref; the negate_source/negate_destination flag on SecurityRule
+    still correctly records that negation is in effect.
+    """
+    complement_intervals = compute_negated_complement_intervals(resolved_refs)
+    if not complement_intervals:
+        return None
+
+    name = f"__negated_complement__{normalized_rule.name}__{side}"
+    namespace_type, namespace_value, precedence_rank = literal_namespace(
+        enforcement_point=enforcement_point,
+        source_snapshot=normalized_rule.source_snapshot,
+    )
+    summary = ", ".join(
+        f"{ipaddress.IPv4Address(start)}-{ipaddress.IPv4Address(end)}"
+        for start, end in complement_intervals[:5]
+    )
+    if len(complement_intervals) > 5:
+        summary += f", +{len(complement_intervals) - 5} more"
+
+    address_object = AddressObject.objects.create(
+        management_station=enforcement_point.management_station,
+        enforcement_point=enforcement_point,
+        source_snapshot=normalized_rule.source_snapshot,
+        config_source=normalized_rule.config_source,
+        name=name,
+        namespace_type=namespace_type,
+        namespace_value=namespace_value,
+        precedence_rank=precedence_rank,
+        address_type=AddressObject.TYPE_NEGATED_COMPLEMENT,
+        value=summary,
+        normalized_value=summary,
+        is_any=False,
+        is_builtin=False,
+        is_synthetic=True,
+        synthetic_kind=AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT,
+        description=(
+            f"System-generated: effective (post-negation) range for {side} of rule "
+            f"'{normalized_rule.name}'"
+        ),
+        raw_object={
+            "synthetic": True,
+            "kind": "negated_complement",
+            "rule": normalized_rule.name,
+            "side": side,
+        },
+        last_synced_at=normalized_rule.source_snapshot.collected_at,
+    )
+    collected_at = timezone.now()
+    AddressObjectResolvedEntry.objects.bulk_create(
+        AddressObjectResolvedEntry(
+            address_object=address_object,
+            ipv4_start_int=start,
+            ipv4_end_int=end,
+            source_snapshot=normalized_rule.source_snapshot,
+            collected_at=collected_at,
+        )
+        for start, end in complement_intervals
+    )
+
+    position = max((ref.position for ref in resolved_refs), default=-1) + 1
+    return ResolvedAddressRef(
+        raw_value=name,
+        position=position,
+        ref_type=SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT,
+        address_object=address_object,
+        address_group=None,
+    )
+
+
 def replace_security_rules(
     enforcement_point: EnforcementPoint,
     normalized_rules: list[NormalizedSecurityRule],
 ) -> list[SecurityRule]:
     enforcement_point.security_rules.all().delete()
+    enforcement_point.address_objects.filter(
+        synthetic_kind=AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT,
+    ).delete()
     realize_literal_address_objects(enforcement_point, normalized_rules)
     address_objects_by_name, address_groups_by_name, regions_by_name = build_address_lookup_maps(enforcement_point)
     sr_ct = ContentType.objects.get_for_model(SecurityRule)
@@ -792,6 +955,25 @@ def replace_security_rules(
         except ValueError as exc:
             raise ValueError(f"{exc} (field=destination_address, {rule_context})") from exc
 
+        if normalized_rule.negate_source:
+            complement_ref = _materialize_negated_complement_ref(
+                enforcement_point=enforcement_point,
+                normalized_rule=normalized_rule,
+                side="source",
+                resolved_refs=source_resolved_refs,
+            )
+            if complement_ref is not None:
+                source_resolved_refs = [*source_resolved_refs, complement_ref]
+        if normalized_rule.negate_destination:
+            complement_ref = _materialize_negated_complement_ref(
+                enforcement_point=enforcement_point,
+                normalized_rule=normalized_rule,
+                side="destination",
+                resolved_refs=destination_resolved_refs,
+            )
+            if complement_ref is not None:
+                destination_resolved_refs = [*destination_resolved_refs, complement_ref]
+
         security_rule = SecurityRule.objects.create(
             management_station=enforcement_point.management_station,
             enforcement_point=enforcement_point,
@@ -808,6 +990,8 @@ def replace_security_rules(
             log_start=normalized_rule.log_start,
             log_end=normalized_rule.log_end,
             log_setting=normalized_rule.log_setting,
+            negate_source=normalized_rule.negate_source,
+            negate_destination=normalized_rule.negate_destination,
             raw_rule=normalized_rule.raw_rule,
             last_synced_at=normalized_rule.source_snapshot.collected_at,
         )

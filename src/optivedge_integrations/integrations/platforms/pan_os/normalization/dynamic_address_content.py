@@ -37,7 +37,7 @@ from optivedge_integrations.integrations.models import (
     Snapshot,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import derive_address_fields
-from optivedge_integrations.integrations.platforms.pan_os.normalization.common import ensure_list
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import ensure_list, merge_intervals
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     classify_literal_address_type,
 )
@@ -98,20 +98,6 @@ def _parse_ipv4_literal_interval(raw_value: str) -> tuple[int, int] | None:
     return start_int, end_int
 
 
-def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    if not intervals:
-        return []
-    sorted_intervals = sorted(intervals)
-    merged = [sorted_intervals[0]]
-    for start, end in sorted_intervals[1:]:
-        last_start, last_end = merged[-1]
-        if start <= last_end + 1:
-            merged[-1] = (last_start, max(last_end, end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
 def _entries_from_snapshot(snapshot: Snapshot) -> list[dict[str, Any]]:
     payload = snapshot.payload
     entries = payload.get("entry") if isinstance(payload, dict) else None
@@ -125,7 +111,7 @@ def _intervals_from_entries(entries: list[dict[str, Any]]) -> list[tuple[int, in
             interval = _parse_ipv4_literal_interval(leaf)
             if interval is not None:
                 intervals.append(interval)
-    return _merge_intervals(intervals)
+    return merge_intervals(intervals)
 
 
 def _latest_external_list_snapshot(appliance_id: int, *, scope_name: str) -> Snapshot | None:

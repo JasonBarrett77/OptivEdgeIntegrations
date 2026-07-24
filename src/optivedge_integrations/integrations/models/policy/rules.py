@@ -46,6 +46,8 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     log_start = models.BooleanField(null=True, blank=True)
     log_end = models.BooleanField(null=True, blank=True)
     log_setting = models.CharField(max_length=128, blank=True)
+    negate_source = models.BooleanField(default=False)
+    negate_destination = models.BooleanField(default=False)
     raw_rule = models.JSONField(default=dict, blank=True)
 
     class Meta:

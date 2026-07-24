@@ -903,6 +903,310 @@ class DynamicAddressContentNormalizationTests(TestCase):
         self.assertNotEqual(entries[0].ipv4_start_int, 1)
 
 
+class NegatedComplementNormalizationTests(TestCase):
+    def _build_enforcement_point(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.local",
+        )
+        appliance = Appliance.objects.create(
+            management_station=station,
+            serial_number="SERIAL-NEG-001",
+            hostname="fw-neg-01",
+        )
+        enforcement_point = EnforcementPoint.objects.create(
+            management_station=station,
+            appliance=appliance,
+            vsys_name="vsys1",
+        )
+        return station, appliance, enforcement_point
+
+    def _build_pushed_snapshot(self, *, station, enforcement_point):
+        Snapshot.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_type="show_pushed_shared_policy_vsys",
+            collected_at=timezone.now(),
+            payload={
+                "policy": {
+                    "panorama": {
+                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
+                        "post-rulebase": {
+                            "security": {"rules": {"entry": []}},
+                            "default-security-rules": {"rules": {"entry": []}},
+                        },
+                    }
+                }
+            },
+        )
+
+    def test_negated_source_with_resolvable_members_creates_complement_with_multiple_gaps(self):
+        station, appliance, enforcement_point = self._build_enforcement_point()
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "address": {
+                                        "entry": [
+                                            {"@name": "host-a", "ip-netmask": "10.0.0.5/32"},
+                                            {"@name": "host-b", "ip-netmask": "10.0.0.10/32"},
+                                        ]
+                                    },
+                                    "address-group": {
+                                        "entry": [
+                                            {
+                                                "@name": "static-src",
+                                                "static": {"member": ["host-a", "host-b"]},
+                                            },
+                                        ]
+                                    },
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-negated",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["static-src"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                        "negate-source": "yes",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        self._build_pushed_snapshot(station=station, enforcement_point=enforcement_point)
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        rule = next(r for r in normalized.security_rules if r.name == "rule-negated")
+        self.assertTrue(rule.negate_source)
+        self.assertFalse(rule.negate_destination)
+
+        source_refs = list(rule.source_address_refs.order_by("id"))
+        # 2 flattened static-group members (unchanged, kept for name search/audit) + 1
+        # synthetic complement ref.
+        self.assertEqual(len(source_refs), 3)
+
+        complement_refs = [
+            ref for ref in source_refs if ref.address_object is not None and ref.address_object.is_synthetic
+        ]
+        self.assertEqual(len(complement_refs), 1)
+        complement_object = complement_refs[0].address_object
+        self.assertEqual(complement_object.synthetic_kind, AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT)
+        self.assertEqual(complement_object.address_type, AddressObject.TYPE_NEGATED_COMPLEMENT)
+
+        host_a_int = int(ipaddress.IPv4Address("10.0.0.5"))
+        host_b_int = int(ipaddress.IPv4Address("10.0.0.10"))
+        expected_intervals = {
+            (0, host_a_int - 1),
+            (host_a_int + 1, host_b_int - 1),
+            (host_b_int + 1, 4_294_967_295),
+        }
+        actual_intervals = {
+            (entry.ipv4_start_int, entry.ipv4_end_int) for entry in complement_object.resolved_entries.all()
+        }
+        self.assertEqual(actual_intervals, expected_intervals)
+
+        # Re-running normalization must not accumulate stale/duplicate complement objects.
+        normalize_enforcement_point_security_rules(enforcement_point)
+        self.assertEqual(
+            AddressObject.objects.filter(
+                enforcement_point=enforcement_point,
+                synthetic_kind=AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT,
+            ).count(),
+            1,
+        )
+
+    def test_negated_source_with_dynamic_group_member_skips_complement(self):
+        station, appliance, enforcement_point = self._build_enforcement_point()
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "address": {"entry": []},
+                                    "address-group": {
+                                        "entry": [
+                                            {"@name": "dyn-src", "dynamic": {"filter": "'tag1'"}},
+                                        ]
+                                    },
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-negated-dynamic",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["dyn-src"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                        "negate-source": "yes",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        self._build_pushed_snapshot(station=station, enforcement_point=enforcement_point)
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        rule = next(r for r in normalized.security_rules if r.name == "rule-negated-dynamic")
+        self.assertTrue(rule.negate_source)
+        source_refs = list(rule.source_address_refs.all())
+        self.assertEqual(len(source_refs), 1)
+        self.assertEqual(source_refs[0].ref_type, SecurityRuleSourceAddressRef.RefType.DYNAMIC_ADDRESS_GROUP)
+        self.assertEqual(
+            AddressObject.objects.filter(
+                enforcement_point=enforcement_point,
+                synthetic_kind=AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT,
+            ).count(),
+            0,
+        )
+
+    def test_negated_source_with_unrefreshed_edl_member_skips_complement(self):
+        station, appliance, enforcement_point = self._build_enforcement_point()
+
+        merged_snapshot = Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "address": {"entry": []},
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-negated-edl",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["my-edl"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                        "negate-source": "yes",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        self._build_pushed_snapshot(station=station, enforcement_point=enforcement_point)
+
+        # Pre-created directly (bypassing normalize_enforcement_point_addresses, which would
+        # wipe it since the merged config's own address book is empty above) with zero
+        # resolved entries - i.e. never refreshed via "Refresh EDL/FQDN Cache". The builtin
+        # "any" object is likewise pre-created directly since the normal address-normalization
+        # pass (which would create it) is skipped in this test.
+        AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=merged_snapshot,
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="my-edl",
+            namespace_type="pushed_vsys_effective",
+            namespace_value="vsys1",
+            precedence_rank=30,
+            address_type=AddressObject.TYPE_EDL,
+            is_edl=True,
+            edl_list_type="ip",
+            value="ip",
+            normalized_value="ip",
+        )
+        AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=merged_snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name="any",
+            namespace_type="builtin",
+            namespace_value="any",
+            precedence_rank=90,
+            address_type=AddressObject.TYPE_BUILTIN_ANY,
+            value="any",
+            normalized_value="any",
+            ipv4_start_int=0,
+            ipv4_end_int=4_294_967_295,
+            num_hosts=4_294_967_296,
+            is_any=True,
+            is_builtin=True,
+        )
+
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        rule = next(r for r in normalized.security_rules if r.name == "rule-negated-edl")
+        self.assertTrue(rule.negate_source)
+        source_refs = list(rule.source_address_refs.all())
+        self.assertEqual(len(source_refs), 1)
+        self.assertEqual(source_refs[0].ref_type, SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT)
+        self.assertFalse(source_refs[0].address_object.is_synthetic)
+        self.assertEqual(
+            AddressObject.objects.filter(
+                enforcement_point=enforcement_point,
+                synthetic_kind=AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT,
+            ).count(),
+            0,
+        )
+
+
 class SecurityRuleSearchVocabularyEntryTests(TestCase):
     def test_save_populates_lookup_fields(self):
         station = ManagementStation.objects.create(

@@ -103,7 +103,12 @@
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{{ row.config_source_label }}</td>
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.location %}{{ row.location }}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.device_group_name %}{{ row.device_group_name }}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
-                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-900">{{ row.name }}</td>
+                                <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-900">
+                                    {{ row.name }}
+                                    {% if row.is_synthetic %}
+                                        <span class="ml-1 inline-flex items-center border border-amber-300 bg-amber-50 px-1 text-[9px] font-medium uppercase tracking-wide text-amber-700" title="System-generated - not a device-configured object">System-Generated ({{ row.synthetic_kind_display }})</span>
+                                    {% endif %}
+                                </td>
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{{ row.value_type }}</td>
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.value %}{{ row.value }}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>
                                 <td class="border-b border-slate-200 px-2 py-1 align-top text-[11px] leading-3.5 text-slate-800">{% if row.members %}{% for value in row.members %}<div>{{ value }}</div>{% endfor %}{% else %}<span class="text-slate-400">-</span>{% endif %}</td>

@@ -165,6 +165,24 @@ def ensure_list(value: Any) -> list[Any]:
     return [value]
 
 
+def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping/adjacent (start, end) integer intervals into the minimal sorted,
+    disjoint set. Shared by dynamic_address_content.py (EDL/FQDN resolved entries) and
+    security_rules.py (negate-complement computation) - lives here, not in either of those
+    modules, so importing it doesn't create a cross-module dependency between them."""
+    if not intervals:
+        return []
+    sorted_intervals = sorted(intervals)
+    merged = [sorted_intervals[0]]
+    for start, end in sorted_intervals[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end + 1:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def first_text(mapping: dict[str, Any], *keys: str) -> str:
     for key in keys:
         value = mapping.get(key)

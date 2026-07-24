@@ -104,6 +104,11 @@ def build_address_object_row(address_object: AddressObject) -> dict:
         # current as the rest of this row.
         "resolved_entry_count": len(resolved_entries),
         "resolved_as_of": resolved_as_of,
+        # System-generated objects (a literal address typed directly into a rule, or the
+        # computed effective range for a negated rule) never came from the device's own
+        # config - flagged so they're never mistaken for a real PAN-OS-configured object.
+        "is_synthetic": address_object.is_synthetic,
+        "synthetic_kind_display": address_object.get_synthetic_kind_display() if address_object.is_synthetic else "",
     }
 
 
@@ -123,4 +128,6 @@ def build_address_group_row(address_group: AddressGroup) -> dict:
         "source_snapshot": address_group.source_snapshot,
         "resolved_entry_count": 0,
         "resolved_as_of": None,
+        "is_synthetic": False,
+        "synthetic_kind_display": "",
     }

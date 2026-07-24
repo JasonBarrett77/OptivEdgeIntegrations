@@ -58,6 +58,7 @@ class AddressObject(ScopedPolicyObject):
     TYPE_FQDN = "fqdn"
     TYPE_IP_RANGE = "ip_range"
     TYPE_IP_WILDCARD = "ip_wildcard"
+    TYPE_NEGATED_COMPLEMENT = "negated_complement"
 
     ADDRESS_TYPE_CHOICES = [
         (TYPE_BUILTIN_ANY, "Any"),
@@ -66,6 +67,14 @@ class AddressObject(ScopedPolicyObject):
         (TYPE_FQDN, "FQDN"),
         (TYPE_IP_RANGE, "IP Range"),
         (TYPE_IP_WILDCARD, "IP Wildcard"),
+        (TYPE_NEGATED_COMPLEMENT, "Negated Complement (system-generated)"),
+    ]
+
+    SYNTHETIC_KIND_RULE_LITERAL = "rule_literal"
+    SYNTHETIC_KIND_NEGATED_COMPLEMENT = "negated_complement"
+    SYNTHETIC_KIND_CHOICES = [
+        (SYNTHETIC_KIND_RULE_LITERAL, "Rule Literal Address"),
+        (SYNTHETIC_KIND_NEGATED_COMPLEMENT, "Negated Complement"),
     ]
 
     management_station = models.ForeignKey(
@@ -92,6 +101,8 @@ class AddressObject(ScopedPolicyObject):
     is_any = models.BooleanField(default=False)
     is_edl = models.BooleanField(default=False)
     is_builtin = models.BooleanField(default=False)
+    is_synthetic = models.BooleanField(default=False)
+    synthetic_kind = models.CharField(max_length=32, choices=SYNTHETIC_KIND_CHOICES, blank=True, default="")
     edl_list_type = models.CharField(max_length=16, blank=True, default="")
     description = models.TextField(blank=True)
     raw_object = models.JSONField(default=dict, blank=True)
@@ -129,6 +140,14 @@ class AddressObject(ScopedPolicyObject):
                 | (models.Q(is_any=True) & models.Q(is_builtin=True)),
                 name="integrations_builtin_any_address_object_flags",
             ),
+            models.CheckConstraint(
+                condition=models.Q(synthetic_kind="") | models.Q(is_synthetic=True),
+                name="integrations_synthetic_kind_requires_is_synthetic",
+            ),
+            models.CheckConstraint(
+                condition=~models.Q(address_type="negated_complement") | models.Q(is_synthetic=True),
+                name="integrations_negated_complement_must_be_synthetic",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -147,6 +166,12 @@ class AddressObject(ScopedPolicyObject):
 
         if self.address_type == self.TYPE_EDL and not self.is_edl:
             raise ValidationError("EDL address objects must set is_edl.")
+
+        if self.synthetic_kind and not self.is_synthetic:
+            raise ValidationError("Address objects with a synthetic_kind must set is_synthetic.")
+
+        if self.address_type == self.TYPE_NEGATED_COMPLEMENT and not self.is_synthetic:
+            raise ValidationError("Negated-complement address objects must set is_synthetic.")
 
 
 class AddressObjectTag(models.Model):
