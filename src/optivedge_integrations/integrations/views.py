@@ -142,10 +142,30 @@ def build_appliance_group_snapshot_context(appliance_group):
         .order_by("-collected_at", "-pk")
         .first()
     )
+    latest_predefined_ip_block_lists = (
+        Snapshot.objects.filter(
+            appliance__appliance_group=appliance_group,
+            source_type="show_predefined_ip_block_lists",
+        )
+        .select_related("appliance")
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+    latest_predefined_url_lists = (
+        Snapshot.objects.filter(
+            appliance__appliance_group=appliance_group,
+            source_type="show_predefined_url_lists",
+        )
+        .select_related("appliance")
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
 
     for source_type, label, snapshot in [
         ("show_merged_config", "Merged Config", latest_merged_config),
         ("show_pushed_shared_policy", "Pushed Shared Policy", latest_shared_policy),
+        ("show_predefined_ip_block_lists", "Predefined IP Block Lists", latest_predefined_ip_block_lists),
+        ("show_predefined_url_lists", "Predefined URL Lists", latest_predefined_url_lists),
     ]:
         latest_snapshots.append(
             {

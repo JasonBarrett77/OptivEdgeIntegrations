@@ -2408,6 +2408,20 @@ class ApplianceGroupSnapshotViewTests(TestCase):
             collected_at=timezone.now(),
             payload={"config": "value"},
         )
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_predefined_ip_block_lists",
+            collected_at=timezone.now(),
+            payload={"ip-block-list-v2": {"entry": []}},
+        )
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_predefined_url_lists",
+            collected_at=timezone.now(),
+            payload={"url-predefined": {"entry": []}},
+        )
 
         response = self.client.get(
             reverse(
@@ -2418,6 +2432,8 @@ class ApplianceGroupSnapshotViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Merged Config")
+        self.assertContains(response, "Predefined IP Block Lists")
+        self.assertContains(response, "Predefined URL Lists")
 
     def test_get_404s_when_appliance_group_belongs_to_different_station(self):
         station = ManagementStation.objects.create(
