@@ -440,6 +440,13 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             reason="MergedConfigCollectionFailed", message=f.error_text,
             appliance=f.appliance,
         ))
+    for f in batch.predefined_lists_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="PredefinedListsCollectionFailed", message=f.error_text,
+            appliance=f.appliance,
+        ))
     for f in batch.shared_policy_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,

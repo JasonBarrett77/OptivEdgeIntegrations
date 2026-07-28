@@ -30,6 +30,8 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_external_list,
     collect_show_managed_devices,
     collect_show_merged_config,
+    collect_show_predefined_ip_block_lists,
+    collect_show_predefined_url_lists,
     collect_show_pushed_shared_policy,
     collect_show_pushed_shared_policy_vsys,
     set_target_vsys,
@@ -186,6 +188,8 @@ class PANOSInScopeConfigCollection:
     enforcement_points: list[EnforcementPoint]
     merged_config_collections: list[PANOSApplianceCollectedSnapshot]
     merged_config_failures: list[PANOSApplianceCollectionFailure]
+    predefined_lists_collections: list[PANOSApplianceCollectedSnapshot]
+    predefined_lists_failures: list[PANOSApplianceCollectionFailure]
     shared_policy_collections: list[PANOSApplianceGroupCollectedSnapshot]
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure]
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot]
@@ -386,6 +390,28 @@ def collect_appliance_merged_config(
     )
 
 
+def collect_appliance_predefined_address_lists(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = "AegisGo/1.0",
+) -> list[PANOSPersistedCollection]:
+    """Collect PAN-OS's predefined (vendor-shipped) IP block list and URL list catalogs for
+    one appliance. Appliance-wide, not vsys-scoped, so one session covers both calls."""
+    session = open_session(
+        appliance.management_station,
+        credentials_provider=credentials_provider,
+        target=appliance.serial_number,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    return [
+        persist_appliance_collected_response(appliance, collect_show_predefined_ip_block_lists(session)),
+        persist_appliance_collected_response(appliance, collect_show_predefined_url_lists(session)),
+    ]
+
+
 def collect_appliance_group_pushed_shared_policy(
     appliance_group: ApplianceGroup,
     *,
@@ -538,6 +564,8 @@ def collect_in_scope_configuration_snapshots(
     enforcement_points = get_in_scope_enforcement_points(management_station)
     merged_config_collections: list[PANOSApplianceCollectedSnapshot] = []
     merged_config_failures: list[PANOSApplianceCollectionFailure] = []
+    predefined_lists_collections: list[PANOSApplianceCollectedSnapshot] = []
+    predefined_lists_failures: list[PANOSApplianceCollectionFailure] = []
     shared_policy_collections: list[PANOSApplianceGroupCollectedSnapshot] = []
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure] = []
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot] = []
@@ -565,6 +593,30 @@ def collect_in_scope_configuration_snapshots(
                 persisted=persisted,
             )
         )
+
+    for appliance in appliances:
+        try:
+            persisted_list = collect_appliance_predefined_address_lists(
+                appliance,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            predefined_lists_failures.append(
+                PANOSApplianceCollectionFailure(
+                    appliance=appliance,
+                    error_text=str(exc),
+                )
+            )
+            continue
+        for persisted in persisted_list:
+            predefined_lists_collections.append(
+                PANOSApplianceCollectedSnapshot(
+                    appliance=appliance,
+                    persisted=persisted,
+                )
+            )
 
     for appliance_group in appliance_groups:
         try:
@@ -620,6 +672,8 @@ def collect_in_scope_configuration_snapshots(
         enforcement_points=enforcement_points,
         merged_config_collections=merged_config_collections,
         merged_config_failures=merged_config_failures,
+        predefined_lists_collections=predefined_lists_collections,
+        predefined_lists_failures=predefined_lists_failures,
         shared_policy_collections=shared_policy_collections,
         shared_policy_failures=shared_policy_failures,
         vsys_policy_collections=vsys_policy_collections,

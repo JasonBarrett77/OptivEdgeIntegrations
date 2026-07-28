@@ -53,6 +53,34 @@ def latest_pushed_vsys_snapshot(enforcement_point: EnforcementPoint) -> Snapshot
     )
 
 
+def latest_predefined_ip_block_lists_snapshot(enforcement_point: EnforcementPoint) -> Snapshot | None:
+    appliance = choose_local_appliance(enforcement_point)
+    if appliance is None:
+        return None
+    return (
+        Snapshot.objects.filter(
+            appliance=appliance,
+            source_type="show_predefined_ip_block_lists",
+        )
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+
+
+def latest_predefined_url_lists_snapshot(enforcement_point: EnforcementPoint) -> Snapshot | None:
+    appliance = choose_local_appliance(enforcement_point)
+    if appliance is None:
+        return None
+    return (
+        Snapshot.objects.filter(
+            appliance=appliance,
+            source_type="show_predefined_url_lists",
+        )
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+
+
 def latest_pushed_shared_snapshot(enforcement_point: EnforcementPoint) -> Snapshot | None:
     # EP.appliance_group is the Panorama-management discriminant: all Panorama-managed
     # devices are modeled with appliance_group (TYPE_STANDALONE, TYPE_HA_PAIR, etc.).

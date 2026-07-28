@@ -22,6 +22,7 @@ class PolicyObjectNamespace(models.TextChoices):
     PANORAMA_DEVICE_GROUP = "panorama_device_group", "Panorama Device Group"
     PUSHED_VSYS_EFFECTIVE = "pushed_vsys_effective", "Pushed VSYS Effective"
     BUILTIN = "builtin", "Built-In"
+    PREDEFINED = "predefined", "Predefined"
 
 
 class PolicyObjectPrecedence:
@@ -31,6 +32,7 @@ class PolicyObjectPrecedence:
     PANORAMA_SHARED = 40
     PANORAMA_DEVICE_GROUP = 50
     BUILTIN = 90
+    PREDEFINED = 95
 
 
 class PolicyObjectBase(ProvenancedMixin, models.Model):

@@ -114,6 +114,8 @@ def _empty_in_scope_refresh_collection():
             enforcement_points=[],
             merged_config_collections=[],
             merged_config_failures=[],
+            predefined_lists_collections=[],
+            predefined_lists_failures=[],
             shared_policy_collections=[],
             shared_policy_failures=[],
             vsys_policy_collections=[],
@@ -798,6 +800,134 @@ class AddressNormalizationTests(TestCase):
         self.assertEqual(literal_object.normalized_value, "10.0.0.0/8")
         self.assertEqual(literal_object.namespace_type, "local_vsys")
         self.assertEqual(literal_object.namespace_value, "vsys1")
+
+    def test_normalize_enforcement_point_security_rules_resolves_predefined_edl_references(self):
+        """PAN-OS-shipped predefined IP block/URL lists (e.g. panw-known-ip-list) never appear
+        in a rule's own config_source snapshot - only via `show predefined`, appliance-scoped.
+        Rules referencing them by name must resolve (address_type=EDL, is_builtin=True), not
+        raise "unresolved address reference"."""
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-007",
+            appliance_hostname="fw-07",
+        )
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "address": {"entry": []},
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-predefined-edl",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["any"]},
+                                                        "destination": {
+                                                            "member": ["panw-known-ip-list"]
+                                                        },
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "deny",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_predefined_ip_block_lists",
+            collected_at=timezone.now(),
+            payload={
+                "ip-block-list-v2": {
+                    "@max-ip-files": "4",
+                    "@min-version": "9.0.0",
+                    "entry": [
+                        {
+                            "@name": "panw-known-ip-list",
+                            "@max-entries": "20000",
+                            "filename": "panw-known-ip-list",
+                            "display-name": "Palo Alto Networks - Known malicious IP addresses",
+                            "description": "IP addresses used almost exclusively by malicious actors.",
+                        },
+                        {
+                            "@name": "panw-highrisk-ip-list",
+                            "@max-entries": "20000",
+                            "filename": "panw-highrisk-ip-list",
+                            "display-name": "Palo Alto Networks - High risk IP addresses",
+                            "description": "IP addresses featured in threat activity advisories.",
+                        },
+                    ],
+                }
+            },
+        )
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_predefined_url_lists",
+            collected_at=timezone.now(),
+            payload={
+                "url-predefined": {
+                    "@max-url-files": "1",
+                    "@min-version": "9.2.0",
+                    "entry": [
+                        {
+                            "@name": "panw-auth-portal-exclude-list",
+                            "@max-entries": "2000",
+                            "filename": "panw-auth-portal-exclude-list",
+                            "display-name": "Palo Alto Networks - Authentication Portal Exclude List",
+                            "description": "Domains and URLs to exclude from Authentication Policy.",
+                        },
+                    ],
+                }
+            },
+        )
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        self.assertEqual(normalized.security_rule_failures, [])
+        rule = next(rule for rule in normalized.security_rules if rule.name == "rule-predefined-edl")
+        destination_refs = list(rule.destination_address_refs.all())
+        self.assertEqual(len(destination_refs), 1)
+        self.assertEqual(destination_refs[0].ref_type, SecurityRuleDestinationAddressRef.RefType.ADDRESS_OBJECT)
+        predefined_object = destination_refs[0].address_object
+        self.assertEqual(predefined_object.name, "panw-known-ip-list")
+        self.assertEqual(predefined_object.address_type, predefined_object.TYPE_EDL)
+        self.assertTrue(predefined_object.is_edl)
+        self.assertTrue(predefined_object.is_builtin)
+        self.assertEqual(predefined_object.edl_list_type, "ip")
+        self.assertEqual(predefined_object.namespace_type, "predefined")
+
+        # The whole catalog normalizes, not just the referenced entry.
+        self.assertTrue(
+            enforcement_point.address_objects.filter(name="panw-highrisk-ip-list", is_builtin=True).exists()
+        )
+        self.assertTrue(
+            enforcement_point.address_objects.filter(
+                name="panw-auth-portal-exclude-list", edl_list_type="url"
+            ).exists()
+        )
 
 
 class DynamicAddressContentNormalizationTests(TestCase):

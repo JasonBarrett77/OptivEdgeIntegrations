@@ -27,6 +27,12 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
     collect_show_external_list,
     set_target_vsys,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
+    SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND,
+    SHOW_PREDEFINED_URL_LISTS_COMMAND,
+    collect_show_predefined_ip_block_lists,
+    collect_show_predefined_url_lists,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import (
     PANOSCollectedResponse,
     PANOSOperationRequest,
@@ -39,6 +45,8 @@ __all__ = [
     "SHOW_DNS_PROXY_FQDN_ALL_COMMAND",
     "SHOW_MERGED_CONFIG_COMMAND",
     "SHOW_MANAGED_DEVICES_COMMAND",
+    "SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND",
+    "SHOW_PREDEFINED_URL_LISTS_COMMAND",
     "SHOW_PUSHED_SHARED_POLICY_COMMAND",
     "build_clear_target_vsys_command",
     "build_set_target_vsys_command",
@@ -49,6 +57,8 @@ __all__ = [
     "collect_show_external_list",
     "collect_show_merged_config",
     "collect_show_managed_devices",
+    "collect_show_predefined_ip_block_lists",
+    "collect_show_predefined_url_lists",
     "collect_show_pushed_shared_policy",
     "collect_show_pushed_shared_policy_vsys",
     "set_target_vsys",

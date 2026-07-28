@@ -46,6 +46,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.regions 
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     choose_local_appliance,
     latest_merged_snapshot,
+    latest_predefined_ip_block_lists_snapshot,
+    latest_predefined_url_lists_snapshot,
     latest_pushed_shared_snapshot,
     latest_pushed_vsys_snapshot,
 )
@@ -315,6 +317,90 @@ def normalize_external_list_object(
     )
 
 
+def normalize_predefined_address_object(
+    *,
+    source_snapshot: Snapshot,
+    edl_list_type: str,
+    entry: dict[str, Any],
+) -> NormalizedAddressObject:
+    """A PAN-OS-shipped predefined list entry (e.g. panw-known-ip-list) from `show predefined`.
+
+    Not user-configured - no @loc/@ptpl provenance to record, and PAN-OS doesn't expose actual
+    member IPs/URLs for these the way it does for user-defined EDLs (see external_list.py), so
+    this only makes the name resolvable (ipv4_start_int/end_int stay null, same as an EDL that
+    has never been refreshed) - real interval data is a separate, not-yet-supported follow-up.
+    """
+    name = str(entry.get("@name") or "")
+    display_name, _display_name_rk, _display_name_rv = scalar_value(entry.get("display-name"))
+    description, _description_rk, _description_rv = scalar_value(entry.get("description"))
+    normalized_value, start_int, end_int, num_hosts, is_any = derive_address_fields(AddressObject.TYPE_EDL, name)
+
+    return NormalizedAddressObject(
+        source_snapshot=source_snapshot,
+        config_source=SecurityRule.SOURCE_LOCAL,
+        name=name,
+        namespace_type=PolicyObjectNamespace.PREDEFINED,
+        namespace_value="predefined",
+        precedence_rank=PolicyObjectPrecedence.PREDEFINED,
+        address_type=AddressObject.TYPE_EDL,
+        value=name,
+        normalized_value=normalized_value,
+        ipv4_start_int=start_int,
+        ipv4_end_int=end_int,
+        num_hosts=num_hosts,
+        is_any=is_any,
+        is_edl=True,
+        is_builtin=True,
+        edl_list_type=edl_list_type,
+        description=description or display_name,
+        raw_object=entry,
+        tags=[],
+        field_provenance_data=[],
+    )
+
+
+def build_normalized_predefined_address_objects(
+    enforcement_point: EnforcementPoint,
+) -> list[NormalizedAddressObject]:
+    """Predefined IP block list and URL list catalogs for this enforcement point's appliance.
+
+    Optional: environments that haven't yet collected these new snapshot types (or whose
+    appliance doesn't support the command) simply get no predefined objects, same as any other
+    best-effort PAN-OS data source in this pipeline - not a normalization failure.
+    """
+    normalized_objects: list[NormalizedAddressObject] = []
+
+    ip_block_snapshot = latest_predefined_ip_block_lists_snapshot(enforcement_point)
+    if ip_block_snapshot is not None:
+        list_node = ip_block_snapshot.payload.get("ip-block-list-v2")
+        for entry in ensure_list(list_node.get("entry") if isinstance(list_node, dict) else None):
+            if not isinstance(entry, dict):
+                continue
+            normalized_objects.append(
+                normalize_predefined_address_object(
+                    source_snapshot=ip_block_snapshot,
+                    edl_list_type="ip",
+                    entry=entry,
+                )
+            )
+
+    url_list_snapshot = latest_predefined_url_lists_snapshot(enforcement_point)
+    if url_list_snapshot is not None:
+        list_node = url_list_snapshot.payload.get("url-predefined")
+        for entry in ensure_list(list_node.get("entry") if isinstance(list_node, dict) else None):
+            if not isinstance(entry, dict):
+                continue
+            normalized_objects.append(
+                normalize_predefined_address_object(
+                    source_snapshot=url_list_snapshot,
+                    edl_list_type="url",
+                    entry=entry,
+                )
+            )
+
+    return normalized_objects
+
+
 def normalize_address_group(
     *,
     source_snapshot: Snapshot,
@@ -501,6 +587,7 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
             )
         )
 
+    normalized_objects.extend(build_normalized_predefined_address_objects(enforcement_point))
     normalized_objects.append(build_builtin_any_object(merged_snapshot))
 
     if any(not address.name for address in normalized_objects):
