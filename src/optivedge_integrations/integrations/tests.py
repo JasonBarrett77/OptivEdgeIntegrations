@@ -124,6 +124,7 @@ def _empty_in_scope_refresh_collection():
             address_failures=[],
             security_rule_normalizations=[],
             security_rule_failures=[],
+            security_rule_item_failures=[],
         ),
     )
 
@@ -138,6 +139,7 @@ def _empty_renormalization_result():
         address_failures=[],
         security_rule_normalizations=[],
         security_rule_failures=[],
+        security_rule_item_failures=[],
     )
 
 
@@ -532,7 +534,7 @@ class AddressNormalizationTests(TestCase):
         self.assertIsNone(dynamic_refs[0].address_object)
         self.assertEqual(dynamic_refs[0].address_group.name, "nested-dynamic")
 
-    def test_normalize_enforcement_point_security_rules_raises_on_circular_static_address_group(self):
+    def test_normalize_enforcement_point_security_rules_skips_circular_static_address_group(self):
         station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-004",
             appliance_hostname="fw-04",
@@ -592,8 +594,14 @@ class AddressNormalizationTests(TestCase):
         _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
 
         normalize_enforcement_point_addresses(enforcement_point)
-        with self.assertRaises(ValueError):
-            normalize_enforcement_point_security_rules(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        self.assertEqual(normalized.security_rules, [])
+        self.assertEqual(len(normalized.security_rule_failures), 1)
+        self.assertEqual(normalized.security_rule_failures[0].name, "rule-cycle")
+        self.assertFalse(
+            SecurityRule.objects.filter(enforcement_point=enforcement_point, name="rule-cycle").exists()
+        )
 
     def test_normalize_enforcement_point_security_rules_resolves_vendor_region_codes(self):
         station, appliance, enforcement_point = _create_panorama_enforcement_point(
@@ -654,7 +662,11 @@ class AddressNormalizationTests(TestCase):
         )
         self.assertEqual({ref.raw_value for ref in source_refs}, {"BY", "DN", "XK"})
 
-    def test_normalize_enforcement_point_security_rules_raises_on_unresolved_two_letter_value(self):
+    def test_normalize_enforcement_point_security_rules_skips_unresolved_two_letter_value(self):
+        """An unresolvable reference fails and skips only its own rule - it must not abort
+        normalization for every other rule on the same enforcement point (the previous
+        behavior: one bad region/vendor code anywhere would leave the whole enforcement
+        point's rules stuck on stale data)."""
         station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-006",
             appliance_hostname="fw-06",
@@ -691,6 +703,16 @@ class AddressNormalizationTests(TestCase):
                                                         "service": {"member": ["application-default"]},
                                                         "action": "allow",
                                                     },
+                                                    {
+                                                        "@name": "rule-good-ref",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["any"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                    },
                                                 ]
                                             }
                                         },
@@ -706,8 +728,19 @@ class AddressNormalizationTests(TestCase):
         _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
 
         normalize_enforcement_point_addresses(enforcement_point)
-        with self.assertRaises(ValueError):
-            normalize_enforcement_point_security_rules(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        self.assertEqual([rule.name for rule in normalized.security_rules], ["rule-good-ref"])
+        self.assertEqual(len(normalized.security_rule_failures), 1)
+        failure = normalized.security_rule_failures[0]
+        self.assertEqual(failure.name, "rule-bad-ref")
+        self.assertIn("ZZ", failure.error_text)
+        self.assertTrue(
+            SecurityRule.objects.filter(enforcement_point=enforcement_point, name="rule-good-ref").exists()
+        )
+        self.assertFalse(
+            SecurityRule.objects.filter(enforcement_point=enforcement_point, name="rule-bad-ref").exists()
+        )
 
     def test_normalize_enforcement_point_security_rules_realizes_literal_address_objects(self):
         station, appliance, enforcement_point = _create_panorama_enforcement_point(

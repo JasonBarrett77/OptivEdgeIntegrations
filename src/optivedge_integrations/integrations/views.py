@@ -475,6 +475,17 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             reason="SecurityRuleNormalizationFailed", message=f.error_text,
             enforcement_point=f.enforcement_point,
         ))
+    for f in batch.security_rule_item_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="SecurityRuleItemNormalizationFailed",
+            message=(
+                f"rule={f.name!r} config_source={f.config_source!r} "
+                f"position={f.rule_position}: {f.error_text}"
+            ),
+            enforcement_point=f.enforcement_point,
+        ))
     if events:
         IntegrationEvent.objects.bulk_create(events)
 
@@ -619,6 +630,17 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
             management_station=management_station, run=run,
             level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
             reason="SecurityRuleNormalizationFailed", message=f.error_text,
+            enforcement_point=f.enforcement_point,
+        ))
+    for f in renormalized.security_rule_item_failures:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="SecurityRuleItemNormalizationFailed",
+            message=(
+                f"rule={f.name!r} config_source={f.config_source!r} "
+                f"position={f.rule_position}: {f.error_text}"
+            ),
             enforcement_point=f.enforcement_point,
         ))
     if events:

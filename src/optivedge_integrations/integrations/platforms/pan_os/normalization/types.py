@@ -18,6 +18,17 @@ from optivedge_integrations.integrations.models import (
 
 
 @dataclass(slots=True)
+class SecurityRuleFailure:
+    """One rule's normalization failed (an unresolvable source/destination member, etc.) and
+    was skipped - scoped to that single rule, not the whole enforcement point."""
+
+    name: str
+    config_source: str
+    rule_position: int
+    error_text: str
+
+
+@dataclass(slots=True)
 class PANOSNormalizedCollection:
     address_objects: list[AddressObject]
     address_groups: list[AddressGroup]
@@ -28,3 +39,4 @@ class PANOSNormalizedCollection:
     device_configuration_profiles: list[DeviceConfigurationProfile]
     security_rules: list[SecurityRule]
     regions: list[Region] = field(default_factory=list)
+    security_rule_failures: list[SecurityRuleFailure] = field(default_factory=list)

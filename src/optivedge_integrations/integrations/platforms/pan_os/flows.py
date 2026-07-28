@@ -118,6 +118,19 @@ class PANOSSecurityRuleNormalizationFailure:
 
 
 @dataclass(slots=True)
+class PANOSSecurityRuleFailure:
+    """One rule within an otherwise-successfully-normalized enforcement point failed and was
+    skipped - distinct from PANOSSecurityRuleNormalizationFailure, which means the enforcement
+    point's rules couldn't be normalized at all (e.g. a missing snapshot)."""
+
+    enforcement_point: EnforcementPoint
+    name: str
+    config_source: str
+    rule_position: int
+    error_text: str
+
+
+@dataclass(slots=True)
 class PANOSAddressNormalizedPoint:
     enforcement_point: EnforcementPoint
     address_objects: list[AddressObject]
@@ -183,6 +196,7 @@ class PANOSInScopeConfigCollection:
     address_failures: list[PANOSAddressNormalizationFailure]
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint]
     security_rule_failures: list[PANOSSecurityRuleNormalizationFailure]
+    security_rule_item_failures: list[PANOSSecurityRuleFailure]
 
 
 @dataclass(slots=True)
@@ -201,6 +215,7 @@ class PANOSInScopeRenormalizationResult:
     address_failures: list[PANOSAddressNormalizationFailure]
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint]
     security_rule_failures: list[PANOSSecurityRuleNormalizationFailure]
+    security_rule_item_failures: list[PANOSSecurityRuleFailure]
 
 
 def get_in_scope_appliances(management_station: ManagementStation) -> list[Appliance]:
@@ -431,6 +446,7 @@ def renormalize_in_scope_configuration(
     address_failures: list[PANOSAddressNormalizationFailure] = []
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint] = []
     security_rule_failures: list[PANOSSecurityRuleNormalizationFailure] = []
+    security_rule_item_failures: list[PANOSSecurityRuleFailure] = []
 
     for appliance in appliances:
         try:
@@ -486,6 +502,16 @@ def renormalize_in_scope_configuration(
                 security_rules=normalized.security_rules,
             )
         )
+        for rule_failure in normalized.security_rule_failures:
+            security_rule_item_failures.append(
+                PANOSSecurityRuleFailure(
+                    enforcement_point=enforcement_point,
+                    name=rule_failure.name,
+                    config_source=rule_failure.config_source,
+                    rule_position=rule_failure.rule_position,
+                    error_text=rule_failure.error_text,
+                )
+            )
 
     return PANOSInScopeRenormalizationResult(
         appliances=appliances,
@@ -496,6 +522,7 @@ def renormalize_in_scope_configuration(
         address_failures=address_failures,
         security_rule_normalizations=security_rule_normalizations,
         security_rule_failures=security_rule_failures,
+        security_rule_item_failures=security_rule_item_failures,
     )
 
 
@@ -603,6 +630,7 @@ def collect_in_scope_configuration_snapshots(
         address_failures=renormalized.address_failures,
         security_rule_normalizations=renormalized.security_rule_normalizations,
         security_rule_failures=renormalized.security_rule_failures,
+        security_rule_item_failures=renormalized.security_rule_item_failures,
     )
 
 

@@ -64,7 +64,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
     latest_merged_snapshot,
     latest_pushed_vsys_snapshot,
 )
-from optivedge_integrations.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
+from optivedge_integrations.integrations.platforms.pan_os.normalization.types import (
+    PANOSNormalizedCollection,
+    SecurityRuleFailure,
+)
 
 
 EFFECTIVE_ORDER_RANKS = {
@@ -927,10 +930,132 @@ def _materialize_negated_complement_ref(
     )
 
 
+def _persist_one_security_rule(
+    *,
+    enforcement_point: EnforcementPoint,
+    normalized_rule: NormalizedSecurityRule,
+    address_objects_by_name: dict[str, list[AddressObject]],
+    address_groups_by_name: dict[str, list[AddressGroup]],
+    regions_by_name: dict[str, list[Region]],
+    sr_ct: ContentType,
+) -> SecurityRule:
+    """Resolve and persist one rule's refs. Raises on any unresolvable member - callers must
+    treat that as a failure scoped to this one rule, not the whole enforcement point."""
+    rule_context = (
+        f"rule='{normalized_rule.name}', uuid={normalized_rule.uuid or 'n/a'}, "
+        f"config_source={normalized_rule.config_source}, position={normalized_rule.rule_position}"
+    )
+    try:
+        source_resolved_refs = resolve_rule_address_refs(
+            members=normalized_rule.source_address_members,
+            address_objects_by_name=address_objects_by_name,
+            address_groups_by_name=address_groups_by_name,
+            regions_by_name=regions_by_name,
+        )
+    except ValueError as exc:
+        raise ValueError(f"{exc} (field=source_address, {rule_context})") from exc
+    try:
+        destination_resolved_refs = resolve_rule_address_refs(
+            members=normalized_rule.destination_address_members,
+            address_objects_by_name=address_objects_by_name,
+            address_groups_by_name=address_groups_by_name,
+            regions_by_name=regions_by_name,
+        )
+    except ValueError as exc:
+        raise ValueError(f"{exc} (field=destination_address, {rule_context})") from exc
+
+    if normalized_rule.negate_source:
+        complement_ref = _materialize_negated_complement_ref(
+            enforcement_point=enforcement_point,
+            normalized_rule=normalized_rule,
+            side="source",
+            resolved_refs=source_resolved_refs,
+        )
+        if complement_ref is not None:
+            source_resolved_refs = [*source_resolved_refs, complement_ref]
+    if normalized_rule.negate_destination:
+        complement_ref = _materialize_negated_complement_ref(
+            enforcement_point=enforcement_point,
+            normalized_rule=normalized_rule,
+            side="destination",
+            resolved_refs=destination_resolved_refs,
+        )
+        if complement_ref is not None:
+            destination_resolved_refs = [*destination_resolved_refs, complement_ref]
+
+    security_rule = SecurityRule.objects.create(
+        management_station=enforcement_point.management_station,
+        enforcement_point=enforcement_point,
+        source_snapshot=normalized_rule.source_snapshot,
+        config_source=normalized_rule.config_source,
+        effective_order=normalized_rule.effective_order,
+        rule_position=normalized_rule.rule_position,
+        name=normalized_rule.name,
+        uuid=normalized_rule.uuid,
+        action=normalized_rule.action,
+        disabled=normalized_rule.disabled,
+        rule_type=normalized_rule.rule_type,
+        description=normalized_rule.description,
+        log_start=normalized_rule.log_start,
+        log_end=normalized_rule.log_end,
+        log_setting=normalized_rule.log_setting,
+        negate_source=normalized_rule.negate_source,
+        negate_destination=normalized_rule.negate_destination,
+        raw_rule=normalized_rule.raw_rule,
+        last_synced_at=normalized_rule.source_snapshot.collected_at,
+    )
+    prov_rows = [
+        FieldProvenance(
+            content_type=sr_ct,
+            object_id=security_rule.pk,
+            field_name=fname,
+            provenance_type=classify_prov_type(rk),
+            raw_key=rk or "",
+            raw_value=rv or "",
+        )
+        for fname, rk, rv in normalized_rule.field_provenance_data
+        if rk is not ABSENT
+    ]
+    if prov_rows:
+        FieldProvenance.objects.bulk_create(prov_rows)
+    for member in normalized_rule.members:
+        extra_fields = member.extra_fields or {}
+        member.model.objects.create(
+            security_rule=security_rule,
+            value=member.value,
+            prov=member.prov,
+            position=member.position,
+            **extra_fields,
+        )
+
+    for resolved_ref in source_resolved_refs:
+        SecurityRuleSourceAddressRef.objects.create(
+            security_rule=security_rule,
+            raw_value=resolved_ref.raw_value,
+            position=resolved_ref.position,
+            ref_type=resolved_ref.ref_type,
+            address_object=resolved_ref.address_object,
+            address_group=resolved_ref.address_group,
+            region=resolved_ref.region,
+        )
+
+    for resolved_ref in destination_resolved_refs:
+        SecurityRuleDestinationAddressRef.objects.create(
+            security_rule=security_rule,
+            raw_value=resolved_ref.raw_value,
+            position=resolved_ref.position,
+            ref_type=resolved_ref.ref_type,
+            address_object=resolved_ref.address_object,
+            address_group=resolved_ref.address_group,
+            region=resolved_ref.region,
+        )
+    return security_rule
+
+
 def replace_security_rules(
     enforcement_point: EnforcementPoint,
     normalized_rules: list[NormalizedSecurityRule],
-) -> list[SecurityRule]:
+) -> tuple[list[SecurityRule], list[SecurityRuleFailure]]:
     enforcement_point.security_rules.all().delete()
     enforcement_point.address_objects.filter(
         synthetic_kind=AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT,
@@ -939,125 +1064,42 @@ def replace_security_rules(
     address_objects_by_name, address_groups_by_name, regions_by_name = build_address_lookup_maps(enforcement_point)
     sr_ct = ContentType.objects.get_for_model(SecurityRule)
     created_rules: list[SecurityRule] = []
+    failures: list[SecurityRuleFailure] = []
 
     for normalized_rule in normalized_rules:
-        rule_context = (
-            f"rule='{normalized_rule.name}', uuid={normalized_rule.uuid or 'n/a'}, "
-            f"config_source={normalized_rule.config_source}, position={normalized_rule.rule_position}"
-        )
         try:
-            source_resolved_refs = resolve_rule_address_refs(
-                members=normalized_rule.source_address_members,
-                address_objects_by_name=address_objects_by_name,
-                address_groups_by_name=address_groups_by_name,
-                regions_by_name=regions_by_name,
+            with transaction.atomic():
+                security_rule = _persist_one_security_rule(
+                    enforcement_point=enforcement_point,
+                    normalized_rule=normalized_rule,
+                    address_objects_by_name=address_objects_by_name,
+                    address_groups_by_name=address_groups_by_name,
+                    regions_by_name=regions_by_name,
+                    sr_ct=sr_ct,
+                )
+        except Exception as exc:
+            # Scoped to this one rule (a savepoint rollback, not the whole enforcement
+            # point) so one bad reference (an unmapped region/vendor code, a genuinely
+            # missing address object, etc.) doesn't leave every other rule on this
+            # enforcement point stuck with stale data.
+            failures.append(
+                SecurityRuleFailure(
+                    name=normalized_rule.name,
+                    config_source=normalized_rule.config_source,
+                    rule_position=normalized_rule.rule_position,
+                    error_text=str(exc),
+                )
             )
-        except ValueError as exc:
-            raise ValueError(f"{exc} (field=source_address, {rule_context})") from exc
-        try:
-            destination_resolved_refs = resolve_rule_address_refs(
-                members=normalized_rule.destination_address_members,
-                address_objects_by_name=address_objects_by_name,
-                address_groups_by_name=address_groups_by_name,
-                regions_by_name=regions_by_name,
-            )
-        except ValueError as exc:
-            raise ValueError(f"{exc} (field=destination_address, {rule_context})") from exc
-
-        if normalized_rule.negate_source:
-            complement_ref = _materialize_negated_complement_ref(
-                enforcement_point=enforcement_point,
-                normalized_rule=normalized_rule,
-                side="source",
-                resolved_refs=source_resolved_refs,
-            )
-            if complement_ref is not None:
-                source_resolved_refs = [*source_resolved_refs, complement_ref]
-        if normalized_rule.negate_destination:
-            complement_ref = _materialize_negated_complement_ref(
-                enforcement_point=enforcement_point,
-                normalized_rule=normalized_rule,
-                side="destination",
-                resolved_refs=destination_resolved_refs,
-            )
-            if complement_ref is not None:
-                destination_resolved_refs = [*destination_resolved_refs, complement_ref]
-
-        security_rule = SecurityRule.objects.create(
-            management_station=enforcement_point.management_station,
-            enforcement_point=enforcement_point,
-            source_snapshot=normalized_rule.source_snapshot,
-            config_source=normalized_rule.config_source,
-            effective_order=normalized_rule.effective_order,
-            rule_position=normalized_rule.rule_position,
-            name=normalized_rule.name,
-            uuid=normalized_rule.uuid,
-            action=normalized_rule.action,
-            disabled=normalized_rule.disabled,
-            rule_type=normalized_rule.rule_type,
-            description=normalized_rule.description,
-            log_start=normalized_rule.log_start,
-            log_end=normalized_rule.log_end,
-            log_setting=normalized_rule.log_setting,
-            negate_source=normalized_rule.negate_source,
-            negate_destination=normalized_rule.negate_destination,
-            raw_rule=normalized_rule.raw_rule,
-            last_synced_at=normalized_rule.source_snapshot.collected_at,
-        )
-        prov_rows = [
-            FieldProvenance(
-                content_type=sr_ct,
-                object_id=security_rule.pk,
-                field_name=fname,
-                provenance_type=classify_prov_type(rk),
-                raw_key=rk or "",
-                raw_value=rv or "",
-            )
-            for fname, rk, rv in normalized_rule.field_provenance_data
-            if rk is not ABSENT
-        ]
-        if prov_rows:
-            FieldProvenance.objects.bulk_create(prov_rows)
-        for member in normalized_rule.members:
-            extra_fields = member.extra_fields or {}
-            member.model.objects.create(
-                security_rule=security_rule,
-                value=member.value,
-                prov=member.prov,
-                position=member.position,
-                **extra_fields,
-            )
-
-        for resolved_ref in source_resolved_refs:
-            SecurityRuleSourceAddressRef.objects.create(
-                security_rule=security_rule,
-                raw_value=resolved_ref.raw_value,
-                position=resolved_ref.position,
-                ref_type=resolved_ref.ref_type,
-                address_object=resolved_ref.address_object,
-                address_group=resolved_ref.address_group,
-                region=resolved_ref.region,
-            )
-
-        for resolved_ref in destination_resolved_refs:
-            SecurityRuleDestinationAddressRef.objects.create(
-                security_rule=security_rule,
-                raw_value=resolved_ref.raw_value,
-                position=resolved_ref.position,
-                ref_type=resolved_ref.ref_type,
-                address_object=resolved_ref.address_object,
-                address_group=resolved_ref.address_group,
-                region=resolved_ref.region,
-            )
+            continue
         created_rules.append(security_rule)
 
-    return created_rules
+    return created_rules, failures
 
 
 def normalize_security_rules(enforcement_point: EnforcementPoint) -> PANOSNormalizedCollection:
     with transaction.atomic():
         normalized_rules = build_normalized_security_rules(enforcement_point)
-        created_rules = replace_security_rules(enforcement_point, normalized_rules)
+        created_rules, failures = replace_security_rules(enforcement_point, normalized_rules)
 
     return PANOSNormalizedCollection(
         address_objects=[],
@@ -1068,4 +1110,5 @@ def normalize_security_rules(enforcement_point: EnforcementPoint) -> PANOSNormal
         enforcement_nodes=[],
         device_configuration_profiles=[],
         security_rules=created_rules,
+        security_rule_failures=failures,
     )
