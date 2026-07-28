@@ -358,6 +358,67 @@ class AddressNormalizationTests(TestCase):
         self.assertIsNone(dynamic_source_refs[0].address_object)
         self.assertEqual(dynamic_source_refs[0].address_group.name, "dag-src")
 
+    def test_normalize_enforcement_point_security_rules_defaults_missing_source_and_destination_to_any(self):
+        """PAN-OS omits <source>/<destination> entirely (rather than an explicit "any" member)
+        for some rules - that must still resolve to an ANY ref, not zero address refs."""
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-002B",
+            appliance_hostname="fw-02b",
+        )
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-no-source-dest",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                    },
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        rule = normalized.security_rules[0]
+        source_refs = list(rule.source_address_refs.all())
+        destination_refs = list(rule.destination_address_refs.all())
+        self.assertEqual(len(source_refs), 1)
+        self.assertEqual(source_refs[0].ref_type, SecurityRuleSourceAddressRef.RefType.ANY)
+        self.assertEqual(source_refs[0].raw_value, "any")
+        self.assertTrue(source_refs[0].address_object.is_any)
+        self.assertEqual(len(destination_refs), 1)
+        self.assertEqual(destination_refs[0].ref_type, SecurityRuleDestinationAddressRef.RefType.ANY)
+        self.assertEqual(destination_refs[0].raw_value, "any")
+        self.assertTrue(destination_refs[0].address_object.is_any)
+
     def test_normalize_enforcement_point_security_rules_resolves_nested_static_address_groups(self):
         station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-003",

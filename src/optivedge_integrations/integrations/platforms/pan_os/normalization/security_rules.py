@@ -41,7 +41,10 @@ from optivedge_integrations.integrations.models import (
     SecurityRuleToZone,
     Snapshot,
 )
-from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import derive_address_fields
+from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
+    ANY_OBJECT_NAME,
+    derive_address_fields,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     ABSENT,
     ISO_3166_1_ALPHA2_REGIONS,
@@ -290,6 +293,11 @@ def normalize_rule(
                 )
             )
 
+    # PAN-OS treats a rule with no <source>/<destination> element (or an empty member list) as
+    # matching "any" - it does not mean the rule has no source/destination. Default to an
+    # explicit "any" member so these rules get a resolvable ref instead of silently ending up
+    # with zero address refs (and rendering as "-" everywhere refs are displayed).
+    source_address_values = iter_member_values(rule.get("source")) or [(ANY_OBJECT_NAME, "")]
     source_address_members = [
         NormalizedSecurityRuleMember(
             model=SecurityRuleSourceAddressRef,
@@ -297,8 +305,9 @@ def normalize_rule(
             prov=prov,
             position=position,
         )
-        for position, (value, prov) in enumerate(iter_member_values(rule.get("source")))
+        for position, (value, prov) in enumerate(source_address_values)
     ]
+    destination_address_values = iter_member_values(rule.get("destination")) or [(ANY_OBJECT_NAME, "")]
     destination_address_members = [
         NormalizedSecurityRuleMember(
             model=SecurityRuleDestinationAddressRef,
@@ -306,7 +315,7 @@ def normalize_rule(
             prov=prov,
             position=position,
         )
-        for position, (value, prov) in enumerate(iter_member_values(rule.get("destination")))
+        for position, (value, prov) in enumerate(destination_address_values)
     ]
 
     profile_setting = rule.get("profile-setting")
