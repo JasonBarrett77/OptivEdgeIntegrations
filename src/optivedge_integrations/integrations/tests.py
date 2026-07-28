@@ -15,6 +15,8 @@ from optivedge_integrations.integrations.models import (
     ApplianceGroup,
     EnforcementPoint,
     DeviceConfigurationProfile,
+    IntegrationEvent,
+    IntegrationRun,
     ManagementStation,
     SecurityRule,
     SecurityRuleApplication,
@@ -23,6 +25,12 @@ from optivedge_integrations.integrations.models import (
     SecurityRuleDestinationAddressRef,
     SecurityRuleSourceAddressRef,
     Snapshot,
+)
+from optivedge_integrations.integrations.platforms.pan_os import (
+    PANOSInScopeConfigCollection,
+    PANOSInScopeRefreshCollection,
+    PANOSInScopeRenormalizationResult,
+    PANOSDynamicContentRefreshResult,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_device_configuration,
@@ -89,6 +97,59 @@ def _create_empty_pushed_policy_snapshot(*, station, enforcement_point):
                 }
             }
         },
+    )
+
+
+def _empty_in_scope_refresh_collection():
+    """A PANOSInScopeRefreshCollection with every collection/failure list empty.
+
+    `inventory` is left as None - none of the action views under test read it, only
+    `.configuration_snapshots`, so a full PANOSProcessedCollection isn't needed here.
+    """
+    return PANOSInScopeRefreshCollection(
+        inventory=None,
+        configuration_snapshots=PANOSInScopeConfigCollection(
+            appliances=[],
+            appliance_groups=[],
+            enforcement_points=[],
+            merged_config_collections=[],
+            merged_config_failures=[],
+            shared_policy_collections=[],
+            shared_policy_failures=[],
+            vsys_policy_collections=[],
+            vsys_policy_failures=[],
+            device_configuration_normalizations=[],
+            device_configuration_failures=[],
+            address_normalizations=[],
+            address_failures=[],
+            security_rule_normalizations=[],
+            security_rule_failures=[],
+        ),
+    )
+
+
+def _empty_renormalization_result():
+    return PANOSInScopeRenormalizationResult(
+        appliances=[],
+        enforcement_points=[],
+        device_configuration_normalizations=[],
+        device_configuration_failures=[],
+        address_normalizations=[],
+        address_failures=[],
+        security_rule_normalizations=[],
+        security_rule_failures=[],
+    )
+
+
+def _empty_dynamic_content_refresh_result():
+    return PANOSDynamicContentRefreshResult(
+        appliances=[],
+        enforcement_points=[],
+        fqdn_cache_collections=[],
+        fqdn_cache_failures=[],
+        external_list_failures=[],
+        dynamic_content_normalizations=[],
+        dynamic_content_failures=[],
     )
 
 
@@ -1875,3 +1936,406 @@ class DeviceConfigurationNormalizationTests(TestCase):
             [address.name for address in address_normalized.address_objects],
             ["any"],
         )
+
+
+class ManagementStationCrudViewTests(TestCase):
+    def test_create_view_creates_station_and_redirects_to_detail(self):
+        response = self.client.post(
+            reverse("management_station_create"),
+            {
+                "station_type": ManagementStation.StationType.PAN_PANORAMA,
+                "name": "Test Panorama",
+                "hostname": "panorama-create.local",
+                "port": 443,
+                "username": "admin",
+                "password": "",
+                "api_key": "",
+                "ca_bundle_path": "",
+                "notes": "",
+            },
+        )
+
+        station = ManagementStation.objects.get(hostname="panorama-create.local")
+        self.assertRedirects(
+            response,
+            reverse("management_station_detail", kwargs={"pk": station.pk}),
+        )
+        self.assertEqual(station.name, "Test Panorama")
+
+    def test_detail_view_renders_default_and_each_tab(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-detail.local",
+        )
+
+        for tab in ("details", "appliance-groups", "enforcement-points", "events"):
+            response = self.client.get(
+                reverse("management_station_detail", kwargs={"pk": station.pk}),
+                {"tab": tab},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, station.hostname)
+
+    def test_update_view_updates_station_and_redirects_to_detail(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-update.local",
+        )
+
+        response = self.client.post(
+            reverse("management_station_update", kwargs={"pk": station.pk}),
+            {
+                "station_type": ManagementStation.StationType.PAN_PANORAMA,
+                "name": "Updated name",
+                "hostname": "panorama-update.local",
+                "port": 443,
+                "username": "",
+                "password": "",
+                "api_key": "",
+                "ca_bundle_path": "",
+                "notes": "",
+            },
+        )
+
+        station.refresh_from_db()
+        self.assertRedirects(
+            response,
+            reverse("management_station_detail", kwargs={"pk": station.pk}),
+        )
+        self.assertEqual(station.name, "Updated name")
+
+    def test_delete_view_deletes_station_and_redirects_to_list(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-delete.local",
+        )
+
+        response = self.client.post(
+            reverse("management_station_delete", kwargs={"pk": station.pk})
+        )
+
+        self.assertRedirects(response, reverse("management_station_list"))
+        self.assertFalse(ManagementStation.objects.filter(pk=station.pk).exists())
+
+
+class ManagementStationActionViewTests(TestCase):
+    def _create_panorama_station(self, hostname):
+        return ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname=hostname,
+        )
+
+    def _create_firewall_station(self, hostname):
+        return ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_FIREWALL,
+            hostname=hostname,
+        )
+
+    def test_sync_view_rejects_non_panorama_station(self):
+        station = self._create_firewall_station("firewall-sync.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.collect_persist_and_normalize"
+        ) as mocked_collect:
+            response = self.client.post(
+                reverse("management_station_sync", kwargs={"pk": station.pk})
+            )
+
+        mocked_collect.assert_not_called()
+        self.assertRedirects(
+            response,
+            reverse("management_station_detail", kwargs={"pk": station.pk}),
+        )
+        messages = list(response.wsgi_request._messages)
+        self.assertIn("only supported for Panorama", messages[0].message)
+
+    def test_sync_view_collects_for_panorama_station(self):
+        station = self._create_panorama_station("panorama-sync.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.collect_persist_and_normalize"
+        ) as mocked_collect:
+            response = self.client.post(
+                reverse("management_station_sync", kwargs={"pk": station.pk})
+            )
+
+        mocked_collect.assert_called_once()
+        self.assertRedirects(
+            response,
+            reverse("management_station_detail", kwargs={"pk": station.pk}),
+        )
+        run = IntegrationRun.objects.get(management_station=station)
+        self.assertEqual(run.status, IntegrationRun.STATUS_SUCCEEDED)
+
+    def test_sync_view_records_failed_run_when_collection_raises(self):
+        station = self._create_panorama_station("panorama-sync-fail.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.collect_persist_and_normalize",
+            side_effect=RuntimeError("device unreachable"),
+        ):
+            response = self.client.post(
+                reverse("management_station_sync", kwargs={"pk": station.pk})
+            )
+
+        self.assertRedirects(
+            response,
+            reverse("management_station_detail", kwargs={"pk": station.pk}),
+        )
+        run = IntegrationRun.objects.get(management_station=station)
+        self.assertEqual(run.status, IntegrationRun.STATUS_FAILED)
+        self.assertTrue(
+            IntegrationEvent.objects.filter(
+                management_station=station,
+                reason="InventoryCollectionFailed",
+            ).exists()
+        )
+
+    def test_in_scope_sync_view_rejects_non_panorama_station(self):
+        station = self._create_firewall_station("firewall-in-scope.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots"
+        ) as mocked_refresh:
+            response = self.client.post(
+                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
+            )
+
+        mocked_refresh.assert_not_called()
+        self.assertRedirects(
+            response,
+            reverse("management_station_detail", kwargs={"pk": station.pk}),
+        )
+
+    def test_in_scope_sync_view_succeeds_for_panorama_station(self):
+        station = self._create_panorama_station("panorama-in-scope.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
+            return_value=_empty_in_scope_refresh_collection(),
+        ):
+            response = self.client.post(
+                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
+            )
+
+        self.assertRedirects(
+            response,
+            reverse("management_station_detail", kwargs={"pk": station.pk}),
+        )
+        run = IntegrationRun.objects.get(management_station=station)
+        self.assertEqual(run.status, IntegrationRun.STATUS_SUCCEEDED)
+        messages = list(response.wsgi_request._messages)
+        self.assertIn("In-scope configuration refresh completed", messages[0].message)
+
+    def test_renormalize_view_succeeds(self):
+        station = self._create_panorama_station("panorama-renorm.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.renormalize_in_scope_configuration",
+            return_value=_empty_renormalization_result(),
+        ):
+            response = self.client.post(
+                reverse("management_station_renormalize", kwargs={"pk": station.pk})
+            )
+
+        self.assertRedirects(response, reverse("management_station_list"))
+        run = IntegrationRun.objects.get(management_station=station)
+        self.assertEqual(run.status, IntegrationRun.STATUS_SUCCEEDED)
+
+    def test_refresh_dynamic_content_view_succeeds(self):
+        station = self._create_panorama_station("panorama-dynamic.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_dynamic_content",
+            return_value=_empty_dynamic_content_refresh_result(),
+        ):
+            response = self.client.post(
+                reverse(
+                    "management_station_refresh_dynamic_content",
+                    kwargs={"pk": station.pk},
+                )
+            )
+
+        self.assertRedirects(response, reverse("management_station_list"))
+        run = IntegrationRun.objects.get(management_station=station)
+        self.assertEqual(run.status, IntegrationRun.STATUS_SUCCEEDED)
+
+
+class ApplianceGroupSnapshotViewTests(TestCase):
+    def test_get_renders_latest_snapshots_for_appliance_group(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-snap.local",
+        )
+        appliance_group = ApplianceGroup.objects.create(
+            management_station=station,
+            name="group-snap",
+        )
+        appliance = Appliance.objects.create(
+            management_station=station,
+            appliance_group=appliance_group,
+            serial_number="SERIAL-SNAP-001",
+            hostname="fw-snap",
+        )
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": "value"},
+        )
+
+        response = self.client.get(
+            reverse(
+                "appliance_group_snapshots",
+                kwargs={"pk": station.pk, "appliance_group_pk": appliance_group.pk},
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Merged Config")
+
+    def test_get_404s_when_appliance_group_belongs_to_different_station(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-snap-a.local",
+        )
+        other_station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-snap-b.local",
+        )
+        appliance_group = ApplianceGroup.objects.create(
+            management_station=other_station,
+            name="group-other",
+        )
+
+        response = self.client.get(
+            reverse(
+                "appliance_group_snapshots",
+                kwargs={"pk": station.pk, "appliance_group_pk": appliance_group.pk},
+            )
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+
+class EnforcementPointAddressListViewTests(TestCase):
+    def test_get_renders_address_objects_for_enforcement_point(self):
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-ADDR-001",
+            appliance_hostname="fw-addr",
+        )
+        snapshot = Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={},
+        )
+        AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name="listed-object",
+            namespace_type="local_vsys",
+            namespace_value="vsys1",
+            precedence_rank=10,
+            address_type=AddressObject.TYPE_IP_NETMASK,
+            value="10.5.5.5/32",
+            normalized_value="10.5.5.5/32",
+        )
+
+        response = self.client.get(
+            reverse(
+                "enforcement_point_addresses",
+                kwargs={"pk": station.pk, "enforcement_point_pk": enforcement_point.pk},
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "listed-object")
+
+    def test_get_filters_by_query_string(self):
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-ADDR-002",
+            appliance_hostname="fw-addr-2",
+        )
+        snapshot = Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={},
+        )
+        AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name="matching-object",
+            namespace_type="local_vsys",
+            namespace_value="vsys1",
+            precedence_rank=10,
+            address_type=AddressObject.TYPE_IP_NETMASK,
+            value="10.5.5.6/32",
+            normalized_value="10.5.5.6/32",
+        )
+        AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name="other-object",
+            namespace_type="local_vsys",
+            namespace_value="vsys1",
+            precedence_rank=10,
+            address_type=AddressObject.TYPE_IP_NETMASK,
+            value="10.5.5.7/32",
+            normalized_value="10.5.5.7/32",
+        )
+
+        response = self.client.get(
+            reverse(
+                "enforcement_point_addresses",
+                kwargs={"pk": station.pk, "enforcement_point_pk": enforcement_point.pk},
+            ),
+            {"q": "matching"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "matching-object")
+        self.assertNotContains(response, "other-object")
+
+
+class EnforcementPointScopeToggleViewTests(TestCase):
+    def test_post_toggles_in_scope_flag_and_redirects_to_detail(self):
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-SCOPE-001",
+            appliance_hostname="fw-scope",
+        )
+        self.assertFalse(enforcement_point.in_scope)
+
+        response = self.client.post(
+            reverse(
+                "enforcement_point_scope_toggle",
+                kwargs={"pk": station.pk, "enforcement_point_pk": enforcement_point.pk},
+            )
+        )
+
+        enforcement_point.refresh_from_db()
+        self.assertTrue(enforcement_point.in_scope)
+        self.assertRedirects(
+            response,
+            f"{reverse('management_station_detail', kwargs={'pk': station.pk})}?tab=enforcement-points",
+        )
+
+        # Toggling again flips it back.
+        self.client.post(
+            reverse(
+                "enforcement_point_scope_toggle",
+                kwargs={"pk": station.pk, "enforcement_point_pk": enforcement_point.pk},
+            )
+        )
+        enforcement_point.refresh_from_db()
+        self.assertFalse(enforcement_point.in_scope)
