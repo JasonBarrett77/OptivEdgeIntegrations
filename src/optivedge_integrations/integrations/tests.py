@@ -2,6 +2,7 @@ import ipaddress
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -36,21 +37,66 @@ from optivedge_integrations.integrations.search_vocabulary import (
 )
 
 
+def _create_panorama_enforcement_point(
+    *,
+    serial_number,
+    appliance_hostname,
+    station_hostname="panorama.local",
+    vsys_name="vsys1",
+    vsys_display_name=None,
+):
+    """Build a ManagementStation/Appliance/EnforcementPoint chain shared by normalization tests."""
+    station = ManagementStation.objects.create(
+        station_type=ManagementStation.StationType.PAN_PANORAMA,
+        hostname=station_hostname,
+    )
+    appliance = Appliance.objects.create(
+        management_station=station,
+        serial_number=serial_number,
+        hostname=appliance_hostname,
+    )
+    enforcement_point_kwargs = {"vsys_name": vsys_name}
+    if vsys_display_name is not None:
+        enforcement_point_kwargs["vsys_display_name"] = vsys_display_name
+    enforcement_point = EnforcementPoint.objects.create(
+        management_station=station,
+        appliance=appliance,
+        **enforcement_point_kwargs,
+    )
+    return station, appliance, enforcement_point
+
+
+def _create_empty_pushed_policy_snapshot(*, station, enforcement_point):
+    """Create a `show_pushed_shared_policy_vsys` snapshot with no pre/post-rulebase content.
+
+    Shared by tests whose fixtures only need the merged-config side of normalization to
+    have content - the pushed-policy snapshot must still exist (normalization requires it)
+    but its rulebases are deliberately empty.
+    """
+    return Snapshot.objects.create(
+        management_station=station,
+        enforcement_point=enforcement_point,
+        source_type="show_pushed_shared_policy_vsys",
+        collected_at=timezone.now(),
+        payload={
+            "policy": {
+                "panorama": {
+                    "pre-rulebase": {"security": {"rules": {"entry": []}}},
+                    "post-rulebase": {
+                        "security": {"rules": {"entry": []}},
+                        "default-security-rules": {"rules": {"entry": []}},
+                    },
+                }
+            }
+        },
+    )
+
+
 class AddressNormalizationTests(TestCase):
     def test_normalize_enforcement_point_addresses_populates_derived_fields_and_builtin_any(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-001",
-            hostname="fw-01",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-01",
         )
 
         Snapshot.objects.create(
@@ -126,19 +172,9 @@ class AddressNormalizationTests(TestCase):
         self.assertTrue(any_obj.is_any)
 
     def test_normalize_enforcement_point_security_rules_builds_address_refs(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-002",
-            hostname="fw-02",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-02",
         )
 
         Snapshot.objects.create(
@@ -217,23 +253,7 @@ class AddressNormalizationTests(TestCase):
                 }
             },
         )
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload={
-                "policy": {
-                    "panorama": {
-                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
-                        "post-rulebase": {
-                            "security": {"rules": {"entry": []}},
-                            "default-security-rules": {"rules": {"entry": []}},
-                        },
-                    }
-                }
-            },
-        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
 
         normalize_enforcement_point_addresses(enforcement_point)
         normalized = normalize_enforcement_point_security_rules(enforcement_point)
@@ -278,19 +298,9 @@ class AddressNormalizationTests(TestCase):
         self.assertEqual(dynamic_source_refs[0].address_group.name, "dag-src")
 
     def test_normalize_enforcement_point_security_rules_resolves_nested_static_address_groups(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-003",
-            hostname="fw-03",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-03",
         )
 
         Snapshot.objects.create(
@@ -370,23 +380,7 @@ class AddressNormalizationTests(TestCase):
                 }
             },
         )
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload={
-                "policy": {
-                    "panorama": {
-                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
-                        "post-rulebase": {
-                            "security": {"rules": {"entry": []}},
-                            "default-security-rules": {"rules": {"entry": []}},
-                        },
-                    }
-                }
-            },
-        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
 
         normalize_enforcement_point_addresses(enforcement_point)
         normalized = normalize_enforcement_point_security_rules(enforcement_point)
@@ -417,19 +411,9 @@ class AddressNormalizationTests(TestCase):
         self.assertEqual(dynamic_refs[0].address_group.name, "nested-dynamic")
 
     def test_normalize_enforcement_point_security_rules_raises_on_circular_static_address_group(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-004",
-            hostname="fw-04",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-04",
         )
 
         Snapshot.objects.create(
@@ -483,42 +467,16 @@ class AddressNormalizationTests(TestCase):
                 }
             },
         )
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload={
-                "policy": {
-                    "panorama": {
-                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
-                        "post-rulebase": {
-                            "security": {"rules": {"entry": []}},
-                            "default-security-rules": {"rules": {"entry": []}},
-                        },
-                    }
-                }
-            },
-        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
 
         normalize_enforcement_point_addresses(enforcement_point)
         with self.assertRaises(ValueError):
             normalize_enforcement_point_security_rules(enforcement_point)
 
     def test_normalize_enforcement_point_security_rules_resolves_vendor_region_codes(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-005",
-            hostname="fw-05",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-05",
         )
 
         Snapshot.objects.create(
@@ -560,23 +518,7 @@ class AddressNormalizationTests(TestCase):
                 }
             },
         )
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload={
-                "policy": {
-                    "panorama": {
-                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
-                        "post-rulebase": {
-                            "security": {"rules": {"entry": []}},
-                            "default-security-rules": {"rules": {"entry": []}},
-                        },
-                    }
-                }
-            },
-        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
 
         normalize_enforcement_point_addresses(enforcement_point)
         normalized = normalize_enforcement_point_security_rules(enforcement_point)
@@ -591,19 +533,9 @@ class AddressNormalizationTests(TestCase):
         self.assertEqual({ref.raw_value for ref in source_refs}, {"BY", "DN"})
 
     def test_normalize_enforcement_point_security_rules_raises_on_unresolved_two_letter_value(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-006",
-            hostname="fw-06",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-06",
         )
 
         Snapshot.objects.create(
@@ -649,44 +581,75 @@ class AddressNormalizationTests(TestCase):
                 }
             },
         )
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload={
-                "policy": {
-                    "panorama": {
-                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
-                        "post-rulebase": {
-                            "security": {"rules": {"entry": []}},
-                            "default-security-rules": {"rules": {"entry": []}},
-                        },
-                    }
-                }
-            },
-        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
 
         normalize_enforcement_point_addresses(enforcement_point)
         with self.assertRaises(ValueError):
             normalize_enforcement_point_security_rules(enforcement_point)
 
+    def test_normalize_enforcement_point_security_rules_realizes_literal_address_objects(self):
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-003",
+            appliance_hostname="fw-03",
+        )
+
+        Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "devices": {
+                        "entry": {
+                            "vsys": {
+                                "entry": {
+                                    "@name": "vsys1",
+                                    "rulebase": {
+                                        "security": {
+                                            "rules": {
+                                                "entry": [
+                                                    {
+                                                        "@name": "rule-literal",
+                                                        "from": {"member": ["trust"]},
+                                                        "to": {"member": ["untrust"]},
+                                                        "source": {"member": ["10.0.0.0/8"]},
+                                                        "destination": {"member": ["any"]},
+                                                        "application": {"member": ["ssl"]},
+                                                        "service": {"member": ["application-default"]},
+                                                        "action": "allow",
+                                                    }
+                                                ]
+                                            }
+                                        },
+                                        "default-security-rules": {"rules": {"entry": []}},
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
+
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalized = normalize_enforcement_point_security_rules(enforcement_point)
+
+        self.assertEqual(len(normalized.security_rules), 1)
+        literal_object = enforcement_point.address_objects.get(name="10.0.0.0/8")
+        self.assertFalse(literal_object.field_provenance.filter(field_name="__entry__").exists())
+        self.assertEqual(literal_object.address_type, literal_object.TYPE_IP_NETMASK)
+        self.assertEqual(literal_object.normalized_value, "10.0.0.0/8")
+        self.assertEqual(literal_object.namespace_type, "local_vsys")
+        self.assertEqual(literal_object.namespace_value, "vsys1")
+
 
 class DynamicAddressContentNormalizationTests(TestCase):
     def _build_enforcement_point(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-EDL-001",
-            hostname="fw-edl-01",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-edl-01",
         )
         return station, appliance, enforcement_point
 
@@ -905,40 +868,14 @@ class DynamicAddressContentNormalizationTests(TestCase):
 
 class NegatedComplementNormalizationTests(TestCase):
     def _build_enforcement_point(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-NEG-001",
-            hostname="fw-neg-01",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-neg-01",
         )
         return station, appliance, enforcement_point
 
     def _build_pushed_snapshot(self, *, station, enforcement_point):
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload={
-                "policy": {
-                    "panorama": {
-                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
-                        "post-rulebase": {
-                            "security": {"rules": {"entry": []}},
-                            "default-security-rules": {"rules": {"entry": []}},
-                        },
-                    }
-                }
-            },
-        )
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
 
     def test_negated_source_with_resolvable_members_creates_complement_with_multiple_gaps(self):
         station, appliance, enforcement_point = self._build_enforcement_point()
@@ -1462,19 +1399,10 @@ class SecurityRuleSearchVocabularyRebuildTests(TestCase):
         )
 
     def _create_rule_scope(self, hostname: str, serial_number: str, appliance_hostname: str):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname=hostname,
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, _appliance, enforcement_point = _create_panorama_enforcement_point(
+            station_hostname=hostname,
             serial_number=serial_number,
-            hostname=appliance_hostname,
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname=appliance_hostname,
         )
         snapshot = Snapshot.objects.create(
             management_station=station,
@@ -1525,10 +1453,10 @@ class IntegrationOrchestrationTests(TestCase):
             return "vocab-result"
 
         with patch(
-            "integrations.orchestration.pan_os.refresh_in_scope_configuration_snapshots",
+            "optivedge_integrations.integrations.orchestration.pan_os.refresh_in_scope_configuration_snapshots",
             side_effect=fake_platform_refresh,
         ), patch(
-            "integrations.orchestration.pan_os.rebuild_security_rule_search_vocabulary",
+            "optivedge_integrations.integrations.orchestration.pan_os.rebuild_security_rule_search_vocabulary",
             side_effect=fake_vocab_rebuild,
         ):
             result = refresh_panorama_in_scope_data(station)
@@ -1626,89 +1554,6 @@ class ManagementStationBulkInScopeSyncViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Refresh All In Scope")
-
-    def test_normalize_enforcement_point_security_rules_realizes_literal_address_objects(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
-            serial_number="SERIAL-003",
-            hostname="fw-03",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
-        )
-
-        Snapshot.objects.create(
-            management_station=station,
-            appliance=appliance,
-            source_type="show_merged_config",
-            collected_at=timezone.now(),
-            payload={
-                "config": {
-                    "devices": {
-                        "entry": {
-                            "vsys": {
-                                "entry": {
-                                    "@name": "vsys1",
-                                    "rulebase": {
-                                        "security": {
-                                            "rules": {
-                                                "entry": [
-                                                    {
-                                                        "@name": "rule-literal",
-                                                        "from": {"member": ["trust"]},
-                                                        "to": {"member": ["untrust"]},
-                                                        "source": {"member": ["10.0.0.0/8"]},
-                                                        "destination": {"member": ["any"]},
-                                                        "application": {"member": ["ssl"]},
-                                                        "service": {"member": ["application-default"]},
-                                                        "action": "allow",
-                                                    }
-                                                ]
-                                            }
-                                        },
-                                        "default-security-rules": {"rules": {"entry": []}},
-                                    },
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-        )
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload={
-                "policy": {
-                    "panorama": {
-                        "pre-rulebase": {"security": {"rules": {"entry": []}}},
-                        "post-rulebase": {
-                            "security": {"rules": {"entry": []}},
-                            "default-security-rules": {"rules": {"entry": []}},
-                        },
-                    }
-                }
-            },
-        )
-
-        normalize_enforcement_point_addresses(enforcement_point)
-        normalized = normalize_enforcement_point_security_rules(enforcement_point)
-
-        self.assertEqual(len(normalized.security_rules), 1)
-        literal_object = enforcement_point.address_objects.get(name="10.0.0.0/8")
-        self.assertFalse(literal_object.field_provenance.filter(field_name="__entry__").exists())
-        self.assertEqual(literal_object.address_type, literal_object.TYPE_IP_NETMASK)
-        self.assertEqual(literal_object.normalized_value, "10.0.0.0/8")
-        self.assertEqual(literal_object.namespace_type, "local_vsys")
-        self.assertEqual(literal_object.namespace_value, "vsys1")
 
 
 class DeviceConfigurationNormalizationTests(TestCase):
@@ -1869,19 +1714,9 @@ class DeviceConfigurationNormalizationTests(TestCase):
         self.assertEqual(profile.idle_timeout_minutes, 60)
 
     def test_normalize_enforcement_point_security_rules_persists_rules_with_edl_objects(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-004",
-            hostname="fw-04",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
-            vsys_name="vsys1",
+            appliance_hostname="fw-04",
         )
 
         Snapshot.objects.create(
@@ -1990,18 +1825,9 @@ class DeviceConfigurationNormalizationTests(TestCase):
         self.assertEqual(destination_ref.address_object, edl_object)
 
     def test_normalization_tolerates_string_pushed_policy_payload(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
             serial_number="SERIAL-003",
-            hostname="fw-03",
-        )
-        enforcement_point = EnforcementPoint.objects.create(
-            management_station=station,
-            appliance=appliance,
+            appliance_hostname="fw-03",
             vsys_name="vsys6",
             vsys_display_name="vsys1",
         )
