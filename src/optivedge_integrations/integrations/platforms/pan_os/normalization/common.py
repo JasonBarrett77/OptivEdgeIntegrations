@@ -558,4 +558,7 @@ PANOS_VENDOR_REGION_CODES: dict[str, str] = {
     "CE": "Crimea",
     "DN": "Donetsk",
     "LN": "Luhansk",
+    # User-assigned code (ISO 3166-1 user-assigned range, not officially allocated) for
+    # Kosovo, widely used by PAN-OS and other vendors pending an official ISO allocation.
+    "XK": "Kosovo",
 }

@@ -622,7 +622,7 @@ class AddressNormalizationTests(TestCase):
                                                         "@name": "rule-vendor-region",
                                                         "from": {"member": ["trust"]},
                                                         "to": {"member": ["untrust"]},
-                                                        "source": {"member": ["BY", "DN"]},
+                                                        "source": {"member": ["BY", "DN", "XK"]},
                                                         "destination": {"member": ["any"]},
                                                         "application": {"member": ["ssl"]},
                                                         "service": {"member": ["application-default"]},
@@ -647,12 +647,12 @@ class AddressNormalizationTests(TestCase):
 
         rule = next(rule for rule in normalized.security_rules if rule.name == "rule-vendor-region")
         source_refs = list(rule.source_address_refs.order_by("id"))
-        self.assertEqual(len(source_refs), 2)
+        self.assertEqual(len(source_refs), 3)
         self.assertEqual(
             {ref.ref_type for ref in source_refs},
             {SecurityRuleSourceAddressRef.RefType.REGION},
         )
-        self.assertEqual({ref.raw_value for ref in source_refs}, {"BY", "DN"})
+        self.assertEqual({ref.raw_value for ref in source_refs}, {"BY", "DN", "XK"})
 
     def test_normalize_enforcement_point_security_rules_raises_on_unresolved_two_letter_value(self):
         station, appliance, enforcement_point = _create_panorama_enforcement_point(
