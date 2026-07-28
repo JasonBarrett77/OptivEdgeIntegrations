@@ -34,7 +34,7 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        queryset = SecurityRule.objects.prefetch_related(
+        queryset = SecurityRule.objects.select_related("source_snapshot").prefetch_related(
             "source_address_refs", "destination_address_refs"
         ).order_by("pk")
 
@@ -61,7 +61,10 @@ class Command(BaseCommand):
             count += 1
             self.stdout.write(
                 f"--- {rule.name!r} (pk={rule.pk}, config_source={rule.config_source!r}, "
-                f"rule_position={rule.rule_position}) ---"
+                f"rule_position={rule.rule_position}, enforcement_point_id={rule.enforcement_point_id}, "
+                f"last_synced_at={rule.last_synced_at.isoformat() if rule.last_synced_at else None}, "
+                f"source_snapshot_collected_at="
+                f"{rule.source_snapshot.collected_at.isoformat() if rule.source_snapshot_id else None}) ---"
             )
             self.stdout.write(f"  raw_rule['source']      = {json.dumps(raw_source)}")
             self.stdout.write(f"  raw_rule['destination'] = {json.dumps(raw_destination)}")
