@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 OptivEdgeIntegrations is a reusable Django **framework package**, not a standalone deployable project. It is installed
 as a dependency (`pip install -e .` for local dev, or via git URL) by a separate downstream Django project
 that owns `manage.py`, root settings, root URLs, and the database. This repo has no `manage.py` and no
-Django settings module of its own — Django model/view code here cannot be exercised without a configured
-downstream project.
+*downstream* Django settings module of its own — Django model/view code cannot be exercised as part of a
+real deployment without a configured downstream project. It does have a committed `tests/settings.py`, but
+that exists solely to run this repo's own test suite in isolation (see "Commands").
 
 Full downstream integration instructions (installing, wiring `INSTALLED_APPS`/`TEMPLATES`/urls, migrations,
 troubleshooting) live in `DEPLOYMENT.md`. Read it before changing anything that affects how downstream
@@ -34,17 +35,19 @@ import optivedge_integrations.templatetags.lucide
 PY
 ```
 
-There is no test runner in this repo. `src/optivedge_integrations/integrations/tests.py` contains Django `TestCase`
-classes, but they require a configured Django project to execute (`ImproperlyConfigured` otherwise). Run
-them from a downstream project that has this package installed editable and includes `OPTIVEDGE_APPS`:
+Run this repo's own test suite (`src/optivedge_integrations/integrations/tests.py`) via the committed
+`tests/settings.py` — a minimal, test-only settings module (not a downstream integration example; see
+`tests/settings.py`'s docstring and `DEPLOYMENT.md` for that). Requires `optivedge` installed editable
+alongside this package:
 
 ```bash
-python manage.py test optivedge_integrations.integrations
-python manage.py test optivedge_integrations.integrations.tests.DeviceConfigurationNormalizationTests
-python manage.py test optivedge_integrations.integrations.tests.DeviceConfigurationNormalizationTests.test_some_case
+DJANGO_SETTINGS_MODULE=tests.settings python -m django test optivedge_integrations.integrations
+DJANGO_SETTINGS_MODULE=tests.settings python -m django test optivedge_integrations.integrations.tests.DeviceConfigurationNormalizationTests
+DJANGO_SETTINGS_MODULE=tests.settings python -m django test optivedge_integrations.integrations.tests.DeviceConfigurationNormalizationTests.test_some_case
 ```
 
-Validating full Django behavior (models, migrations, views) always requires that same downstream project:
+Validating full downstream Django behavior (models, migrations, views, other installed apps) still requires
+a real downstream project:
 
 ```bash
 python manage.py check
