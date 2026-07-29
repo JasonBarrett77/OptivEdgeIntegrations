@@ -100,7 +100,7 @@ def build_management_station_detail_context(management_station, *, active_tab=TA
         context["integration_events"] = (
             management_station.integration_events
             .select_related("run", "appliance", "appliance_group", "enforcement_point")
-            .order_by("-occurred_at")[:200]
+            .order_by("-occurred_at")[:1000]
         )
 
     return context
@@ -389,6 +389,14 @@ class ManagementStationSyncView(View):
             run_scope=IntegrationRun.SCOPE_STATION,
             status=IntegrationRun.STATUS_FAILED,
         )
+        IntegrationEvent.objects.create(
+            management_station=management_station,
+            run=run,
+            level=IntegrationEvent.LEVEL_INFO,
+            stage="",
+            reason="InventorySyncStarted",
+            message="Managed devices inventory sync started.",
+        )
         try:
             collect_persist_and_normalize(
                 management_station,
@@ -411,6 +419,14 @@ class ManagementStationSyncView(View):
         run.status = IntegrationRun.STATUS_SUCCEEDED
         run.completed_at = timezone.now()
         run.save(update_fields=["status", "completed_at"])
+        IntegrationEvent.objects.create(
+            management_station=management_station,
+            run=run,
+            level=IntegrationEvent.LEVEL_INFO,
+            stage="",
+            reason="InventorySyncCompleted",
+            message="Managed devices collected, persisted, and normalized.",
+        )
         messages.success(request, "Managed devices collected, persisted, and normalized.")
         return HttpResponseRedirect(detail_url)
 
@@ -432,6 +448,14 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
         management_station=management_station,
         run_scope=IntegrationRun.SCOPE_APPLIANCE,
         status=IntegrationRun.STATUS_RUNNING,
+    )
+    IntegrationEvent.objects.create(
+        management_station=management_station,
+        run=run,
+        level=IntegrationEvent.LEVEL_INFO,
+        stage="",
+        reason="InScopeRefreshStarted",
+        message="In-scope configuration refresh started.",
     )
     try:
         refresh = refresh_in_scope_configuration_snapshots(management_station)
@@ -460,12 +484,27 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             reason="MergedConfigCollectionFailed", message=f.error_text,
             appliance=f.appliance,
         ))
+    for item in batch.merged_config_collections:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="MergedConfigCollected", message="Collected merged config snapshot.",
+            appliance=item.appliance,
+        ))
     for f in batch.predefined_lists_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
             level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
             reason="PredefinedListsCollectionFailed", message=f.error_text,
             appliance=f.appliance,
+        ))
+    for item in batch.predefined_lists_collections:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="PredefinedListsCollected",
+            message="Collected predefined address/URL list catalog snapshot.",
+            appliance=item.appliance,
         ))
     for f in batch.shared_policy_failures:
         events.append(IntegrationEvent(
@@ -474,12 +513,26 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             reason="SharedPolicyCollectionFailed", message=f.error_text,
             appliance_group=f.appliance_group,
         ))
+    for item in batch.shared_policy_collections:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="SharedPolicyCollected", message="Collected pushed shared policy snapshot.",
+            appliance_group=item.appliance_group,
+        ))
     for f in batch.vsys_policy_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
             level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
             reason="VsysPolicyCollectionFailed", message=f.error_text,
             enforcement_point=f.enforcement_point,
+        ))
+    for item in batch.vsys_policy_collections:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="VsysPolicyCollected", message="Collected pushed VSYS policy snapshot.",
+            enforcement_point=item.enforcement_point,
         ))
     for f in batch.device_configuration_failures:
         events.append(IntegrationEvent(
@@ -488,6 +541,14 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             reason="DeviceConfigurationNormalizationFailed", message=f.error_text,
             appliance=f.appliance,
         ))
+    for item in batch.device_configuration_normalizations:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="DeviceConfigurationNormalized",
+            message=f"Normalized {len(item.device_configuration_profiles)} device configuration profile(s).",
+            appliance=item.appliance,
+        ))
     for f in batch.address_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
@@ -495,12 +556,31 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             reason="AddressNormalizationFailed", message=f.error_text,
             enforcement_point=f.enforcement_point,
         ))
+    for item in batch.address_normalizations:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="AddressNormalized",
+            message=(
+                f"Normalized {len(item.address_objects)} address object(s) and "
+                f"{len(item.address_groups)} address group(s)."
+            ),
+            enforcement_point=item.enforcement_point,
+        ))
     for f in batch.security_rule_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
             level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
             reason="SecurityRuleNormalizationFailed", message=f.error_text,
             enforcement_point=f.enforcement_point,
+        ))
+    for item in batch.security_rule_normalizations:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="SecurityRuleNormalized",
+            message=f"Normalized {len(item.security_rules)} security rule(s).",
+            enforcement_point=item.enforcement_point,
         ))
     for f in batch.security_rule_item_failures:
         events.append(IntegrationEvent(
@@ -513,10 +593,14 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             ),
             enforcement_point=f.enforcement_point,
         ))
-    if events:
-        IntegrationEvent.objects.bulk_create(events)
-
-    failure_count = len(events)
+    failure_count = sum(1 for e in events if e.level == IntegrationEvent.LEVEL_ERROR)
+    events.append(IntegrationEvent(
+        management_station=management_station, run=run,
+        level=IntegrationEvent.LEVEL_INFO, stage="",
+        reason="InScopeRefreshCompleted",
+        message=f"In-scope configuration refresh completed with {failure_count} failure(s).",
+    ))
+    IntegrationEvent.objects.bulk_create(events)
     run.status = IntegrationRun.STATUS_PARTIAL if failure_count else IntegrationRun.STATUS_SUCCEEDED
     run.completed_at = timezone.now()
     run.save(update_fields=["status", "completed_at"])
@@ -635,6 +719,14 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
         run_scope=IntegrationRun.SCOPE_APPLIANCE,
         status=IntegrationRun.STATUS_RUNNING,
     )
+    IntegrationEvent.objects.create(
+        management_station=management_station,
+        run=run,
+        level=IntegrationEvent.LEVEL_INFO,
+        stage="",
+        reason="RenormalizationStarted",
+        message="Renormalization started (using already-collected data).",
+    )
     renormalized = renormalize_in_scope_configuration(management_station)
 
     events = []
@@ -645,6 +737,14 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
             reason="DeviceConfigurationNormalizationFailed", message=f.error_text,
             appliance=f.appliance,
         ))
+    for item in renormalized.device_configuration_normalizations:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="DeviceConfigurationNormalized",
+            message=f"Normalized {len(item.device_configuration_profiles)} device configuration profile(s).",
+            appliance=item.appliance,
+        ))
     for f in renormalized.address_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
@@ -652,12 +752,31 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
             reason="AddressNormalizationFailed", message=f.error_text,
             enforcement_point=f.enforcement_point,
         ))
+    for item in renormalized.address_normalizations:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="AddressNormalized",
+            message=(
+                f"Normalized {len(item.address_objects)} address object(s) and "
+                f"{len(item.address_groups)} address group(s)."
+            ),
+            enforcement_point=item.enforcement_point,
+        ))
     for f in renormalized.security_rule_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
             level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
             reason="SecurityRuleNormalizationFailed", message=f.error_text,
             enforcement_point=f.enforcement_point,
+        ))
+    for item in renormalized.security_rule_normalizations:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="SecurityRuleNormalized",
+            message=f"Normalized {len(item.security_rules)} security rule(s).",
+            enforcement_point=item.enforcement_point,
         ))
     for f in renormalized.security_rule_item_failures:
         events.append(IntegrationEvent(
@@ -670,10 +789,15 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
             ),
             enforcement_point=f.enforcement_point,
         ))
-    if events:
-        IntegrationEvent.objects.bulk_create(events)
+    failure_count = sum(1 for e in events if e.level == IntegrationEvent.LEVEL_ERROR)
+    events.append(IntegrationEvent(
+        management_station=management_station, run=run,
+        level=IntegrationEvent.LEVEL_INFO, stage="",
+        reason="RenormalizationCompleted",
+        message=f"Renormalization completed with {failure_count} failure(s).",
+    ))
+    IntegrationEvent.objects.bulk_create(events)
 
-    failure_count = len(events)
     run.status = IntegrationRun.STATUS_PARTIAL if failure_count else IntegrationRun.STATUS_SUCCEEDED
     run.completed_at = timezone.now()
     run.save(update_fields=["status", "completed_at"])
@@ -726,6 +850,14 @@ def _refresh_station_dynamic_content_with_tracking(
         run_scope=IntegrationRun.SCOPE_APPLIANCE,
         status=IntegrationRun.STATUS_RUNNING,
     )
+    IntegrationEvent.objects.create(
+        management_station=management_station,
+        run=run,
+        level=IntegrationEvent.LEVEL_INFO,
+        stage="",
+        reason="DynamicContentRefreshStarted",
+        message="EDL/FQDN cache refresh started.",
+    )
     refresh = refresh_in_scope_dynamic_content(management_station)
 
     events = []
@@ -736,12 +868,26 @@ def _refresh_station_dynamic_content_with_tracking(
             reason="FqdnCacheCollectionFailed", message=f.error_text,
             appliance=f.appliance,
         ))
+    for item in refresh.fqdn_cache_collections:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="FqdnCacheCollected", message="Collected FQDN resolution cache.",
+            appliance=item.appliance,
+        ))
     for f in refresh.external_list_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
             level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_COLLECT,
             reason="ExternalListCollectionFailed", message=f.error_text,
             enforcement_point=f.enforcement_point,
+        ))
+    for item in refresh.external_list_collections:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_COLLECT,
+            reason="ExternalListCollected", message="Collected external dynamic list.",
+            enforcement_point=item.enforcement_point,
         ))
     for f in refresh.dynamic_content_failures:
         events.append(IntegrationEvent(
@@ -750,10 +896,26 @@ def _refresh_station_dynamic_content_with_tracking(
             reason="DynamicAddressContentNormalizationFailed", message=f.error_text,
             enforcement_point=f.enforcement_point,
         ))
-    if events:
-        IntegrationEvent.objects.bulk_create(events)
+    for item in refresh.dynamic_content_normalizations:
+        events.append(IntegrationEvent(
+            management_station=management_station, run=run,
+            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
+            reason="DynamicAddressContentNormalized",
+            message=(
+                f"Normalized {len(item.updated_address_objects)} address object(s), "
+                f"{item.total_resolved_entries} resolved entr{'y' if item.total_resolved_entries == 1 else 'ies'}."
+            ),
+            enforcement_point=item.enforcement_point,
+        ))
+    failure_count = sum(1 for e in events if e.level == IntegrationEvent.LEVEL_ERROR)
+    events.append(IntegrationEvent(
+        management_station=management_station, run=run,
+        level=IntegrationEvent.LEVEL_INFO, stage="",
+        reason="DynamicContentRefreshCompleted",
+        message=f"EDL/FQDN cache refresh completed with {failure_count} failure(s).",
+    ))
+    IntegrationEvent.objects.bulk_create(events)
 
-    failure_count = len(events)
     run.status = IntegrationRun.STATUS_PARTIAL if failure_count else IntegrationRun.STATUS_SUCCEEDED
     run.completed_at = timezone.now()
     run.save(update_fields=["status", "completed_at"])

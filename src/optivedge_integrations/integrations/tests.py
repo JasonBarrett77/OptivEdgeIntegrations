@@ -151,6 +151,7 @@ def _empty_dynamic_content_refresh_result():
         enforcement_points=[],
         fqdn_cache_collections=[],
         fqdn_cache_failures=[],
+        external_list_collections=[],
         external_list_failures=[],
         dynamic_content_normalizations=[],
         dynamic_content_failures=[],

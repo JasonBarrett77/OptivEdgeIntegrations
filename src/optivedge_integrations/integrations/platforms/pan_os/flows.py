@@ -176,6 +176,7 @@ class PANOSDynamicContentRefreshResult:
     enforcement_points: list[EnforcementPoint]
     fqdn_cache_collections: list[PANOSApplianceCollectedSnapshot]
     fqdn_cache_failures: list[PANOSApplianceCollectionFailure]
+    external_list_collections: list[PANOSEnforcementPointCollectedSnapshot]
     external_list_failures: list[PANOSEnforcementPointCollectionFailure]
     dynamic_content_normalizations: list[PANOSDynamicAddressContentNormalizedPoint]
     dynamic_content_failures: list[PANOSDynamicAddressContentNormalizationFailure]
@@ -841,10 +842,11 @@ def refresh_in_scope_dynamic_content(
             PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
         )
 
+    external_list_collections: list[PANOSEnforcementPointCollectedSnapshot] = []
     external_list_failures: list[PANOSEnforcementPointCollectionFailure] = []
     for enforcement_point in enforcement_points:
         try:
-            collect_enforcement_point_external_lists(
+            persisted_list = collect_enforcement_point_external_lists(
                 enforcement_point,
                 credentials_provider=credentials_provider,
                 timeout=timeout,
@@ -853,6 +855,11 @@ def refresh_in_scope_dynamic_content(
         except Exception as exc:
             external_list_failures.append(
                 PANOSEnforcementPointCollectionFailure(enforcement_point=enforcement_point, error_text=str(exc))
+            )
+            continue
+        for persisted in persisted_list:
+            external_list_collections.append(
+                PANOSEnforcementPointCollectedSnapshot(enforcement_point=enforcement_point, persisted=persisted)
             )
 
     dynamic_content_normalizations: list[PANOSDynamicAddressContentNormalizedPoint] = []
@@ -880,6 +887,7 @@ def refresh_in_scope_dynamic_content(
         enforcement_points=enforcement_points,
         fqdn_cache_collections=fqdn_cache_collections,
         fqdn_cache_failures=fqdn_cache_failures,
+        external_list_collections=external_list_collections,
         external_list_failures=external_list_failures,
         dynamic_content_normalizations=dynamic_content_normalizations,
         dynamic_content_failures=dynamic_content_failures,
