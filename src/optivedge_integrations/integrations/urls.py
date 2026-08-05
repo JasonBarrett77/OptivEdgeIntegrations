@@ -14,6 +14,9 @@ from optivedge_integrations.integrations.views import (
     ManagementStationRenormalizeView,
     ManagementStationSyncView,
     ManagementStationUpdateView,
+    NoteCreateView,
+    NoteListView,
+    NoteUpdateView,
 )
 
 urlpatterns = [
@@ -81,5 +84,20 @@ urlpatterns = [
         "management-stations/<int:pk>/enforcement-points/<int:enforcement_point_pk>/addresses/",
         EnforcementPointAddressListView.as_view(),
         name="enforcement_point_addresses",
+    ),
+    path(
+        "notes/",
+        NoteListView.as_view(),
+        name="note_list",
+    ),
+    path(
+        "notes/create/",
+        NoteCreateView.as_view(),
+        name="note_create",
+    ),
+    path(
+        "notes/<int:pk>/edit/",
+        NoteUpdateView.as_view(),
+        name="note_update",
     ),
 ]

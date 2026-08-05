@@ -8,7 +8,7 @@ of this layer.
 from django import forms
 
 from optivedge.forms import MONO_TEXT_INPUT_CLASS, TEXT_INPUT_CLASS, TEXTAREA_CLASS
-from optivedge_integrations.integrations.models import ManagementStation
+from optivedge_integrations.integrations.models import ApplianceGroup, ManagementStation, Note
 
 
 SELECT_CLASS = (
@@ -79,4 +79,37 @@ class ManagementStationForm(forms.ModelForm):
                     "class": TEXTAREA_CLASS,
                 }
             ),
+        }
+
+
+class ApplianceGroupChoiceField(forms.ModelChoiceField):
+    """Renders each appliance group by its member appliance name(s) - the presentation
+    the Notes feature keys on - with the station/group for disambiguation."""
+
+    def label_from_instance(self, obj):
+        appliances = ", ".join(
+            appliance.hostname or appliance.serial_number for appliance in obj.appliances.all()
+        ) or "no appliances"
+        return f"{appliances} — {obj.management_station} / {obj.name}"
+
+
+class NoteForm(forms.ModelForm):
+    appliance_group = ApplianceGroupChoiceField(
+        queryset=(
+            ApplianceGroup.objects.select_related("management_station")
+            .prefetch_related("appliances")
+            .order_by("management_station__hostname", "name")
+        ),
+        widget=forms.Select(attrs={"class": SELECT_CLASS}),
+        label="Appliance group",
+    )
+
+    field_order = ["appliance_group", "body"]
+
+    class Meta:
+        model = Note
+        fields = ["body"]
+        labels = {"body": "Note"}
+        widgets = {
+            "body": forms.Textarea(attrs={"class": TEXTAREA_CLASS, "rows": 8}),
         }

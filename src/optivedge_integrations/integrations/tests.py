@@ -1,6 +1,7 @@
 import ipaddress
 from unittest.mock import patch
 
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.test import TestCase
@@ -18,6 +19,7 @@ from optivedge_integrations.integrations.models import (
     IntegrationEvent,
     IntegrationRun,
     ManagementStation,
+    Note,
     SecurityRule,
     SecurityRuleApplication,
     SecurityRuleSearchVocabularyEntry,
@@ -2580,3 +2582,78 @@ class EnforcementPointScopeToggleViewTests(TestCase):
         )
         enforcement_point.refresh_from_db()
         self.assertFalse(enforcement_point.in_scope)
+
+
+class NoteViewTests(TestCase):
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="notes-panorama.local",
+        )
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station,
+            name="notes-ha-pair",
+            group_type=ApplianceGroup.TYPE_HA_PAIR,
+        )
+        Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="NOTE-SN-A", hostname="note-fw-a",
+        )
+        Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="NOTE-SN-B", hostname="note-fw-b",
+        )
+
+    def test_note_list_shows_appliance_names_and_body(self):
+        Note.objects.create(
+            content_type=ContentType.objects.get_for_model(ApplianceGroup),
+            object_id=self.group.pk,
+            body="Scheduled maintenance window Saturday.",
+        )
+        response = self.client.get(reverse("note_list"))
+        self.assertEqual(response.status_code, 200)
+        # The appliance name(s) are the presentation, not the group/target internals.
+        self.assertContains(response, "note-fw-a")
+        self.assertContains(response, "note-fw-b")
+        self.assertContains(response, "Scheduled maintenance window Saturday.")
+
+    def test_note_list_empty_state(self):
+        response = self.client.get(reverse("note_list"))
+        self.assertContains(response, "No notes yet.")
+
+    def test_create_note_attaches_generic_target_to_appliance_group(self):
+        response = self.client.post(
+            reverse("note_create"),
+            {"appliance_group": self.group.pk, "body": "First note."},
+            follow=True,
+        )
+        self.assertRedirects(response, reverse("note_list"))
+        note = Note.objects.get()
+        self.assertEqual(note.body, "First note.")
+        self.assertEqual(note.content_type, ContentType.objects.get_for_model(ApplianceGroup))
+        self.assertEqual(note.object_id, self.group.pk)
+        self.assertEqual(note.target, self.group)
+
+    def test_update_note_edits_body(self):
+        note = Note.objects.create(
+            content_type=ContentType.objects.get_for_model(ApplianceGroup),
+            object_id=self.group.pk,
+            body="Original.",
+        )
+        response = self.client.post(
+            reverse("note_update", kwargs={"pk": note.pk}),
+            {"appliance_group": self.group.pk, "body": "Revised."},
+            follow=True,
+        )
+        self.assertRedirects(response, reverse("note_list"))
+        note.refresh_from_db()
+        self.assertEqual(note.body, "Revised.")
+
+    def test_notes_cascade_when_appliance_group_deleted(self):
+        Note.objects.create(
+            content_type=ContentType.objects.get_for_model(ApplianceGroup),
+            object_id=self.group.pk,
+            body="Doomed with the group.",
+        )
+        self.group.delete()
+        self.assertEqual(Note.objects.count(), 0)

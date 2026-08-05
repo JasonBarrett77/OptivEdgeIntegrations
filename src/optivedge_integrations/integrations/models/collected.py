@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from django.contrib.contenttypes.fields import GenericRelation
 from django.core.exceptions import ValidationError
 from django.db import models
 
@@ -64,6 +65,9 @@ class ApplianceGroup(SyncTrackedModel):
         blank=True,
     )
     notes = models.TextField(blank=True)
+    # User-authored Note records (the Notes feature). Distinct from the scalar `notes`
+    # field above; the GenericRelation gives cascade cleanup if the group is deleted.
+    note_entries = GenericRelation("integrations.Note", related_query_name="appliance_group")
 
     class Meta:
         ordering = ["name"]

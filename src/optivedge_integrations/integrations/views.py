@@ -21,14 +21,16 @@ from django.views import View
 from django.views.generic import DetailView, ListView, TemplateView
 from django.views.generic.edit import CreateView, DeleteView, UpdateView
 
+from django.contrib.contenttypes.models import ContentType
 from optivedge.views import RightOverlayMixin
-from optivedge_integrations.integrations.forms import ManagementStationForm
+from optivedge_integrations.integrations.forms import ManagementStationForm, NoteForm
 from optivedge_integrations.integrations.models import (
     ApplianceGroup,
     EnforcementPoint,
     IntegrationEvent,
     IntegrationRun,
     ManagementStation,
+    Note,
     SecurityRule,
     Snapshot,
 )
@@ -968,3 +970,116 @@ class EnforcementPointScopeToggleView(View):
         else:
             messages.success(request, "Enforcement point marked out of scope.")
         return HttpResponseRedirect(detail_url)
+
+
+def build_note_rows(notes):
+    """Resolve each note's target to the appliance name(s) shown in the Notes area.
+
+    Currently every note targets an ApplianceGroup; the presentation leads with that
+    group's member appliance names. Written generically so new target types can be added
+    to the resolution map without reshaping callers.
+    """
+    appliance_group_ct = ContentType.objects.get_for_model(ApplianceGroup)
+    group_ids = [
+        note.object_id for note in notes if note.content_type_id == appliance_group_ct.id
+    ]
+    groups_by_id = {
+        group.pk: group
+        for group in (
+            ApplianceGroup.objects.filter(pk__in=group_ids)
+            .select_related("management_station")
+            .prefetch_related("appliances")
+        )
+    }
+
+    rows = []
+    for note in notes:
+        group = None
+        if note.content_type_id == appliance_group_ct.id:
+            group = groups_by_id.get(note.object_id)
+        appliance_names = (
+            [appliance.hostname or appliance.serial_number for appliance in group.appliances.all()]
+            if group is not None
+            else []
+        )
+        rows.append(
+            {
+                "note": note,
+                "appliance_group": group,
+                "appliance_names": appliance_names,
+            }
+        )
+    return rows
+
+
+def get_note_rows():
+    return build_note_rows(list(Note.objects.select_related("content_type")))
+
+
+class NoteListView(TemplateView):
+    template_name = "integrations/note_list.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["note_rows"] = get_note_rows()
+        return context
+
+
+class NoteListBackgroundMixin:
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["note_rows"] = get_note_rows()
+        return context
+
+
+class NoteCreateView(RightOverlayMixin, NoteListBackgroundMixin, CreateView):
+    form_class = NoteForm
+    model = Note
+    template_name = "integrations/note_form.html"
+
+    def get_overlay_close_url(self):
+        return reverse("note_list")
+
+    def get_success_url(self):
+        return reverse("note_list")
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["form_mode"] = "create"
+        return context
+
+    def form_valid(self, form):
+        appliance_group = form.cleaned_data["appliance_group"]
+        form.instance.content_type = ContentType.objects.get_for_model(ApplianceGroup)
+        form.instance.object_id = appliance_group.pk
+        return super().form_valid(form)
+
+
+class NoteUpdateView(RightOverlayMixin, NoteListBackgroundMixin, UpdateView):
+    form_class = NoteForm
+    model = Note
+    pk_url_kwarg = "pk"
+    template_name = "integrations/note_form.html"
+
+    def get_overlay_close_url(self):
+        return reverse("note_list")
+
+    def get_success_url(self):
+        return reverse("note_list")
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["form_mode"] = "update"
+        return context
+
+    def get_initial(self):
+        initial = super().get_initial()
+        if isinstance(self.object.target, ApplianceGroup):
+            initial["appliance_group"] = self.object.target
+        return initial
+
+    def form_valid(self, form):
+        appliance_group = form.cleaned_data["appliance_group"]
+        form.instance.content_type = ContentType.objects.get_for_model(ApplianceGroup)
+        form.instance.object_id = appliance_group.pk
+        return super().form_valid(form)
