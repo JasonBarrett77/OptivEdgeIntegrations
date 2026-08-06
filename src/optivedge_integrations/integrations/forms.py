@@ -100,13 +100,29 @@ class ApplianceGroupChoiceField(forms.ModelChoiceField):
         return f"{appliances} — {obj.management_station} / {obj.name}"
 
 
+def appliance_group_note_choice_queryset():
+    """Appliance groups ordered for the note picker: in-scope groups first (a group is
+    in scope if any of its enforcement points is), then by active appliance name.
+
+    Active appliance name is COALESCE(hostname or NULL, serial_number); groups without an
+    active appliance sort last within their scope bucket.
+    """
+    in_scope = EnforcementPoint.objects.filter(appliance_group=OuterRef("pk"), in_scope=True)
+    active_name = Coalesce(
+        NullIf("active_appliance__hostname", Value("")),
+        "active_appliance__serial_number",
+    )
+    return (
+        ApplianceGroup.objects.select_related("management_station", "active_appliance")
+        .prefetch_related("appliances")
+        .annotate(_in_scope=Exists(in_scope), _active_name=active_name)
+        .order_by("-_in_scope", F("_active_name").asc(nulls_last=True), "name")
+    )
+
+
 class NoteForm(forms.ModelForm):
     appliance_group = ApplianceGroupChoiceField(
-        queryset=(
-            ApplianceGroup.objects.select_related("management_station")
-            .prefetch_related("appliances")
-            .order_by("management_station__hostname", "name")
-        ),
+        queryset=appliance_group_note_choice_queryset(),
         widget=forms.Select(attrs={"class": SELECT_CLASS}),
         label="Appliance group",
     )

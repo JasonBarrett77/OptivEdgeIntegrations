@@ -2657,3 +2657,30 @@ class NoteViewTests(TestCase):
         )
         self.group.delete()
         self.assertEqual(Note.objects.count(), 0)
+
+    def test_note_picker_orders_in_scope_first_by_active_appliance(self):
+        from optivedge_integrations.integrations.forms import appliance_group_note_choice_queryset
+
+        def make_group(name, active_hostname, in_scope):
+            group = ApplianceGroup.objects.create(management_station=self.station, name=name)
+            appliance = Appliance.objects.create(
+                management_station=self.station, appliance_group=group,
+                serial_number=f"SN-{name}", hostname=active_hostname,
+            )
+            group.active_appliance = appliance
+            group.save(update_fields=["active_appliance"])
+            EnforcementPoint.objects.create(
+                management_station=self.station, appliance_group=group,
+                vsys_name=f"vsys-{name}", in_scope=in_scope,
+            )
+            return group
+
+        g_in_b = make_group("g-in-b", "b-fw", True)
+        g_out_z = make_group("g-out-z", "z-fw", False)
+        g_in_a = make_group("g-in-a", "a-fw", True)
+        g_out_a = make_group("g-out-a", "a-fw-out", False)
+
+        ordered = list(appliance_group_note_choice_queryset())
+        # In scope first (sorted by active appliance name), then out of scope (same sort);
+        # setUp's self.group has no in-scope EP and no active appliance -> out, nulls last.
+        self.assertEqual(ordered, [g_in_a, g_in_b, g_out_a, g_out_z, self.group])
