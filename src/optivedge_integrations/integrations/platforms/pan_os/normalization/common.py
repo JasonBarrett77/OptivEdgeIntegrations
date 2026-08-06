@@ -246,9 +246,28 @@ def merged_shared(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def pushed_shared(payload: dict[str, Any] | Any) -> dict[str, Any]:
-    """Extract the shared subtree from a show_pushed_shared_policy payload."""
+    """Extract the shared subtree from a show_pushed_shared_policy payload.
+
+    DELIBERATELY ASYMMETRIC with pushed_vsys_panorama(): that one absorbs
+    NO_PUSHED_POLICY_MESSAGE and returns {}, this one raises on any non-dict payload.
+    Do not "align" them - they answer different questions.
+
+    A vsys with no device-group assignment having nothing pushed is an ordinary, measured
+    state, so the per-vsys reader is right to absorb it. A Panorama-managed device
+    answering the DEVICE-WIDE shared query with something that is not config data has
+    never been observed, and nothing establishes it would be benign - it fits a lost
+    Panorama association or a query sent to the wrong target just as well as an empty
+    result. Returning {} here would turn an unexplained response into a confident "this
+    device has no shared objects", silently dropping every Panorama-Shared object for the
+    enforcement point.
+
+    If this ever raises in the field, the exception is the observation - which is why the
+    payload value is included below, not just its type.
+    """
     if not isinstance(payload, dict):
-        raise ValueError(f"unexpected pushed shared payload type: {type(payload).__name__}")
+        raise ValueError(
+            f"unexpected pushed shared payload type: {type(payload).__name__}: {payload!r}"
+        )
     shared = payload.get("shared", {})
     if not isinstance(shared, dict):
         raise ValueError(f"unexpected pushed shared subtree type: {type(shared).__name__}")

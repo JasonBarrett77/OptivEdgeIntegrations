@@ -82,10 +82,24 @@ def latest_predefined_url_lists_snapshot(enforcement_point: EnforcementPoint) ->
 
 
 def latest_pushed_shared_snapshot(enforcement_point: EnforcementPoint) -> Snapshot | None:
-    # EP.appliance_group is the Panorama-management discriminant: all Panorama-managed
-    # devices are modeled with appliance_group (TYPE_STANDALONE, TYPE_HA_PAIR, etc.).
-    # EP.appliance (direct) means locally-managed with no Panorama. Pushed shared policy
-    # is collected per appliance_group and has no meaning for locally-managed devices.
+    # Pushed shared policy is collected per appliance_group and has no meaning for a
+    # locally-managed device, so this has to know whether Panorama manages the device.
+    #
+    # EP.appliance_group is used as that discriminant - Panorama-managed devices are all
+    # modeled with a group (TYPE_STANDALONE, TYPE_HA_PAIR, ...), while EP.appliance
+    # (direct) means locally managed. BUT THAT IS A PROXY, NOT THE FACT. It holds only
+    # because the non-Panorama collection path was never completed, so every
+    # EnforcementPoint in existence comes from normalization/panorama.py with
+    # appliance_group set; EP.appliance is set only in tests.
+    #
+    # ApplianceGroup models HA/multi-appliance topology, not Panorama. A locally-managed
+    # HA pair is exactly what it is for, and would set appliance_group on a device with no
+    # Panorama - at which point this returns a group, addresses.py raises "Panorama-managed
+    # but pushed-shared snapshot missing", and the error is nonsense.
+    #
+    # The explicit discriminant already exists: management_station.station_type
+    # (PAN_PANORAMA / PAN_FIREWALL). Switch to it here, in addresses.py and in regions.py
+    # before anyone removes either FK. See CLAUDE.md, "Topology model hierarchy".
     appliance_group = enforcement_point.appliance_group
     if appliance_group is None:
         return None

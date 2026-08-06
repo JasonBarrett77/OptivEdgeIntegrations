@@ -39,6 +39,18 @@ class ManagementStation(TimestampedModel):
 
 
 class ApplianceGroup(SyncTrackedModel):
+    """Several appliances managed as one unit - the HA/redundancy relationship.
+
+    This models topology only: `group_type` is standalone/ha_pair/cluster and
+    `active_appliance` names the active node. It carries no information about Panorama.
+
+    A group is created for every Panorama-managed appliance, including standalone ones
+    (`TYPE_STANDALONE`), because the Panorama discovery path is the only one implemented.
+    That makes "has a group" *look* like "is Panorama-managed" - it is not, and code must
+    not read it that way. See EnforcementPoint below and use
+    `ManagementStation.station_type` for that question.
+    """
+
     TYPE_STANDALONE = "standalone"
     TYPE_HA_PAIR = "ha_pair"
     TYPE_CLUSTER = "cluster"
@@ -134,6 +146,30 @@ class Appliance(SyncTrackedModel):
 
 
 class EnforcementPoint(SyncTrackedModel):
+    """A vsys - the unit most assessment is performed against.
+
+    Exactly one of `appliance` / `appliance_group` is set, and **the choice is not
+    "standalone vs HA"**. It is currently used as a proxy for *Panorama-managed vs
+    locally-managed*: `appliance_group` set means Panorama-managed (every such appliance
+    gets a group, standalone included), `appliance` set means locally managed with no
+    Panorama. `normalization/snapshots.py::latest_pushed_shared_snapshot` depends on that
+    reading, since pushed shared policy is meaningless without Panorama.
+
+    The proxy holds only because the non-Panorama collection path was never completed.
+    `normalization/panorama.py` is the sole production site that creates an
+    EnforcementPoint and it always sets `appliance_group`; `appliance` is set only in
+    tests. A locally-managed HA pair - which `ApplianceGroup` exists to model - would set
+    `appliance_group` on a device with no Panorama and break every consumer of the proxy.
+
+    The explicit discriminant is `ManagementStation.station_type`. Prefer it. Move the
+    three sites that read the FKs (`normalization/` snapshots, addresses, regions) over to
+    it *before* changing either field, or the check vanishes silently.
+
+    The two conditional UniqueConstraints below are the other reason these FKs exist: one
+    enforcement point per vsys name per owner. That guarantee is not expressible through
+    `EnforcementNode`, so it must be preserved by any replacement.
+    """
+
     management_station = models.ForeignKey(
         ManagementStation,
         on_delete=models.CASCADE,

@@ -85,6 +85,30 @@ ManagementStation (Panorama or standalone firewall connection)
 (see `get_in_scope_*` helpers in `platforms/pan_os/flows.py`) — most of the domain model exists to support
 appliance-group HA topologies where a vsys-level enforcement point spans multiple physical nodes.
 
+**`ApplianceGroup` models the HA/multi-appliance relationship, and nothing else.** `group_type` is
+standalone/ha_pair/cluster and `active_appliance` names the active node; it exists so several appliances can
+be managed as one unit. Nothing about it concerns Panorama.
+
+**The `EnforcementPoint` appliance/appliance_group XOR does not mean "standalone vs HA".** It is currently
+read as a proxy for *Panorama-managed vs locally-managed* — see the comment in
+`normalization/snapshots.py`, `latest_pushed_shared_snapshot()`. That reading holds only by accident: the
+Panorama path is the only discovery path ever completed, `normalization/panorama.py` is the sole production
+site that creates an `EnforcementPoint`, and it always sets `appliance_group`. So `appliance_group IS NOT
+NULL` coincides with Panorama-managed. `EnforcementPoint.appliance` is never set outside tests.
+
+This is a latent bug, not just an inelegance. The non-Panorama collection path was **intentionally** left
+incomplete, and locally-managed devices can legitimately be in an HA group — that is what `ApplianceGroup`
+is for. The first locally-managed HA pair collected will have `appliance_group` set, so
+`latest_pushed_shared_snapshot()` will hunt for pushed shared policy that cannot exist and
+`normalization/addresses.py` will raise "Panorama-managed but pushed-shared snapshot missing" for a device
+that never had one.
+
+**The correct discriminant already exists:** `ManagementStation.station_type` (`PAN_PANORAMA` /
+`PAN_FIREWALL`). Panorama-management is a property of the station, not of the topology. Three sites ask the
+question the wrong way — `normalization/snapshots.py`, `normalization/addresses.py`,
+`normalization/regions.py`. Move the discriminant to `station_type` **before** touching either FK, or the
+check disappears silently.
+
 `Snapshot` (raw collected JSON payload + metadata) attaches to **exactly one** scope target
 (management_station / appliance_group / appliance / enforcement_point / enforcement_node) — `clean()`
 enforces this. Everything downstream (normalization, `DeviceConfigurationProfile`, policy objects) traces
@@ -120,9 +144,120 @@ Two related but distinct concepts track "where did this value come from":
   `field_name = "__entry__"` records entry-level (not field-level) provenance.
 - **`config_source`** (`CONFIG_SOURCE_CHOICES` in `models/policy/base.py`: `local` / `pushed_pre` /
   `pushed_post` / `default`) — a per-object classification of which PAN-OS rulebase/config layer an object
-  or rule was pulled from, used alongside `PolicyObjectNamespace`/`PolicyObjectPrecedence` to resolve
-  overlapping objects across local vsys, local shared, pushed-effective, Panorama shared, and Panorama
-  device-group namespaces (higher precedence wins when names collide).
+  or rule was pulled from. It sits alongside `PolicyObjectNamespace` (which scope an object was found in)
+  and `PolicyObjectPrecedence` (which one wins on a name collision). **`PolicyObjectPrecedence` currently
+  encodes a resolution model that has been measured false** — see the next section before relying on it.
+
+### Object scope resolution (PAN-OS) — measured, and not what the code assumes
+
+This section records device behaviour established by direct measurement against a Panorama-managed PA-5220
+(11.1.13-h3, multi-vsys) and a PA-VM (11.2.3, single-vsys) in 2026-08. Configuration reads cannot answer
+these questions — PAN-OS reports every definition as-is and never names a winner — so each claim below comes
+from compiled policy (`show running security-policy-addresses`) or from a commit that PAN-OS accepted or
+rejected.
+
+**There are two scopes, and scope is the only precedence axis.**
+
+```
+vsys-specific   >   shared
+```
+
+Ownership — firewall-local vs Panorama-pushed — is **not** a precedence level. Two owners cannot occupy the
+same scope under the same name: PAN-OS rejects the configuration rather than picking a winner (local-vsys +
+pushed-vsys is refused at the candidate write; local-shared + Panorama-shared passes the write and fails at
+commit validation). A successful config write therefore proves nothing; only a successful commit does.
+
+Panorama decides *scope*, the firewall decides *precedence*:
+
+```
+Panorama Shared    -> shared scope
+ANY device group   -> vsys scope     (including a container DG with no devices assigned)
+```
+
+**`PolicyObjectPrecedence` encodes a four-level ladder that is wrong twice over:**
+
+```
+LOCAL_VSYS 10 < LOCAL_SHARED 20 < PUSHED_VSYS_EFFECTIVE 30 < PANORAMA_SHARED 40
+```
+
+1. `LOCAL_SHARED (20)` ahead of `PUSHED_VSYS_EFFECTIVE (30)` is **inverted** — a pushed device-group object
+   is vsys-scoped and beats a firewall-local shared object. Measured directly: pushed-DG `10.221.1.1` beat
+   local-shared `10.222.1.1` in compiled policy.
+2. Ranks 10/30 and 20/40 model coexistence for pairs PAN-OS **rejects**, describing states that cannot exist.
+
+The ladder matched every earlier observation; it was underdetermined, not supported. Keep all seven
+`namespace_type` values — they are useful provenance — but stop treating them as precedence levels.
+
+**Classify pushed objects by `@loc`, never by which query returned them.** This is the rule that makes one
+code path work for both multi-vsys and single-vsys devices, with no branch on operating mode:
+
+```
+@loc = "shared"        -> shared scope
+@loc = <device-group>  -> vsys scope
+(absent)               -> firewall-local; use read position to tell vsys from shared
+```
+
+Neither signal suffices alone: `@loc` separates the two Panorama scopes, read position separates the two
+local ones. `normalization/addresses.py` currently assigns namespace from read position alone. On a
+single-vsys firewall the vsys and non-vsys pushed responses are **byte-identical**, so every Panorama-Shared
+object is misclassified as vsys-scoped and would wrongly outrank a local shared object.
+
+**Enumerating definitions for an enforcement point takes three reads**, in this order; first hit wins:
+
+```
+1  vsys scope    merged -> devices.entry[0].vsys.entry[@name=V].address.entry[@name=N]
+                 pushed-shared-policy vsys=V -> policy.panorama.address...  where @loc != "shared"
+2  shared scope  merged -> config.shared.address.entry[@name=N]
+                 pushed-shared-policy (no vsys) -> shared.address... or policy.panorama.address...
+                                                   where @loc == "shared"
+```
+
+**`show config merged` contains no Panorama-pushed policy objects.** The name invites the opposite
+assumption: it is the firewall's local running config merged with Panorama **template** config, and
+templates carry device/network settings, not policy objects. On the lab PA-5220 it is blind to 178
+Panorama-Shared objects and every device-group object. Seeing only a local value in `merged` for a name that
+also exists in Panorama Shared does *not* show that PAN-OS resolved the two and chose local — it shows the
+Panorama definition was never in the data set. OEI already reads the three sources separately and does not
+make this mistake; the note guards against a future "simplification" onto `merged` alone.
+
+**A vsys with no device-group assignment still resolves Panorama-Shared objects.** Panorama sends nothing
+*for* such a vsys and its per-vsys pushed read returns the bare string `No shared policy pushed to device` —
+but Shared objects were delivered to the *device*, and the vsys reads them out of device-wide shared scope
+like any other. An empty per-vsys pushed read must therefore never be taken to mean an empty object set;
+skipping shared-scope collection on that basis would under-report the vsys by the entire Shared set.
+
+**A disabled Panorama device-group rule is not pushed to the firewall at all** — not present-and-disabled,
+simply not delivered. Anything enumerating "which rules exist here" from pushed policy silently omits every
+disabled Panorama rule, and the objects those rules reference *are* still pushed. Reference counting
+therefore cannot decide whether an object is safe to remove.
+
+### Deliberate asymmetries — do not "clean these up"
+
+**`pushed_shared()` raises on a non-dict payload; `pushed_vsys_panorama()` returns `{}`.** This looks like an
+oversight and is not. They answer different questions:
+
+```
+pushed_vsys_panorama('No shared policy pushed to device') -> {}          correct
+pushed_shared('No shared policy pushed to device')        -> ValueError  correct
+```
+
+A vsys with no device group having nothing pushed is an ordinary, *measured* state, so the per-vsys reader
+is right to absorb it. A Panorama-managed device answering the **device-wide** shared query with something
+that is not config data has never been observed, and nothing establishes it is benign — it would fit a lost
+Panorama association or a query sent to the wrong target equally well. Returning `{}` there would convert an
+unexplained response into a confident "this device has no shared objects", silently dropping every
+Panorama-Shared object for that enforcement point.
+
+Symmetry between sibling functions is not a reason on its own. The per-vsys reader earned its tolerance by
+measurement; the non-vsys one has no such warrant.
+
+### Test fixture caveat (`integrations/tests.py`)
+
+`_create_panorama_enforcement_point()` (18 call sites) builds an `EnforcementPoint` with `appliance` set and
+`appliance_group` null — **a shape production never creates**. On it, the `appliance_group_id is not None`
+guard in `normalization/addresses.py` cannot fire and the Panorama-shared branch is inert. Any test of
+pushed-shared handling written against that helper will pass without exercising the code it targets. Build a
+group-based enforcement point for those tests.
 
 ### Observability model (`models/events.py`)
 
