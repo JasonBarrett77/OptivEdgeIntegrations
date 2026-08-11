@@ -96,6 +96,45 @@ def entry_provenance(entry: dict[str, Any]) -> tuple[str | None, str | None]:
     return None, None
 
 
+SHARED_LOC = "shared"
+
+
+def pushed_entry_scope(entry: dict[str, Any], vsys_name: str) -> tuple[str, str]:
+    """Return (namespace_type, namespace_value) for a Panorama-pushed entry, from @loc.
+
+    Scope MUST come from @loc, never from which query returned the entry. On a
+    single-vsys firewall the vsys and non-vsys pushed responses are byte-identical, so
+    read position classifies every Panorama-Shared object as vsys-scoped - which then
+    wrongly outranks a local shared object of the same name. Measured on both lab
+    devices: the PA-VM's non-vsys read carries a device-group object, and the PA-5220's
+    per-vsys read carries only device-group objects.
+
+        @loc == "shared"        -> shared scope, PANORAMA_SHARED
+        @loc == <device group>  -> vsys scope,   PUSHED_VSYS_EFFECTIVE
+
+    namespace_value is the vsys name for device-group objects, not the device-group
+    name: @loc names where the object was *authored* in the Panorama hierarchy, not the
+    namespace it occupies on the firewall. The authoring location is recorded separately
+    as FieldProvenance via entry_provenance().
+
+    An absent @loc raises. Every pushed object on both lab devices carries one, so this
+    is an unobserved state - and inferring scope from read position when the explicit
+    signal is missing is exactly the defect this function exists to remove.
+    """
+    # Imported here to avoid a circular import: models.policy imports from this package.
+    from optivedge_integrations.integrations.models.policy.base import PolicyObjectNamespace
+
+    raw_key, raw_value = entry_provenance(entry)
+    if raw_key != "@loc" or not raw_value:
+        raise ValueError(
+            f"pushed entry {entry.get('@name')!r} has no @loc marker "
+            f"(provenance key {raw_key!r}); cannot determine its scope"
+        )
+    if raw_value == SHARED_LOC:
+        return PolicyObjectNamespace.PANORAMA_SHARED, SHARED_LOC
+    return PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, vsys_name
+
+
 def iter_member_values(node: Any) -> list[tuple[str, str]]:
     """Return (value, prov_string) for each member in a PAN-OS member/entry list.
 
@@ -581,3 +620,57 @@ PANOS_VENDOR_REGION_CODES: dict[str, str] = {
     # Kosovo, widely used by PAN-OS and other vendors pending an official ISO allocation.
     "XK": "Kosovo",
 }
+
+
+def merge_pushed_entries(
+    reads: list[tuple[dict[str, Any], Any]],
+    kind: str,
+    *,
+    vsys_name: str,
+    label: str,
+) -> list[tuple[dict[str, Any], Any, str, str]]:
+    """Merge the pushed reads into one scope-classified set of `kind` entries.
+
+    `reads` is [(payload_root, source_snapshot), ...] - the non-vsys and per-vsys
+    pushed-shared-policy responses. Both are views of the same pushed policy, and which
+    objects each carries depends on the device rather than on the scope being asked
+    about, so they are merged and then classified per entry by @loc.
+
+    Deduplication is keyed by (name, namespace_type, namespace_value) - the object's
+    identity on the firewall. That key handles both measured cases with no special-casing:
+
+    - Single-vsys (PA-VM): the two responses are byte-identical, so every object arrives
+      twice with the same @loc -> same key -> one row. Classifying by read position
+      instead put the same object in two different scopes.
+    - Multi-vsys (PA-5220): a name defined in both Panorama Shared and a device group is
+      delivered twice with *different* @loc -> different keys -> two rows. That is a
+      legitimate cross-scope override pair; collapsing it would discard the losing
+      definition and hide the override.
+
+    A collision whose entries differ is neither case and raises: two disagreeing
+    definitions of one object in one scope is a state PAN-OS rejects, so it can only mean
+    a collection or classification fault.
+
+    Returns [(entry, source_snapshot, namespace_type, namespace_value), ...] with the
+    first read winning and insertion order preserved, so output stays reproducible.
+    """
+    merged: dict[tuple[str, str, str], tuple[dict[str, Any], Any, str, str]] = {}
+    for root, snapshot in reads:
+        node = root.get(kind)
+        if not isinstance(node, dict):
+            continue
+        for entry in ensure_list(node.get("entry")):
+            if not isinstance(entry, dict):
+                continue
+            namespace_type, namespace_value = pushed_entry_scope(entry, vsys_name)
+            key = (str(entry.get("@name") or ""), str(namespace_type), namespace_value)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = (entry, snapshot, namespace_type, namespace_value)
+                continue
+            if existing[0] != entry:
+                raise ValueError(
+                    f"conflicting pushed {kind} definitions for {'/'.join(key)} "
+                    f"on {label}"
+                )
+    return list(merged.values())

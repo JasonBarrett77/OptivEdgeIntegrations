@@ -35,6 +35,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     member_values,
     merged_shared,
     merged_vsys_entry,
+    merge_pushed_entries,
     pushed_shared,
     pushed_vsys_panorama,
     scalar_value,
@@ -45,6 +46,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.regions 
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     choose_local_appliance,
+    is_panorama_managed,
     latest_merged_snapshot,
     latest_predefined_ip_block_lists_snapshot,
     latest_predefined_url_lists_snapshot,
@@ -55,6 +57,14 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.types im
 
 
 ANY_OBJECT_NAME = "any"
+
+# Precedence for the two scopes a Panorama-pushed object can occupy. Keyed by the
+# namespace pushed_entry_scope() derives from @loc, so the rank can never disagree with
+# the scope - they are decided together rather than passed separately at each call site.
+PUSHED_PRECEDENCE_BY_NAMESPACE = {
+    PolicyObjectNamespace.PANORAMA_SHARED: PolicyObjectPrecedence.PANORAMA_SHARED,
+    PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE: PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
+}
 
 
 @dataclass(slots=True)
@@ -448,15 +458,15 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
     if merged_snapshot is None:
         raise ValueError(f"missing merged config snapshot for {enforcement_point}")
-    if enforcement_point.appliance_group_id is not None and pushed_shared_snapshot is None:
+    if is_panorama_managed(enforcement_point) and pushed_shared_snapshot is None:
         raise ValueError(f"missing pushed shared policy snapshot for {enforcement_point}")
-    if pushed_snapshot is None:
+    if is_panorama_managed(enforcement_point) and pushed_snapshot is None:
         raise ValueError(f"missing pushed VSYS snapshot for {enforcement_point}")
 
     merged_root = merged_vsys_entry(merged_snapshot.payload, enforcement_point.vsys_name)
     merged_shared_root = merged_shared(merged_snapshot.payload)
     pushed_shared_root = pushed_shared(pushed_shared_snapshot.payload) if pushed_shared_snapshot is not None else {}
-    pushed_root = pushed_vsys_panorama(pushed_snapshot.payload)
+    pushed_root = pushed_vsys_panorama(pushed_snapshot.payload) if pushed_snapshot is not None else {}
 
     normalized_objects: list[NormalizedAddressObject] = []
     normalized_groups: list[NormalizedAddressGroup] = []
@@ -517,72 +527,51 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
             )
         )
 
-    for entry in ensure_list((pushed_shared_root.get("address") or {}).get("entry") if isinstance(pushed_shared_root.get("address"), dict) else None):
-        if not isinstance(entry, dict):
-            continue
+    # Both pushed reads are merged and classified per entry by @loc - never by which
+    # read returned them. See merge_pushed_entries() and common.pushed_entry_scope().
+    pushed_reads = [
+        (pushed_shared_root, pushed_shared_snapshot),
+        (pushed_root, pushed_snapshot),
+    ]
+
+    for entry, snapshot, namespace_type, namespace_value in merge_pushed_entries(
+            pushed_reads, "address", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
+    ):
         normalized_objects.append(
             normalize_address_object(
-                source_snapshot=pushed_shared_snapshot,
+                source_snapshot=snapshot,
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
-                namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
-                namespace_value="shared",
-                precedence_rank=PolicyObjectPrecedence.PANORAMA_SHARED,
+                namespace_type=namespace_type,
+                namespace_value=namespace_value,
+                precedence_rank=PUSHED_PRECEDENCE_BY_NAMESPACE[namespace_type],
                 entry=entry,
             )
         )
 
-    for entry in ensure_list((pushed_shared_root.get("address-group") or {}).get("entry") if isinstance(pushed_shared_root.get("address-group"), dict) else None):
-        if not isinstance(entry, dict):
-            continue
-        normalized_groups.append(
-            normalize_address_group(
-                source_snapshot=pushed_shared_snapshot,
-                config_source=SecurityRule.SOURCE_PUSHED_PRE,
-                namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
-                namespace_value="shared",
-                precedence_rank=PolicyObjectPrecedence.PANORAMA_SHARED,
-                entry=entry,
-            )
-        )
-
-    for entry in ensure_list((pushed_root.get("address") or {}).get("entry") if isinstance(pushed_root.get("address"), dict) else None):
-        if not isinstance(entry, dict):
-            continue
-        normalized_objects.append(
-            normalize_address_object(
-                source_snapshot=pushed_snapshot,
-                config_source=SecurityRule.SOURCE_PUSHED_PRE,
-                namespace_type=PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE,
-                namespace_value=enforcement_point.vsys_name,
-                precedence_rank=PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
-                entry=entry,
-            )
-        )
-
-    for entry in ensure_list((pushed_root.get("external-list") or {}).get("entry") if isinstance(pushed_root.get("external-list"), dict) else None):
-        if not isinstance(entry, dict):
-            continue
+    for entry, snapshot, namespace_type, namespace_value in merge_pushed_entries(
+            pushed_reads, "external-list", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
+    ):
         normalized_objects.append(
             normalize_external_list_object(
-                source_snapshot=pushed_snapshot,
+                source_snapshot=snapshot,
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
-                namespace_type=PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE,
-                namespace_value=enforcement_point.vsys_name,
-                precedence_rank=PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
+                namespace_type=namespace_type,
+                namespace_value=namespace_value,
+                precedence_rank=PUSHED_PRECEDENCE_BY_NAMESPACE[namespace_type],
                 entry=entry,
             )
         )
 
-    for entry in ensure_list((pushed_root.get("address-group") or {}).get("entry") if isinstance(pushed_root.get("address-group"), dict) else None):
-        if not isinstance(entry, dict):
-            continue
+    for entry, snapshot, namespace_type, namespace_value in merge_pushed_entries(
+            pushed_reads, "address-group", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
+    ):
         normalized_groups.append(
             normalize_address_group(
-                source_snapshot=pushed_snapshot,
+                source_snapshot=snapshot,
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
-                namespace_type=PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE,
-                namespace_value=enforcement_point.vsys_name,
-                precedence_rank=PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
+                namespace_type=namespace_type,
+                namespace_value=namespace_value,
+                precedence_rank=PUSHED_PRECEDENCE_BY_NAMESPACE[namespace_type],
                 entry=entry,
             )
         )

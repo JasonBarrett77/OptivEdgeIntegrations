@@ -89,25 +89,27 @@ appliance-group HA topologies where a vsys-level enforcement point spans multipl
 standalone/ha_pair/cluster and `active_appliance` names the active node; it exists so several appliances can
 be managed as one unit. Nothing about it concerns Panorama.
 
-**The `EnforcementPoint` appliance/appliance_group XOR does not mean "standalone vs HA".** It is currently
-read as a proxy for *Panorama-managed vs locally-managed* — see the comment in
-`normalization/snapshots.py`, `latest_pushed_shared_snapshot()`. That reading holds only by accident: the
-Panorama path is the only discovery path ever completed, `normalization/panorama.py` is the sole production
-site that creates an `EnforcementPoint`, and it always sets `appliance_group`. So `appliance_group IS NOT
-NULL` coincides with Panorama-managed. `EnforcementPoint.appliance` is never set outside tests.
+**The `EnforcementPoint` appliance/appliance_group XOR does not mean "standalone vs HA", and must not be
+read as a Panorama-management discriminant.** It was, until `normalization/snapshots.py::is_panorama_managed`
+replaced that inference with `ManagementStation.station_type` (`PAN_PANORAMA` / `PAN_FIREWALL`).
 
-This is a latent bug, not just an inelegance. The non-Panorama collection path was **intentionally** left
-incomplete, and locally-managed devices can legitimately be in an HA group — that is what `ApplianceGroup`
-is for. The first locally-managed HA pair collected will have `appliance_group` set, so
-`latest_pushed_shared_snapshot()` will hunt for pushed shared policy that cannot exist and
-`normalization/addresses.py` will raise "Panorama-managed but pushed-shared snapshot missing" for a device
-that never had one.
+The old reading held only by accident: the Panorama path is the only discovery path ever completed,
+`normalization/panorama.py` is the sole production site that creates an `EnforcementPoint`, and it always
+sets `appliance_group` — so `appliance_group IS NOT NULL` coincided with Panorama-managed.
+`EnforcementPoint.appliance` is never set outside tests. The non-Panorama collection path was
+**intentionally** left incomplete, and locally-managed devices can legitimately be in an HA group — that is
+what `ApplianceGroup` is for. The first such pair collected would have raised "missing pushed shared policy
+snapshot" for a device that never had one, and could not have.
 
-**The correct discriminant already exists:** `ManagementStation.station_type` (`PAN_PANORAMA` /
-`PAN_FIREWALL`). Panorama-management is a property of the station, not of the topology. Three sites ask the
-question the wrong way — `normalization/snapshots.py`, `normalization/addresses.py`,
-`normalization/regions.py`. Move the discriminant to `station_type` **before** touching either FK, or the
-check disappears silently.
+`is_panorama_managed()` is the single definition of that question; everything asking "should pushed Panorama
+data exist for this point?" goes through it. It gates both pushed sources — pushed-shared **and** pushed-vsys
+— in `addresses.py`, `regions.py` and `security_rules.py`, since neither exists without Panorama. When the
+non-Panorama collection path is completed, that helper is the seam.
+
+`EnforcementPoint.appliance` / `.appliance_group` still carry the two conditional `UniqueConstraint`s (one
+enforcement point per vsys name per owner), which is not expressible through `EnforcementNode` — so
+preserve that guarantee in any replacement. `get_in_scope_*` in `flows.py` `select_related`s
+`management_station` to keep the discriminant from costing a query per point.
 
 `Snapshot` (raw collected JSON payload + metadata) attaches to **exactly one** scope target
 (management_station / appliance_group / appliance / enforcement_point / enforcement_node) — `clean()`
@@ -198,9 +200,23 @@ code path work for both multi-vsys and single-vsys devices, with no branch on op
 ```
 
 Neither signal suffices alone: `@loc` separates the two Panorama scopes, read position separates the two
-local ones. `normalization/addresses.py` currently assigns namespace from read position alone. On a
-single-vsys firewall the vsys and non-vsys pushed responses are **byte-identical**, so every Panorama-Shared
-object is misclassified as vsys-scoped and would wrongly outrank a local shared object.
+local ones. `common.pushed_entry_scope()` is the single implementation; an absent `@loc` on a pushed entry
+**raises** rather than falling back to read position (398 pushed entries were checked across both lab
+devices and every one carries it, so absence is unobserved and guessing is what produced the original bug).
+
+`common.merge_pushed_entries()` merges the non-vsys and per-vsys reads into one set before classifying,
+keyed by `(name, namespace_type, namespace_value)`. That key is what makes both measured cases work without
+branching on device type:
+
+- **single-vsys** — the two responses are byte-identical, so each object arrives twice with the same `@loc`,
+  collapses to one row, and is scoped correctly. Read position instead emitted **104 rows for 52 objects**,
+  all mis-scoped as vsys.
+- **multi-vsys** — a name defined in both Panorama Shared and a device group arrives twice with *different*
+  `@loc`, so it stays two rows. That is a real cross-scope override pair; collapsing it would discard the
+  losing definition and hide the override entirely.
+
+A key collision whose entries disagree raises — one object with two different definitions in one scope is a
+state PAN-OS rejects, so it can only mean a collection fault.
 
 **Enumerating definitions for an enforcement point takes three reads**, in this order; first hit wins:
 
@@ -251,13 +267,22 @@ Panorama-Shared object for that enforcement point.
 Symmetry between sibling functions is not a reason on its own. The per-vsys reader earned its tolerance by
 measurement; the non-vsys one has no such warrant.
 
-### Test fixture caveat (`integrations/tests.py`)
+### Test fixtures build the shape production creates (`integrations/tests.py`)
 
-`_create_panorama_enforcement_point()` (18 call sites) builds an `EnforcementPoint` with `appliance` set and
-`appliance_group` null — **a shape production never creates**. On it, the `appliance_group_id is not None`
-guard in `normalization/addresses.py` cannot fire and the Panorama-shared branch is inert. Any test of
-pushed-shared handling written against that helper will pass without exercising the code it targets. Build a
-group-based enforcement point for those tests.
+`_create_panorama_enforcement_point()` used to set `appliance` and leave `appliance_group` null — a shape no
+collection path produces. On it the group-scoped pushed-shared branch was inert, so 13 tests were passing
+without exercising the code they targeted; fixing the discriminant surfaced all 13 at once.
+
+Both helpers now build the production shape, enforcement point on the group:
+
+- `_create_grouped_enforcement_point(...)` — takes `station_type` explicitly, for tests that care which side
+  of the discriminant they are on.
+- `_create_panorama_enforcement_point(...)` — delegates with `PAN_PANORAMA` and also creates the
+  pushed-shared-policy snapshot a Panorama-managed point always has in reality. Pass
+  `with_pushed_shared=False` to assert on its absence.
+
+Do not reintroduce an enforcement point whose `appliance` is set directly; nothing in production does that,
+and it silently disables the pushed-shared path.
 
 ### Observability model (`models/events.py`)
 

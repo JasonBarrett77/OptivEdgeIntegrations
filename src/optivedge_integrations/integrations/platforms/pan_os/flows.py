@@ -227,6 +227,7 @@ def get_in_scope_appliances(management_station: ManagementStation) -> list[Appli
     enforcement_points = management_station.enforcement_points.filter(in_scope=True).select_related(
         "appliance",
         "appliance_group",
+        "management_station",
     ).prefetch_related(
         "nodes__appliance",
         "appliance_group__appliances",
@@ -265,6 +266,7 @@ def get_in_scope_enforcement_points(management_station: ManagementStation) -> li
     enforcement_points = management_station.enforcement_points.filter(in_scope=True).select_related(
         "appliance",
         "appliance_group",
+        "management_station",
     ).prefetch_related(
         "nodes__appliance",
         "appliance_group__appliances",

@@ -29,16 +29,24 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     classify_prov_type,
     ensure_list,
     entry_provenance,
+    merge_pushed_entries,
     merged_shared,
     merged_vsys_entry,
     pushed_shared,
     pushed_vsys_panorama,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
+    is_panorama_managed,
     latest_merged_snapshot,
     latest_pushed_shared_snapshot,
     latest_pushed_vsys_snapshot,
 )
+
+
+PUSHED_PRECEDENCE_BY_NAMESPACE = {
+    PolicyObjectNamespace.PANORAMA_SHARED: PolicyObjectPrecedence.PANORAMA_SHARED,
+    PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE: PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
+}
 
 
 @dataclass(slots=True)
@@ -91,15 +99,15 @@ def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[Normal
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
     if merged_snapshot is None:
         raise ValueError(f"missing merged config snapshot for {enforcement_point}")
-    if enforcement_point.appliance_group_id is not None and pushed_shared_snapshot is None:
+    if is_panorama_managed(enforcement_point) and pushed_shared_snapshot is None:
         raise ValueError(f"missing pushed shared policy snapshot for {enforcement_point}")
-    if pushed_snapshot is None:
+    if is_panorama_managed(enforcement_point) and pushed_snapshot is None:
         raise ValueError(f"missing pushed VSYS snapshot for {enforcement_point}")
 
     merged_root = merged_vsys_entry(merged_snapshot.payload, enforcement_point.vsys_name)
     merged_shared_root = merged_shared(merged_snapshot.payload)
     pushed_shared_root = pushed_shared(pushed_shared_snapshot.payload) if pushed_shared_snapshot is not None else {}
-    pushed_root = pushed_vsys_panorama(pushed_snapshot.payload)
+    pushed_root = pushed_vsys_panorama(pushed_snapshot.payload) if pushed_snapshot is not None else {}
 
     normalized_regions: list[NormalizedRegion] = []
 
@@ -127,26 +135,21 @@ def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[Normal
             )
         )
 
-    for entry in _region_entries(pushed_shared_root):
+    # Both pushed reads merged, then classified per entry by @loc - never by which read
+    # returned them. See common.merge_pushed_entries() / common.pushed_entry_scope().
+    for entry, snapshot, namespace_type, namespace_value in merge_pushed_entries(
+        [(pushed_shared_root, pushed_shared_snapshot), (pushed_root, pushed_snapshot)],
+        "region",
+        vsys_name=enforcement_point.vsys_name,
+        label=str(enforcement_point),
+    ):
         normalized_regions.append(
             normalize_region(
-                source_snapshot=pushed_shared_snapshot,
+                source_snapshot=snapshot,
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
-                namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
-                namespace_value="shared",
-                precedence_rank=PolicyObjectPrecedence.PANORAMA_SHARED,
-                entry=entry,
-            )
-        )
-
-    for entry in _region_entries(pushed_root):
-        normalized_regions.append(
-            normalize_region(
-                source_snapshot=pushed_snapshot,
-                config_source=SecurityRule.SOURCE_PUSHED_PRE,
-                namespace_type=PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE,
-                namespace_value=enforcement_point.vsys_name,
-                precedence_rank=PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
+                namespace_type=namespace_type,
+                namespace_value=namespace_value,
+                precedence_rank=PUSHED_PRECEDENCE_BY_NAMESPACE[namespace_type],
                 entry=entry,
             )
         )

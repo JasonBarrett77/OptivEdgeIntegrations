@@ -61,6 +61,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     choose_local_appliance,
+    is_panorama_managed,
     latest_merged_snapshot,
     latest_pushed_vsys_snapshot,
 )
@@ -772,11 +773,13 @@ def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
     if merged_snapshot is None:
         raise ValueError(f"missing merged config snapshot for {enforcement_point}")
-    if pushed_snapshot is None:
+    if is_panorama_managed(enforcement_point) and pushed_snapshot is None:
         raise ValueError(f"missing pushed VSYS snapshot for {enforcement_point}")
 
     merged_security_rules, merged_default_rules = merged_local_rules(merged_snapshot, enforcement_point)
-    pushed_pre_rules, pushed_post_rules, pushed_default_rules = pushed_rules(pushed_snapshot)
+    pushed_pre_rules, pushed_post_rules, pushed_default_rules = (
+        pushed_rules(pushed_snapshot) if pushed_snapshot is not None else ([], [], [])
+    )
     pushed_defaults_by_name = {
         str(rule.get("@name") or ""): rule
         for rule in pushed_default_rules

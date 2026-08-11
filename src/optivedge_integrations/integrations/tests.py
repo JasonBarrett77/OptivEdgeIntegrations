@@ -14,12 +14,14 @@ from optivedge_integrations.integrations.models import (
     AddressObjectResolvedEntry,
     Appliance,
     ApplianceGroup,
+    EnforcementNode,
     EnforcementPoint,
     DeviceConfigurationProfile,
     IntegrationEvent,
     IntegrationRun,
     ManagementStation,
     Note,
+    PolicyObjectNamespace,
     SecurityRule,
     SecurityRuleApplication,
     SecurityRuleSearchVocabularyEntry,
@@ -34,6 +36,19 @@ from optivedge_integrations.integrations.platforms.pan_os import (
     PANOSInScopeRenormalizationResult,
     PANOSDynamicContentRefreshResult,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
+    build_normalized_addresses,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.regions import (
+    build_normalized_regions,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
+    build_normalized_security_rules,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
+    is_panorama_managed,
+    latest_pushed_shared_snapshot,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_device_configuration,
     normalize_enforcement_point_addresses,
@@ -47,6 +62,57 @@ from optivedge_integrations.integrations.search_vocabulary import (
 )
 
 
+def _create_grouped_enforcement_point(
+    *,
+    serial_number,
+    appliance_hostname,
+    station_hostname,
+    station_type,
+    group_name,
+    group_type=ApplianceGroup.TYPE_STANDALONE,
+    vsys_name="vsys1",
+):
+    """Build a station/group/appliance/EnforcementPoint chain with the point on the GROUP.
+
+    This is the shape production actually creates - `normalization/panorama.py` is the
+    only site that creates an EnforcementPoint, and it always sets `appliance_group`.
+    `_create_panorama_enforcement_point()` above sets `appliance` instead, a shape no
+    collection path produces, so anything exercising group-scoped lookups needs this
+    helper or it will silently test nothing.
+
+    `station_type` is a required argument because it - not the presence of a group - is
+    what decides whether Panorama data should exist for the point.
+    """
+    station = ManagementStation.objects.create(
+        station_type=station_type,
+        hostname=station_hostname,
+    )
+    group = ApplianceGroup.objects.create(
+        management_station=station,
+        name=group_name,
+        group_type=group_type,
+    )
+    appliance = Appliance.objects.create(
+        management_station=station,
+        appliance_group=group,
+        serial_number=serial_number,
+        hostname=appliance_hostname,
+    )
+    group.active_appliance = appliance
+    group.save()
+    enforcement_point = EnforcementPoint.objects.create(
+        management_station=station,
+        appliance_group=group,
+        vsys_name=vsys_name,
+    )
+    EnforcementNode.objects.create(
+        management_station=station,
+        enforcement_point=enforcement_point,
+        appliance=appliance,
+    )
+    return station, group, appliance, enforcement_point
+
+
 def _create_panorama_enforcement_point(
     *,
     serial_number,
@@ -54,25 +120,38 @@ def _create_panorama_enforcement_point(
     station_hostname="panorama.local",
     vsys_name="vsys1",
     vsys_display_name=None,
+    with_pushed_shared=True,
 ):
-    """Build a ManagementStation/Appliance/EnforcementPoint chain shared by normalization tests."""
-    station = ManagementStation.objects.create(
-        station_type=ManagementStation.StationType.PAN_PANORAMA,
-        hostname=station_hostname,
-    )
-    appliance = Appliance.objects.create(
-        management_station=station,
+    """Build a Panorama-managed station/group/appliance/EnforcementPoint chain.
+
+    Produces the shape production actually creates: the enforcement point hangs off an
+    `ApplianceGroup`, because `normalization/panorama.py` is the only site that creates
+    one and it always sets `appliance_group`. This helper previously set `appliance`
+    instead - a shape no collection path produces - which left the group-scoped
+    pushed-shared branch inert in every test that used it.
+
+    A Panorama-managed point always has a pushed-shared-policy snapshot in reality, so
+    one is created here too. Pass `with_pushed_shared=False` to assert on its absence.
+    """
+    station, group, appliance, enforcement_point = _create_grouped_enforcement_point(
         serial_number=serial_number,
-        hostname=appliance_hostname,
+        appliance_hostname=appliance_hostname,
+        station_hostname=station_hostname,
+        station_type=ManagementStation.StationType.PAN_PANORAMA,
+        group_name=f"grp-{serial_number}",
+        vsys_name=vsys_name,
     )
-    enforcement_point_kwargs = {"vsys_name": vsys_name}
     if vsys_display_name is not None:
-        enforcement_point_kwargs["vsys_display_name"] = vsys_display_name
-    enforcement_point = EnforcementPoint.objects.create(
-        management_station=station,
-        appliance=appliance,
-        **enforcement_point_kwargs,
-    )
+        enforcement_point.vsys_display_name = vsys_display_name
+        enforcement_point.save()
+    if with_pushed_shared:
+        Snapshot.objects.create(
+            management_station=station,
+            appliance_group=group,
+            source_type="show_pushed_shared_policy",
+            collected_at=timezone.now(),
+            payload={"shared": {}},
+        )
     return station, appliance, enforcement_point
 
 
@@ -2057,6 +2136,9 @@ class DeviceConfigurationNormalizationTests(TestCase):
                             "entry": [
                                 {
                                     "@name": "prod_west_edl",
+                                    # Every pushed entry on both lab devices carries @loc
+                                    # (398 checked, none missing); scope is derived from it.
+                                    "@loc": "prod-west",
                                     "type": {"ip": {"url": "http://192.0.2.10/edl.txt"}},
                                 }
                             ]
@@ -2684,3 +2766,224 @@ class NoteViewTests(TestCase):
         # In scope first (sorted by active appliance name), then out of scope (same sort);
         # setUp's self.group has no in-scope EP and no active appliance -> out, nulls last.
         self.assertEqual(ordered, [g_in_a, g_in_b, g_out_a, g_out_z, self.group])
+
+
+class PanoramaManagementDiscriminantTests(TestCase):
+    """Whether Panorama data should exist is read from station_type, not from topology.
+
+    These cover a path that previously had no tests at all, which is how the proxy
+    survived: `latest_pushed_shared_snapshot()` inferred Panorama-management from
+    `EnforcementPoint.appliance_group` being set. That inference held only because the
+    non-Panorama collection path was never completed. `ApplianceGroup` models HA and
+    multi-appliance topology, so a locally-managed HA pair - the thing it exists for -
+    would have been misread as Panorama-managed and failed normalization.
+    """
+
+    def _merged_snapshot(self, station, appliance, enforcement_point):
+        return Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={
+                "config": {
+                    "shared": {},
+                    "devices": {
+                        "entry": [{
+                            "@name": "localhost.localdomain",
+                            "vsys": {"entry": [{"@name": enforcement_point.vsys_name}]},
+                        }]
+                    },
+                }
+            },
+        )
+
+    def test_station_type_decides_not_the_presence_of_an_appliance_group(self):
+        _, _, _, panorama_point = _create_grouped_enforcement_point(
+            serial_number="0001", appliance_hostname="fw-a",
+            station_hostname="panorama.local", group_name="grp-pan",
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+        )
+        _, _, _, local_point = _create_grouped_enforcement_point(
+            serial_number="0002", appliance_hostname="fw-b",
+            station_hostname="firewall.local", group_name="grp-local",
+            station_type=ManagementStation.StationType.PAN_FIREWALL,
+            group_type=ApplianceGroup.TYPE_HA_PAIR,
+        )
+
+        # Both have an appliance group; only the station type differs.
+        self.assertIsNotNone(panorama_point.appliance_group)
+        self.assertIsNotNone(local_point.appliance_group)
+        self.assertTrue(is_panorama_managed(panorama_point))
+        self.assertFalse(is_panorama_managed(local_point))
+
+    def test_pushed_shared_snapshot_is_not_returned_for_a_locally_managed_group(self):
+        station, group, _, point = _create_grouped_enforcement_point(
+            serial_number="0003", appliance_hostname="fw-c",
+            station_hostname="firewall.local", group_name="grp-ha",
+            station_type=ManagementStation.StationType.PAN_FIREWALL,
+            group_type=ApplianceGroup.TYPE_HA_PAIR,
+        )
+        # Even if a snapshot somehow exists, it must not be attributed to a device with
+        # no Panorama - the old code would have returned it purely because a group exists.
+        Snapshot.objects.create(
+            management_station=station,
+            appliance_group=group,
+            source_type="show_pushed_shared_policy",
+            collected_at=timezone.now(),
+            payload={"shared": {}},
+        )
+        self.assertIsNone(latest_pushed_shared_snapshot(point))
+
+    def test_pushed_shared_snapshot_is_returned_for_a_panorama_managed_group(self):
+        station, group, _, point = _create_grouped_enforcement_point(
+            serial_number="0004", appliance_hostname="fw-d",
+            station_hostname="panorama.local", group_name="grp-pan",
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+        )
+        snapshot = Snapshot.objects.create(
+            management_station=station,
+            appliance_group=group,
+            source_type="show_pushed_shared_policy",
+            collected_at=timezone.now(),
+            payload={"shared": {}},
+        )
+        self.assertEqual(latest_pushed_shared_snapshot(point), snapshot)
+
+    def test_locally_managed_ha_pair_normalizes_without_panorama_snapshots(self):
+        """The regression: this raised "missing pushed shared policy snapshot" for a
+        device that never had one, and could not have."""
+        station, _, appliance, point = _create_grouped_enforcement_point(
+            serial_number="0005", appliance_hostname="fw-e",
+            station_hostname="firewall.local", group_name="grp-ha2",
+            station_type=ManagementStation.StationType.PAN_FIREWALL,
+            group_type=ApplianceGroup.TYPE_HA_PAIR,
+        )
+        self._merged_snapshot(station, appliance, point)
+
+        objects, groups = build_normalized_addresses(point)
+        # Only the synthesized builtin "any" survives - nothing Panorama-derived, because
+        # there is no Panorama. Previously this call raised instead of returning.
+        self.assertEqual(
+            [(obj.name, obj.namespace_type) for obj in objects],
+            [("any", "builtin")],
+        )
+        self.assertEqual(groups, [])
+        self.assertEqual(build_normalized_regions(point), [])
+        self.assertEqual(build_normalized_security_rules(point), [])
+
+    def test_panorama_managed_point_still_requires_its_pushed_snapshots(self):
+        """The guard must keep firing where it means something - a Panorama-managed
+        point missing pushed data is a collection failure, not an empty result."""
+        station, _, appliance, point = _create_grouped_enforcement_point(
+            serial_number="0006", appliance_hostname="fw-f",
+            station_hostname="panorama.local", group_name="grp-pan2",
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+        )
+        self._merged_snapshot(station, appliance, point)
+
+        with self.assertRaisesMessage(ValueError, "missing pushed shared policy snapshot"):
+            build_normalized_addresses(point)
+        with self.assertRaisesMessage(ValueError, "missing pushed VSYS snapshot"):
+            build_normalized_security_rules(point)
+
+
+class PushedScopeClassificationTests(TestCase):
+    """Pushed objects are scoped by @loc, never by which read returned them.
+
+    Grounded in what both lab devices actually return:
+      PA-5220  non-vsys 352 objects all @loc=shared; per-vsys 1 object @loc=<dg>;
+               the one overlapping name carries DIFFERENT @loc in each - a real
+               cross-scope override pair.
+      PA-VM    non-vsys and per-vsys are byte-identical, 52 objects, @loc=shared x51
+               plus one @loc=prod-west - so read position mis-scopes 51 of them.
+    """
+
+    def _point(self):
+        station, appliance, point = _create_panorama_enforcement_point(
+            serial_number="9001", appliance_hostname="fw-scope", with_pushed_shared=False,
+        )
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [
+                {"@name": "localhost.localdomain",
+                 "vsys": {"entry": [{"@name": point.vsys_name}]}}]}}},
+        )
+        return station, point
+
+    def _pushed(self, station, point, *, group_payload, vsys_payload):
+        Snapshot.objects.create(
+            management_station=station, appliance_group=point.appliance_group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload=group_payload,
+        )
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload=vsys_payload,
+        )
+
+    @staticmethod
+    def _addr(name, loc, value):
+        return {"@name": name, "@loc": loc, "ip-netmask": value}
+
+    def test_identical_reads_yield_one_row_scoped_by_loc_not_read_position(self):
+        """The PA-VM case. Read position would call these vsys-scoped and duplicate them."""
+        station, point = self._point()
+        entries = [self._addr("shared-a", "shared", "10.0.0.1"),
+                   self._addr("dg-b", "prod-west", "10.0.0.2")]
+        payload = {"shared": {"address": {"entry": entries}}}
+        # Byte-identical responses, as measured on the single-vsys device.
+        self._pushed(station, point, group_payload=payload,
+                     vsys_payload={"policy": {"panorama": {"address": {"entry": entries}}}})
+
+        objects, _ = build_normalized_addresses(point)
+        by_name = {o.name: o for o in objects if o.name in {"shared-a", "dg-b"}}
+        self.assertEqual(len(by_name), 2, "each object must appear exactly once")
+        self.assertEqual(by_name["shared-a"].namespace_type, PolicyObjectNamespace.PANORAMA_SHARED)
+        self.assertEqual(by_name["shared-a"].namespace_value, "shared")
+        # Carried by the non-vsys read, but device-group authored -> vsys scope.
+        self.assertEqual(by_name["dg-b"].namespace_type, PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE)
+        self.assertEqual(by_name["dg-b"].namespace_value, point.vsys_name)
+
+    def test_same_name_in_both_scopes_is_kept_as_two_rows(self):
+        """The PA-5220 override pair. Both definitions are delivered and both must persist."""
+        station, point = self._point()
+        self._pushed(
+            station, point,
+            group_payload={"shared": {"address": {"entry": [
+                self._addr("ovr", "shared", "10.213.1.1")]}}},
+            vsys_payload={"policy": {"panorama": {"address": {"entry": [
+                self._addr("ovr", "dg_app", "10.214.1.1")]}}}},
+        )
+        objects, _ = build_normalized_addresses(point)
+        ovr = sorted((o for o in objects if o.name == "ovr"), key=lambda o: o.namespace_type)
+        self.assertEqual(
+            [(o.namespace_type, o.value) for o in ovr],
+            [(PolicyObjectNamespace.PANORAMA_SHARED, "10.213.1.1"),
+             (PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, "10.214.1.1")],
+        )
+
+    def test_same_key_with_conflicting_definitions_raises(self):
+        station, point = self._point()
+        self._pushed(
+            station, point,
+            group_payload={"shared": {"address": {"entry": [
+                self._addr("clash", "shared", "10.0.0.1")]}}},
+            vsys_payload={"policy": {"panorama": {"address": {"entry": [
+                self._addr("clash", "shared", "10.0.0.99")]}}}},
+        )
+        with self.assertRaisesMessage(ValueError, "conflicting pushed address definitions"):
+            build_normalized_addresses(point)
+
+    def test_pushed_entry_without_loc_raises_rather_than_guessing(self):
+        station, point = self._point()
+        self._pushed(
+            station, point,
+            group_payload={"shared": {"address": {"entry": [
+                {"@name": "no-loc", "ip-netmask": "10.0.0.1"}]}}},
+            vsys_payload={"policy": {"panorama": {}}},
+        )
+        with self.assertRaisesMessage(ValueError, "has no @loc marker"):
+            build_normalized_addresses(point)
