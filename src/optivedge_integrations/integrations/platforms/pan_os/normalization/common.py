@@ -285,7 +285,26 @@ def merged_shared(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def pushed_shared(payload: dict[str, Any] | Any) -> dict[str, Any]:
-    """Extract the shared subtree from a show_pushed_shared_policy payload.
+    """Extract the object-bearing subtree from a show_pushed_shared_policy payload.
+
+    The non-vsys response roots differently by device, so both shapes are accepted:
+
+        result.shared            multi-vsys PA-5220, 11.1.13-h3
+        result.policy.panorama   single-vsys PA-VM,  11.2.3
+
+    Do not branch on device type to pick one. Two samples cannot separate model,
+    version and vsys mode, and the @loc classification downstream makes the
+    distinction unnecessary anyway - scope comes from the marker, not the root.
+
+    Reading only `shared` returned {} silently on the PA-VM. No objects were lost
+    there only because its two pushed reads are byte-identical, so the per-vsys read
+    caught what this one dropped - luck, not design. A device with this shape AND
+    genuine separation between the two reads (the PA-5220 has such separation:
+    shared-object optimization keeps its 176 Shared objects out of every per-vsys
+    response) would lose every Panorama-Shared object with no error at all.
+
+    A dict carrying neither root raises rather than yielding {}: an unrecognised
+    shape is not evidence of an empty one.
 
     DELIBERATELY ASYMMETRIC with pushed_vsys_panorama(): that one absorbs
     NO_PUSHED_POLICY_MESSAGE and returns {}, this one raises on any non-dict payload.
@@ -307,10 +326,24 @@ def pushed_shared(payload: dict[str, Any] | Any) -> dict[str, Any]:
         raise ValueError(
             f"unexpected pushed shared payload type: {type(payload).__name__}: {payload!r}"
         )
-    shared = payload.get("shared", {})
-    if not isinstance(shared, dict):
-        raise ValueError(f"unexpected pushed shared subtree type: {type(shared).__name__}")
-    return shared
+
+    if "shared" in payload:
+        shared = payload["shared"]
+        if not isinstance(shared, dict):
+            raise ValueError(f"unexpected pushed shared subtree type: {type(shared).__name__}")
+        return shared
+
+    policy = payload.get("policy")
+    if isinstance(policy, dict) and "panorama" in policy:
+        panorama = policy["panorama"]
+        if not isinstance(panorama, dict):
+            raise ValueError(f"unexpected pushed panorama subtree type: {type(panorama).__name__}")
+        return panorama
+
+    raise ValueError(
+        f"unrecognised pushed shared payload root: expected 'shared' or 'policy.panorama', "
+        f"got keys {sorted(payload)}"
+    )
 
 
 def pushed_vsys_panorama(payload: dict[str, Any] | Any) -> dict[str, Any]:

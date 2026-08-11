@@ -45,6 +45,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.regions 
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     build_normalized_security_rules,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    pushed_shared,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     is_panorama_managed,
     latest_pushed_shared_snapshot,
@@ -2987,3 +2990,70 @@ class PushedScopeClassificationTests(TestCase):
         )
         with self.assertRaisesMessage(ValueError, "has no @loc marker"):
             build_normalized_addresses(point)
+
+
+class PushedSharedPayloadShapeTests(TestCase):
+    """The non-vsys pushed response roots differently by device; both are accepted.
+
+        result.shared            multi-vsys PA-5220, 11.1.13-h3
+        result.policy.panorama   single-vsys PA-VM,  11.2.3
+
+    Reading only `shared` returned {} silently on the second shape. Nothing was lost
+    on the lab PA-VM only because its two pushed reads are byte-identical, so the
+    per-vsys read caught what this one dropped.
+    """
+
+    ENTRY = {"@name": "shr-1", "@loc": "shared", "ip-netmask": "10.0.0.1"}
+
+    def test_both_payload_roots_yield_the_same_subtree(self):
+        by_shared = pushed_shared({"shared": {"address": {"entry": [self.ENTRY]}}})
+        by_panorama = pushed_shared({"policy": {"panorama": {"address": {"entry": [self.ENTRY]}}}})
+        self.assertEqual(by_shared, by_panorama)
+        self.assertEqual(by_shared["address"]["entry"], [self.ENTRY])
+
+    def test_unrecognised_root_raises_rather_than_reporting_an_empty_subtree(self):
+        """An unrecognised shape is not evidence of an empty one - returning {} here
+        would report "this device has no shared objects" for an unexplained response."""
+        with self.assertRaisesMessage(ValueError, "unrecognised pushed shared payload root"):
+            pushed_shared({"something-else": {}})
+
+    def test_non_dict_payload_still_raises_with_its_value(self):
+        """Kept asymmetric with pushed_vsys_panorama(), which absorbs this string."""
+        with self.assertRaisesMessage(ValueError, "No shared policy pushed to device"):
+            pushed_shared("No shared policy pushed to device")
+
+    def test_empty_shared_subtree_is_a_valid_empty_result(self):
+        self.assertEqual(pushed_shared({"shared": {}}), {})
+
+    def test_pa_vm_shape_end_to_end_produces_correctly_scoped_objects(self):
+        """The shape that used to yield nothing now normalizes, and the merge absorbs
+        the duplicate arrival that made this fix unsafe before @loc classification."""
+        station, appliance, point = _create_panorama_enforcement_point(
+            serial_number="9100", appliance_hostname="fw-pavm", with_pushed_shared=False,
+        )
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [
+                {"@name": "localhost.localdomain",
+                 "vsys": {"entry": [{"@name": point.vsys_name}]}}]}}},
+        )
+        # Byte-identical reads in the PA-VM's root shape, as measured.
+        entries = [self.ENTRY, {"@name": "dg-1", "@loc": "prod-west", "ip-netmask": "10.0.0.2"}]
+        body = {"policy": {"panorama": {"address": {"entry": entries}}}}
+        Snapshot.objects.create(
+            management_station=station, appliance_group=point.appliance_group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(), payload=body,
+        )
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload=body,
+        )
+
+        objects, _ = build_normalized_addresses(point)
+        got = {o.name: (o.namespace_type, o.namespace_value)
+               for o in objects if o.name in {"shr-1", "dg-1"}}
+        self.assertEqual(got, {
+            "shr-1": (PolicyObjectNamespace.PANORAMA_SHARED, "shared"),
+            "dg-1": (PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, point.vsys_name),
+        }, "each object once, scoped by @loc - not duplicated across the two reads")

@@ -228,6 +228,23 @@ state PAN-OS rejects, so it can only mean a collection fault.
                                                    where @loc == "shared"
 ```
 
+**The non-vsys pushed response roots differently by device, and `pushed_shared()` accepts both.**
+
+```
+result.shared            multi-vsys PA-5220, 11.1.13-h3
+result.policy.panorama   single-vsys PA-VM,  11.2.3
+```
+
+Do not branch on device type to pick one — two samples cannot separate model, version and vsys mode, and
+`@loc` classification makes the distinction unnecessary anyway. Reading only `shared` returned `{}` silently
+on the PA-VM; no objects were lost there only because its two pushed reads are byte-identical, so the
+per-vsys read caught what this one dropped. A device with that shape **and** genuine separation between the
+two reads would lose every Panorama-Shared object with no error — and the PA-5220 has exactly such
+separation: shared-object optimization keeps its 176 Shared objects out of every per-vsys response, making
+the non-vsys read the only path to them.
+
+A dict carrying neither root **raises**. An unrecognised shape is not evidence of an empty one.
+
 **`show config merged` contains no Panorama-pushed policy objects.** The name invites the opposite
 assumption: it is the firewall's local running config merged with Panorama **template** config, and
 templates carry device/network settings, not policy objects. On the lab PA-5220 it is blind to 178
