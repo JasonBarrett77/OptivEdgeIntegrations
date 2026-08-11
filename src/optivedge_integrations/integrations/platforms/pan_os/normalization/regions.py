@@ -19,7 +19,7 @@ from optivedge_integrations.integrations.models import (
     EnforcementPoint,
     FieldProvenance,
     PolicyObjectNamespace,
-    PolicyObjectPrecedence,
+    precedence_for,
     Region,
     SecurityRule,
     Snapshot,
@@ -43,12 +43,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
 )
 
 
-PUSHED_PRECEDENCE_BY_NAMESPACE = {
-    PolicyObjectNamespace.PANORAMA_SHARED: PolicyObjectPrecedence.PANORAMA_SHARED,
-    PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE: PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
-}
-
-
 @dataclass(slots=True)
 class NormalizedRegion:
     source_snapshot: Snapshot
@@ -68,7 +62,6 @@ def normalize_region(
     config_source: str,
     namespace_type: str,
     namespace_value: str,
-    precedence_rank: int,
     entry: dict[str, Any],
 ) -> NormalizedRegion:
     entry_rk, entry_rv = entry_provenance(entry)
@@ -78,7 +71,7 @@ def normalize_region(
         name=str(entry.get("@name") or ""),
         namespace_type=namespace_type,
         namespace_value=namespace_value,
-        precedence_rank=precedence_rank,
+        precedence_rank=precedence_for(namespace_type),
         raw_region=entry,
         field_provenance_data=[
             ("__entry__", entry_rk, entry_rv),
@@ -118,7 +111,6 @@ def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[Normal
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
                 namespace_value=enforcement_point.vsys_name,
-                precedence_rank=PolicyObjectPrecedence.LOCAL_VSYS,
                 entry=entry,
             )
         )
@@ -130,7 +122,6 @@ def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[Normal
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
                 namespace_value="shared",
-                precedence_rank=PolicyObjectPrecedence.LOCAL_SHARED,
                 entry=entry,
             )
         )
@@ -149,7 +140,6 @@ def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[Normal
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 namespace_type=namespace_type,
                 namespace_value=namespace_value,
-                precedence_rank=PUSHED_PRECEDENCE_BY_NAMESPACE[namespace_type],
                 entry=entry,
             )
         )

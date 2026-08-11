@@ -23,7 +23,7 @@ from optivedge_integrations.integrations.models import (
     EnforcementPoint,
     FieldProvenance,
     PolicyObjectNamespace,
-    PolicyObjectPrecedence,
+    precedence_for,
     SecurityRule,
     Snapshot,
 )
@@ -57,15 +57,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.types im
 
 
 ANY_OBJECT_NAME = "any"
-
-# Precedence for the two scopes a Panorama-pushed object can occupy. Keyed by the
-# namespace pushed_entry_scope() derives from @loc, so the rank can never disagree with
-# the scope - they are decided together rather than passed separately at each call site.
-PUSHED_PRECEDENCE_BY_NAMESPACE = {
-    PolicyObjectNamespace.PANORAMA_SHARED: PolicyObjectPrecedence.PANORAMA_SHARED,
-    PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE: PolicyObjectPrecedence.PUSHED_VSYS_EFFECTIVE,
-}
-
 
 @dataclass(slots=True)
 class NormalizedAddressTag:
@@ -204,7 +195,7 @@ def build_builtin_any_object(source_snapshot: Snapshot) -> NormalizedAddressObje
         name=ANY_OBJECT_NAME,
         namespace_type=PolicyObjectNamespace.BUILTIN,
         namespace_value=ANY_OBJECT_NAME,
-        precedence_rank=PolicyObjectPrecedence.BUILTIN,
+        precedence_rank=precedence_for(PolicyObjectNamespace.BUILTIN),
         address_type=AddressObject.TYPE_BUILTIN_ANY,
         value=ANY_OBJECT_NAME,
         normalized_value=normalized_value,
@@ -228,7 +219,6 @@ def normalize_address_object(
     config_source: str,
     namespace_type: str,
     namespace_value: str,
-    precedence_rank: int,
     entry: dict[str, Any],
 ) -> NormalizedAddressObject:
     entry_rk, entry_rv = entry_provenance(entry)
@@ -263,7 +253,7 @@ def normalize_address_object(
         name=str(entry.get("@name") or ""),
         namespace_type=namespace_type,
         namespace_value=namespace_value,
-        precedence_rank=precedence_rank,
+        precedence_rank=precedence_for(namespace_type),
         address_type=address_type,
         value=value,
         normalized_value=normalized_value,
@@ -291,7 +281,6 @@ def normalize_external_list_object(
     config_source: str,
     namespace_type: str,
     namespace_value: str,
-    precedence_rank: int,
     entry: dict[str, Any],
 ) -> NormalizedAddressObject:
     entry_rk, entry_rv = entry_provenance(entry)
@@ -305,7 +294,7 @@ def normalize_external_list_object(
         name=str(entry.get("@name") or ""),
         namespace_type=namespace_type,
         namespace_value=namespace_value,
-        precedence_rank=precedence_rank,
+        precedence_rank=precedence_for(namespace_type),
         address_type=AddressObject.TYPE_EDL,
         value=value,
         normalized_value=normalized_value,
@@ -350,8 +339,8 @@ def normalize_predefined_address_object(
         config_source=SecurityRule.SOURCE_LOCAL,
         name=name,
         namespace_type=PolicyObjectNamespace.PREDEFINED,
+        precedence_rank=precedence_for(PolicyObjectNamespace.PREDEFINED),
         namespace_value="predefined",
-        precedence_rank=PolicyObjectPrecedence.PREDEFINED,
         address_type=AddressObject.TYPE_EDL,
         value=name,
         normalized_value=normalized_value,
@@ -417,7 +406,6 @@ def normalize_address_group(
     config_source: str,
     namespace_type: str,
     namespace_value: str,
-    precedence_rank: int,
     entry: dict[str, Any],
 ) -> NormalizedAddressGroup:
     entry_rk, entry_rv = entry_provenance(entry)
@@ -440,7 +428,7 @@ def normalize_address_group(
         name=str(entry.get("@name") or ""),
         namespace_type=namespace_type,
         namespace_value=namespace_value,
-        precedence_rank=precedence_rank,
+        precedence_rank=precedence_for(namespace_type),
         dynamic_filter=dynamic_filter,
         raw_group=entry,
         tags=tags,
@@ -480,7 +468,6 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
                 namespace_value=enforcement_point.vsys_name,
-                precedence_rank=PolicyObjectPrecedence.LOCAL_VSYS,
                 entry=entry,
             )
         )
@@ -494,7 +481,6 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
                 namespace_value=enforcement_point.vsys_name,
-                precedence_rank=PolicyObjectPrecedence.LOCAL_VSYS,
                 entry=entry,
             )
         )
@@ -508,7 +494,6 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
                 namespace_value="shared",
-                precedence_rank=PolicyObjectPrecedence.LOCAL_SHARED,
                 entry=entry,
             )
         )
@@ -522,7 +507,6 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
                 namespace_value="shared",
-                precedence_rank=PolicyObjectPrecedence.LOCAL_SHARED,
                 entry=entry,
             )
         )
@@ -543,7 +527,6 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 namespace_type=namespace_type,
                 namespace_value=namespace_value,
-                precedence_rank=PUSHED_PRECEDENCE_BY_NAMESPACE[namespace_type],
                 entry=entry,
             )
         )
@@ -557,7 +540,6 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 namespace_type=namespace_type,
                 namespace_value=namespace_value,
-                precedence_rank=PUSHED_PRECEDENCE_BY_NAMESPACE[namespace_type],
                 entry=entry,
             )
         )
@@ -571,7 +553,6 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 namespace_type=namespace_type,
                 namespace_value=namespace_value,
-                precedence_rank=PUSHED_PRECEDENCE_BY_NAMESPACE[namespace_type],
                 entry=entry,
             )
         )

@@ -25,49 +25,100 @@ class PolicyObjectNamespace(models.TextChoices):
     PREDEFINED = "predefined", "Predefined"
 
 
-class PolicyObjectPrecedence:
-    """MEASURED WRONG - a four-level ladder PAN-OS does not implement. Do not extend.
+class PolicyObjectScope:
+    """The axis PAN-OS actually resolves object names over.
 
     Established against a Panorama-managed PA-5220 (11.1.13-h3, multi-vsys) and a PA-VM
     (11.2.3, single-vsys), 2026-08, by reading compiled policy
-    (`show running security-policy-addresses`) rather than configuration - configuration
-    reads report every definition as-is and never name a winner.
+    (`show running security-policy-addresses`). Configuration reads report every
+    definition as-is and never name a winner, so they cannot answer this.
 
-    PAN-OS has **two** scopes, and scope is the only precedence axis:
+    There are TWO scopes, and scope is the only precedence axis:
 
-        vsys-specific  >  shared
+        VSYS  >  SHARED
 
-    Ownership (firewall-local vs Panorama-pushed) is provenance, not precedence. Two
-    owners cannot occupy the same scope under one name - PAN-OS rejects the configuration
-    instead of choosing a winner.
+    Ownership - firewall-local versus Panorama-pushed - is **provenance, not precedence**.
+    A pushed device-group object is vsys-scoped and beats a firewall-local *shared*
+    object; measured, pushed-DG 10.221.1.1 beat local-shared 10.222.1.1.
 
-    The ranks below are wrong twice over:
+    Two owners cannot occupy the same scope under one name: PAN-OS rejects the
+    configuration rather than choosing. So within one scope a name has at most one
+    definition, and two candidates in one scope means our collection is wrong - not that
+    a tie needs breaking.
 
-    1. LOCAL_SHARED (20) ahead of PUSHED_VSYS_EFFECTIVE (30) is INVERTED. A pushed
-       device-group object is vsys-scoped and beats a firewall-local shared object;
-       measured, pushed-DG 10.221.1.1 beat local-shared 10.222.1.1 in compiled policy.
-    2. Ranks 10/30 and 20/40 model coexistence for pairs PAN-OS REJECTS - states that
-       cannot exist on a device.
+    VENDOR covers builtin/predefined objects. Its position below user configuration is
+    an assumption: whether a user object can shadow a predefined one was never measured.
 
-    The ladder reproduced every earlier observation, which is why it survived: those
-    observations could not distinguish it from the two-scope model. It was
-    underdetermined, not supported.
-
-    The seven PolicyObjectNamespace values remain useful *provenance* and should be kept;
-    only their use as an ordering is unsound. Note also that
-    `normalization/security_rules.py::literal_namespace` hardcodes 10 and 30 rather than
-    reading this class, so changing the values here does not reach every site.
-
-    See CLAUDE.md, "Object scope resolution (PAN-OS)".
+    A four-level ladder (local-vsys > local-shared > pushed-vsys > pushed-shared) was
+    believed and is wrong. It reproduced every observation available at the time because
+    those observations could not distinguish it from this model - underdetermined, not
+    supported.
     """
 
-    LOCAL_VSYS = 10
-    LOCAL_SHARED = 20
-    PUSHED_VSYS_EFFECTIVE = 30
-    PANORAMA_SHARED = 40
-    PANORAMA_DEVICE_GROUP = 50
+    VSYS = "vsys"
+    SHARED = "shared"
+    VENDOR = "vendor"
+
+    #: Resolution order, most specific first. Iterate this rather than sorting.
+    ORDER = (VSYS, SHARED, VENDOR)
+
+
+#: Which scope each namespace occupies. Namespaces stay as PROVENANCE - they record where
+#: a definition came from - while the scope is what decides which one wins.
+SCOPE_BY_NAMESPACE = {
+    # vsys scope: local and pushed alike. Ownership does not separate them.
+    PolicyObjectNamespace.LOCAL_VSYS: PolicyObjectScope.VSYS,
+    PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE: PolicyObjectScope.VSYS,
+    PolicyObjectNamespace.PANORAMA_DEVICE_GROUP: PolicyObjectScope.VSYS,
+    # shared scope: likewise.
+    PolicyObjectNamespace.LOCAL_SHARED: PolicyObjectScope.SHARED,
+    PolicyObjectNamespace.PANORAMA_SHARED: PolicyObjectScope.SHARED,
+    # vendor-supplied, below user configuration (position assumed, not measured).
+    PolicyObjectNamespace.BUILTIN: PolicyObjectScope.VENDOR,
+    PolicyObjectNamespace.PREDEFINED: PolicyObjectScope.VENDOR,
+}
+
+
+class PolicyObjectPrecedence:
+    """The numeric encoding of PolicyObjectScope, for `Meta.ordering` and the composite
+    index. It is derived, never chosen - use `precedence_for()` rather than writing a
+    literal, so the rank and the namespace cannot disagree.
+
+    Equal ranks are meaningful: two objects sharing a name and a rank occupy one scope,
+    which PAN-OS rejects. A tie is a collection or classification fault, not something to
+    break arbitrarily.
+    """
+
+    VSYS = 10
+    SHARED = 20
     BUILTIN = 90
     PREDEFINED = 95
+
+
+_RANK_BY_SCOPE = {
+    PolicyObjectScope.VSYS: PolicyObjectPrecedence.VSYS,
+    PolicyObjectScope.SHARED: PolicyObjectPrecedence.SHARED,
+}
+
+
+def scope_for(namespace_type: str) -> str:
+    """The scope a namespace occupies. Unknown namespaces raise rather than defaulting -
+    a new namespace must state which scope it belongs to."""
+    try:
+        return SCOPE_BY_NAMESPACE[namespace_type]
+    except KeyError:
+        raise ValueError(
+            f"no scope defined for namespace {namespace_type!r}; add it to SCOPE_BY_NAMESPACE"
+        ) from None
+
+
+def precedence_for(namespace_type: str) -> int:
+    """The rank for a namespace, derived from its scope. The single source of the value."""
+    if namespace_type == PolicyObjectNamespace.PREDEFINED:
+        return PolicyObjectPrecedence.PREDEFINED
+    if namespace_type == PolicyObjectNamespace.BUILTIN:
+        return PolicyObjectPrecedence.BUILTIN
+    return _RANK_BY_SCOPE[scope_for(namespace_type)]
 
 
 class PolicyObjectBase(ProvenancedMixin, models.Model):

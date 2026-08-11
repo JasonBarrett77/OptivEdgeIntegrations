@@ -22,7 +22,11 @@ from optivedge_integrations.integrations.models import (
     ManagementStation,
     Note,
     PolicyObjectNamespace,
+    PolicyObjectPrecedence,
+    PolicyObjectScope,
     Region,
+    precedence_for,
+    scope_for,
     SecurityRule,
     SecurityRuleApplication,
     SecurityRuleSearchVocabularyEntry,
@@ -47,6 +51,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     ISO_3166_1_ALPHA2_REGIONS,
     NormalizedSecurityRuleMember,
     build_normalized_security_rules,
+    first_effective_object,
+    literal_namespace,
     resolve_rule_address_refs,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
@@ -3084,18 +3090,22 @@ class CrossNamespaceNameResolutionTests(TestCase):
             model=SecurityRuleSourceAddressRef, value=name, prov="", position=0
         )]
 
-    def _object(self, name, value="10.0.0.1/32", is_any=False):
-        obj = AddressObject(name=name, value=value, is_any=is_any)
+    def _object(self, name, value="10.0.0.1/32", is_any=False,
+                namespace_type=PolicyObjectNamespace.LOCAL_VSYS):
+        obj = AddressObject(name=name, value=value, is_any=is_any,
+                            namespace_type=namespace_type, namespace_value="vsys1")
         obj.pk = abs(hash(name)) % 10_000
         return obj
 
-    def _group(self, name, dynamic_filter=""):
-        grp = AddressGroup(name=name, dynamic_filter=dynamic_filter)
+    def _group(self, name, dynamic_filter="",
+               namespace_type=PolicyObjectNamespace.LOCAL_VSYS):
+        grp = AddressGroup(name=name, dynamic_filter=dynamic_filter,
+                           namespace_type=namespace_type, namespace_value="vsys1")
         grp.pk = abs(hash(name)) % 10_000
         return grp
 
-    def _region(self, name):
-        reg = Region(name=name)
+    def _region(self, name, namespace_type=PolicyObjectNamespace.LOCAL_VSYS):
+        reg = Region(name=name, namespace_type=namespace_type, namespace_value="vsys1")
         reg.pk = abs(hash(name)) % 10_000
         return reg
 
@@ -3161,3 +3171,103 @@ class CrossNamespaceNameResolutionTests(TestCase):
         )
         self.assertEqual(refs[0].ref_type, SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT)
         self.assertEqual(refs[0].address_object.name, name)
+
+
+class ScopePrecedenceTests(TestCase):
+    """Scope is the only precedence axis; ownership is provenance.
+
+    Measured against a PA-5220 11.1.13-h3 and a PA-VM 11.2.3, 2026-08, from compiled
+    policy. The four-level ladder this replaced was wrong twice: it put LOCAL_SHARED
+    ahead of PUSHED_VSYS_EFFECTIVE, and it gave distinct ranks to pairs PAN-OS rejects.
+    """
+
+    def test_vsys_scope_namespaces_all_rank_together(self):
+        vsys = [PolicyObjectNamespace.LOCAL_VSYS,
+                PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE,
+                PolicyObjectNamespace.PANORAMA_DEVICE_GROUP]
+        for ns in vsys:
+            self.assertEqual(scope_for(ns), PolicyObjectScope.VSYS, ns)
+        self.assertEqual({precedence_for(ns) for ns in vsys}, {PolicyObjectPrecedence.VSYS})
+
+    def test_shared_scope_namespaces_all_rank_together(self):
+        shared = [PolicyObjectNamespace.LOCAL_SHARED, PolicyObjectNamespace.PANORAMA_SHARED]
+        for ns in shared:
+            self.assertEqual(scope_for(ns), PolicyObjectScope.SHARED, ns)
+        self.assertEqual({precedence_for(ns) for ns in shared}, {PolicyObjectPrecedence.SHARED})
+
+    def test_a_pushed_device_group_object_outranks_a_local_shared_one(self):
+        """The measurement that refuted the ladder: pushed-DG 10.221.1.1 beat
+        local-shared 10.222.1.1 in compiled policy. Ownership is not precedence."""
+        self.assertLess(
+            precedence_for(PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE),
+            precedence_for(PolicyObjectNamespace.LOCAL_SHARED),
+        )
+
+    def test_every_namespace_has_a_scope(self):
+        for ns in PolicyObjectNamespace:
+            self.assertIn(scope_for(ns), PolicyObjectScope.ORDER, ns)
+
+    def test_an_unmapped_namespace_raises_rather_than_defaulting(self):
+        with self.assertRaisesMessage(ValueError, "no scope defined for namespace"):
+            scope_for("something_new")
+
+    def _obj(self, name, namespace_type, value):
+        obj = AddressObject(name=name, value=value, namespace_type=namespace_type,
+                            namespace_value="vsys1")
+        obj.pk = abs(hash(f"{name}{namespace_type}{value}")) % 100_000
+        return obj
+
+    def test_vsys_scope_wins_over_shared_regardless_of_owner(self):
+        """Both cross-scope directions, since the ladder got one of them backwards."""
+        name = "dual"
+        cases = [
+            (PolicyObjectNamespace.LOCAL_VSYS, PolicyObjectNamespace.PANORAMA_SHARED),
+            (PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, PolicyObjectNamespace.LOCAL_SHARED),
+        ]
+        for vsys_ns, shared_ns in cases:
+            with self.subTest(vsys=vsys_ns, shared=shared_ns):
+                candidates = [self._obj(name, shared_ns, "10.2.2.2/32"),
+                              self._obj(name, vsys_ns, "10.1.1.1/32")]
+                winner = first_effective_object(name, {name: candidates})
+                self.assertEqual(winner.namespace_type, vsys_ns)
+                self.assertEqual(winner.value, "10.1.1.1/32")
+
+    def test_two_definitions_in_one_scope_raise_instead_of_picking_one(self):
+        """PAN-OS rejects this configuration, so a device cannot present it. Reaching
+        here means our collection or @loc classification is wrong."""
+        name = "impossible"
+        candidates = [self._obj(name, PolicyObjectNamespace.LOCAL_VSYS, "10.1.1.1/32"),
+                      self._obj(name, PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, "10.9.9.9/32")]
+        with self.assertRaisesMessage(ValueError, "in vsys scope"):
+            first_effective_object(name, {name: candidates})
+
+    def test_vendor_objects_are_the_fallback_tier(self):
+        name = "any"
+        builtin = self._obj(name, PolicyObjectNamespace.BUILTIN, "any")
+        local = self._obj(name, PolicyObjectNamespace.LOCAL_VSYS, "10.1.1.1/32")
+        self.assertEqual(first_effective_object(name, {name: [builtin, local]}), local)
+        self.assertEqual(first_effective_object(name, {name: [builtin]}), builtin)
+
+    def test_literal_namespace_no_longer_returns_a_rank(self):
+        """It returned hardcoded 10 and 30, bypassing PolicyObjectPrecedence entirely.
+        Both literal cases are vsys scope; they differ only in provenance."""
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pan.local")
+        appliance = Appliance.objects.create(
+            management_station=station, serial_number="7000", hostname="fw-lit")
+        point = EnforcementPoint.objects.create(
+            management_station=station, appliance=appliance, vsys_name="vsys1")
+        local_snap = Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(), payload={})
+        pushed_snap = Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload={})
+
+        for snapshot, expected_ns in [(local_snap, PolicyObjectNamespace.LOCAL_VSYS),
+                                      (pushed_snap, PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE)]:
+            ns, value = literal_namespace(enforcement_point=point, source_snapshot=snapshot)
+            self.assertEqual(ns, expected_ns)
+            self.assertEqual(value, "vsys1")
+            self.assertEqual(scope_for(ns), PolicyObjectScope.VSYS)
+            self.assertEqual(precedence_for(ns), PolicyObjectPrecedence.VSYS)

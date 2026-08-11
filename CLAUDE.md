@@ -147,10 +147,11 @@ Two related but distinct concepts track "where did this value come from":
 - **`config_source`** (`CONFIG_SOURCE_CHOICES` in `models/policy/base.py`: `local` / `pushed_pre` /
   `pushed_post` / `default`) — a per-object classification of which PAN-OS rulebase/config layer an object
   or rule was pulled from. It sits alongside `PolicyObjectNamespace` (which scope an object was found in)
-  and `PolicyObjectPrecedence` (which one wins on a name collision). **`PolicyObjectPrecedence` currently
-  encodes a resolution model that has been measured false** — see the next section before relying on it.
+  and `PolicyObjectScope` (which one wins on a name collision). `PolicyObjectPrecedence` is the *numeric
+  encoding* of the scope — derived by `precedence_for()`, never written as a literal, so the rank and the
+  namespace cannot disagree.
 
-### Object scope resolution (PAN-OS) — measured, and not what the code assumes
+### Object scope resolution (PAN-OS)
 
 This section records device behaviour established by direct measurement against a Panorama-managed PA-5220
 (11.1.13-h3, multi-vsys) and a PA-VM (11.2.3, single-vsys) in 2026-08. Configuration reads cannot answer
@@ -176,19 +177,29 @@ Panorama Shared    -> shared scope
 ANY device group   -> vsys scope     (including a container DG with no devices assigned)
 ```
 
-**`PolicyObjectPrecedence` encodes a four-level ladder that is wrong twice over:**
+**`PolicyObjectScope` is how this is modelled.** Namespaces record *provenance*; the scope decides who wins:
 
 ```
-LOCAL_VSYS 10 < LOCAL_SHARED 20 < PUSHED_VSYS_EFFECTIVE 30 < PANORAMA_SHARED 40
+namespace                 scope    rank
+local_vsys                vsys     10
+pushed_vsys_effective     vsys     10
+panorama_device_group     vsys     10
+local_shared              shared   20
+panorama_shared           shared   20
+builtin / predefined      vendor   90 / 95   (position assumed, never measured)
 ```
 
-1. `LOCAL_SHARED (20)` ahead of `PUSHED_VSYS_EFFECTIVE (30)` is **inverted** — a pushed device-group object
-   is vsys-scoped and beats a firewall-local shared object. Measured directly: pushed-DG `10.221.1.1` beat
-   local-shared `10.222.1.1` in compiled policy.
-2. Ranks 10/30 and 20/40 model coexistence for pairs PAN-OS **rejects**, describing states that cannot exist.
+`effective_in_scope_order()` walks `PolicyObjectScope.ORDER` explicitly rather than sorting, because the
+order *is* the rule. **Two candidates in one scope raises** — PAN-OS rejects that configuration, so a device
+cannot present it, and picking one would bury a collection or `@loc` classification fault.
 
-The ladder matched every earlier observation; it was underdetermined, not supported. Keep all seven
-`namespace_type` values — they are useful provenance — but stop treating them as precedence levels.
+This replaced a four-level ladder that was wrong twice: `LOCAL_SHARED (20)` sat ahead of
+`PUSHED_VSYS_EFFECTIVE (30)`, inverting the measured result where pushed-DG `10.221.1.1` beat local-shared
+`10.222.1.1` in compiled policy; and ranks 10/30 and 20/40 gave distinct positions to pairs PAN-OS rejects,
+describing states that cannot exist. It matched every observation available at the time — underdetermined,
+not supported.
+
+All seven `namespace_type` values are kept; only their use as an ordering is gone.
 
 **Classify pushed objects by `@loc`, never by which query returned them.** This is the rule that makes one
 code path work for both multi-vsys and single-vsys devices, with no branch on operating mode:

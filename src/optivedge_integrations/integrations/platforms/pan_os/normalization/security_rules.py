@@ -23,6 +23,9 @@ from optivedge_integrations.integrations.models import (
     EnforcementPoint,
     FieldProvenance,
     PolicyObjectNamespace,
+    PolicyObjectScope,
+    precedence_for,
+    scope_for,
     Region,
     SecurityRule,
     SecurityRuleApplication,
@@ -194,18 +197,19 @@ def literal_namespace(
     *,
     enforcement_point: EnforcementPoint,
     source_snapshot: Snapshot,
-) -> tuple[str, str, int]:
+) -> tuple[str, str]:
+    """Namespace for an address literal typed directly into a rule.
+
+    Both outcomes are **vsys scope** - the literal belongs to the vsys whose rule carries
+    it. They differ only in provenance: local when the rule came from the firewall's own
+    config, pushed when it arrived from Panorama. Ownership is not a precedence level, so
+    the rank is identical either way and is derived by precedence_for(), not returned
+    here. This function previously returned hardcoded 10 and 30, which both bypassed
+    PolicyObjectPrecedence and encoded the refuted ladder.
+    """
     if source_snapshot.appliance_id is not None:
-        return (
-            PolicyObjectNamespace.LOCAL_VSYS,
-            enforcement_point.vsys_name,
-            10,
-        )
-    return (
-        PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE,
-        enforcement_point.vsys_name,
-        30,
-    )
+        return PolicyObjectNamespace.LOCAL_VSYS, enforcement_point.vsys_name
+    return PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, enforcement_point.vsys_name
 
 
 def build_literal_address_object_spec(
@@ -227,7 +231,7 @@ def build_literal_address_object_spec(
         address_type,
         literal_value,
     )
-    namespace_type, namespace_value, precedence_rank = literal_namespace(
+    namespace_type, namespace_value = literal_namespace(
         enforcement_point=enforcement_point,
         source_snapshot=source_snapshot,
     )
@@ -235,7 +239,7 @@ def build_literal_address_object_spec(
         name=raw_value,
         namespace_type=namespace_type,
         namespace_value=namespace_value,
-        precedence_rank=precedence_rank,
+        precedence_rank=precedence_for(namespace_type),
         config_source=config_source,
         source_snapshot=source_snapshot,
         address_type=address_type,
@@ -486,28 +490,65 @@ def realize_literal_address_objects(
             created_specs.add(key)
 
 
+def effective_in_scope_order(name: str, candidates_by_name: dict, kind: str):
+    """Resolve a name the way PAN-OS does: by scope, most specific first.
+
+    The scope order is walked explicitly rather than inferred from a sort, because the
+    order IS the rule:
+
+        vsys-specific  >  shared  >  vendor-supplied
+
+    Ownership - firewall-local versus Panorama-pushed - is provenance and plays no part.
+    A pushed device-group object is vsys-scoped and beats a firewall-local *shared*
+    object; sorting by a per-namespace rank got that backwards for years.
+
+    Within one scope a name has at most one definition. PAN-OS rejects the configuration
+    when two owners try to occupy the same scope under the same name - at the candidate
+    write for the vsys pair, at commit validation for the shared pair - so a device cannot
+    present two. Finding two here means the collection or the @loc classification is
+    wrong, and picking one would bury that. It raises instead.
+    """
+    candidates = candidates_by_name.get(name, [])
+    if not candidates:
+        return None
+
+    by_scope: dict[str, list] = {}
+    for candidate in candidates:
+        by_scope.setdefault(scope_for(candidate.namespace_type), []).append(candidate)
+
+    for scope in PolicyObjectScope.ORDER:
+        in_scope = by_scope.get(scope)
+        if not in_scope:
+            continue
+        if len(in_scope) > 1:
+            raise ValueError(
+                f"{len(in_scope)} definitions of {kind} {name!r} in {scope} scope "
+                f"({', '.join(sorted(c.namespace_type for c in in_scope))}): PAN-OS rejects "
+                f"this configuration, so it indicates a collection or classification fault"
+            )
+        return in_scope[0]
+    return None
+
+
 def first_effective_object(
     name: str,
     address_objects_by_name: dict[str, list[AddressObject]],
 ) -> AddressObject | None:
-    candidates = address_objects_by_name.get(name, [])
-    return candidates[0] if candidates else None
+    return effective_in_scope_order(name, address_objects_by_name, "address object")
 
 
 def first_effective_group(
     name: str,
     address_groups_by_name: dict[str, list[AddressGroup]],
 ) -> AddressGroup | None:
-    candidates = address_groups_by_name.get(name, [])
-    return candidates[0] if candidates else None
+    return effective_in_scope_order(name, address_groups_by_name, "address group")
 
 
 def first_effective_region(
     name: str,
     regions_by_name: dict[str, list[Region]],
 ) -> Region | None:
-    candidates = regions_by_name.get(name, [])
-    return candidates[0] if candidates else None
+    return effective_in_scope_order(name, regions_by_name, "region")
 
 
 def resolve_group_member_object(
@@ -532,7 +573,9 @@ def resolve_group_member_object(
             if candidate.namespace_type == PolicyObjectNamespace.PANORAMA_SHARED:
                 return candidate
 
-    return candidates[0]
+    # No same-namespace member: fall back to the scope order, which also surfaces an
+    # impossible same-scope duplicate rather than silently taking the first row.
+    return effective_in_scope_order(member_name, address_objects_by_name, "address object")
 
 
 def resolve_static_group_members(
@@ -907,7 +950,7 @@ def _materialize_negated_complement_ref(
         return None
 
     name = f"__negated_complement__{normalized_rule.name}__{side}"
-    namespace_type, namespace_value, precedence_rank = literal_namespace(
+    namespace_type, namespace_value = literal_namespace(
         enforcement_point=enforcement_point,
         source_snapshot=normalized_rule.source_snapshot,
     )
@@ -926,7 +969,7 @@ def _materialize_negated_complement_ref(
         name=name,
         namespace_type=namespace_type,
         namespace_value=namespace_value,
-        precedence_rank=precedence_rank,
+        precedence_rank=precedence_for(namespace_type),
         address_type=AddressObject.TYPE_NEGATED_COMPLEMENT,
         value=summary,
         normalized_value=summary,

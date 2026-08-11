@@ -5,6 +5,9 @@ from .base import (
     PolicyObjectBase,
     PolicyObjectNamespace,
     PolicyObjectPrecedence,
+    PolicyObjectScope,
+    precedence_for,
+    scope_for,
 )
 from .objects import (
     AddressGroup,
@@ -48,6 +51,9 @@ __all__ = [
     "PolicyObjectBase",
     "PolicyObjectNamespace",
     "PolicyObjectPrecedence",
+    "PolicyObjectScope",
+    "precedence_for",
+    "scope_for",
     "Region",
     "ScopedPolicyObject",
     "SecurityRule",
