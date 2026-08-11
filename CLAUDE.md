@@ -284,6 +284,30 @@ Panorama-Shared object for that enforcement point.
 Symmetry between sibling functions is not a reason on its own. The per-vsys reader earned its tolerance by
 measurement; the non-vsys one has no such warrant.
 
+### Known gap — only the address family is normalized into models
+
+Rule fields divide into two families, and they are modelled very differently:
+
+- **source / destination** — fully resolved. `resolve_rule_address_refs()` turns every member into a
+  `SecurityRuleSourceAddressRef` / `SecurityRuleDestinationAddressRef` row carrying both the `raw_value` as
+  written *and* an FK to what it resolved to: `AddressObject`, `AddressGroup`, or `Region`. Static groups are
+  flattened one row per member, nested groups recurse, rule-literal IPs are synthesized into `AddressObject`
+  rows (`synthetic_kind`), ambiguity across namespaces raises, and an unresolvable member raises.
+- **everything else** — `service`, `application`, `category`, `source-user`, HIP, SaaS user/tenant, zones,
+  profiles — subclass `SecurityRuleValue`: `value` + `prov` + `position`. Plain strings, no FK, because
+  service, tag and application objects are **never normalized into models at all**.
+
+So a service reference is the string `"web-browsing-svc"` with nothing behind it. Any assessment needing to
+reason about what a service *is* (port ranges, protocol, overlap) cannot, today.
+
+Worth revisiting. Two things to know before doing it:
+
+1. The scope and precedence rules in "Object scope resolution" are **measured for address objects only**.
+   Service, tag, application and schedule objects are *assumed* to scope the same way — that is inference,
+   not measurement, and should be verified on a device before being relied on.
+2. If service objects do get normalized, they should reuse the same scope classification (`@loc`, then read
+   position) rather than growing a parallel implementation.
+
 ### Test fixtures build the shape production creates (`integrations/tests.py`)
 
 `_create_panorama_enforcement_point()` used to set `appliance` and leave `appliance_group` null — a shape no
