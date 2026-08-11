@@ -259,6 +259,37 @@ but Shared objects were delivered to the *device*, and the vsys reads them out o
 like any other. An empty per-vsys pushed read must therefore never be taken to mean an empty object set;
 skipping shared-scope collection on that basis would under-report the vsys by the entire Shared set.
 
+**A name can match more than one object namespace, and the two cases need opposite handling.**
+Measured on a PA-VM 11.2.3:
+
+```
+address object  +  address group   REJECTED   at the candidate WRITE
+address object  +  EDL             REJECTED   at COMMIT VALIDATION
+address group   +  EDL             REJECTED   at COMMIT VALIDATION
+anything above  +  region          LEGAL      the REGION wins
+custom region   +  predefined      LEGAL      UNION - both sets of addresses live
+```
+
+Objects, groups and EDLs are **one namespace**; a device cannot present a collision between
+them, so `resolve_rule_address_refs()` raises if it sees one — that means *our* collection or
+classification is wrong. EDLs only fail at commit rather than at the write because they live
+under `/external-list` rather than `/address`, so the write-time uniqueness check misses them.
+
+Regions are a **separate namespace** and win. Proven inert, not inferred: given a name that was
+both, the address object's own address did not match the rule carrying its name, and neither did
+a static group holding a routable member. PAN-OS reports it at commit as
+`Warning: <name> is used as a region, not an address object` — it says "address object" even for
+a group, naming the namespace rather than the type.
+
+Predefined region names are **not reserved**: `US` may simultaneously be an address object, a
+group, a custom region and the predefined region. So this is reachable in ordinary configurations,
+and the earlier behaviour — raising on any multi-namespace hit — failed normalization for
+configurations the firewall had accepted.
+
+**Open gap:** a custom region sharing a predefined region's name *unions* with it. The `region` FK
+points at the custom definition only, so computing a region's address extent from it alone
+under-reports. Nothing depends on that today because predefined region ranges are not modelled.
+
 **A disabled Panorama device-group rule is not pushed to the firewall at all** — not present-and-disabled,
 simply not delivered. Anything enumerating "which rules exist here" from pushed policy silently omits every
 disabled Panorama rule, and the objects those rules reference *are* still pushed. Reference counting

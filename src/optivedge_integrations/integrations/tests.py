@@ -22,6 +22,7 @@ from optivedge_integrations.integrations.models import (
     ManagementStation,
     Note,
     PolicyObjectNamespace,
+    Region,
     SecurityRule,
     SecurityRuleApplication,
     SecurityRuleSearchVocabularyEntry,
@@ -43,7 +44,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.regions 
     build_normalized_regions,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
+    ISO_3166_1_ALPHA2_REGIONS,
+    NormalizedSecurityRuleMember,
     build_normalized_security_rules,
+    resolve_rule_address_refs,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     pushed_shared,
@@ -3057,3 +3061,103 @@ class PushedSharedPayloadShapeTests(TestCase):
             "shr-1": (PolicyObjectNamespace.PANORAMA_SHARED, "shared"),
             "dg-1": (PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, point.vsys_name),
         }, "each object once, scoped by @loc - not duplicated across the two reads")
+
+
+class CrossNamespaceNameResolutionTests(TestCase):
+    """A name matching more than one object namespace - which is NOT always a fault.
+
+    Measured on a PA-VM 11.2.3, 2026-08:
+
+        address object + address group   rejected by PAN-OS at the candidate WRITE
+        address object + EDL             rejected at COMMIT VALIDATION
+        address group  + EDL             rejected at COMMIT VALIDATION
+        anything above + REGION          LEGAL, and the REGION wins
+
+    The address-namespace collisions cannot reach us from a device, so they indicate our
+    own fault and raise. The region case is legal, was committed on a real firewall, and
+    must resolve to the region - it previously raised, failing normalization for a
+    configuration PAN-OS had accepted.
+    """
+
+    def _members(self, name):
+        return [NormalizedSecurityRuleMember(
+            model=SecurityRuleSourceAddressRef, value=name, prov="", position=0
+        )]
+
+    def _object(self, name, value="10.0.0.1/32", is_any=False):
+        obj = AddressObject(name=name, value=value, is_any=is_any)
+        obj.pk = abs(hash(name)) % 10_000
+        return obj
+
+    def _group(self, name, dynamic_filter=""):
+        grp = AddressGroup(name=name, dynamic_filter=dynamic_filter)
+        grp.pk = abs(hash(name)) % 10_000
+        return grp
+
+    def _region(self, name):
+        reg = Region(name=name)
+        reg.pk = abs(hash(name)) % 10_000
+        return reg
+
+    def test_region_wins_over_an_address_object_of_the_same_name(self):
+        name = "US"
+        refs = resolve_rule_address_refs(
+            members=self._members(name),
+            address_objects_by_name={name: [self._object(name, "10.77.2.1/32")]},
+            address_groups_by_name={},
+            regions_by_name={name: [self._region(name)]},
+        )
+        self.assertEqual(len(refs), 1)
+        self.assertEqual(refs[0].ref_type, SecurityRuleSourceAddressRef.RefType.REGION)
+        # The address object is inert on the device; it must not be attached here either.
+        self.assertIsNone(refs[0].address_object)
+        self.assertIsNone(refs[0].address_group)
+        self.assertEqual(refs[0].region.name, name)
+
+    def test_region_wins_over_an_address_group_of_the_same_name(self):
+        name = "v9-grp-region"
+        refs = resolve_rule_address_refs(
+            members=self._members(name),
+            address_objects_by_name={},
+            address_groups_by_name={name: [self._group(name)]},
+            regions_by_name={name: [self._region(name)]},
+        )
+        self.assertEqual(refs[0].ref_type, SecurityRuleSourceAddressRef.RefType.REGION)
+        self.assertIsNone(refs[0].address_group)
+
+    def test_builtin_region_code_wins_over_an_address_object_without_a_custom_region(self):
+        """Predefined region names are not reserved - an address object may be named GB.
+        The builtin code still wins, and `region` stays null as the model allows."""
+        name = "GB"
+        self.assertIn(name, ISO_3166_1_ALPHA2_REGIONS)
+        refs = resolve_rule_address_refs(
+            members=self._members(name),
+            address_objects_by_name={name: [self._object(name)]},
+            address_groups_by_name={},
+            regions_by_name={},
+        )
+        self.assertEqual(refs[0].ref_type, SecurityRuleSourceAddressRef.RefType.REGION)
+        self.assertIsNone(refs[0].region)
+        self.assertIsNone(refs[0].address_object)
+
+    def test_address_object_and_group_sharing_a_name_raises_as_our_fault(self):
+        """PAN-OS rejects this at the candidate write, so a device cannot present it."""
+        name = "collide"
+        with self.assertRaisesMessage(ValueError, "PAN-OS rejects this configuration"):
+            resolve_rule_address_refs(
+                members=self._members(name),
+                address_objects_by_name={name: [self._object(name)]},
+                address_groups_by_name={name: [self._group(name)]},
+                regions_by_name={},
+            )
+
+    def test_an_unambiguous_address_object_still_resolves_normally(self):
+        name = "web-servers"
+        refs = resolve_rule_address_refs(
+            members=self._members(name),
+            address_objects_by_name={name: [self._object(name)]},
+            address_groups_by_name={},
+            regions_by_name={},
+        )
+        self.assertEqual(refs[0].ref_type, SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT)
+        self.assertEqual(refs[0].address_object.name, name)

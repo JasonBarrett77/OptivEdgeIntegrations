@@ -626,6 +626,39 @@ def resolve_rule_address_refs(
     address_groups_by_name: dict[str, list[AddressGroup]],
     regions_by_name: dict[str, list[Region]],
 ) -> list[ResolvedAddressRef]:
+    """Resolve each rule source/destination member to the object PAN-OS actually uses.
+
+    A name can match more than one namespace, and the outcomes are not symmetric.
+    Measured on a PA-VM 11.2.3, 2026-08 (see the object-scope section of CLAUDE.md):
+
+        address object + address group   rejected by PAN-OS at the candidate WRITE
+        address object + EDL             rejected at COMMIT VALIDATION
+        address group  + EDL             rejected at COMMIT VALIDATION
+        anything above + REGION          LEGAL, and the REGION wins
+
+    So the two cases need opposite handling:
+
+    **Within the address namespace** - objects, groups and EDLs share one namespace and a
+    device cannot present a collision, so seeing one here means our own collection or
+    classification is wrong. That raises.
+
+    **Region versus the address namespace** - legal, and committed on a real device. The
+    region wins and the address-namespace object contributes nothing: given a name that
+    was both, the object's own address did not match the rule carrying its name, and the
+    same held for a static group holding a routable member. PAN-OS reports it at commit
+    as `Warning: <name> is used as a region, not an address object` (it says "address
+    object" even for a group, naming the namespace rather than the type).
+
+    This previously raised for any multi-namespace hit, which failed normalization for a
+    configuration the firewall had accepted. Predefined region names are not reserved -
+    `US` may simultaneously be an address object, a group, a custom region and the
+    predefined region - so this is reachable in ordinary configurations.
+
+    Known limitation: a custom region sharing a predefined region's name UNIONS with it
+    rather than overriding it - both sets of addresses are live. The `region` FK here
+    points at the custom definition only, so anything computing a region's address extent
+    from it alone under-reports.
+    """
     resolved: list[ResolvedAddressRef] = []
     for member in members:
         raw_value = member.value
@@ -638,13 +671,28 @@ def resolve_rule_address_refs(
             or raw_value in PANOS_VENDOR_REGION_CODES
         )
 
-        namespace_hits = sum([address_object is not None, address_group is not None, is_region])
-        if namespace_hits > 1:
+        # Objects, groups and EDLs are one namespace on the device - PAN-OS rejects a
+        # collision between them, at the write or at commit validation depending on the
+        # pair. Reaching this means our data is wrong, not the device's.
+        if address_object is not None and address_group is not None:
             raise ValueError(
-                f"ambiguous address reference: {raw_value} matches multiple namespaces "
-                f"(address_object={address_object is not None}, address_group={address_group is not None}, "
-                f"region={is_region})"
+                f"address object and address group both named {raw_value}: PAN-OS rejects "
+                f"this configuration, so it indicates a collection or classification fault"
             )
+
+        # A region beats the address namespace. Checked before them, not alongside them.
+        if is_region:
+            resolved.append(
+                ResolvedAddressRef(
+                    raw_value=raw_value,
+                    position=member.position,
+                    ref_type=SecurityRuleSourceAddressRef.RefType.REGION,
+                    address_object=None,
+                    address_group=None,
+                    region=region,
+                )
+            )
+            continue
 
         if address_object is not None:
             ref_type = (
@@ -659,19 +707,6 @@ def resolve_rule_address_refs(
                     ref_type=ref_type,
                     address_object=address_object,
                     address_group=None,
-                )
-            )
-            continue
-
-        if address_group is None and is_region:
-            resolved.append(
-                ResolvedAddressRef(
-                    raw_value=raw_value,
-                    position=member.position,
-                    ref_type=SecurityRuleSourceAddressRef.RefType.REGION,
-                    address_object=None,
-                    address_group=None,
-                    region=region,
                 )
             )
             continue
