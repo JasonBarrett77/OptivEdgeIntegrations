@@ -230,6 +230,12 @@ magnitude depends on how many vsys each group has. It does flag three things out
 survived, a change in *which* objects exist, and dependent rows left at zero — which means the renormalize
 never ran.
 
+`name_collisions` reports (owner, name) pairs appearing more than once — exactly what the **Stage B** unique
+constraints will reject. Check it reads `0 / 0` before adding them: a constraint added blind fails the
+migration partway through, and seeing the offenders as data beats seeing them as an `IntegrityError`.
+`rows_per_object` covers only the shared side; this also covers the enforcement point, where a vsys-scoped
+object and a vendor object could share a name.
+
 ### The developer page (`/developer/`)
 
 `DeveloperView` renders the live census, captures labelled snapshots, and compares any two. It is

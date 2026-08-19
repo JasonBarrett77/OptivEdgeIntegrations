@@ -34,7 +34,9 @@
         Recomputed on every page load, so this always reflects the installed code &mdash; unlike a
         saved snapshot, whose derived values are frozen at capture time. Nothing is written. <span class="font-medium">Rows per object</span> should be
         <span class="font-mono">1.0</span> &mdash; shared scope is group-wide, so anything higher means the
-        same object is stored more than once.
+        same object is stored more than once. <span class="font-medium">Name collisions</span>
+        (point / group) must both be <span class="font-mono">0</span> before Stage B adds the unique
+        constraints &mdash; PAN-OS rejects such a configuration, so any hit is a collection fault.
       </p>
       {% if not live_census.schema_has_appliance_group_owner %}
         <p class="mt-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
@@ -53,6 +55,7 @@
           <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">On point</th>
           <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">On group</th>
           <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Orphaned</th>
+          <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Name collisions</th>
         </tr>
       </thead>
       <tbody>
@@ -72,6 +75,12 @@
                      {% if data.by_owner.orphaned %}bg-red-50 font-semibold text-red-900{% else %}text-slate-600{% endif %}">
             {{ data.by_owner.orphaned|default:"&ndash;" }}
           </td>
+          {% with point_hits=data.name_collisions.enforcement_point_id.violating_pairs group_hits=data.name_collisions.appliance_group_id.violating_pairs %}
+          <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono
+                     {% if point_hits or group_hits %}bg-red-50 font-semibold text-red-900{% else %}text-slate-600{% endif %}">
+            {{ point_hits|default:0 }} / {{ group_hits|default:0 }}
+          </td>
+          {% endwith %}
         </tr>
         {% endfor %}
       </tbody>

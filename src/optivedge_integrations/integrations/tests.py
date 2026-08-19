@@ -4100,3 +4100,53 @@ class CensusVersioningTests(TestCase):
     def test_two_current_snapshots_are_not_flagged(self):
         result = compare_censuses(capture_census(label="a"), capture_census(label="b"))
         self.assertFalse(any("census version" in o for o in result["observations"]))
+
+
+class NameCollisionPrecheckTests(TestCase):
+    """Stage B adds unique(owner, name). Surface violations as data first — a constraint
+    added blind fails the migration partway through."""
+
+    def _setup(self):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="8800", appliance_hostname="fw-coll", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-coll")
+        snapshot = Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(), payload={})
+        return station, group, point, snapshot
+
+    def _object(self, station, snapshot, name, *, owner, namespace_type):
+        kwargs = ({"enforcement_point": owner} if isinstance(owner, EnforcementPoint)
+                  else {"appliance_group": owner})
+        return AddressObject.objects.create(
+            management_station=station, source_snapshot=snapshot, config_source="local",
+            name=name, namespace_type=namespace_type, namespace_value="vsys1",
+            precedence_rank=precedence_for(namespace_type),
+            address_type=AddressObject.TYPE_IP_NETMASK, value="10.0.0.1/32",
+            last_synced_at=timezone.now(), **kwargs)
+
+    def test_a_clean_deployment_reports_no_violations(self):
+        station, group, point, snapshot = self._setup()
+        self._object(station, snapshot, "web", owner=point,
+                     namespace_type=PolicyObjectNamespace.LOCAL_VSYS)
+        collisions = capture_census()["models"]["AddressObject"]["name_collisions"]
+        self.assertEqual(collisions["enforcement_point_id"]["violating_pairs"], 0)
+        self.assertEqual(collisions["appliance_group_id"]["violating_pairs"], 0)
+
+    def test_a_vsys_object_colliding_with_a_vendor_object_is_reported(self):
+        """rows_per_object covers only the shared side; this is the case it cannot see."""
+        station, group, point, snapshot = self._setup()
+        self._object(station, snapshot, "any", owner=point,
+                     namespace_type=PolicyObjectNamespace.LOCAL_VSYS)
+        self._object(station, snapshot, "any", owner=point,
+                     namespace_type=PolicyObjectNamespace.BUILTIN)
+
+        census = capture_census(label="after")
+        collisions = census["models"]["AddressObject"]["name_collisions"]
+        self.assertEqual(collisions["enforcement_point_id"]["violating_pairs"], 1)
+        self.assertEqual(collisions["enforcement_point_id"]["examples"][0]["name"], "any")
+        self.assertEqual(collisions["enforcement_point_id"]["examples"][0]["rows"], 2)
+
+        observations = compare_censuses(capture_census(label="before"), census)["observations"]
+        self.assertTrue(any("Stage B unique constraint would fail" in o for o in observations),
+                        observations)

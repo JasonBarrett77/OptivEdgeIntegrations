@@ -53,11 +53,12 @@ DEFAULT_CENSUS_DIR = Path("policy-object-census")
 #: rather than letting stale numbers read as a live result.
 #:
 #: 1: initial.
+#: 3: adds name_collisions — the pairs that would violate the Stage B unique constraints.
 #: 2: duplication keyed by (appliance_group, name). Version 1 keyed on
 #:    (namespace_value, name), which is the constant "shared" for every shared-scope
 #:    object, so distinct groups collapsed together and rows_per_object was inflated by
 #:    roughly the number of appliance groups.
-CENSUS_VERSION = 2
+CENSUS_VERSION = 3
 
 SCOPED_MODELS = {
     "AddressObject": AddressObject,
@@ -152,6 +153,7 @@ def _model_census(model, *, has_owner_column: bool) -> dict[str, Any]:
         "by_scope": _scope_counts(rows),
         "by_namespace": dict(Counter(namespace_type for namespace_type, *_ in rows)),
         "duplication": _duplication(rows),
+        "name_collisions": _name_collisions(model, has_owner_column=has_owner_column),
     }
 
     if has_owner_column:
@@ -165,6 +167,38 @@ def _model_census(model, *, has_owner_column: bool) -> dict[str, Any]:
     else:
         census["by_owner"] = None  # pre-migration schema; see _has_owner_column
     return census
+
+
+def _name_collisions(model, *, has_owner_column: bool) -> dict[str, Any]:
+    """Rows that would violate the Stage B unique constraints, if any.
+
+    Stage B adds unique(enforcement_point, name) and unique(appliance_group, name) —
+    the collisions PAN-OS itself rejects, so a device cannot present them and a hit means
+    our collection or classification is wrong. Reported here first because a constraint
+    added blind fails the migration partway through; seeing the offenders as data is
+    strictly better than seeing them as an IntegrityError.
+
+    rows_per_object == 1.0 only covers the shared side. This also covers the enforcement
+    point, where a vsys-scoped object and a vendor object could share a name.
+    """
+    owners = ["enforcement_point_id"] + (["appliance_group_id"] if has_owner_column else [])
+    collisions: dict[str, Any] = {}
+    for owner in owners:
+        counts = Counter(
+            (owner_id, name)
+            for owner_id, name in model.objects.exclude(**{f"{owner}__isnull": True})
+            .values_list(owner, "name")
+        )
+        offenders = [
+            {"owner_id": owner_id, "name": name, "rows": count}
+            for (owner_id, name), count in counts.items()
+            if count > 1
+        ]
+        collisions[owner] = {
+            "violating_pairs": len(offenders),
+            "examples": sorted(offenders, key=lambda o: -o["rows"])[:10],
+        }
+    return collisions
 
 
 def _station_breakdown(*, has_owner_column: bool) -> list[dict[str, Any]]:
@@ -337,6 +371,16 @@ def compare_censuses(before: dict[str, Any], after: dict[str, Any]) -> dict[str,
                 f"scope, which changes the shared set. Unexpected if the only change was ownership, "
                 f"in which case objects were gained or lost rather than deduplicated."
             )
+        for owner_field, data in (a.get("name_collisions") or {}).items():
+            if data.get("violating_pairs"):
+                examples = ", ".join(f"{e['name']} x{e['rows']}" for e in data["examples"][:3])
+                result["observations"].append(
+                    f"{label}: {data['violating_pairs']} (owner, name) pair(s) appear more than "
+                    f"once on {owner_field} — e.g. {examples}. The Stage B unique constraint would "
+                    f"fail on these; PAN-OS rejects such a configuration, so they indicate a "
+                    f"collection or classification fault rather than a real device state."
+                )
+
         owner = a.get("by_owner") or {}
         if owner.get("orphaned"):
             result["observations"].append(
