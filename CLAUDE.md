@@ -214,6 +214,12 @@ into one entry — a correct three-group deployment then reports `3.0` and can n
 the rows hang off enforcement points, so the group is reached through them; that is what makes the two
 snapshots comparable.
 
+**Derived values are computed at capture time and frozen into the file.** Reinstalling does not recompute a
+stored snapshot, so a fix to the metric cannot repair one — and a pre-migration baseline cannot be
+recaptured. `CENSUS_VERSION` is bumped whenever a stored value changes meaning, and `compare_censuses()`
+flags a mismatch instead of presenting stale numbers as current. The live census on `/developer/` is
+recomputed per request, so it always reflects the installed code.
+
 `distinct_shared` changing between snapshots is worth explaining but is **not** automatically a fault. Moving
 objects to the group owner alone cannot change which objects exist — but if normalization logic also changed
 between the captures (the `@loc` scope fix moves objects between vsys and shared scope), the shared set

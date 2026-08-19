@@ -47,6 +47,18 @@ from optivedge_integrations.integrations.models import (
 #: directory, so it lands beside the downstream project rather than inside this package.
 DEFAULT_CENSUS_DIR = Path("policy-object-census")
 
+#: Bump when a stored metric changes MEANING. Derived values are computed at capture time
+#: and frozen into the file, so a later fix cannot repair an existing snapshot - and two
+#: snapshots computed by different versions are not comparable. compare_censuses() says so
+#: rather than letting stale numbers read as a live result.
+#:
+#: 1: initial.
+#: 2: duplication keyed by (appliance_group, name). Version 1 keyed on
+#:    (namespace_value, name), which is the constant "shared" for every shared-scope
+#:    object, so distinct groups collapsed together and rows_per_object was inflated by
+#:    roughly the number of appliance groups.
+CENSUS_VERSION = 2
+
 SCOPED_MODELS = {
     "AddressObject": AddressObject,
     "AddressGroup": AddressGroup,
@@ -194,6 +206,7 @@ def capture_census(*, label: str = "") -> dict[str, Any]:
     has_owner_column = _has_owner_column(AddressObject)
     return {
         "label": label,
+        "census_version": CENSUS_VERSION,
         "captured_at": datetime.now(dt_timezone.utc).isoformat(),
         "schema_has_appliance_group_owner": has_owner_column,
         "models": {
@@ -272,6 +285,19 @@ def compare_censuses(before: dict[str, Any], after: dict[str, Any]) -> dict[str,
         "models": {},
         "observations": [],
     }
+
+    b_version = before.get("census_version", 1)
+    a_version = after.get("census_version", 1)
+    result["census_versions"] = {"before": b_version, "after": a_version}
+    stale = [v for v in (b_version, a_version) if v != CENSUS_VERSION]
+    if stale:
+        result["observations"].append(
+            f"Snapshot(s) were captured by census version {sorted(set(stale))}, current is "
+            f"{CENSUS_VERSION}. Derived values are computed at capture time and frozen into the "
+            f"file, so these were NOT recomputed by reinstalling — rows_per_object in particular "
+            f"is inflated in version 1, by roughly the number of appliance groups. Read the live "
+            f"census for the current state; a pre-migration snapshot cannot be recaptured."
+        )
 
     b_at, a_at = before.get("captured_at") or "", after.get("captured_at") or ""
     if b_at and a_at and b_at > a_at:

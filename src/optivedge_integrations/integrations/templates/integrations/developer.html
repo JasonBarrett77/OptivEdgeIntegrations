@@ -31,7 +31,8 @@
     <div class="border-b border-slate-200 px-4 py-3">
       <h2 class="text-sm font-semibold text-slate-900">Policy object census &mdash; current</h2>
       <p class="mt-1 text-xs text-slate-600">
-        Read live, nothing written. <span class="font-medium">Rows per object</span> should be
+        Recomputed on every page load, so this always reflects the installed code &mdash; unlike a
+        saved snapshot, whose derived values are frozen at capture time. Nothing is written. <span class="font-medium">Rows per object</span> should be
         <span class="font-mono">1.0</span> &mdash; shared scope is group-wide, so anything higher means the
         same object is stored more than once.
       </p>
@@ -196,7 +197,8 @@
           {% endfor %}
         </ul>
         <p class="mt-2 text-[11px] text-slate-500">
-          Distinct shared should not change &mdash; deduplication removes copies, not objects.
+          Derived values are computed when a snapshot is captured and frozen into the file &mdash;
+          reinstalling does not recompute them. For the current state, read the live census above.
         </p>
       </div>
     {% endif %}

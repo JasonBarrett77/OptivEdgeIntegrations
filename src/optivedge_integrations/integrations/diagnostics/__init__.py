@@ -5,6 +5,7 @@ developer page, a shell session, or a script. Nothing here writes to the databas
 """
 
 from optivedge_integrations.integrations.diagnostics.policy_object_census import (
+    CENSUS_VERSION,
     capture_census,
     compare_censuses,
     list_censuses,
@@ -13,6 +14,7 @@ from optivedge_integrations.integrations.diagnostics.policy_object_census import
 )
 
 __all__ = [
+    "CENSUS_VERSION",
     "capture_census",
     "compare_censuses",
     "list_censuses",

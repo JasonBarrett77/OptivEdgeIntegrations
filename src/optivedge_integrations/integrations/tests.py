@@ -74,6 +74,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
 )
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
+    CENSUS_VERSION,
     compare_censuses,
     load_census,
     write_census,
@@ -4077,3 +4078,25 @@ class DeveloperPageTests(TestCase):
         response = self.client.get(reverse("developer"), {"before": str(bad), "after": str(bad)})
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Could not compare")
+
+
+class CensusVersioningTests(TestCase):
+    """Derived values are frozen at capture time, so a later fix cannot repair a stored
+    snapshot. Comparing across versions must say so rather than presenting stale numbers.
+    """
+
+    def test_a_snapshot_from_an_older_census_version_is_called_out(self):
+        current = capture_census(label="after")
+        legacy = dict(current, label="before")
+        legacy.pop("census_version")          # version 1 files had no marker
+
+        result = compare_censuses(legacy, current)
+        self.assertEqual(result["census_versions"], {"before": 1, "after": CENSUS_VERSION})
+        self.assertTrue(
+            any("computed at capture time" in o for o in result["observations"]),
+            result["observations"],
+        )
+
+    def test_two_current_snapshots_are_not_flagged(self):
+        result = compare_censuses(capture_census(label="a"), capture_census(label="b"))
+        self.assertFalse(any("census version" in o for o in result["observations"]))
