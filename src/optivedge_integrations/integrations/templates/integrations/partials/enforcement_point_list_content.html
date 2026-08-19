@@ -4,15 +4,28 @@
         <div class="flex min-h-0 flex-1 flex-col border border-slate-200">
             <div class="flex shrink-0 items-center justify-between bg-white px-4 py-2">
                 <h1 class="text-sm font-semibold text-slate-900">Enforcement Points</h1>
+                <div class="flex gap-0">
+                    <a href="?scope=in"
+                       class="inline-flex h-7 items-center border px-3 text-[11px] font-medium {% if scope_filter == 'in' %}border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                        In Scope
+                    </a>
+                    <a href="?scope=out"
+                       class="inline-flex h-7 items-center border-y px-3 text-[11px] font-medium {% if scope_filter == 'out' %}border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                        Out of Scope
+                    </a>
+                    <a href="?scope=all"
+                       class="inline-flex h-7 items-center border px-3 text-[11px] font-medium {% if scope_filter == 'all' %}border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                        All
+                    </a>
+                </div>
             </div>
             <div class="min-h-0 flex-1 overflow-auto">
                 <table class="min-w-full table-fixed border-separate border-spacing-0">
                     <thead>
                         <tr>
-                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">VSYS</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Appliance Names</th>
+                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">VSYS</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Management Station</th>
-                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Owner Type</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Appliance Group</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Last Synced</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">In Scope</th>
@@ -28,12 +41,6 @@
                             role="link"
                         >
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-900">
-                                {{ enforcement_point.vsys_name }}
-                                {% if enforcement_point.vsys_display_name %}
-                                    <span class="text-slate-500">/ {{ enforcement_point.vsys_display_name }}</span>
-                                {% endif %}
-                            </td>
-                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
                                 {% if enforcement_point.nodes.all %}
                                     {% for node in enforcement_point.nodes.all %}
                                         {{ node.appliance }}{% if not forloop.last %}, {% endif %}
@@ -45,14 +52,13 @@
                                 {% endif %}
                             </td>
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
-                                {{ enforcement_point.management_station }}
+                                {{ enforcement_point.vsys_name }}
+                                {% if enforcement_point.vsys_display_name %}
+                                    <span class="text-slate-500">/ {{ enforcement_point.vsys_display_name }}</span>
+                                {% endif %}
                             </td>
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
-                                {% if enforcement_point.appliance_group %}
-                                    Appliance Group
-                                {% else %}
-                                    Appliance
-                                {% endif %}
+                                {{ enforcement_point.management_station }}
                             </td>
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
                                 {% if enforcement_point.appliance_group %}
@@ -78,8 +84,14 @@
                         </tr>
                         {% empty %}
                         <tr>
-                            <td colspan="7" class="border-b border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
-                                No enforcement points discovered. Sync a management station to populate them.
+                            <td colspan="6" class="border-b border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
+                                {% if scope_filter == 'in' %}
+                                    No in-scope enforcement points. Mark one in scope from its management station, or view All.
+                                {% elif scope_filter == 'out' %}
+                                    No out-of-scope enforcement points.
+                                {% else %}
+                                    No enforcement points discovered. Sync a management station to populate them.
+                                {% endif %}
                             </td>
                         </tr>
                         {% endfor %}

@@ -1,4 +1,5 @@
 import ipaddress
+import re
 from unittest.mock import patch
 
 from django.contrib.contenttypes.models import ContentType
@@ -2558,8 +2559,8 @@ class ApplianceGroupSnapshotViewTests(TestCase):
 
 
 class EnforcementPointListViewTests(TestCase):
-    def test_list_view_shows_points_from_every_management_station(self):
-        _, _, _, first = _create_grouped_enforcement_point(
+    def setUp(self):
+        _, _, _, self.in_scope = _create_grouped_enforcement_point(
             serial_number="0001",
             appliance_hostname="fw-a",
             station_hostname="panorama-a.local",
@@ -2567,7 +2568,10 @@ class EnforcementPointListViewTests(TestCase):
             group_name="grp-a",
             vsys_name="vsys1",
         )
-        _, _, _, second = _create_grouped_enforcement_point(
+        self.in_scope.in_scope = True
+        self.in_scope.save()
+
+        _, _, _, self.out_of_scope = _create_grouped_enforcement_point(
             serial_number="0002",
             appliance_hostname="fw-b",
             station_hostname="firewall-b.local",
@@ -2576,35 +2580,70 @@ class EnforcementPointListViewTests(TestCase):
             vsys_name="vsys2",
         )
 
-        response = self.client.get(reverse("enforcement_point_list"))
-
+    def listed_pks(self, query=None):
+        response = self.client.get(reverse("enforcement_point_list"), query or {})
         self.assertEqual(response.status_code, 200)
+        return response, [point.pk for point in response.context["enforcement_points"]]
+
+    def test_list_view_shows_only_in_scope_points_by_default(self):
+        """in_scope gates collection, so an out-of-scope point carries no rules or objects."""
+        response, pks = self.listed_pks()
+
+        self.assertEqual(pks, [self.in_scope.pk])
+        self.assertEqual(response.context["scope_filter"], "in")
+
+    def test_scope_filter_selects_out_of_scope_points(self):
+        _, pks = self.listed_pks({"scope": "out"})
+
+        self.assertEqual(pks, [self.out_of_scope.pk])
+
+    def test_scope_filter_all_shows_both(self):
+        _, pks = self.listed_pks({"scope": "all"})
+
+        self.assertEqual(sorted(pks), sorted([self.in_scope.pk, self.out_of_scope.pk]))
+
+    def test_unknown_scope_filter_falls_back_to_in_scope(self):
+        response, pks = self.listed_pks({"scope": "not-a-scope"})
+
+        self.assertEqual(pks, [self.in_scope.pk])
+        self.assertEqual(response.context["scope_filter"], "in")
+
+    def test_list_view_shows_points_from_every_management_station(self):
+        response, pks = self.listed_pks({"scope": "all"})
+
         self.assertContains(response, "panorama-a.local")
         self.assertContains(response, "firewall-b.local")
-        self.assertContains(response, reverse("enforcement_point_detail", kwargs={"pk": first.pk}))
-        self.assertContains(response, reverse("enforcement_point_detail", kwargs={"pk": second.pk}))
+        self.assertContains(response, reverse("enforcement_point_detail", kwargs={"pk": self.in_scope.pk}))
+        self.assertContains(response, reverse("enforcement_point_detail", kwargs={"pk": self.out_of_scope.pk}))
 
-    def test_list_view_renders_with_no_enforcement_points(self):
+    def test_columns_lead_with_appliance_names_and_omit_owner_type(self):
         response = self.client.get(reverse("enforcement_point_list"))
 
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "No enforcement points discovered")
-
-    def test_list_view_labels_scope_state(self):
-        _, _, _, enforcement_point = _create_grouped_enforcement_point(
-            serial_number="0003",
-            appliance_hostname="fw-c",
-            station_hostname="panorama-c.local",
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            group_name="grp-c",
+        headers = re.findall(r"<th[^>]*>\s*(.*?)\s*</th>", response.content.decode())
+        self.assertEqual(
+            headers,
+            [
+                "Appliance Names",
+                "VSYS",
+                "Management Station",
+                "Appliance Group",
+                "Last Synced",
+                "In Scope",
+            ],
         )
 
-        self.assertContains(self.client.get(reverse("enforcement_point_list")), "Out of Scope")
+    def test_empty_state_names_the_active_filter(self):
+        EnforcementPoint.objects.all().delete()
 
-        enforcement_point.in_scope = True
-        enforcement_point.save()
-
-        self.assertContains(self.client.get(reverse("enforcement_point_list")), "In Scope")
+        self.assertContains(self.client.get(reverse("enforcement_point_list")), "No in-scope enforcement points")
+        self.assertContains(
+            self.client.get(reverse("enforcement_point_list"), {"scope": "out"}),
+            "No out-of-scope enforcement points",
+        )
+        self.assertContains(
+            self.client.get(reverse("enforcement_point_list"), {"scope": "all"}),
+            "No enforcement points discovered",
+        )
 
 
 class EnforcementPointDetailViewTests(TestCase):

@@ -62,6 +62,11 @@ _VALID_TABS = {TAB_DETAILS, TAB_APPLIANCE_GROUPS, TAB_ENFORCEMENT_POINTS, TAB_EV
 TAB_APPLIANCES = "appliances"
 _VALID_ENFORCEMENT_POINT_TABS = {TAB_DETAILS, TAB_APPLIANCES}
 
+SCOPE_FILTER_IN = "in"
+SCOPE_FILTER_OUT = "out"
+SCOPE_FILTER_ALL = "all"
+_VALID_SCOPE_FILTERS = {SCOPE_FILTER_IN, SCOPE_FILTER_OUT, SCOPE_FILTER_ALL}
+
 
 def get_management_station_list_queryset():
     latest_run_qs = IntegrationRun.objects.filter(management_station=OuterRef("pk")).order_by("-started_at")
@@ -111,21 +116,35 @@ def build_management_station_detail_context(management_station, *, active_tab=TA
     return context
 
 
-def get_enforcement_point_list_queryset():
-    return (
-        EnforcementPoint.objects.select_related(
-            "management_station",
-            "appliance_group",
-            "appliance",
-        )
-        .prefetch_related("nodes__appliance")
-        .order_by(
-            "management_station__hostname",
-            "appliance_group__name",
-            "appliance__hostname",
-            "vsys_name",
-            "pk",
-        )
+def normalize_scope_filter(scope):
+    return scope if scope in _VALID_SCOPE_FILTERS else SCOPE_FILTER_IN
+
+
+def get_enforcement_point_list_queryset(*, scope=SCOPE_FILTER_IN):
+    """In-scope points only by default - those are the ones actually collected against.
+
+    `EnforcementPoint.in_scope` gates what gets collected and normalized on a sync, so an
+    out-of-scope point holds no rules or objects. Listing them alongside the rest by
+    default would bury the working set in rows that carry nothing.
+    """
+    queryset = EnforcementPoint.objects.select_related(
+        "management_station",
+        "appliance_group",
+        "appliance",
+    ).prefetch_related("nodes__appliance")
+
+    scope = normalize_scope_filter(scope)
+    if scope == SCOPE_FILTER_IN:
+        queryset = queryset.filter(in_scope=True)
+    elif scope == SCOPE_FILTER_OUT:
+        queryset = queryset.filter(in_scope=False)
+
+    return queryset.order_by(
+        "management_station__hostname",
+        "appliance_group__name",
+        "appliance__hostname",
+        "vsys_name",
+        "pk",
     )
 
 
@@ -329,8 +348,16 @@ class EnforcementPointListView(ListView):
     context_object_name = "enforcement_points"
     template_name = "integrations/enforcement_point_list.html"
 
+    def get_scope_filter(self):
+        return normalize_scope_filter(self.request.GET.get("scope", SCOPE_FILTER_IN))
+
     def get_queryset(self):
-        return get_enforcement_point_list_queryset()
+        return get_enforcement_point_list_queryset(scope=self.get_scope_filter())
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["scope_filter"] = self.get_scope_filter()
+        return context
 
 
 class EnforcementPointDetailView(DetailView):
