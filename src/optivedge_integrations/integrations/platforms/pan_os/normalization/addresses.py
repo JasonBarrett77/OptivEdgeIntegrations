@@ -746,36 +746,68 @@ def replace_addresses(
 def normalize_appliance_group_shared_objects(appliance_group: ApplianceGroup) -> PANOSNormalizedCollection:
     """Normalize the shared-scope objects the appliance group holds.
 
-    Shared scope is group-wide: every vsys on the group reads the same /config/shared and
-    receives the same Panorama-Shared push, so it is derived once here rather than once
-    per enforcement point. Any in-scope point in the group yields the same set - the
-    sources are `merged`'s /config/shared node (read from the group's active appliance)
-    and the non-vsys pushed-shared-policy response (collected per group) - so a
-    representative point is used to reach them.
+    Shared scope is one namespace per group, but it is NOT reported identically to every
+    vsys. Panorama pushes only what each device group references (shared-object
+    optimization), so a Panorama-Shared object can appear in one vsys's per-vsys response
+    and not another's. Every in-scope point is therefore read and the shared halves
+    unioned.
+
+    An earlier version derived this from a single representative point. Any shared object
+    that happened to be absent from that one point's response was then owned by nobody -
+    the group pass never saw it, and the owning point's pass discards shared scope by
+    design - and every rule referencing it failed with "unresolved address reference".
 
     Must run BEFORE the group's enforcement points are normalized: this is a
     delete-and-recreate, and security rule address refs FK to these rows.
     """
-    representative = (
-        appliance_group.enforcement_points.filter(in_scope=True)
-        .order_by("vsys_name", "pk")
-        .first()
+    points = list(
+        appliance_group.enforcement_points.filter(in_scope=True).order_by("vsys_name", "pk")
     )
-    if representative is None:
+    if not points:
         return PANOSNormalizedCollection(
             address_objects=[], address_groups=[], regions=[], appliances=[],
             appliance_groups=[], enforcement_points=[], enforcement_nodes=[],
             device_configuration_profiles=[], security_rules=[],
         )
 
+    def union(collected: dict, normalized_items, kind: str) -> None:
+        """Keep one entry per (name, namespace_type, namespace_value).
+
+        The same shared object arrives from several points - the non-vsys response is
+        included in every point's build - so overlap is expected. Disagreeing values are
+        not: shared scope is a single namespace on the device, so one name cannot hold two
+        values, and a conflict means the collection or classification is wrong.
+        """
+        for item in normalized_items:
+            if not is_shared_scope(item.namespace_type):
+                continue
+            key = (item.name, item.namespace_type, item.namespace_value)
+            existing = collected.get(key)
+            if existing is None:
+                collected[key] = item
+            elif getattr(existing, "raw_object", None) != getattr(item, "raw_object", None) or \
+                    getattr(existing, "raw_group", None) != getattr(item, "raw_group", None) or \
+                    getattr(existing, "raw_region", None) != getattr(item, "raw_region", None):
+                raise ValueError(
+                    f"conflicting shared {kind} definitions for {item.name!r} across the "
+                    f"enforcement points of {appliance_group}: shared scope is one namespace, "
+                    f"so this indicates a collection or classification fault"
+                )
+
+    shared_objects: dict = {}
+    shared_groups: dict = {}
+    shared_regions: dict = {}
     with transaction.atomic():
-        normalized_objects, normalized_groups = build_normalized_addresses(representative)
+        for point in points:
+            normalized_objects, normalized_groups = build_normalized_addresses(point)
+            union(shared_objects, normalized_objects, "address object")
+            union(shared_groups, normalized_groups, "address group")
+            union(shared_regions, build_normalized_regions(point), "region")
+
         created_objects, created_groups = replace_addresses(
-            appliance_group, normalized_objects, normalized_groups
+            appliance_group, list(shared_objects.values()), list(shared_groups.values())
         )
-        created_regions = replace_regions(
-            appliance_group, build_normalized_regions(representative)
-        )
+        created_regions = replace_regions(appliance_group, list(shared_regions.values()))
 
     return PANOSNormalizedCollection(
         address_objects=created_objects,

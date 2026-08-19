@@ -4150,3 +4150,82 @@ class NameCollisionPrecheckTests(TestCase):
         observations = compare_censuses(capture_census(label="before"), census)["observations"]
         self.assertTrue(any("Stage B unique constraint would fail" in o for o in observations),
                         observations)
+
+
+class SharedScopeAcrossPointsTests(TestCase):
+    """Panorama does not push the same shared set to every vsys.
+
+    Shared-object optimization pushes only what each device group references, so a
+    Panorama-Shared object can appear in one vsys's per-vsys response and not another's.
+    Deriving group-wide shared scope from a single representative point therefore left
+    such objects owned by nobody - the group pass never saw them, and the owning point's
+    pass discards shared scope by design - and every rule referencing one failed with
+    "unresolved address reference".
+    """
+
+    def _fixture(self):
+        station, group, appliance, point_a = _create_grouped_enforcement_point(
+            serial_number="8900", appliance_hostname="fw-opt", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-opt")
+        point_a.in_scope = True
+        point_a.save()
+        point_b = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group, vsys_name="vsys2", in_scope=True)
+        EnforcementNode.objects.create(
+            management_station=station, enforcement_point=point_b, appliance=appliance)
+
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": "vsys1"}, {"@name": "vsys2"}]}}]}}})
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {"address": {"entry": [
+                {"@name": "in-both", "@loc": "shared", "ip-netmask": "10.0.0.1/32"}]}}})
+
+        def vsys_payload(entries, rules):
+            return {"policy": {"panorama": {
+                "address": {"entry": entries},
+                "pre-rulebase": {"security": {"rules": {"entry": rules}}},
+                "post-rulebase": {"security": {"rules": {"entry": []}},
+                                  "default-security-rules": {"rules": {"entry": []}}}}}}
+
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point_a,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload=vsys_payload([], []))
+        # Only vsys2 receives this shared object, and only vsys2 has a rule using it.
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point_b,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload=vsys_payload(
+                [{"@name": "vsys2-only", "@loc": "shared", "ip-netmask": "172.25.84.0/24"}],
+                [{"@name": "pushed-rule", "@loc": "dg1",
+                  "from": {"member": ["trust"]}, "to": {"member": ["untrust"]},
+                  "source": {"member": ["vsys2-only"]}, "destination": {"member": ["any"]},
+                  "application": {"member": ["any"]},
+                  "service": {"member": ["application-default"]}, "action": "allow"}]))
+        return station, group, point_a, point_b
+
+    def test_a_shared_object_seen_by_only_one_point_is_still_group_owned(self):
+        _, group, _, _ = self._fixture()
+        normalize_appliance_group_shared_scope(group)
+        self.assertEqual(
+            sorted(group.address_objects.values_list("name", flat=True)),
+            ["in-both", "vsys2-only"],
+            "shared scope must be the union across every in-scope point, not one sample",
+        )
+
+    def test_a_rule_using_that_object_normalizes_instead_of_failing(self):
+        _, group, point_a, point_b = self._fixture()
+        normalize_appliance_group_shared_scope(group)
+        for point in (point_a, point_b):
+            normalize_enforcement_point_addresses(point)
+
+        result = normalize_enforcement_point_security_rules(point_b)
+        self.assertEqual(len(result.security_rules), 1)
+        self.assertEqual(list(result.security_rule_failures), [],
+                         "an unresolved reference here means the object was owned by nobody")

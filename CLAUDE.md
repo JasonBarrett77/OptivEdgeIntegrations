@@ -171,6 +171,16 @@ a five-vsys PA-5220. `ScopedPolicyObject.clean()` enforces that the owner matche
 
 Vendor objects stay on the point: two synthesized objects, so the duplication costs nothing.
 
+**Shared scope is the union across every in-scope point, not a sample of one.** Panorama does not push the
+same shared set to every vsys — shared-object optimization pushes only what each device group references, so
+a Panorama-Shared object can appear in one vsys's per-vsys response and not another's. Deriving group-wide
+shared scope from a single representative point left such objects owned by **nobody**: the group pass never
+saw them, and the owning point's pass discards shared scope by design. Every rule referencing one then failed
+with `unresolved address reference`. `normalize_appliance_group_shared_objects()` reads every in-scope point
+and unions the shared halves, keyed on `(name, namespace_type, namespace_value)`; overlap is expected since
+the non-vsys response is in every point's build, but **disagreeing values raise** — shared scope is a single
+namespace, so one name cannot hold two values.
+
 **Write order is load-bearing.** `replace_addresses()` is a delete-and-recreate and
 `SecurityRuleAddressRef.address_object` FKs point at these rows, so rewriting shared scope *after* a point's
 rules were normalized would cascade those refs away. `renormalize_in_scope_configuration()` runs the
