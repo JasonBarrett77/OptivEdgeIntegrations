@@ -3954,6 +3954,36 @@ class PolicyObjectCensusTests(TestCase):
             result["observations"],
         )
 
+    def test_the_same_name_in_different_groups_is_not_duplication(self):
+        """Regression: namespace_value is the literal "shared" for every shared object, so
+        keying duplication on (namespace_value, name) collapsed distinct groups together
+        and reported 3.0 rows per object for a perfectly correct three-group deployment."""
+        station, group_a, _, _, snapshot_a = self._fixture()
+        group_b = ApplianceGroup.objects.create(management_station=station, name="grp-second")
+        snapshot_b = Snapshot.objects.create(
+            management_station=station, appliance_group=group_b,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(), payload={})
+
+        self._shared_object(station, snapshot_a, "shr-a", owner=group_a)
+        self._shared_object(station, snapshot_b, "shr-a", owner=group_b)
+
+        dup = capture_census()["models"]["AddressObject"]["duplication"]
+        self.assertEqual(dup["shared_rows"], 2)
+        self.assertEqual(dup["distinct_shared"], 2, "one per group - not one overall")
+        self.assertEqual(dup["rows_per_object"], 1.0, "each group holds exactly one copy")
+
+    def test_compare_warns_when_the_snapshots_are_selected_backwards(self):
+        self._fixture()
+        first = capture_census(label="before-renormalize")
+        second = capture_census(label="after-renormalize")
+        second["captured_at"] = "2099-01-01T00:00:00+00:00"
+
+        backwards = compare_censuses(second, first)
+        self.assertTrue(
+            any("inverted" in o for o in backwards["observations"]), backwards["observations"])
+        forwards = compare_censuses(first, second)
+        self.assertFalse(any("inverted" in o for o in forwards["observations"]))
+
     def test_write_and_load_round_trip(self):
         self._fixture()
         census = capture_census(label="round-trip")

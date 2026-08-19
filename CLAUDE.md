@@ -204,10 +204,20 @@ it. `capture_census()` is safe against a **pre-migration** schema — the `appli
 exist yet, and its absence is recorded (`schema_has_appliance_group_owner`) rather than raised, which matters
 because the baseline is captured before migrating.
 
-The headline number is `rows_per_object` — shared rows ÷ distinct shared objects. It should be **1.0**;
-anything higher means one observation is stored more than once. On the lab five-vsys PA-5220 the before/after
-is `1320 -> 264` rows at `5.0 -> 1.0`, with `distinct_shared` unchanged at 264 — that last part is the check
-that deduplication removed copies rather than objects.
+The headline number is `rows_per_object` — shared rows ÷ distinct shared objects **per appliance group**. It
+should be **1.0**; anything higher means one observation is stored more than once. On the lab five-vsys
+PA-5220 the before/after is `1320 -> 264` rows at `5.0 -> 1.0`.
+
+The appliance group must be in that key. `namespace_value` is the literal string `"shared"` for every
+shared-scope object, so keying on `(namespace_value, name)` collapses *the same name in different groups*
+into one entry — a correct three-group deployment then reports `3.0` and can never reach 1.0. Pre-migration
+the rows hang off enforcement points, so the group is reached through them; that is what makes the two
+snapshots comparable.
+
+`distinct_shared` changing between snapshots is worth explaining but is **not** automatically a fault. Moving
+objects to the group owner alone cannot change which objects exist — but if normalization logic also changed
+between the captures (the `@loc` scope fix moves objects between vsys and shared scope), the shared set
+legitimately differs.
 
 `compare_censuses()` returns `observations` as plain statements rather than pass/fail, since the expected
 magnitude depends on how many vsys each group has. It does flag three things outright: duplication that

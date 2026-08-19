@@ -72,9 +72,9 @@ def _has_owner_column(model) -> bool:
     return any(column.name == "appliance_group_id" for column in columns)
 
 
-def _scope_counts(rows: list[tuple[str, Any, Any]]) -> dict[str, int]:
+def _scope_counts(rows: list[tuple]) -> dict[str, int]:
     counts: Counter = Counter()
-    for namespace_type, _, _ in rows:
+    for namespace_type, *_ in rows:
         try:
             counts[scope_for(namespace_type)] += 1
         except ValueError:
@@ -82,18 +82,26 @@ def _scope_counts(rows: list[tuple[str, Any, Any]]) -> dict[str, int]:
     return dict(counts)
 
 
-def _duplication(rows: list[tuple[str, Any, Any]]) -> dict[str, Any]:
-    """How many rows exist per distinct shared-scope object.
+def _duplication(rows: list[tuple]) -> dict[str, Any]:
+    """How many rows exist per distinct shared-scope object, per appliance group.
 
-    This is the headline number. Shared scope is group-wide, so each distinct name should
-    exist exactly once per appliance group. A factor above 1.0 means the same observation
-    is stored more than once — which is what owning shared objects per enforcement point
-    did, at one copy per vsys.
+    The headline number. Shared scope is group-wide, so a name should exist exactly once
+    **within each appliance group** — a factor above 1.0 means one observation is stored
+    more than once, which is what owning shared objects per enforcement point did at one
+    copy per vsys.
+
+    The appliance group has to be in the key. `namespace_value` is the literal string
+    "shared" for every shared-scope object, so keying on (namespace_value, name) collapses
+    the *same name in different groups* into one entry — and a deployment with three
+    groups then reports 3.0 rows per object while being perfectly correct. Keying on the
+    group is also what makes the before/after comparable: pre-migration the rows hang off
+    enforcement points, so the group is reached through them, and 5 vsys holding one name
+    still counts as one distinct object in one group.
     """
     shared = [r for r in rows if _safe_scope(r[0]) == PolicyObjectScope.SHARED]
     if not shared:
         return {"shared_rows": 0, "distinct_shared": 0, "rows_per_object": None}
-    distinct = len({(namespace_value, name) for _, namespace_value, name in shared})
+    distinct = len({(group_id, name) for _, _, name, group_id in shared})
     return {
         "shared_rows": len(shared),
         "distinct_shared": distinct,
@@ -109,13 +117,28 @@ def _safe_scope(namespace_type: str) -> str:
 
 
 def _model_census(model, *, has_owner_column: bool) -> dict[str, Any]:
-    fields = ["namespace_type", "namespace_value", "name"]
-    rows = list(model.objects.values_list(*fields))
+    # The owning appliance group is part of the duplication key. Post-migration a shared
+    # object names it directly; pre-migration it hangs off an enforcement point, so the
+    # group is reached through that — which is what keeps the two snapshots comparable.
+    if has_owner_column:
+        raw = model.objects.values_list(
+            "namespace_type", "namespace_value", "name",
+            "appliance_group_id", "enforcement_point__appliance_group_id",
+        )
+        rows = [(ns, nv, name, group or via_point) for ns, nv, name, group, via_point in raw]
+    else:
+        rows = [
+            (ns, nv, name, via_point)
+            for ns, nv, name, via_point in model.objects.values_list(
+                "namespace_type", "namespace_value", "name",
+                "enforcement_point__appliance_group_id",
+            )
+        ]
 
     census: dict[str, Any] = {
         "total_rows": len(rows),
         "by_scope": _scope_counts(rows),
-        "by_namespace": dict(Counter(namespace_type for namespace_type, _, _ in rows)),
+        "by_namespace": dict(Counter(namespace_type for namespace_type, *_ in rows)),
         "duplication": _duplication(rows),
     }
 
@@ -250,6 +273,14 @@ def compare_censuses(before: dict[str, Any], after: dict[str, Any]) -> dict[str,
         "observations": [],
     }
 
+    b_at, a_at = before.get("captured_at") or "", after.get("captured_at") or ""
+    if b_at and a_at and b_at > a_at:
+        result["observations"].append(
+            f"The snapshot given as BEFORE was captured later ({b_at}) than the one given as "
+            f"AFTER ({a_at}). Every delta below is therefore inverted — a reduction will read "
+            f"as an increase. Swap the two selections."
+        )
+
     for label in SCOPED_MODELS:
         b = before["models"].get(label, {})
         a = after["models"].get(label, {})
@@ -274,8 +305,11 @@ def compare_censuses(before: dict[str, Any], after: dict[str, Any]) -> dict[str,
         if (b_dup.get("distinct_shared") or 0) and a_dup.get("distinct_shared") != b_dup.get("distinct_shared"):
             result["observations"].append(
                 f"{label}: distinct shared objects changed {b_dup.get('distinct_shared')} -> "
-                f"{a_dup.get('distinct_shared')} — deduplication should not change WHICH objects exist, "
-                f"so this is worth explaining before trusting the drop"
+                f"{a_dup.get('distinct_shared')}. Moving objects to the group owner alone cannot do "
+                f"that, so something else differs between the snapshots. Expected if normalization "
+                f"logic also changed — the @loc scope fix moves objects between vsys and shared "
+                f"scope, which changes the shared set. Unexpected if the only change was ownership, "
+                f"in which case objects were gained or lost rather than deduplicated."
             )
         owner = a.get("by_owner") or {}
         if owner.get("orphaned"):
