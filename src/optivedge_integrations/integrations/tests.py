@@ -1,4 +1,6 @@
 import ipaddress
+from pathlib import Path
+import tempfile
 import re
 from unittest.mock import patch
 
@@ -69,6 +71,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.zones im
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     is_panorama_managed,
     latest_pushed_shared_snapshot,
+)
+from optivedge_integrations.integrations.diagnostics import (
+    capture_census,
+    compare_censuses,
+    load_census,
+    write_census,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_device_configuration,
@@ -3851,3 +3859,104 @@ class SharedScopeOwnershipTests(TestCase):
         )
         with self.assertRaisesMessage(ValidationError, "shared-scoped and must belong to an appliance group"):
             wrong.clean()
+
+
+class PolicyObjectCensusTests(TestCase):
+    """The census exists to validate that shared-scope rows collapsed to one per group.
+
+    So the tests check it can tell the two states apart — not merely that it runs.
+    """
+
+    def _fixture(self):
+        station, group, appliance, point_a = _create_grouped_enforcement_point(
+            serial_number="8500", appliance_hostname="fw-census",
+            station_hostname="panorama.local", group_name="grp-census",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, vsys_name="vsys1",
+        )
+        point_b = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group, vsys_name="vsys2")
+        snapshot = Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {}},
+        )
+        return station, group, point_a, point_b, snapshot
+
+    def _shared_object(self, station, snapshot, name, *, owner):
+        kwargs = {"enforcement_point": owner} if isinstance(owner, EnforcementPoint) else {"appliance_group": owner}
+        return AddressObject.objects.create(
+            management_station=station, source_snapshot=snapshot, config_source="pushed_pre",
+            name=name, namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
+            namespace_value="shared",
+            precedence_rank=precedence_for(PolicyObjectNamespace.PANORAMA_SHARED),
+            address_type=AddressObject.TYPE_IP_NETMASK, value="10.0.0.1/32",
+            last_synced_at=timezone.now(), **kwargs,
+        )
+
+    def test_reports_one_row_per_object_when_shared_scope_is_group_owned(self):
+        station, group, _, _, snapshot = self._fixture()
+        for name in ("shr-a", "shr-b"):
+            self._shared_object(station, snapshot, name, owner=group)
+
+        census = capture_census(label="after")
+        dup = census["models"]["AddressObject"]["duplication"]
+        self.assertEqual(dup, {"shared_rows": 2, "distinct_shared": 2, "rows_per_object": 1.0})
+        self.assertEqual(census["models"]["AddressObject"]["by_owner"]["appliance_group"], 2)
+        self.assertEqual(census["models"]["AddressObject"]["by_owner"]["enforcement_point"], 0)
+
+    def test_detects_the_duplication_the_split_removed(self):
+        """The pre-change shape: the same shared object stored once per vsys."""
+        station, group, point_a, point_b, snapshot = self._fixture()
+        for point in (point_a, point_b):
+            for name in ("shr-a", "shr-b"):
+                self._shared_object(station, snapshot, name, owner=point)
+
+        census = capture_census(label="before")
+        dup = census["models"]["AddressObject"]["duplication"]
+        self.assertEqual(dup["shared_rows"], 4)
+        self.assertEqual(dup["distinct_shared"], 2)
+        self.assertEqual(dup["rows_per_object"], 2.0, "two vsys, so two rows per object")
+
+    def test_compare_flags_surviving_duplication_and_stays_quiet_when_clean(self):
+        station, group, point_a, point_b, snapshot = self._fixture()
+        for point in (point_a, point_b):
+            self._shared_object(station, snapshot, "shr-a", owner=point)
+        before = capture_census(label="before")
+
+        AddressObject.objects.all().delete()
+        self._shared_object(station, snapshot, "shr-a", owner=group)
+        after = capture_census(label="after")
+
+        clean = compare_censuses(before, after)
+        self.assertEqual(clean["models"]["AddressObject"]["shared_rows"], {"before": 2, "after": 1, "delta": -1})
+        self.assertEqual(clean["observations"], [
+            "No anomalies: shared scope is stored once per appliance group and dependent "
+            "rows were rebuilt."
+        ])
+
+        noisy = compare_censuses(before, before)
+        self.assertTrue(any("still stored more than once" in o for o in noisy["observations"]))
+
+    def test_compare_flags_a_renormalize_that_never_ran(self):
+        station, group, point_a, _, snapshot = self._fixture()
+        SecurityRule.objects.create(
+            management_station=station, enforcement_point=point_a, source_snapshot=snapshot,
+            config_source="local", effective_order=1, rule_position=1, name="r1",
+            last_synced_at=timezone.now(),
+        )
+        before = capture_census(label="before")
+        SecurityRule.objects.all().delete()          # what migration 0015 does
+        after = capture_census(label="after")
+
+        result = compare_censuses(before, after)
+        self.assertTrue(
+            any("renormalize did not run" in o for o in result["observations"]),
+            result["observations"],
+        )
+
+    def test_write_and_load_round_trip(self):
+        self._fixture()
+        census = capture_census(label="round-trip")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_census(census, Path(tmp) / "census.json")
+            self.assertEqual(load_census(path), census)

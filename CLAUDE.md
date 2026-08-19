@@ -184,6 +184,36 @@ information lives in the raw `Snapshot` payload, not in the normalized row — s
 objects and security rules and requires a **renormalize** to repopulate. That is safe because the data is
 fully re-derivable from stored snapshots without contacting a device.
 
+### Diagnostics (`integrations/diagnostics/`)
+
+Read-only reporting over normalized data. Plain functions — no views, no management commands — so the same
+logic serves a developer page, a shell session or a script. Nothing here writes to the database.
+
+`policy_object_census` answers "did shared-scope rows collapse to one copy per appliance group?":
+
+```python
+before = capture_census(label="before-renormalize")
+write_census(before)                     # -> ./policy-object-census/<label>-<ts>.json
+# migrate 0015, then renormalize
+compare_censuses(before, capture_census(label="after-renormalize"))
+```
+
+Computation is separate from persistence deliberately: a page can render `capture_census()` live without
+writing anything, while the before/after case needs the baseline to outlive the migration that invalidates
+it. `capture_census()` is safe against a **pre-migration** schema — the `appliance_group` column may not
+exist yet, and its absence is recorded (`schema_has_appliance_group_owner`) rather than raised, which matters
+because the baseline is captured before migrating.
+
+The headline number is `rows_per_object` — shared rows ÷ distinct shared objects. It should be **1.0**;
+anything higher means one observation is stored more than once. On the lab five-vsys PA-5220 the before/after
+is `1320 -> 264` rows at `5.0 -> 1.0`, with `distinct_shared` unchanged at 264 — that last part is the check
+that deduplication removed copies rather than objects.
+
+`compare_censuses()` returns `observations` as plain statements rather than pass/fail, since the expected
+magnitude depends on how many vsys each group has. It does flag three things outright: duplication that
+survived, a change in *which* objects exist, and dependent rows left at zero — which means the renormalize
+never ran.
+
 ### Collection → normalization → persistence pipeline (PAN-OS)
 
 `integrations/platforms/pan_os/` is layered strictly bottom-up; keep new PAN-OS logic in the matching layer

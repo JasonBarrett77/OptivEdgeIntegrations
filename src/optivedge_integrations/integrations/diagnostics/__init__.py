@@ -1,0 +1,19 @@
+"""Read-only diagnostics over normalized data.
+
+Plain functions, no Django views or management commands, so the same logic serves a
+developer page, a shell session, or a script. Nothing here writes to the database.
+"""
+
+from optivedge_integrations.integrations.diagnostics.policy_object_census import (
+    capture_census,
+    compare_censuses,
+    load_census,
+    write_census,
+)
+
+__all__ = [
+    "capture_census",
+    "compare_censuses",
+    "load_census",
+    "write_census",
+]
