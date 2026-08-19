@@ -2778,6 +2778,32 @@ class ZoneViewTests(TestCase):
             ),
         )
 
+    def test_zones_tab_keeps_one_truncated_line_per_interface(self):
+        """The two columns line up only while each interface occupies exactly one line.
+
+        A wrapping address list would push its own row taller than the interface name
+        beside it and silently break the pairing, so the cell truncates and carries the
+        full list as a tooltip instead.
+        """
+        response = self.client.get(
+            reverse("enforcement_point_detail", kwargs={"pk": self.enforcement_point.pk}),
+            {"tab": "zones"},
+        )
+        html = response.content.decode()
+
+        self.assertIn("table-fixed", html)
+        trust_row = next(
+            row
+            for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html, re.S)
+            if ">trust<" in row
+        )
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", trust_row, re.S)
+        interface_lines = re.findall(r'<div class="truncate"', cells[2])
+        address_lines = re.findall(r'<div class="truncate font-mono text-xs" title="([^"]*)"', cells[3])
+
+        self.assertEqual(len(interface_lines), 2)
+        self.assertEqual(address_lines, ["10.1.1.1/24, 10.1.2.1/24", "192.168.100.1/24"])
+
     def test_zone_detail_renders_details_and_interfaces(self):
         response = self.client.get(
             reverse(
