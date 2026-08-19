@@ -33,6 +33,7 @@ from optivedge_integrations.integrations.models import (
     Note,
     SecurityRule,
     Snapshot,
+    Zone,
 )
 from optivedge_integrations.integrations.presentation import (
     build_address_group_row,
@@ -60,7 +61,8 @@ TAB_EVENTS = "events"
 _VALID_TABS = {TAB_DETAILS, TAB_APPLIANCE_GROUPS, TAB_ENFORCEMENT_POINTS, TAB_EVENTS}
 
 TAB_APPLIANCES = "appliances"
-_VALID_ENFORCEMENT_POINT_TABS = {TAB_DETAILS, TAB_APPLIANCES}
+TAB_ZONES = "zones"
+_VALID_ENFORCEMENT_POINT_TABS = {TAB_DETAILS, TAB_APPLIANCES, TAB_ZONES}
 
 SCOPE_FILTER_IN = "in"
 SCOPE_FILTER_OUT = "out"
@@ -156,6 +158,11 @@ def build_enforcement_point_detail_context(enforcement_point, *, active_tab=TAB_
 
     if active_tab == TAB_APPLIANCES:
         context["appliances"] = get_enforcement_point_appliances(enforcement_point)
+
+    elif active_tab == TAB_ZONES:
+        context["zones"] = list(
+            enforcement_point.zones.prefetch_related("interfaces").order_by("name", "pk")
+        )
 
     return context
 
@@ -378,6 +385,28 @@ class EnforcementPointDetailView(DetailView):
         context = super().get_context_data(**kwargs)
         active_tab = self.request.GET.get("tab", TAB_DETAILS)
         context.update(build_enforcement_point_detail_context(self.object, active_tab=active_tab))
+        return context
+
+
+class EnforcementPointZoneDetailView(DetailView):
+    model = Zone
+    context_object_name = "zone"
+    pk_url_kwarg = "zone_pk"
+    template_name = "integrations/zone_detail.html"
+
+    def get_queryset(self):
+        return Zone.objects.filter(
+            enforcement_point=self.kwargs["pk"],
+        ).select_related(
+            "enforcement_point",
+            "enforcement_point__management_station",
+            "source_snapshot",
+        ).prefetch_related("interfaces")
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["enforcement_point"] = self.object.enforcement_point
+        context["raw_entry_json"] = build_pretty_json(self.object.raw_entry)
         return context
 
 

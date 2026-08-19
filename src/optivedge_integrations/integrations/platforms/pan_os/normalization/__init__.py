@@ -10,6 +10,7 @@ from optivedge_integrations.integrations.models import (
     Appliance,
     EnforcementPoint,
     ManagementStation,
+    Zone,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import PANOSCollectedResponse
 from optivedge_integrations.integrations.platforms.pan_os.normalization.panorama import (
@@ -29,6 +30,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     normalize_security_rules,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
+from optivedge_integrations.integrations.platforms.pan_os.normalization.zones import (
+    normalize_zones,
+)
 
 
 def normalize_collected_response(
@@ -62,6 +66,10 @@ def normalize_enforcement_point_addresses(enforcement_point: EnforcementPoint) -
     return normalize_addresses(enforcement_point)
 
 
+def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
+    return normalize_zones(enforcement_point)
+
+
 __all__ = [
     "NormalizedDynamicAddressContent",
     "PANOSNormalizedCollection",
@@ -70,8 +78,10 @@ __all__ = [
     "normalize_enforcement_point_addresses",
     "normalize_enforcement_point_dynamic_address_content",
     "normalize_enforcement_point_security_rules",
+    "normalize_enforcement_point_zones",
     "normalize_device_configuration_profile",
     "normalize_collected_response",
     "normalize_security_rules",
     "normalize_show_managed_devices",
+    "normalize_zones",
 ]

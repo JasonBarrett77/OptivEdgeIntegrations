@@ -23,6 +23,7 @@ from optivedge_integrations.integrations.models import (
     SecurityRule,
     SecurityRuleDestinationAddressRef,
     SecurityRuleSourceAddressRef,
+    Zone,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     clear_target_vsys,
@@ -40,6 +41,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.types impor
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     PANOSNormalizedCollection,
     normalize_enforcement_point_addresses,
+    normalize_enforcement_point_zones,
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
     normalize_appliance_device_configuration,
@@ -183,6 +185,18 @@ class PANOSDynamicContentRefreshResult:
 
 
 @dataclass(slots=True)
+class PANOSZoneNormalizedPoint:
+    enforcement_point: EnforcementPoint
+    zones: list[Zone]
+
+
+@dataclass(slots=True)
+class PANOSZoneNormalizationFailure:
+    enforcement_point: EnforcementPoint
+    error_text: str
+
+
+@dataclass(slots=True)
 class PANOSInScopeConfigCollection:
     appliances: list[Appliance]
     appliance_groups: list[ApplianceGroup]
@@ -202,6 +216,8 @@ class PANOSInScopeConfigCollection:
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint]
     security_rule_failures: list[PANOSSecurityRuleNormalizationFailure]
     security_rule_item_failures: list[PANOSSecurityRuleFailure]
+    zone_normalizations: list[PANOSZoneNormalizedPoint]
+    zone_failures: list[PANOSZoneNormalizationFailure]
 
 
 @dataclass(slots=True)
@@ -221,6 +237,8 @@ class PANOSInScopeRenormalizationResult:
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint]
     security_rule_failures: list[PANOSSecurityRuleNormalizationFailure]
     security_rule_item_failures: list[PANOSSecurityRuleFailure]
+    zone_normalizations: list[PANOSZoneNormalizedPoint]
+    zone_failures: list[PANOSZoneNormalizationFailure]
 
 
 def get_in_scope_appliances(management_station: ManagementStation) -> list[Appliance]:
@@ -476,6 +494,8 @@ def renormalize_in_scope_configuration(
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint] = []
     security_rule_failures: list[PANOSSecurityRuleNormalizationFailure] = []
     security_rule_item_failures: list[PANOSSecurityRuleFailure] = []
+    zone_normalizations: list[PANOSZoneNormalizedPoint] = []
+    zone_failures: list[PANOSZoneNormalizationFailure] = []
 
     for appliance in appliances:
         try:
@@ -542,6 +562,24 @@ def renormalize_in_scope_configuration(
                 )
             )
 
+    for enforcement_point in enforcement_points:
+        try:
+            zones = normalize_enforcement_point_zones(enforcement_point)
+        except Exception as exc:
+            zone_failures.append(
+                PANOSZoneNormalizationFailure(
+                    enforcement_point=enforcement_point,
+                    error_text=str(exc),
+                )
+            )
+            continue
+        zone_normalizations.append(
+            PANOSZoneNormalizedPoint(
+                enforcement_point=enforcement_point,
+                zones=zones,
+            )
+        )
+
     return PANOSInScopeRenormalizationResult(
         appliances=appliances,
         enforcement_points=enforcement_points,
@@ -552,6 +590,8 @@ def renormalize_in_scope_configuration(
         security_rule_normalizations=security_rule_normalizations,
         security_rule_failures=security_rule_failures,
         security_rule_item_failures=security_rule_item_failures,
+        zone_normalizations=zone_normalizations,
+        zone_failures=zone_failures,
     )
 
 
@@ -688,6 +728,8 @@ def collect_in_scope_configuration_snapshots(
         security_rule_normalizations=renormalized.security_rule_normalizations,
         security_rule_failures=renormalized.security_rule_failures,
         security_rule_item_failures=renormalized.security_rule_item_failures,
+        zone_normalizations=renormalized.zone_normalizations,
+        zone_failures=renormalized.zone_failures,
     )
 
 

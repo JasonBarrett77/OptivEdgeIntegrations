@@ -1,0 +1,147 @@
+{% load local_time %}
+<section class="flex h-full w-full min-h-0 min-w-0">
+    <div class="min-h-0 flex-1 overflow-auto">
+        <div class="flex flex-col">
+            <div class="flex items-start justify-between gap-2 border-b border-slate-200 px-4 py-3">
+                <div class="min-w-0 space-y-0.5">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Zone</div>
+                    <div class="text-[15px] font-semibold leading-5 text-slate-950">{{ zone.name }}</div>
+                    <div class="truncate pt-0.5 text-[11px] leading-4 text-slate-500">
+                        {{ enforcement_point.vsys_name }}{% if enforcement_point.vsys_display_name %} / {{ enforcement_point.vsys_display_name }}{% endif %}
+                        · {{ enforcement_point.management_station }}
+                    </div>
+                </div>
+                <div class="flex shrink-0 items-center gap-1.5 pt-0.5">
+                    <a
+                        href="{% url 'enforcement_point_detail' pk=enforcement_point.pk %}?tab=zones"
+                        class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                    >
+                        Back to Enforcement Point
+                    </a>
+                </div>
+            </div>
+
+            <div class="px-4 py-3">
+                <div class="grid grid-cols-1 gap-4 py-1 xl:grid-cols-2">
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Type</div>
+                        <div class="text-sm leading-5 text-slate-900">{{ zone.get_zone_type_display }}</div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">User Identification</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if zone.enable_user_identification %}Enabled{% else %}<span class="text-slate-400">Disabled</span>{% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Zone Protection Profile</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if zone.zone_protection_profile %}{{ zone.zone_protection_profile }}{% else %}<span class="text-slate-400">None</span>{% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Log Setting</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if zone.log_setting %}{{ zone.log_setting }}{% else %}<span class="text-slate-400">None</span>{% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Packet Buffer Protection</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if zone.packet_buffer_protection is None %}
+                                <span class="text-slate-400">Not reported</span>
+                            {% elif zone.packet_buffer_protection %}
+                                Enabled
+                            {% else %}
+                                <span class="text-slate-400">Disabled</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Last Synced</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if zone.source_snapshot.collected_at %}
+                                {{ zone.source_snapshot.collected_at|local_time }}
+                            {% else %}
+                                <span class="text-slate-400">-</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">User-ID Include ACL</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% for value in zone.include_acl %}
+                                <div><code class="font-mono text-xs">{{ value }}</code></div>
+                            {% empty %}
+                                <span class="text-slate-400">-</span>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">User-ID Exclude ACL</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% for value in zone.exclude_acl %}
+                                <div><code class="font-mono text-xs">{{ value }}</code></div>
+                            {% empty %}
+                                <span class="text-slate-400">-</span>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+
+                <div class="pt-4">
+                    <div class="flex items-center justify-between gap-3 pb-1.5">
+                        <h2 class="text-sm font-semibold text-slate-950">Interfaces</h2>
+                        <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                            {{ zone.interfaces.all|length }} interface{{ zone.interfaces.all|length|pluralize }}
+                        </div>
+                    </div>
+                    <div class="overflow-auto border border-slate-200">
+                        <table class="min-w-full border-separate border-spacing-0">
+                            <thead>
+                                <tr>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Interface</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">IP Addresses</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for interface in zone.interfaces.all %}
+                                <tr>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-900 whitespace-nowrap">{{ interface.name }}</td>
+                                    <td class="border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% for address in interface.ip_addresses %}
+                                            <div><code class="font-mono text-xs">{{ address }}</code></div>
+                                        {% empty %}
+                                            <span class="text-slate-400">No configured address</span>
+                                        {% endfor %}
+                                    </td>
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="2" class="px-4 py-8 text-center text-sm text-slate-500">
+                                        No interfaces assigned to this zone.
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <details class="pt-4">
+                    <summary class="cursor-pointer text-[11px] font-medium uppercase tracking-wide text-slate-500 hover:text-slate-700">
+                        Raw configuration entry
+                    </summary>
+                    <pre class="mt-2 max-h-96 overflow-auto border border-slate-200 bg-slate-50 p-3 font-mono text-xs leading-5 text-slate-800">{{ raw_entry_json }}</pre>
+                </details>
+            </div>
+        </div>
+    </div>
+</section>

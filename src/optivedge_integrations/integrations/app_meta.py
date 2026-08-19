@@ -38,6 +38,7 @@ SIDEBAR_SECTION = [
                 "active_names": {
                     "enforcement_point_list",
                     "enforcement_point_detail",
+                    "enforcement_point_zone_detail",
                 },
             },
         ],

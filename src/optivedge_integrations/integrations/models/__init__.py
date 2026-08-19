@@ -18,6 +18,7 @@ from .collected import (
 from .events import IntegrationEvent, IntegrationRun
 from .device_configuration import DeviceConfigurationProfile
 from .notes import Note
+from .zones import Zone, ZoneInterface
 from .policy import (
     AddressGroup,
     AddressGroupMember,
@@ -102,4 +103,6 @@ __all__ = [
     "Snapshot",
     "SyncTrackedModel",
     "TimestampedModel",
+    "Zone",
+    "ZoneInterface",
 ]

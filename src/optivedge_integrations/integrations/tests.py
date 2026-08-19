@@ -35,6 +35,8 @@ from optivedge_integrations.integrations.models import (
     SecurityRuleDestinationAddressRef,
     SecurityRuleSourceAddressRef,
     Snapshot,
+    Zone,
+    ZoneInterface,
 )
 from optivedge_integrations.integrations.platforms.pan_os import (
     PANOSInScopeConfigCollection,
@@ -59,6 +61,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     pushed_shared,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.zones import (
+    build_interface_address_index,
+    build_normalized_zones,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     is_panorama_managed,
     latest_pushed_shared_snapshot,
@@ -68,6 +74,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_addresses,
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
+    normalize_enforcement_point_zones,
 )
 from optivedge_integrations.integrations.orchestration import refresh_panorama_in_scope_data
 from optivedge_integrations.integrations.search_vocabulary import (
@@ -222,6 +229,8 @@ def _empty_in_scope_refresh_collection():
             security_rule_normalizations=[],
             security_rule_failures=[],
             security_rule_item_failures=[],
+            zone_normalizations=[],
+            zone_failures=[],
         ),
     )
 
@@ -237,6 +246,8 @@ def _empty_renormalization_result():
         security_rule_normalizations=[],
         security_rule_failures=[],
         security_rule_item_failures=[],
+        zone_normalizations=[],
+        zone_failures=[],
     )
 
 
@@ -2558,6 +2569,250 @@ class ApplianceGroupSnapshotViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
 
+ZONE_MERGED_CONFIG_PAYLOAD = {
+    "config": {
+        "devices": {
+            "entry": {
+                "network": {
+                    "interface": {
+                        "ethernet": {
+                            "entry": [
+                                {
+                                    "@name": "ethernet1/1",
+                                    "layer3": {
+                                        "ip": {
+                                            "entry": [
+                                                {"@name": "10.1.1.1/24"},
+                                                {"@name": "10.1.2.1/24"},
+                                            ]
+                                        }
+                                    },
+                                },
+                                {
+                                    "@name": "ethernet1/2",
+                                    "layer3": {
+                                        "units": {
+                                            "entry": {
+                                                "@name": "ethernet1/2.100",
+                                                "ip": {"entry": {"@name": "192.168.100.1/24"}},
+                                            }
+                                        }
+                                    },
+                                },
+                                {"@name": "ethernet1/3", "layer2": {}},
+                            ]
+                        },
+                        "loopback": {
+                            "units": {
+                                "entry": {
+                                    "@name": "loopback.1",
+                                    "ip": {"entry": {"@name": "172.16.0.1/32"}},
+                                }
+                            }
+                        },
+                    }
+                },
+                "vsys": {
+                    "entry": {
+                        "@name": "vsys1",
+                        "zone": {
+                            "entry": [
+                                {
+                                    "@name": "trust",
+                                    "network": {
+                                        "layer3": {"member": ["ethernet1/1", "ethernet1/2.100"]},
+                                        "zone-protection-profile": "zp-strict",
+                                        "log-setting": "log-fwd",
+                                        "packet-buffer-protection": "yes",
+                                    },
+                                    "enable-user-identification": "yes",
+                                    "user-acl": {
+                                        "include-list": {"member": ["10.0.0.0/8"]},
+                                        "exclude-list": {"member": "10.9.9.0/24"},
+                                    },
+                                },
+                                {
+                                    "@name": "dmz",
+                                    "network": {"layer3": {"member": "loopback.1"}},
+                                },
+                                {
+                                    "@name": "l2-segment",
+                                    "network": {"layer2": {"member": ["ethernet1/3"]}},
+                                },
+                            ]
+                        },
+                    }
+                },
+            }
+        }
+    }
+}
+
+
+class ZoneNormalizationTests(TestCase):
+    def setUp(self):
+        self.station, self.appliance, self.enforcement_point = _create_panorama_enforcement_point(
+            serial_number="Z001",
+            appliance_hostname="fw-zone",
+            station_hostname="panorama-zone.local",
+        )
+        self.snapshot = Snapshot.objects.create(
+            management_station=self.station,
+            appliance=self.appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload=ZONE_MERGED_CONFIG_PAYLOAD,
+        )
+
+    def test_interface_address_index_covers_physical_units_and_logical_interfaces(self):
+        index = build_interface_address_index(ZONE_MERGED_CONFIG_PAYLOAD)
+
+        self.assertEqual(index["ethernet1/1"], ["10.1.1.1/24", "10.1.2.1/24"])
+        self.assertEqual(index["ethernet1/2.100"], ["192.168.100.1/24"])
+        self.assertEqual(index["loopback.1"], ["172.16.0.1/32"])
+        # A layer 2 interface carries no address, but must still be indexed - otherwise
+        # "not in the index" and "has no addresses" become indistinguishable.
+        self.assertEqual(index["ethernet1/3"], [])
+
+    def test_build_normalized_zones_reads_type_members_and_common_details(self):
+        zones = {zone.name: zone for zone in build_normalized_zones(ZONE_MERGED_CONFIG_PAYLOAD, "vsys1")}
+
+        trust = zones["trust"]
+        self.assertEqual(trust.zone_type, Zone.TYPE_LAYER3)
+        self.assertEqual([i.name for i in trust.interfaces], ["ethernet1/1", "ethernet1/2.100"])
+        self.assertEqual(trust.interfaces[0].ip_addresses, ["10.1.1.1/24", "10.1.2.1/24"])
+        self.assertEqual(trust.interfaces[1].ip_addresses, ["192.168.100.1/24"])
+        self.assertTrue(trust.enable_user_identification)
+        self.assertEqual(trust.zone_protection_profile, "zp-strict")
+        self.assertEqual(trust.log_setting, "log-fwd")
+        self.assertIs(trust.packet_buffer_protection, True)
+        self.assertEqual(trust.include_acl, ["10.0.0.0/8"])
+        self.assertEqual(trust.exclude_acl, ["10.9.9.0/24"])
+
+        self.assertEqual(zones["l2-segment"].zone_type, Zone.TYPE_LAYER2)
+        self.assertEqual([i.name for i in zones["l2-segment"].interfaces], ["ethernet1/3"])
+
+    def test_absent_packet_buffer_protection_is_unset_rather_than_disabled(self):
+        """Not reported and reported-as-no are different facts; don't collapse them."""
+        zones = {zone.name: zone for zone in build_normalized_zones(ZONE_MERGED_CONFIG_PAYLOAD, "vsys1")}
+
+        self.assertIsNone(zones["dmz"].packet_buffer_protection)
+        self.assertFalse(zones["dmz"].enable_user_identification)
+
+    def test_single_member_is_read_as_one_interface_not_characters(self):
+        """xmltodict collapses a one-element member list to a bare string."""
+        zones = {zone.name: zone for zone in build_normalized_zones(ZONE_MERGED_CONFIG_PAYLOAD, "vsys1")}
+
+        self.assertEqual([i.name for i in zones["dmz"].interfaces], ["loopback.1"])
+
+    def test_unrecognised_payload_yields_no_zones_instead_of_raising(self):
+        """These payload shapes are inferred, not measured - degrade, don't fail the run."""
+        for payload in ({}, {"config": "not-a-dict"}, {"config": {"devices": {}}}):
+            self.assertEqual(build_normalized_zones(payload, "vsys1"), [])
+            self.assertEqual(build_interface_address_index(payload), {})
+
+    def test_normalize_zones_persists_zones_and_interfaces(self):
+        zones = normalize_enforcement_point_zones(self.enforcement_point)
+
+        self.assertEqual([zone.name for zone in zones], ["dmz", "l2-segment", "trust"])
+        trust = Zone.objects.get(enforcement_point=self.enforcement_point, name="trust")
+        self.assertEqual(trust.source_snapshot, self.snapshot)
+        self.assertEqual(
+            [(i.name, i.ip_addresses) for i in trust.interfaces.all()],
+            [("ethernet1/1", ["10.1.1.1/24", "10.1.2.1/24"]), ("ethernet1/2.100", ["192.168.100.1/24"])],
+        )
+
+    def test_normalize_zones_replaces_previous_zones(self):
+        normalize_enforcement_point_zones(self.enforcement_point)
+        Zone.objects.create(
+            management_station=self.station,
+            enforcement_point=self.enforcement_point,
+            source_snapshot=self.snapshot,
+            name="stale-zone",
+        )
+
+        normalize_enforcement_point_zones(self.enforcement_point)
+
+        names = list(Zone.objects.filter(enforcement_point=self.enforcement_point).values_list("name", flat=True))
+        self.assertNotIn("stale-zone", names)
+        self.assertEqual(ZoneInterface.objects.filter(zone__name="stale-zone").count(), 0)
+
+    def test_normalize_zones_without_a_merged_snapshot_returns_nothing(self):
+        self.snapshot.delete()
+
+        self.assertEqual(normalize_enforcement_point_zones(self.enforcement_point), [])
+
+
+class ZoneViewTests(TestCase):
+    def setUp(self):
+        self.station, self.appliance, self.enforcement_point = _create_panorama_enforcement_point(
+            serial_number="Z100",
+            appliance_hostname="fw-zone-view",
+            station_hostname="panorama-zone-view.local",
+        )
+        Snapshot.objects.create(
+            management_station=self.station,
+            appliance=self.appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload=ZONE_MERGED_CONFIG_PAYLOAD,
+        )
+        normalize_enforcement_point_zones(self.enforcement_point)
+        self.trust = Zone.objects.get(enforcement_point=self.enforcement_point, name="trust")
+
+    def test_zones_tab_lists_zones_with_interface_names_and_addresses(self):
+        response = self.client.get(
+            reverse("enforcement_point_detail", kwargs={"pk": self.enforcement_point.pk}),
+            {"tab": "zones"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([z.name for z in response.context["zones"]], ["dmz", "l2-segment", "trust"])
+        self.assertContains(response, "ethernet1/2.100")
+        self.assertContains(response, "10.1.1.1/24")
+        self.assertContains(
+            response,
+            reverse(
+                "enforcement_point_zone_detail",
+                kwargs={"pk": self.enforcement_point.pk, "zone_pk": self.trust.pk},
+            ),
+        )
+
+    def test_zone_detail_renders_details_and_interfaces(self):
+        response = self.client.get(
+            reverse(
+                "enforcement_point_zone_detail",
+                kwargs={"pk": self.enforcement_point.pk, "zone_pk": self.trust.pk},
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["zone"], self.trust)
+        self.assertEqual(response.context["enforcement_point"], self.enforcement_point)
+        self.assertContains(response, "zp-strict")
+        self.assertContains(response, "192.168.100.1/24")
+        self.assertContains(response, "10.9.9.0/24")
+
+    def test_zone_detail_404s_for_a_zone_on_another_enforcement_point(self):
+        """The zone pk is only meaningful under its own point; don't let one leak across."""
+        _, _, _, other_point = _create_grouped_enforcement_point(
+            serial_number="Z200",
+            appliance_hostname="fw-other",
+            station_hostname="panorama-other-zone.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            group_name="grp-other-zone",
+        )
+
+        response = self.client.get(
+            reverse(
+                "enforcement_point_zone_detail",
+                kwargs={"pk": other_point.pk, "zone_pk": self.trust.pk},
+            )
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+
 class EnforcementPointListViewTests(TestCase):
     def setUp(self):
         _, _, _, self.in_scope = _create_grouped_enforcement_point(
@@ -2742,7 +2997,10 @@ class EnforcementPointNavigationTests(TestCase):
             for item in section["items"]
             if item["label"] == "Enforcement Points"
         )
-        self.assertEqual(item["active_names"], {"enforcement_point_list", "enforcement_point_detail"})
+        self.assertEqual(
+            item["active_names"],
+            {"enforcement_point_list", "enforcement_point_detail", "enforcement_point_zone_detail"},
+        )
 
 
 class EnforcementPointAddressListViewTests(TestCase):

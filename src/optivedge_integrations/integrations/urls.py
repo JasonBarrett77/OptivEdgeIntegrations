@@ -6,6 +6,7 @@ from optivedge_integrations.integrations.views import (
     EnforcementPointDetailView,
     EnforcementPointListView,
     EnforcementPointScopeToggleView,
+    EnforcementPointZoneDetailView,
     ManagementStationBulkInScopeSyncView,
     ManagementStationCreateView,
     ManagementStationDeleteView,
@@ -96,6 +97,11 @@ urlpatterns = [
         "enforcement-points/<int:pk>/",
         EnforcementPointDetailView.as_view(),
         name="enforcement_point_detail",
+    ),
+    path(
+        "enforcement-points/<int:pk>/zones/<int:zone_pk>/",
+        EnforcementPointZoneDetailView.as_view(),
+        name="enforcement_point_zone_detail",
     ),
     path(
         "notes/",

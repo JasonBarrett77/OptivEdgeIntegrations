@@ -41,6 +41,10 @@
                    class="inline-flex h-9 items-center border-b-2 px-3 text-[13px] font-medium {% if active_tab == 'appliances' %}border-blue-500 text-slate-900{% else %}border-transparent text-slate-500 hover:text-slate-700{% endif %}">
                     Appliances
                 </a>
+                <a href="?tab=zones"
+                   class="inline-flex h-9 items-center border-b-2 px-3 text-[13px] font-medium {% if active_tab == 'zones' %}border-blue-500 text-slate-900{% else %}border-transparent text-slate-500 hover:text-slate-700{% endif %}">
+                    Zones
+                </a>
             </div>
 
             <div class="px-4 py-3">
@@ -221,6 +225,81 @@
                                 <tr>
                                     <td colspan="6" class="px-4 py-8 text-center text-sm text-slate-500">
                                         No appliances recorded for this enforcement point.
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                {% elif active_tab == "zones" %}
+                <div>
+                    <div class="flex items-center justify-between gap-3 pb-1.5">
+                        <h2 class="text-sm font-semibold text-slate-950">Zones</h2>
+                        <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                            {{ zones|length }} zone{{ zones|length|pluralize }}
+                        </div>
+                    </div>
+                    <div class="overflow-auto border border-slate-200">
+                        <table class="min-w-full border-separate border-spacing-0">
+                            <thead>
+                                <tr>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Name</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Type</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Interfaces</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">IP Addresses</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">User-ID</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Zone Protection</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Log Setting</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for zone in zones %}
+                                <tr
+                                    class="cursor-pointer transition-colors duration-150 hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
+                                    onclick="window.location.href='{% url 'enforcement_point_zone_detail' pk=enforcement_point.pk zone_pk=zone.pk %}'"
+                                    onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); window.location.href='{% url 'enforcement_point_zone_detail' pk=enforcement_point.pk zone_pk=zone.pk %}'; }"
+                                    tabindex="0"
+                                    role="link"
+                                >
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-900">{{ zone.name }}</td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">{{ zone.get_zone_type_display }}</td>
+                                    <td class="border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% for interface in zone.interfaces.all %}
+                                            <div class="whitespace-nowrap">{{ interface.name }}</div>
+                                        {% empty %}
+                                            <span class="text-slate-400">-</span>
+                                        {% endfor %}
+                                    </td>
+                                    <td class="border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% for interface in zone.interfaces.all %}
+                                            <div class="whitespace-nowrap">
+                                                {% for address in interface.ip_addresses %}
+                                                    <code class="font-mono text-xs">{{ address }}</code>{% if not forloop.last %}, {% endif %}
+                                                {% empty %}
+                                                    <span class="text-slate-400">-</span>
+                                                {% endfor %}
+                                            </div>
+                                        {% empty %}
+                                            <span class="text-slate-400">-</span>
+                                        {% endfor %}
+                                    </td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% if zone.enable_user_identification %}Enabled{% else %}<span class="text-slate-400">Disabled</span>{% endif %}
+                                    </td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% if zone.zone_protection_profile %}{{ zone.zone_protection_profile }}{% else %}<span class="text-slate-400">-</span>{% endif %}
+                                    </td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% if zone.log_setting %}{{ zone.log_setting }}{% else %}<span class="text-slate-400">-</span>{% endif %}
+                                    </td>
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="7" class="px-4 py-8 text-center text-sm text-slate-500">
+                                        No zones normalized for this enforcement point. Zones come from the merged
+                                        configuration snapshot - sync or renormalize the management station.
                                     </td>
                                 </tr>
                                 {% endfor %}
