@@ -31,6 +31,15 @@ SIDEBAR_SECTION = [
                     "enforcement_point_addresses",
                 },
             },
+            {
+                "href": "/integrations/enforcement-points/",
+                "icon": "shield",
+                "label": "Enforcement Points",
+                "active_names": {
+                    "enforcement_point_list",
+                    "enforcement_point_detail",
+                },
+            },
         ],
     },
     {

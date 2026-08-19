@@ -1,0 +1,237 @@
+{% load local_time %}
+<section class="flex h-full w-full min-h-0 min-w-0">
+    <div class="min-h-0 flex-1 overflow-auto">
+        <div class="flex flex-col">
+            <div class="flex items-start justify-between gap-2 border-b border-slate-200 px-4 py-3">
+                <div class="min-w-0 space-y-0.5">
+                    <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Enforcement Point</div>
+                    <div class="text-[15px] font-semibold leading-5 text-slate-950">
+                        {{ enforcement_point.vsys_name }}
+                        {% if enforcement_point.vsys_display_name %}
+                            <span class="font-normal text-slate-500">/ {{ enforcement_point.vsys_display_name }}</span>
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="flex shrink-0 items-center gap-1.5 pt-0.5">
+                    <a
+                        href="{% url 'management_station_detail' pk=enforcement_point.management_station.pk %}?tab=enforcement-points"
+                        class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                    >
+                        Management Station
+                    </a>
+                </div>
+            </div>
+
+            {% if messages %}
+            <div class="flex flex-col gap-2 border-b border-slate-200 px-4 py-2.5">
+                {% for message in messages %}
+                <div class="border px-3 py-2 text-sm leading-5 {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-800{% else %}border-blue-200 bg-blue-50 text-blue-800{% endif %}">
+                    {{ message }}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            <div class="flex shrink-0 gap-0 border-b border-slate-200 px-4">
+                <a href="?tab=details"
+                   class="inline-flex h-9 items-center border-b-2 px-3 text-[13px] font-medium {% if active_tab == 'details' %}border-blue-500 text-slate-900{% else %}border-transparent text-slate-500 hover:text-slate-700{% endif %}">
+                    Details
+                </a>
+                <a href="?tab=appliances"
+                   class="inline-flex h-9 items-center border-b-2 px-3 text-[13px] font-medium {% if active_tab == 'appliances' %}border-blue-500 text-slate-900{% else %}border-transparent text-slate-500 hover:text-slate-700{% endif %}">
+                    Appliances
+                </a>
+            </div>
+
+            <div class="px-4 py-3">
+
+                {% if active_tab == "details" %}
+                <div class="grid grid-cols-1 gap-4 py-1 xl:grid-cols-2">
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">VSYS</div>
+                        <div class="text-sm leading-5 text-slate-900">{{ enforcement_point.vsys_name }}</div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">VSYS Display Name</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if enforcement_point.vsys_display_name %}
+                                {{ enforcement_point.vsys_display_name }}
+                            {% else %}
+                                <span class="text-slate-400">-</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Management Station</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            <a
+                                href="{% url 'management_station_detail' pk=enforcement_point.management_station.pk %}"
+                                class="text-blue-700 hover:underline"
+                            >
+                                {{ enforcement_point.management_station }}
+                            </a>
+                            <span class="text-slate-500">({{ enforcement_point.management_station.get_station_type_display }})</span>
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Owner Type</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if enforcement_point.appliance_group %}
+                                Appliance Group
+                            {% else %}
+                                Appliance
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Appliance Group</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if enforcement_point.appliance_group %}
+                                {{ enforcement_point.appliance_group.name }}
+                                <span class="text-slate-500">({{ enforcement_point.appliance_group.get_group_type_display }})</span>
+                            {% else %}
+                                <span class="text-slate-400">-</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">In Scope</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if enforcement_point.in_scope %}
+                                <span class="inline-flex items-center px-1.5 py-0.5 text-[11px] font-medium bg-blue-50 text-blue-700">In Scope</span>
+                            {% else %}
+                                <span class="inline-flex items-center px-1.5 py-0.5 text-[11px] font-medium bg-slate-100 text-slate-600">Out of Scope</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Last Synced</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if enforcement_point.last_synced_at %}
+                                {{ enforcement_point.last_synced_at|local_time }}
+                            {% else %}
+                                <span class="text-slate-400">Never synced</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Missing</div>
+                        <div class="text-sm leading-5 text-slate-900">
+                            {% if enforcement_point.is_missing %}
+                                <span class="text-amber-700">Not seen since {{ enforcement_point.missing_since|local_time }}</span>
+                            {% else %}
+                                <span class="text-slate-400">No</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Discovery Key</div>
+                        <div class="break-all text-sm leading-5 text-slate-900">
+                            {% if enforcement_point.discovery_key %}
+                                <code class="font-mono text-xs">{{ enforcement_point.discovery_key }}</code>
+                            {% else %}
+                                <span class="text-slate-400">-</span>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
+                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Notes</div>
+                        {% if enforcement_point.notes %}
+                            <div class="whitespace-pre-wrap break-words text-left text-sm leading-5 text-slate-900">{{ enforcement_point.notes }}</div>
+                        {% else %}
+                            <div class="text-left text-sm leading-5 text-slate-400">-</div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                {% elif active_tab == "appliances" %}
+                <div>
+                    <div class="flex items-center justify-between gap-3 pb-1.5">
+                        <h2 class="text-sm font-semibold text-slate-950">Appliances</h2>
+                        <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                            {{ appliances|length }} row{{ appliances|length|pluralize }}
+                        </div>
+                    </div>
+                    <div class="overflow-auto border border-slate-200">
+                        <table class="min-w-full table-fixed border-separate border-spacing-0">
+                            <thead>
+                                <tr>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Hostname</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Serial Number</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Model</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Software Version</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">HA Role</th>
+                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Last Synced</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for appliance in appliances %}
+                                <tr>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-900">
+                                        {% if appliance.hostname %}
+                                            {{ appliance.hostname }}
+                                        {% else %}
+                                            <span class="text-slate-400">-</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        <code class="font-mono text-xs">{{ appliance.serial_number }}</code>
+                                    </td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% if appliance.model %}
+                                            {{ appliance.model }}
+                                        {% else %}
+                                            <span class="text-slate-400">-</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% if appliance.software_version %}
+                                            {{ appliance.software_version }}
+                                        {% else %}
+                                            <span class="text-slate-400">-</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% if not enforcement_point.appliance_group %}
+                                            <span class="text-slate-400">-</span>
+                                        {% elif enforcement_point.appliance_group.active_appliance_id == appliance.pk %}
+                                            <span class="text-emerald-700">Active</span>
+                                        {% else %}
+                                            <span class="text-slate-600">Member</span>
+                                        {% endif %}
+                                    </td>
+                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
+                                        {% if appliance.last_synced_at %}
+                                            {{ appliance.last_synced_at|local_time }}
+                                        {% else %}
+                                            <span class="text-slate-400">-</span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="6" class="px-4 py-8 text-center text-sm text-slate-500">
+                                        No appliances recorded for this enforcement point.
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                {% endif %}
+
+            </div>
+        </div>
+    </div>
+</section>

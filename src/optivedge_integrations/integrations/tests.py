@@ -2557,6 +2557,155 @@ class ApplianceGroupSnapshotViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
 
+class EnforcementPointListViewTests(TestCase):
+    def test_list_view_shows_points_from_every_management_station(self):
+        _, _, _, first = _create_grouped_enforcement_point(
+            serial_number="0001",
+            appliance_hostname="fw-a",
+            station_hostname="panorama-a.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            group_name="grp-a",
+            vsys_name="vsys1",
+        )
+        _, _, _, second = _create_grouped_enforcement_point(
+            serial_number="0002",
+            appliance_hostname="fw-b",
+            station_hostname="firewall-b.local",
+            station_type=ManagementStation.StationType.PAN_FIREWALL,
+            group_name="grp-b",
+            vsys_name="vsys2",
+        )
+
+        response = self.client.get(reverse("enforcement_point_list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "panorama-a.local")
+        self.assertContains(response, "firewall-b.local")
+        self.assertContains(response, reverse("enforcement_point_detail", kwargs={"pk": first.pk}))
+        self.assertContains(response, reverse("enforcement_point_detail", kwargs={"pk": second.pk}))
+
+    def test_list_view_renders_with_no_enforcement_points(self):
+        response = self.client.get(reverse("enforcement_point_list"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No enforcement points discovered")
+
+    def test_list_view_labels_scope_state(self):
+        _, _, _, enforcement_point = _create_grouped_enforcement_point(
+            serial_number="0003",
+            appliance_hostname="fw-c",
+            station_hostname="panorama-c.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            group_name="grp-c",
+        )
+
+        self.assertContains(self.client.get(reverse("enforcement_point_list")), "Out of Scope")
+
+        enforcement_point.in_scope = True
+        enforcement_point.save()
+
+        self.assertContains(self.client.get(reverse("enforcement_point_list")), "In Scope")
+
+
+class EnforcementPointDetailViewTests(TestCase):
+    def setUp(self):
+        self.station, self.group, self.appliance, self.enforcement_point = _create_grouped_enforcement_point(
+            serial_number="0010",
+            appliance_hostname="fw-detail",
+            station_hostname="panorama-detail-ep.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            group_name="grp-detail",
+            group_type=ApplianceGroup.TYPE_HA_PAIR,
+            vsys_name="vsys7",
+        )
+        self.url = reverse("enforcement_point_detail", kwargs={"pk": self.enforcement_point.pk})
+
+    def test_detail_view_renders_each_tab(self):
+        for tab in ("details", "appliances"):
+            response = self.client.get(self.url, {"tab": tab})
+
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, "vsys7")
+
+    def test_details_tab_is_the_default_and_the_fallback_for_an_unknown_tab(self):
+        for query in ({}, {"tab": "not-a-tab"}):
+            response = self.client.get(self.url, query)
+
+            self.assertEqual(response.context["active_tab"], "details")
+            self.assertContains(response, "Discovery Key")
+
+    def test_details_tab_links_back_to_the_management_station(self):
+        response = self.client.get(self.url)
+
+        self.assertContains(
+            response,
+            reverse("management_station_detail", kwargs={"pk": self.station.pk}),
+        )
+
+    def test_appliances_tab_lists_nodes_and_marks_the_active_ha_member(self):
+        standby = Appliance.objects.create(
+            management_station=self.station,
+            appliance_group=self.group,
+            serial_number="0011",
+            hostname="fw-detail-standby",
+        )
+        EnforcementNode.objects.create(
+            management_station=self.station,
+            enforcement_point=self.enforcement_point,
+            appliance=standby,
+        )
+
+        response = self.client.get(self.url, {"tab": "appliances"})
+
+        self.assertEqual([a.pk for a in response.context["appliances"]], [self.appliance.pk, standby.pk])
+        self.assertContains(response, "fw-detail-standby")
+        self.assertContains(response, "Active")
+        self.assertContains(response, "Member")
+
+    def test_appliances_tab_falls_back_to_an_appliance_scoped_point(self):
+        """Only tests build this shape, but the template renders it, so pin the behaviour."""
+        appliance_scoped = EnforcementPoint.objects.create(
+            management_station=self.station,
+            appliance=self.appliance,
+            vsys_name="vsys-local",
+        )
+
+        response = self.client.get(
+            reverse("enforcement_point_detail", kwargs={"pk": appliance_scoped.pk}),
+            {"tab": "appliances"},
+        )
+
+        self.assertEqual([a.pk for a in response.context["appliances"]], [self.appliance.pk])
+
+    def test_detail_view_404s_for_an_unknown_point(self):
+        response = self.client.get(reverse("enforcement_point_detail", kwargs={"pk": self.enforcement_point.pk + 1000}))
+
+        self.assertEqual(response.status_code, 404)
+
+
+class EnforcementPointNavigationTests(TestCase):
+    def test_sidebar_lists_enforcement_points_below_management_stations(self):
+        from optivedge.app_registry import sidebar_sections
+
+        sections = [s for s in sidebar_sections() if s["label"] == "Firewall Integrations"]
+        self.assertEqual(len(sections), 1)
+
+        labels = [item["label"] for item in sections[0]["items"]]
+        self.assertEqual(labels, ["Management Stations", "Enforcement Points"])
+
+    def test_sidebar_active_names_cover_every_enforcement_point_route(self):
+        """A route missing from active_names silently stops highlighting its own page."""
+        from optivedge_integrations.integrations import app_meta
+
+        item = next(
+            item
+            for section in app_meta.SIDEBAR_SECTION
+            for item in section["items"]
+            if item["label"] == "Enforcement Points"
+        )
+        self.assertEqual(item["active_names"], {"enforcement_point_list", "enforcement_point_detail"})
+
+
 class EnforcementPointAddressListViewTests(TestCase):
     def test_get_renders_address_objects_for_enforcement_point(self):
         station, appliance, enforcement_point = _create_panorama_enforcement_point(

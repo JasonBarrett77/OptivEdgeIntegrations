@@ -59,6 +59,9 @@ TAB_ENFORCEMENT_POINTS = "enforcement-points"
 TAB_EVENTS = "events"
 _VALID_TABS = {TAB_DETAILS, TAB_APPLIANCE_GROUPS, TAB_ENFORCEMENT_POINTS, TAB_EVENTS}
 
+TAB_APPLIANCES = "appliances"
+_VALID_ENFORCEMENT_POINT_TABS = {TAB_DETAILS, TAB_APPLIANCES}
+
 
 def get_management_station_list_queryset():
     latest_run_qs = IntegrationRun.objects.filter(management_station=OuterRef("pk")).order_by("-started_at")
@@ -106,6 +109,57 @@ def build_management_station_detail_context(management_station, *, active_tab=TA
         )
 
     return context
+
+
+def get_enforcement_point_list_queryset():
+    return (
+        EnforcementPoint.objects.select_related(
+            "management_station",
+            "appliance_group",
+            "appliance",
+        )
+        .prefetch_related("nodes__appliance")
+        .order_by(
+            "management_station__hostname",
+            "appliance_group__name",
+            "appliance__hostname",
+            "vsys_name",
+            "pk",
+        )
+    )
+
+
+def build_enforcement_point_detail_context(enforcement_point, *, active_tab=TAB_DETAILS):
+    if active_tab not in _VALID_ENFORCEMENT_POINT_TABS:
+        active_tab = TAB_DETAILS
+
+    context = {"active_tab": active_tab}
+
+    if active_tab == TAB_APPLIANCES:
+        context["appliances"] = get_enforcement_point_appliances(enforcement_point)
+
+    return context
+
+
+def get_enforcement_point_appliances(enforcement_point):
+    """The appliances enforcing this point, in a single shape for the template.
+
+    Production points are group-scoped and reach their appliances through
+    `EnforcementNode`; the appliance-scoped shape is only built by tests, but the
+    management-station detail template already renders both, so this does too.
+    """
+    appliances = [
+        node.appliance
+        for node in enforcement_point.nodes.select_related("appliance").order_by(
+            "appliance__hostname",
+            "appliance__serial_number",
+            "pk",
+        )
+        if node.appliance is not None
+    ]
+    if not appliances and enforcement_point.appliance is not None:
+        appliances = [enforcement_point.appliance]
+    return appliances
 
 
 def enforcement_point_appliance_sort_key(enforcement_point):
@@ -267,6 +321,36 @@ class ManagementStationDetailView(DetailView):
         context = super().get_context_data(**kwargs)
         active_tab = self.request.GET.get("tab", TAB_DETAILS)
         context.update(build_management_station_detail_context(self.object, active_tab=active_tab))
+        return context
+
+
+class EnforcementPointListView(ListView):
+    model = EnforcementPoint
+    context_object_name = "enforcement_points"
+    template_name = "integrations/enforcement_point_list.html"
+
+    def get_queryset(self):
+        return get_enforcement_point_list_queryset()
+
+
+class EnforcementPointDetailView(DetailView):
+    model = EnforcementPoint
+    context_object_name = "enforcement_point"
+    pk_url_kwarg = "pk"
+    template_name = "integrations/enforcement_point_detail.html"
+
+    def get_queryset(self):
+        return EnforcementPoint.objects.select_related(
+            "management_station",
+            "appliance_group",
+            "appliance",
+            "appliance_group__active_appliance",
+        )
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        active_tab = self.request.GET.get("tab", TAB_DETAILS)
+        context.update(build_enforcement_point_detail_context(self.object, active_tab=active_tab))
         return context
 
 
