@@ -4,41 +4,60 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-OptivEdgeIntegrations is a reusable Django **framework package**, not a standalone deployable project. It is installed
-as a dependency (`pip install -e .` for local dev, or via git URL) by a separate downstream Django project
-that owns `manage.py`, root settings, root URLs, and the database. This repo has no `manage.py` and no
-*downstream* Django settings module of its own — Django model/view code cannot be exercised as part of a
-real deployment without a configured downstream project. It does have a committed `tests/settings.py`, but
-that exists solely to run this repo's own test suite in isolation (see "Commands").
+OptivEdgeIntegrations is a reusable Django **domain package** — firewall config collection, normalization and
+storage — not a standalone deployable project. It is installed as a dependency (`pip install -e .` for local
+dev, or via git URL) by a separate downstream Django project that owns `manage.py`, root settings, root URLs,
+and the database. This repo has no `manage.py` and no *downstream* Django settings module of its own — Django
+model/view code cannot be exercised as part of a real deployment without a configured downstream project. It
+does have a committed `tests/settings.py`, but that exists solely to run this repo's own test suite in
+isolation (see "Commands").
 
-Full downstream integration instructions (installing, wiring `INSTALLED_APPS`/`TEMPLATES`/urls, migrations,
-troubleshooting) live in `DEPLOYMENT.md`. Read it before changing anything that affects how downstream
-projects consume this package (app labels, settings components, URL composition, template locations).
+It depends on **OptivEdge** (`optivedge`), declared in `pyproject.toml` — the shared Django app-shell
+framework. The generic shell code this repo used to carry was extracted into that package: `base.html` and the
+shared component templates, the `app_registry.py` plugin registry, `templatetags/lucide.py`,
+`context_processors.py`, the root `urls.py`, and `ApplicationEnvironment` (deployment/engagement metadata, not
+firewall data). OptivEdgeIntegrations and OptivEdgeAssessments are now peer domain apps that both plug into
+OptivEdge, rather than one depending on the other's leftovers. Do not reintroduce shell/framework concerns
+here — they belong in OptivEdge.
+
+`OptivEdge/DEPLOYMENT.md` is the single authority on host-project wiring (`INSTALLED_APPS`/`TEMPLATES`/urls,
+the `deployment_template/` engagement generator, the offline wheel bundle) for the whole stack. This repo's own
+`DEPLOYMENT.md` covers only what is specific to this package — what it contributes to a host project, its
+dependencies, the `integrations` app label, packaging rules — and defers to OptivEdge's for the rest. Read both
+before changing anything that affects how downstream projects consume this package.
 
 ## Commands
 
-Editable install for local development:
+Editable install for local development. `optivedge` must be installed alongside it, and this cannot be one
+`pip install` — this package declares `optivedge` as a git URL, which pip treats as conflicting with a local
+editable of the same package (`ResolutionImpossible`). Install OptivEdge first, then this package with
+`--no-deps`:
 
 ```bash
-python -m pip install -e .
+python -m pip install -e ~/PythonProjects/OptivEdge
+python -m pip install -e . --no-deps
+python -m pip install requests xmltodict
 ```
+
+`DEPLOYMENT.md` has the same sequence extended to OptivEdgeAssessments.
 
 Non-Django import sanity check (validates plain-Python modules only; does not touch Django models):
 
 ```bash
 python - <<'PY'
+import optivedge
 import optivedge_integrations
-import optivedge_integrations.app_registry
-import optivedge_integrations.context_processors
+import optivedge_integrations.settings.components
 import optivedge_integrations.integrations.apps
-import optivedge_integrations.templatetags.lucide
+import optivedge_integrations.integrations.app_meta
 PY
 ```
 
 Run this repo's own test suite (`src/optivedge_integrations/integrations/tests.py`) via the committed
 `tests/settings.py` — a minimal, test-only settings module (not a downstream integration example; see
-`tests/settings.py`'s docstring and `DEPLOYMENT.md` for that). Requires `optivedge` installed editable
-alongside this package:
+`tests/settings.py`'s docstring and `DEPLOYMENT.md` for that). It composes `OPTIVEDGE_APPS` +
+`OPTIVEDGE_INTEGRATIONS_APPS` and sets `ROOT_URLCONF = "optivedge.urls"`, so it requires `optivedge` installed
+editable alongside this package:
 
 ```bash
 DJANGO_SETTINGS_MODULE=tests.settings python -m django test optivedge_integrations.integrations
@@ -59,17 +78,36 @@ python manage.py runserver
 
 ### Package/app boundaries
 
-- `optivedge_integrations` (label `optivedge_integrations`) — root framework app; owns shared templates (`templates/`), template tags
-  (`templatetags/lucide.py`), settings components (`settings/components.py`), and the optional-app registry
-  (`app_registry.py`).
-- `optivedge_integrations.integrations` (label **`integrations`**, do not rename) — owns all domain models, migrations,
-  views, and PAN-OS platform code. The label is preserved deliberately across a package rename; changing it
+- `optivedge_integrations` — thin distribution root, not a Django app. It holds only
+  `settings/components.py` (which exports `OPTIVEDGE_INTEGRATIONS_APPS`) and the `integrations` app. There is
+  no `templates/`, no `templatetags/`, no `app_registry.py` and no root `urls.py` here — all of that lives in
+  `optivedge` now. Anything reaching for `optivedge_integrations.app_registry`,
+  `optivedge_integrations.context_processors` or `optivedge_integrations.templatetags.lucide` is reading a
+  stale doc or a pre-split downstream project.
+- `optivedge_integrations.integrations` (label **`integrations`**, do not rename) — owns all domain models,
+  migrations, views, forms, PAN-OS platform code, its own `templates/integrations/`, and
+  `templatetags/local_time.py`. The label is preserved deliberately across a package rename; changing it
   breaks migrations, content types, and FK/model references (`integrations.SecurityRule`, etc.).
-- `optivedge_integrations.app_registry` provides a plugin convention for *other* downstream apps: any installed app may
-  expose an `app_meta.py` with `URL_MOUNT = {"prefix": ..., "module": ...}` and/or `SIDEBAR_SECTION`, picked
-  up automatically via `optional_app_urlpatterns()` / `sidebar_sections()`. `optivedge_integrations.urls` should only
-  compose framework-level URL modules (`include("optivedge_integrations.integrations.urls")` + `optional_app_urlpatterns()`)
-  — new integration routes belong in `optivedge_integrations/integrations/urls.py`, not the root `urls.py`.
+
+### How this package plugs into the OptivEdge shell
+
+`integrations/app_meta.py` is the whole integration surface — the plugin convention defined by
+`optivedge.app_registry`, which discovers an `app_meta` module in every installed app:
+
+- `URL_MOUNT = {"prefix": "integrations/", "module": "optivedge_integrations.integrations.urls"}` mounts every
+  route in this package under `/integrations/`. `optivedge.urls` owns the root namespace and appends
+  `optional_app_urlpatterns()`; this package must never try to own root. New routes go in
+  `integrations/urls.py`.
+- `SIDEBAR_SECTION` contributes the "Firewall Integrations" and "Notes" nav sections. Each item carries an
+  `active_names` set of URL names that light it up — **when a route name is added to `urls.py`, add it there
+  too**, or the sidebar silently stops highlighting on that page.
+
+Shared UI primitives come from OptivEdge and are used directly: `{% extends "base.html" %}` and
+`{% include "components/…" %}` in this package's templates, `optivedge.views.RightOverlayMixin` in `views.py`,
+and `TEXT_INPUT_CLASS`/`MONO_TEXT_INPUT_CLASS`/`TEXTAREA_CLASS` from `optivedge.forms` in `forms.py`. Django's
+app-directories template loader resolves those includes by relative path across *every* installed app's
+`templates/` directory, so no import is needed for templates — but `optivedge` must be in `INSTALLED_APPS`
+alongside this package for any of it to resolve.
 
 ### Topology model hierarchy (`integrations/models/collected.py`)
 

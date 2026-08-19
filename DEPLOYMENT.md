@@ -1,89 +1,53 @@
-# OptivEdgeIntegrations Framework Deployment Instructions
+# OptivEdgeIntegrations Deployment Instructions
 
-OptivEdgeIntegrations is a reusable Django framework package. It is not intended to be deployed directly as a standalone Django project. Downstream Django projects install OptivEdgeIntegrations as a dependency and include its Django apps, URLs, templates, and migrations.
+**Host-project wiring is documented in OptivEdge, not here.** `OptivEdge/DEPLOYMENT.md` is the single
+authority for standing up a deployment: creating an engagement project from `deployment_template/`, building
+the offline wheel bundle, and configuring `INSTALLED_APPS` / `TEMPLATES` / root urls for the whole stack. Read
+it first. This file covers only what is specific to *this* package.
 
-## Repository Purpose
+OptivEdgeIntegrations is a reusable Django domain package — firewall config collection, normalization and
+storage. It is not deployable on its own: it has no `manage.py` and no root settings, and it requires
+**OptivEdge** (the shared app shell) to be installed alongside it. A downstream host project owns `manage.py`,
+root settings, root URLs, and the database.
 
-This repository provides the shared OptivEdgeIntegrations framework layer, including:
+## What this package contributes to a host project
 
-* reusable Django apps
-* integration data models
-* PAN-OS collection and normalization logic
-* shared templates and template tags
-* shared framework URL composition
-* framework settings components
+| | |
+|---|---|
+| Django app | `optivedge_integrations.integrations`, label **`integrations`** |
+| Settings component | `OPTIVEDGE_INTEGRATIONS_APPS` (from `optivedge_integrations.settings.components`) |
+| Routes | mounted at `/integrations/` by OptivEdge's plugin registry, via `integrations/app_meta.py` |
+| Navigation | the "Firewall Integrations" and "Notes" sidebar sections, via the same `app_meta.py` |
+| Migrations | the `integrations` app's own |
 
-Downstream projects remain responsible for:
+It contributes **no** shell, base templates, context processors, template libraries, or root URL patterns —
+those come from OptivEdge. There is no root `urls.py` and no `app_registry` in this package; a host project
+that imports `optivedge_integrations.app_registry`, `optivedge_integrations.context_processors` or
+`optivedge_integrations.templatetags.lucide` is following a pre-split doc and will fail at import.
 
-* `manage.py`
-* root Django settings
-* root URL configuration
-* environment variables
-* database configuration
-* deployment configuration
-* project-specific apps and workflows
-
-## Package Layout
-
-Expected repository structure:
-
-```text
-OptivEdgeIntegrations/
-├── pyproject.toml
-├── README.md
-├── src/
-│   └── optivedge_integrations/
-│       ├── __init__.py
-│       ├── apps.py
-│       ├── urls.py
-│       ├── settings/
-│       │   ├── __init__.py
-│       │   └── components.py
-│       ├── integrations/
-│       │   ├── apps.py
-│       │   ├── models/
-│       │   ├── migrations/
-│       │   ├── platforms/
-│       │   ├── orchestration/
-│       │   ├── views.py
-│       │   └── urls.py
-│       ├── templates/
-│       └── templatetags/
-└── .gitignore
-```
-
-## Version Requirements
-
-OptivEdgeIntegrations currently targets:
+## Version requirements and dependencies
 
 ```text
 Python >= 3.12
 Django >= 6.0, < 6.1
 ```
 
-The Django dependency should be declared in `pyproject.toml`:
+Declared in `pyproject.toml`:
 
 ```toml
-[project]
-requires-python = ">=3.12"
 dependencies = [
     "Django>=6.0,<6.1",
     "requests>=2.31",
     "xmltodict>=0.13",
+    "optivedge @ git+https://github.com/JasonBarrett77/OptivEdge.git@main",
 ]
 ```
 
-## Installing OptivEdgeIntegrations in a Downstream Project
+The `optivedge` dependency floats on `@main`; prefer a tag or commit SHA for repeatable deployments.
 
-Create and activate a virtual environment in the downstream project:
+## Installing
 
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-```
-
-Install OptivEdgeIntegrations from GitHub:
+From GitHub — pip resolves the `optivedge` dependency automatically:
 
 ```bash
 python -m pip install "git+https://github.com/JasonBarrett77/OptivEdgeIntegrations.git@main#egg=optivedge-integrations"
@@ -95,217 +59,19 @@ For repeatable installs, prefer a tag:
 python -m pip install "git+https://github.com/JasonBarrett77/OptivEdgeIntegrations.git@v0.1.0#egg=optivedge-integrations"
 ```
 
-For local development against a checked-out copy:
+Working on this package alongside a local OptivEdge checkout is **not** a single `pip install -e` — the
+git-URL dependency on `optivedge` conflicts with a local editable of it. Follow "Co-development with local
+checkouts of the whole stack" in `OptivEdge/DEPLOYMENT.md`; the short form is:
 
 ```bash
-python -m pip install -e ~/PythonProjects/OptivEdgeIntegrations
+python -m pip install -e ~/PythonProjects/OptivEdge
+python -m pip install -e ~/PythonProjects/OptivEdgeIntegrations --no-deps
+python -m pip install requests xmltodict
 ```
 
-## Configuring a Downstream Django Project
+## Django app label
 
-Create a normal Django project:
-
-```bash
-django-admin startproject config .
-```
-
-Edit `config/settings.py`.
-
-Import OptivEdgeIntegrations settings components:
-
-```python
-from optivedge_integrations.settings.components import (
-    OPTIVEDGE_APPS,
-    OPTIVEDGE_CONTEXT_PROCESSORS,
-    OPTIVEDGE_TEMPLATE_LIBRARIES,
-)
-```
-
-Add OptivEdgeIntegrations apps to `INSTALLED_APPS`:
-
-```python
-INSTALLED_APPS = [
-    "django.contrib.admin",
-    "django.contrib.auth",
-    "django.contrib.contenttypes",
-    "django.contrib.sessions",
-    "django.contrib.messages",
-    "django.contrib.staticfiles",
-
-    *OPTIVEDGE_APPS,
-]
-```
-
-Configure templates:
-
-```python
-TEMPLATES = [
-    {
-        "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
-        "APP_DIRS": True,
-        "OPTIONS": {
-            "libraries": {
-                **OPTIVEDGE_TEMPLATE_LIBRARIES,
-            },
-            "context_processors": [
-                "django.template.context_processors.request",
-                "django.contrib.auth.context_processors.auth",
-                "django.contrib.messages.context_processors.messages",
-                *OPTIVEDGE_CONTEXT_PROCESSORS,
-            ],
-        },
-    },
-]
-```
-
-Edit `config/urls.py`:
-
-```python
-from django.contrib import admin
-from django.urls import include, path
-
-urlpatterns = [
-    path("", include("optivedge_integrations.urls")),
-    path("admin/", admin.site.urls),
-]
-```
-
-## Running Django Checks and Migrations
-
-From the downstream project root:
-
-```bash
-python manage.py check
-python manage.py migrate
-```
-
-Expected migrations include the OptivEdgeIntegrations `integrations` app:
-
-```text
-Applying integrations.0001_initial... OK
-Applying integrations.0002_addressobject_is_edl_and_more... OK
-Applying integrations.0003_managementplaneprofile... OK
-Applying integrations.0004_securityrulesearchvocabularyentry... OK
-Applying integrations.0005_client_engagementenvironment... OK
-```
-
-## Running the Development Server
-
-```bash
-python manage.py runserver
-```
-
-Open:
-
-```text
-http://127.0.0.1:8000/
-```
-
-If the OptivEdgeIntegrations home page renders, the framework package, app config, URL config, templates, and migrations are working.
-
-## Development Workflow for OptivEdgeIntegrations
-
-When changing OptivEdgeIntegrations itself:
-
-```bash
-cd ~/PythonProjects/OptivEdgeIntegrations
-source .venv/bin/activate
-```
-
-Install the framework editable for local validation:
-
-```bash
-python -m pip install -e .
-```
-
-Run a basic non-Django import check:
-
-```bash
-python - <<'PY'
-import optivedge_integrations
-import optivedge_integrations.app_registry
-import optivedge_integrations.context_processors
-import optivedge_integrations.integrations.apps
-import optivedge_integrations.templatetags.lucide
-
-print("OptivEdgeIntegrations non-Django import check passed")
-PY
-```
-
-Django model imports require a configured Django settings module. Validate full Django behavior from a downstream test project using:
-
-```bash
-python manage.py check
-python manage.py migrate
-python manage.py runserver
-```
-
-## URL Organization Convention
-
-OptivEdgeIntegrations should keep URL ownership close to the app that owns the views.
-
-Preferred structure:
-
-```text
-src/optivedge_integrations/urls.py
-src/optivedge_integrations/integrations/urls.py
-```
-
-`src/optivedge_integrations/integrations/urls.py` should define integration-owned routes.
-
-`src/optivedge_integrations/urls.py` should only compose framework-level URL modules:
-
-```python
-from django.urls import include, path
-
-from optivedge_integrations.app_registry import optional_app_urlpatterns
-
-urlpatterns = [
-    path("", include("optivedge_integrations.integrations.urls")),
-]
-
-urlpatterns += optional_app_urlpatterns()
-```
-
-Future integration views should generally be added to:
-
-```text
-src/optivedge_integrations/integrations/urls.py
-```
-
-not directly to:
-
-```text
-src/optivedge_integrations/urls.py
-```
-
-## Template Organization
-
-Shared framework templates live under:
-
-```text
-src/optivedge_integrations/templates/
-```
-
-The root OptivEdgeIntegrations app must be installed so Django can discover shared templates:
-
-```python
-OPTIVEDGE_APPS = [
-    "optivedge_integrations.apps.OptivEdgeConfig",
-    "optivedge_integrations.integrations.apps.IntegrationsConfig",
-]
-```
-
-The `integrations` app owns integration-specific templates under:
-
-```text
-src/optivedge_integrations/templates/integrations/
-```
-
-## Django App Labels
-
-The integrations app intentionally preserves the Django app label:
+The integrations app intentionally preserves its label across the package rename:
 
 ```python
 class IntegrationsConfig(AppConfig):
@@ -314,19 +80,34 @@ class IntegrationsConfig(AppConfig):
     label = "integrations"
 ```
 
-This preserves model labels such as:
+This preserves model labels such as `integrations.SecurityRule`, `integrations.ManagementStation` and
+`integrations.DeviceConfigurationProfile`. Do not rename it casually — it would break migrations, content
+types, foreign keys, and the canonical query references OptivEdgeAssessments stores in the database.
 
-```text
-integrations.SecurityRule
-integrations.ManagementStation
-integrations.ManagementPlaneProfile
+## Packaging rules
+
+Runtime package data must stay under `src/optivedge_integrations/`, and be declared in `pyproject.toml`:
+
+```toml
+[tool.setuptools.package-data]
+"optivedge_integrations.integrations" = [
+    "templates/**/*.html",
+]
 ```
 
-Do not rename the app label casually. Changing it would affect migrations, content types, foreign keys, and downstream canonical query references.
+Templates belong to the `integrations` app (`src/optivedge_integrations/integrations/templates/integrations/`),
+not to the distribution root. Do not rely on root-level `templates/` or project-relative file paths.
 
-## Publishing a Version
+## Validating a change to this package
 
-Only tag a release after a downstream Django project can successfully run:
+Its own test suite runs in isolation against the committed `tests/settings.py`, and requires `optivedge`
+installed alongside:
+
+```bash
+DJANGO_SETTINGS_MODULE=tests.settings python -m django test optivedge_integrations.integrations
+```
+
+Full Django behavior — migrations, views, the rendered shell — can only be validated from a host project:
 
 ```bash
 python manage.py check
@@ -334,73 +115,31 @@ python manage.py migrate
 python manage.py runserver
 ```
 
-Create and push a tag:
+## Publishing a version
+
+Only tag a release after a host project can successfully run `check`, `migrate` and `runserver` against it:
 
 ```bash
-cd ~/PythonProjects/OptivEdgeIntegrations
-git status
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Downstream projects should then pin the tag:
-
-```text
-git+https://github.com/JasonBarrett77/OptivEdgeIntegrations.git@v0.1.0#egg=optivedge-integrations
-```
+Downstream projects and `OptivEdgeAssessments/pyproject.toml` should then pin the tag rather than `@main`.
 
 ## Troubleshooting
 
-### `TemplateDoesNotExist: workspace.html`
+**`ModuleNotFoundError: optivedge_integrations.app_registry`** (or `.context_processors`, or
+`.templatetags.lucide`) — the host project is wired for the pre-split layout. Those modules live in
+`optivedge` now; see `OptivEdge/DEPLOYMENT.md`.
 
-Cause: the root `optivedge_integrations` Django app is not installed.
+**`TemplateDoesNotExist: base.html`** — `optivedge` is missing from `INSTALLED_APPS`. This package's templates
+extend it, and the app-directories loader only searches installed apps.
 
-Confirm `OPTIVEDGE_APPS` includes:
+**`NoReverseMatch` for a `management_station_*` URL name** — `integrations` is missing from `INSTALLED_APPS`,
+so OptivEdge's registry never found its `app_meta.py` and never mounted `/integrations/`.
 
-```python
-"optivedge_integrations.apps.OptivEdgeConfig"
-```
+**Sidebar item stops highlighting on a page** — a route name was added to `integrations/urls.py` without being
+added to the matching `active_names` set in `integrations/app_meta.py`.
 
-### `NoReverseMatch` for an OptivEdgeIntegrations URL name
-
-Cause: the downstream project included `optivedge_integrations.urls`, but the framework URL module does not include the route-owning app’s URLs.
-
-Confirm `src/optivedge_integrations/urls.py` includes:
-
-```python
-path("", include("optivedge_integrations.integrations.urls")),
-```
-
-### `ImproperlyConfigured: Requested setting INSTALLED_APPS`
-
-Cause: Django models were imported outside a configured Django project.
-
-This is expected if running plain Python imports against model modules. Validate models from a configured downstream Django project using:
-
-```bash
-python manage.py check
-```
-
-### SSH install fails with `Permission denied (publickey)`
-
-Use HTTPS:
-
-```bash
-python -m pip install "git+https://github.com/JasonBarrett77/OptivEdgeIntegrations.git@main#egg=optivedge-integrations"
-```
-
-Or configure SSH keys for the current WSL/Linux environment.
-
-## Minimal Downstream `requirements.txt`
-
-```text
-git+https://github.com/JasonBarrett77/OptivEdgeIntegrations.git@v0.1.0#egg=optivedge-integrations
-```
-
-During active development, a downstream project may temporarily use:
-
-```text
-git+https://github.com/JasonBarrett77/OptivEdgeIntegrations.git@main#egg=optivedge-integrations
-```
-
-Production or repeatable builds should use a tag or commit SHA, not floating `main`.
+**`ImproperlyConfigured: Requested setting INSTALLED_APPS`** — Django models were imported outside a
+configured project. Expected when running plain Python imports against model modules.
