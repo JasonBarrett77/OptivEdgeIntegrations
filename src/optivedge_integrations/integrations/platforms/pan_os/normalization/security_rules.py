@@ -419,17 +419,32 @@ def default_rule_source(
 def build_address_lookup_maps(
     enforcement_point: EnforcementPoint,
 ) -> tuple[dict[str, list[AddressObject]], dict[str, list[AddressGroup]], dict[str, list[Region]]]:
+    # Candidates come from BOTH owners: the point holds vsys-scoped and vendor objects,
+    # the appliance group holds shared-scoped ones. Neither alone is the visible set.
+    # effective_in_scope_order() then picks between them by scope, so the order the two
+    # querysets are concatenated in does not matter.
+    group = enforcement_point.appliance_group
+
     address_objects: dict[str, list[AddressObject]] = {}
-    for address_object in enforcement_point.address_objects.all().order_by("precedence_rank", "id"):
-        address_objects.setdefault(address_object.name, []).append(address_object)
+    for source in (enforcement_point.address_objects, getattr(group, "address_objects", None)):
+        if source is None:
+            continue
+        for address_object in source.all().order_by("precedence_rank", "id"):
+            address_objects.setdefault(address_object.name, []).append(address_object)
 
     address_groups: dict[str, list[AddressGroup]] = {}
-    for address_group in enforcement_point.address_groups.prefetch_related("members").order_by("precedence_rank", "id"):
-        address_groups.setdefault(address_group.name, []).append(address_group)
+    for source in (enforcement_point.address_groups, getattr(group, "address_groups", None)):
+        if source is None:
+            continue
+        for address_group in source.prefetch_related("members").order_by("precedence_rank", "id"):
+            address_groups.setdefault(address_group.name, []).append(address_group)
 
     regions: dict[str, list[Region]] = {}
-    for region in enforcement_point.regions.all().order_by("precedence_rank", "id"):
-        regions.setdefault(region.name, []).append(region)
+    for source in (enforcement_point.regions, getattr(group, "regions", None)):
+        if source is None:
+            continue
+        for region in source.all().order_by("precedence_rank", "id"):
+            regions.setdefault(region.name, []).append(region)
 
     return address_objects, address_groups, regions
 

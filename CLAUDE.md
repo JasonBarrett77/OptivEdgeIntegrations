@@ -154,6 +154,36 @@ preserve that guarantee in any replacement. `get_in_scope_*` in `flows.py` `sele
 enforces this. Everything downstream (normalization, `DeviceConfigurationProfile`, policy objects) traces
 back to a source `Snapshot`.
 
+### Scoped policy objects are owned by their SCOPE, not by the collection that found them
+
+`AddressObject` / `AddressGroup` / `Region` carry two nullable owner FKs, exactly one set:
+
+```
+vsys scope    -> enforcement_point   local-vsys, pushed device-group
+shared scope  -> appliance_group     local-shared, Panorama-shared
+vendor        -> enforcement_point   builtin/predefined, synthesized per point
+```
+
+Shared scope belongs to the **appliance group** because the group is the unit holding one
+configuration — every vsys on it reads the same `/config/shared` and receives the same Panorama-Shared push.
+Storing it per enforcement point copied a single observation once per vsys: 264 objects became 1,320 rows on
+a five-vsys PA-5220. `ScopedPolicyObject.clean()` enforces that the owner matches the scope.
+
+Vendor objects stay on the point: two synthesized objects, so the duplication costs nothing.
+
+**Write order is load-bearing.** `replace_addresses()` is a delete-and-recreate and
+`SecurityRuleAddressRef.address_object` FKs point at these rows, so rewriting shared scope *after* a point's
+rules were normalized would cascade those refs away. `renormalize_in_scope_configuration()` runs the
+per-group shared pass **before** any enforcement point — both the renormalize and full-refresh paths go
+through it, so the ordering lives in one place.
+
+`build_address_lookup_maps()` unions both owners; neither alone is the set a vsys can see.
+
+**Migration 0015 is destructive by design.** Shared-scope rows had no derivable group owner — the
+information lives in the raw `Snapshot` payload, not in the normalized row — so it deletes all scoped policy
+objects and security rules and requires a **renormalize** to repopulate. That is safe because the data is
+fully re-derivable from stored snapshots without contacting a device.
+
 ### Collection → normalization → persistence pipeline (PAN-OS)
 
 `integrations/platforms/pan_os/` is layered strictly bottom-up; keep new PAN-OS logic in the matching layer

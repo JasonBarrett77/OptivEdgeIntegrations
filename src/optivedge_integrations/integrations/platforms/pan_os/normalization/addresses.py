@@ -20,10 +20,13 @@ from optivedge_integrations.integrations.models import (
     AddressGroupTag,
     AddressObject,
     AddressObjectTag,
+    ApplianceGroup,
     EnforcementPoint,
     FieldProvenance,
     PolicyObjectNamespace,
+    PolicyObjectScope,
     precedence_for,
+    scope_for,
     SecurityRule,
     Snapshot,
 )
@@ -587,13 +590,59 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
     return normalized_objects, normalized_groups
 
 
+def is_shared_scope(namespace_type: str) -> bool:
+    """Whether an object belongs to the appliance group rather than an enforcement point.
+
+    Owner follows SCOPE. Shared scope is group-wide - every vsys on the group reads the
+    same /config/shared and the same Panorama-Shared push - so it is stored once on the
+    group instead of once per vsys.
+
+    Vendor objects (builtin/predefined) stay on the enforcement point: they are
+    synthesized per point and there are two of them, so the duplication costs nothing and
+    moving them would change more than it is worth.
+    """
+    return scope_for(namespace_type) == PolicyObjectScope.SHARED
+
+
+def partition_by_owner(normalized):
+    """Split normalized objects into (enforcement-point-owned, appliance-group-owned)."""
+    point_owned = [n for n in normalized if not is_shared_scope(n.namespace_type)]
+    group_owned = [n for n in normalized if is_shared_scope(n.namespace_type)]
+    return point_owned, group_owned
+
+
 def replace_addresses(
-    enforcement_point: EnforcementPoint,
+    owner: EnforcementPoint | ApplianceGroup,
     normalized_objects: list[NormalizedAddressObject],
     normalized_groups: list[NormalizedAddressGroup],
 ) -> tuple[list[AddressObject], list[AddressGroup]]:
-    enforcement_point.address_objects.all().delete()
-    enforcement_point.address_groups.all().delete()
+    """Write the objects `owner` owns, replacing what it currently holds.
+
+    An EnforcementPoint owns vsys-scoped and vendor objects; an ApplianceGroup owns
+    shared-scoped ones. The caller passes the full normalized set either way and this
+    keeps only its own share, so the two passes cannot write each other's rows.
+
+    Shared scope MUST be written before any enforcement point's security rules are
+    normalized. Rule address refs FK to these rows, and this is a delete-and-recreate, so
+    rewriting shared scope after a point's rules would cascade those refs away. See
+    flows.py, which orders the group pass first.
+    """
+    keep_here = (
+        (lambda n: not is_shared_scope(n.namespace_type))
+        if isinstance(owner, EnforcementPoint)
+        else (lambda n: is_shared_scope(n.namespace_type))
+    )
+    normalized_objects = [n for n in normalized_objects if keep_here(n)]
+    normalized_groups = [n for n in normalized_groups if keep_here(n)]
+
+    owner_kwargs = (
+        {"enforcement_point": owner}
+        if isinstance(owner, EnforcementPoint)
+        else {"appliance_group": owner}
+    )
+
+    owner.address_objects.all().delete()
+    owner.address_groups.all().delete()
 
     ao_ct = ContentType.objects.get_for_model(AddressObject)
     ag_ct = ContentType.objects.get_for_model(AddressGroup)
@@ -601,8 +650,8 @@ def replace_addresses(
     created_objects: list[AddressObject] = []
     for normalized in normalized_objects:
         address_object = AddressObject.objects.create(
-            management_station=enforcement_point.management_station,
-            enforcement_point=enforcement_point,
+            management_station=owner.management_station,
+            **owner_kwargs,
             source_snapshot=normalized.source_snapshot,
             config_source=normalized.config_source,
             name=normalized.name,
@@ -649,8 +698,8 @@ def replace_addresses(
     created_groups: list[AddressGroup] = []
     for normalized in normalized_groups:
         address_group = AddressGroup.objects.create(
-            management_station=enforcement_point.management_station,
-            enforcement_point=enforcement_point,
+            management_station=owner.management_station,
+            **owner_kwargs,
             source_snapshot=normalized.source_snapshot,
             config_source=normalized.config_source,
             name=normalized.name,
@@ -692,6 +741,53 @@ def replace_addresses(
         created_groups.append(address_group)
 
     return created_objects, created_groups
+
+
+def normalize_appliance_group_shared_objects(appliance_group: ApplianceGroup) -> PANOSNormalizedCollection:
+    """Normalize the shared-scope objects the appliance group holds.
+
+    Shared scope is group-wide: every vsys on the group reads the same /config/shared and
+    receives the same Panorama-Shared push, so it is derived once here rather than once
+    per enforcement point. Any in-scope point in the group yields the same set - the
+    sources are `merged`'s /config/shared node (read from the group's active appliance)
+    and the non-vsys pushed-shared-policy response (collected per group) - so a
+    representative point is used to reach them.
+
+    Must run BEFORE the group's enforcement points are normalized: this is a
+    delete-and-recreate, and security rule address refs FK to these rows.
+    """
+    representative = (
+        appliance_group.enforcement_points.filter(in_scope=True)
+        .order_by("vsys_name", "pk")
+        .first()
+    )
+    if representative is None:
+        return PANOSNormalizedCollection(
+            address_objects=[], address_groups=[], regions=[], appliances=[],
+            appliance_groups=[], enforcement_points=[], enforcement_nodes=[],
+            device_configuration_profiles=[], security_rules=[],
+        )
+
+    with transaction.atomic():
+        normalized_objects, normalized_groups = build_normalized_addresses(representative)
+        created_objects, created_groups = replace_addresses(
+            appliance_group, normalized_objects, normalized_groups
+        )
+        created_regions = replace_regions(
+            appliance_group, build_normalized_regions(representative)
+        )
+
+    return PANOSNormalizedCollection(
+        address_objects=created_objects,
+        address_groups=created_groups,
+        regions=created_regions,
+        appliances=[],
+        appliance_groups=[],
+        enforcement_points=[],
+        enforcement_nodes=[],
+        device_configuration_profiles=[],
+        security_rules=[],
+    )
 
 
 def normalize_addresses(enforcement_point: EnforcementPoint) -> PANOSNormalizedCollection:

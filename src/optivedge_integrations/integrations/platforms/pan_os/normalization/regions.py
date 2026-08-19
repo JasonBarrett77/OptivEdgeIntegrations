@@ -16,6 +16,7 @@ from typing import Any
 from django.contrib.contenttypes.models import ContentType
 
 from optivedge_integrations.integrations.models import (
+    ApplianceGroup,
     EnforcementPoint,
     FieldProvenance,
     PolicyObjectNamespace,
@@ -161,18 +162,33 @@ def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[Normal
 
 
 def replace_regions(
-    enforcement_point: EnforcementPoint,
+    owner: EnforcementPoint | ApplianceGroup,
     normalized_regions: list[NormalizedRegion],
 ) -> list[Region]:
-    enforcement_point.regions.all().delete()
+    """Write the regions `owner` owns. See replace_addresses() for the ordering rule."""
+    from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import is_shared_scope
+
+    keep_here = (
+        (lambda n: not is_shared_scope(n.namespace_type))
+        if isinstance(owner, EnforcementPoint)
+        else (lambda n: is_shared_scope(n.namespace_type))
+    )
+    normalized_regions = [n for n in normalized_regions if keep_here(n)]
+    owner_kwargs = (
+        {"enforcement_point": owner}
+        if isinstance(owner, EnforcementPoint)
+        else {"appliance_group": owner}
+    )
+
+    owner.regions.all().delete()
 
     region_ct = ContentType.objects.get_for_model(Region)
 
     created_regions: list[Region] = []
     for normalized in normalized_regions:
         region = Region.objects.create(
-            management_station=enforcement_point.management_station,
-            enforcement_point=enforcement_point,
+            management_station=owner.management_station,
+            **owner_kwargs,
             source_snapshot=normalized.source_snapshot,
             config_source=normalized.config_source,
             name=normalized.name,

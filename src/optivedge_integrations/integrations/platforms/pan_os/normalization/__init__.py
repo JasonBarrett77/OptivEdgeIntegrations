@@ -18,6 +18,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.panorama
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
     normalize_addresses,
+    normalize_appliance_group_shared_objects,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     normalize_device_configuration_profile,
@@ -66,6 +67,11 @@ def normalize_enforcement_point_addresses(enforcement_point: EnforcementPoint) -
     return normalize_addresses(enforcement_point)
 
 
+def normalize_appliance_group_shared_scope(appliance_group) -> PANOSNormalizedCollection:
+    """Shared-scope objects for a group. MUST run before its enforcement points."""
+    return normalize_appliance_group_shared_objects(appliance_group)
+
+
 def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
     return normalize_zones(enforcement_point)
 
@@ -75,6 +81,7 @@ __all__ = [
     "PANOSNormalizedCollection",
     "normalize_addresses",
     "normalize_appliance_device_configuration",
+    "normalize_appliance_group_shared_scope",
     "normalize_enforcement_point_addresses",
     "normalize_enforcement_point_dynamic_address_content",
     "normalize_enforcement_point_security_rules",

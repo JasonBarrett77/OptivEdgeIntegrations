@@ -54,6 +54,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     ISO_3166_1_ALPHA2_REGIONS,
     NormalizedSecurityRuleMember,
     build_normalized_security_rules,
+    build_address_lookup_maps,
     first_effective_object,
     literal_namespace,
     resolve_rule_address_refs,
@@ -71,6 +72,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_device_configuration,
+    normalize_appliance_group_shared_scope,
     normalize_enforcement_point_addresses,
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
@@ -3743,3 +3745,109 @@ class ScopePrecedenceTests(TestCase):
             self.assertEqual(value, "vsys1")
             self.assertEqual(scope_for(ns), PolicyObjectScope.VSYS)
             self.assertEqual(precedence_for(ns), PolicyObjectPrecedence.VSYS)
+
+
+class SharedScopeOwnershipTests(TestCase):
+    """Shared-scope objects belong to the appliance group, not to each enforcement point.
+
+    Every vsys on a group reads the same /config/shared and receives the same
+    Panorama-Shared push, so storing shared scope per point copied one observation once
+    per vsys - 264 objects became 1,320 rows on a five-vsys PA-5220.
+    """
+
+    def _station_with_two_points(self):
+        station, group, appliance, point_a = _create_grouped_enforcement_point(
+            serial_number="8100", appliance_hostname="fw-shared",
+            station_hostname="panorama.local", group_name="grp-shared",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, vsys_name="vsys1",
+        )
+        point_b = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group,
+            vsys_name="vsys2", in_scope=True,
+        )
+        EnforcementNode.objects.create(
+            management_station=station, enforcement_point=point_b, appliance=appliance)
+        point_a.in_scope = True
+        point_a.save()
+
+        merged = {"config": {
+            "shared": {"address": {"entry": [
+                {"@name": "shared-obj", "ip-netmask": "10.50.0.1/32"}]}},
+            "devices": {"entry": [{"@name": "localhost.localdomain", "vsys": {"entry": [
+                {"@name": "vsys1", "address": {"entry": [
+                    {"@name": "vsys1-obj", "ip-netmask": "10.60.1.1/32"}]}},
+                {"@name": "vsys2", "address": {"entry": [
+                    {"@name": "vsys2-obj", "ip-netmask": "10.60.2.1/32"}]}},
+            ]}}]}}}
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(), payload=merged)
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {"address": {"entry": [
+                {"@name": "pan-shared", "@loc": "shared", "ip-netmask": "10.51.0.1/32"}]}}})
+        for point in (point_a, point_b):
+            Snapshot.objects.create(
+                management_station=station, enforcement_point=point,
+                source_type="show_pushed_shared_policy_vsys",
+                collected_at=timezone.now(), payload={"policy": {"panorama": {}}})
+        return station, group, point_a, point_b
+
+    def test_shared_objects_are_stored_once_on_the_group_not_per_point(self):
+        station, group, point_a, point_b = self._station_with_two_points()
+        normalize_appliance_group_shared_scope(group)
+        normalize_enforcement_point_addresses(point_a)
+        normalize_enforcement_point_addresses(point_b)
+
+        self.assertEqual(
+            sorted(group.address_objects.values_list("name", flat=True)),
+            ["pan-shared", "shared-obj"],
+            "both local-shared and Panorama-shared belong to the group",
+        )
+        # Each point holds only its own vsys scope plus the synthesized builtin.
+        for point, own in ((point_a, "vsys1-obj"), (point_b, "vsys2-obj")):
+            names = sorted(point.address_objects.values_list("name", flat=True))
+            self.assertEqual(names, ["any", own], f"{point.vsys_name} holds only its own scope")
+
+        # The duplication this removes: one row each, not one per point.
+        self.assertEqual(AddressObject.objects.filter(name="shared-obj").count(), 1)
+        self.assertEqual(AddressObject.objects.filter(name="pan-shared").count(), 1)
+
+    def test_a_rule_resolves_across_both_owners(self):
+        """The point sees the union of its own scope and the group's shared scope."""
+        station, group, point_a, _ = self._station_with_two_points()
+        normalize_appliance_group_shared_scope(group)
+        normalize_enforcement_point_addresses(point_a)
+
+        objects, groups, regions = build_address_lookup_maps(point_a)
+        self.assertIn("vsys1-obj", objects, "own vsys scope")
+        self.assertIn("shared-obj", objects, "group-owned local-shared")
+        self.assertIn("pan-shared", objects, "group-owned Panorama-shared")
+        self.assertNotIn("vsys2-obj", objects, "another vsys's scope must not leak in")
+
+    def test_shared_objects_survive_a_second_point_being_normalized(self):
+        """Order matters: the group pass is a delete-and-recreate, so re-running a point
+        must not disturb rows that rule address refs already FK to."""
+        station, group, point_a, point_b = self._station_with_two_points()
+        normalize_appliance_group_shared_scope(group)
+        original_ids = set(group.address_objects.values_list("pk", flat=True))
+
+        normalize_enforcement_point_addresses(point_a)
+        normalize_enforcement_point_addresses(point_b)
+
+        self.assertEqual(set(group.address_objects.values_list("pk", flat=True)), original_ids)
+
+    def test_owner_must_match_scope(self):
+        station, group, point_a, _ = self._station_with_two_points()
+        snapshot = Snapshot.objects.get(source_type="show_pushed_shared_policy")
+        wrong = AddressObject(
+            management_station=station, enforcement_point=point_a, source_snapshot=snapshot,
+            config_source="pushed_pre", name="misfiled",
+            namespace_type=PolicyObjectNamespace.PANORAMA_SHARED, namespace_value="shared",
+            precedence_rank=precedence_for(PolicyObjectNamespace.PANORAMA_SHARED),
+            address_type=AddressObject.TYPE_IP_NETMASK, value="10.0.0.1/32",
+            last_synced_at=timezone.now(),
+        )
+        with self.assertRaisesMessage(ValidationError, "shared-scoped and must belong to an appliance group"):
+            wrong.clean()

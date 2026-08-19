@@ -6,8 +6,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 from ..base import SyncTrackedModel
-from ..collected import EnforcementPoint, ManagementStation
-from .base import CONFIG_SOURCE_CHOICES, PolicyObjectBase
+from ..collected import ApplianceGroup, EnforcementPoint, ManagementStation
+from .base import CONFIG_SOURCE_CHOICES, PolicyObjectBase, PolicyObjectScope, scope_for
 
 
 class ScopedPolicyObject(PolicyObjectBase, SyncTrackedModel):
@@ -15,9 +15,29 @@ class ScopedPolicyObject(PolicyObjectBase, SyncTrackedModel):
         ManagementStation,
         on_delete=models.CASCADE,
     )
+    #: Owner follows the object's SCOPE, not the collection that produced it:
+    #:
+    #:     vsys scope    -> enforcement_point   (local-vsys, pushed device-group)
+    #:     shared scope  -> appliance_group     (local-shared, Panorama-shared)
+    #:     vendor        -> enforcement_point   (builtin/predefined, synthesized per point)
+    #:
+    #: Shared scope belongs to the appliance group because the group is the unit that
+    #: holds ONE configuration - every vsys on it reads the same /config/shared and the
+    #: same Panorama-Shared push. Storing it per enforcement point copied a single
+    #: observation once per vsys: 264 objects became 1,320 rows on a five-vsys PA-5220.
+    #:
+    #: Exactly one owner is set. See owner_kwargs_for() in normalization/addresses.py.
     enforcement_point = models.ForeignKey(
         EnforcementPoint,
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+    )
+    appliance_group = models.ForeignKey(
+        ApplianceGroup,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
     )
     source_snapshot = models.ForeignKey(
         "integrations.Snapshot",
@@ -28,9 +48,34 @@ class ScopedPolicyObject(PolicyObjectBase, SyncTrackedModel):
     class Meta:
         abstract = True
 
+    @property
+    def owner(self):
+        """The enforcement point or appliance group this object is scoped to."""
+        return self.enforcement_point or self.appliance_group
+
     def clean(self) -> None:
-        if self.enforcement_point.management_station_id != self.management_station_id:
+        owner_count = int(self.enforcement_point_id is not None) + int(self.appliance_group_id is not None)
+        if owner_count != 1:
+            raise ValidationError(
+                "Policy object must have exactly one owner: an enforcement point for "
+                "vsys-scoped objects, or an appliance group for shared-scoped ones."
+            )
+        if scope_for(self.namespace_type) == PolicyObjectScope.SHARED:
+            if self.appliance_group_id is None:
+                raise ValidationError(
+                    f"{self.namespace_type} is shared-scoped and must belong to an appliance group."
+                )
+        elif self.enforcement_point_id is None:
+            raise ValidationError(
+                f"{self.namespace_type} is not shared-scoped and must belong to an enforcement point."
+            )
+
+        if self.enforcement_point is not None and self.enforcement_point.management_station_id != self.management_station_id:
             raise ValidationError("Policy object must belong to the same management station as the enforcement point.")
+        if self.appliance_group is not None and self.appliance_group.management_station_id != self.management_station_id:
+            raise ValidationError("Policy object must belong to the same management station as the appliance group.")
+        if self.enforcement_point is None:
+            return
 
         if (
             self.source_snapshot.enforcement_point_id != self.enforcement_point_id
@@ -86,6 +131,15 @@ class AddressObject(ScopedPolicyObject):
         EnforcementPoint,
         on_delete=models.CASCADE,
         related_name="address_objects",
+        null=True,
+        blank=True,
+    )
+    appliance_group = models.ForeignKey(
+        ApplianceGroup,
+        on_delete=models.CASCADE,
+        related_name="address_objects",
+        null=True,
+        blank=True,
     )
     source_snapshot = models.ForeignKey(
         "integrations.Snapshot",
@@ -111,6 +165,7 @@ class AddressObject(ScopedPolicyObject):
         ordering = ["name", "precedence_rank", "id"]
         indexes = [
             models.Index(fields=["enforcement_point", "name", "precedence_rank"]),
+            models.Index(fields=["appliance_group", "name", "precedence_rank"]),
             models.Index(fields=["enforcement_point", "normalized_value"]),
             models.Index(fields=["enforcement_point", "namespace_type", "namespace_value"]),
             models.Index(fields=["enforcement_point", "is_any"]),
@@ -236,6 +291,15 @@ class AddressGroup(ScopedPolicyObject):
         EnforcementPoint,
         on_delete=models.CASCADE,
         related_name="address_groups",
+        null=True,
+        blank=True,
+    )
+    appliance_group = models.ForeignKey(
+        ApplianceGroup,
+        on_delete=models.CASCADE,
+        related_name="address_groups",
+        null=True,
+        blank=True,
     )
     source_snapshot = models.ForeignKey(
         "integrations.Snapshot",
@@ -249,6 +313,7 @@ class AddressGroup(ScopedPolicyObject):
         ordering = ["name", "precedence_rank", "id"]
         indexes = [
             models.Index(fields=["enforcement_point", "name", "precedence_rank"]),
+            models.Index(fields=["appliance_group", "name", "precedence_rank"]),
             models.Index(fields=["enforcement_point", "namespace_type", "namespace_value"]),
         ]
         constraints = [
@@ -313,6 +378,15 @@ class Region(ScopedPolicyObject):
         EnforcementPoint,
         on_delete=models.CASCADE,
         related_name="regions",
+        null=True,
+        blank=True,
+    )
+    appliance_group = models.ForeignKey(
+        ApplianceGroup,
+        on_delete=models.CASCADE,
+        related_name="regions",
+        null=True,
+        blank=True,
     )
     source_snapshot = models.ForeignKey(
         "integrations.Snapshot",
@@ -325,6 +399,7 @@ class Region(ScopedPolicyObject):
         ordering = ["name", "precedence_rank", "id"]
         indexes = [
             models.Index(fields=["enforcement_point", "name", "precedence_rank"]),
+            models.Index(fields=["appliance_group", "name", "precedence_rank"]),
             models.Index(fields=["enforcement_point", "namespace_type", "namespace_value"]),
         ]
         constraints = [

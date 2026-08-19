@@ -7,7 +7,7 @@ session behavior or direct data-shaping rules.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from django.db import transaction
 from django.db.models import Q
@@ -40,6 +40,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import PANOSCollectedResponse
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     PANOSNormalizedCollection,
+    normalize_appliance_group_shared_scope,
     normalize_enforcement_point_addresses,
     normalize_enforcement_point_zones,
     normalize_enforcement_point_dynamic_address_content,
@@ -136,9 +137,16 @@ class PANOSSecurityRuleFailure:
 
 @dataclass(slots=True)
 class PANOSAddressNormalizedPoint:
-    enforcement_point: EnforcementPoint
-    address_objects: list[AddressObject]
-    address_groups: list[AddressGroup]
+    """One normalization pass. Exactly one owner is set.
+
+    `enforcement_point` for a vsys pass; `appliance_group` for the shared-scope pass that
+    precedes them, since shared objects belong to the group rather than to any one vsys.
+    """
+
+    enforcement_point: EnforcementPoint | None = None
+    appliance_group: ApplianceGroup | None = None
+    address_objects: list[AddressObject] = field(default_factory=list)
+    address_groups: list[AddressGroup] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -155,7 +163,10 @@ class PANOSDeviceConfigurationNormalizationFailure:
 
 @dataclass(slots=True)
 class PANOSAddressNormalizationFailure:
-    enforcement_point: EnforcementPoint
+    """enforcement_point is None when the shared-scope pass for an appliance group failed;
+    error_text names the group in that case."""
+
+    enforcement_point: EnforcementPoint | None
     error_text: str
 
 
@@ -512,6 +523,29 @@ def renormalize_in_scope_configuration(
             PANOSDeviceConfigurationNormalizedAppliance(
                 appliance=appliance,
                 device_configuration_profiles=normalized.device_configuration_profiles,
+            )
+        )
+
+    # Shared scope belongs to the appliance group and must be rebuilt BEFORE any of its
+    # enforcement points: replace_addresses() is a delete-and-recreate, and security rule
+    # address refs FK to those rows, so rewriting shared scope afterwards would cascade
+    # a point's refs away.
+    for appliance_group in get_in_scope_appliance_groups(management_station):
+        try:
+            shared = normalize_appliance_group_shared_scope(appliance_group)
+        except Exception as exc:
+            address_failures.append(
+                PANOSAddressNormalizationFailure(
+                    enforcement_point=None,
+                    error_text=f"shared scope for appliance group {appliance_group}: {exc}",
+                )
+            )
+            continue
+        address_normalizations.append(
+            PANOSAddressNormalizedPoint(
+                appliance_group=appliance_group,
+                address_objects=shared.address_objects,
+                address_groups=shared.address_groups,
             )
         )
 
