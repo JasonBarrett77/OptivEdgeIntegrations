@@ -201,6 +201,39 @@ def load_census(path: Path | str) -> dict[str, Any]:
     return json.loads(Path(path).read_text())
 
 
+def list_censuses(directory: Path | str | None = None) -> list[dict[str, Any]]:
+    """Saved censuses, newest first, as {path, label, captured_at, ...} summaries.
+
+    Reads each file rather than parsing its name, so a census written to an explicit
+    path is listed with the same detail as one written to the default directory.
+    Unreadable files are reported with an `error` key instead of being skipped - a
+    baseline that cannot be loaded is exactly the thing worth seeing.
+    """
+    directory = Path(directory) if directory is not None else DEFAULT_CENSUS_DIR
+    if not directory.exists():
+        return []
+    entries: list[dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        entry: dict[str, Any] = {"path": str(path), "filename": path.name}
+        try:
+            census = load_census(path)
+        except (OSError, json.JSONDecodeError) as exc:
+            entry["error"] = str(exc)
+        else:
+            entry.update({
+                "label": census.get("label") or "",
+                "captured_at": census.get("captured_at") or "",
+                "schema_has_appliance_group_owner": census.get("schema_has_appliance_group_owner"),
+                "total_rows": {
+                    name: data.get("total_rows")
+                    for name, data in (census.get("models") or {}).items()
+                },
+            })
+        entries.append(entry)
+    entries.sort(key=lambda e: e.get("captured_at") or "", reverse=True)
+    return entries
+
+
 def compare_censuses(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
     """Diff two censuses and say whether shared-scope duplication was removed.
 

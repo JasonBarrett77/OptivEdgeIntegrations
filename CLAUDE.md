@@ -214,6 +214,23 @@ magnitude depends on how many vsys each group has. It does flag three things out
 survived, a change in *which* objects exist, and dependent rows left at zero — which means the renormalize
 never ran.
 
+### The developer page (`/developer/`)
+
+`DeveloperView` renders the live census, captures labelled snapshots, and compares any two. It is
+**deliberately absent from `app_meta.py`'s `SIDEBAR_SECTION`** — reachable only by typing the URL — and a
+test asserts that, so it does not drift into the navigation.
+
+It is **not access-controlled by this package**. This repo has no auth model; a downstream project exposing
+it publicly must gate it in its own middleware or URL conf.
+
+Keep the naming split: the page is `/developer/` because it will grow *actions* (trigger a renormalize,
+force a sync), while `diagnostics/` is strictly read-only. If everything under `/developer/` stays read-only,
+renaming it then is fair.
+
+Messages are rendered **per page** in this codebase, not by the shell — `base.html` has no messages block, so
+each content template loops `{% for message in messages %}` itself. A new page that calls `messages.success`
+without that loop will silently show nothing.
+
 ### Collection → normalization → persistence pipeline (PAN-OS)
 
 `integrations/platforms/pan_os/` is layered strictly bottom-up; keep new PAN-OS logic in the matching layer

@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+
+{% block title %} | Developer{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+
+  <div>
+    <h1 class="text-lg font-semibold text-slate-900">Developer</h1>
+    <p class="mt-1 text-sm text-slate-600">
+      Hidden operations page. Not linked from the navigation.
+    </p>
+  </div>
+
+  {# Messages are rendered per page in this codebase, not by the shell. #}
+  {% if messages %}
+  <div class="flex flex-col gap-2">
+    {% for message in messages %}
+    <div class="border px-3 py-2 text-sm leading-5
+                {% if message.tags == 'error' %}border-red-200 bg-red-50 text-red-800
+                {% elif message.tags == 'warning' %}border-amber-200 bg-amber-50 text-amber-800
+                {% else %}border-blue-200 bg-blue-50 text-blue-800{% endif %}">
+      {{ message }}
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# ---------------- live state ---------------- #}
+  <section class="rounded border border-slate-200 bg-white">
+    <div class="border-b border-slate-200 px-4 py-3">
+      <h2 class="text-sm font-semibold text-slate-900">Policy object census &mdash; current</h2>
+      <p class="mt-1 text-xs text-slate-600">
+        Read live, nothing written. <span class="font-medium">Rows per object</span> should be
+        <span class="font-mono">1.0</span> &mdash; shared scope is group-wide, so anything higher means the
+        same object is stored more than once.
+      </p>
+      {% if not live_census.schema_has_appliance_group_owner %}
+        <p class="mt-2 rounded bg-amber-50 px-2 py-1 text-xs text-amber-800">
+          This database predates migration 0015: scoped objects have no appliance-group owner yet.
+        </p>
+      {% endif %}
+    </div>
+    <table class="w-full text-[11px]">
+      <thead class="bg-slate-50 text-slate-600">
+        <tr>
+          <th class="border-b border-slate-200 px-3 py-2 text-left font-medium">Model</th>
+          <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Total rows</th>
+          <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Shared rows</th>
+          <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Distinct shared</th>
+          <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Rows / object</th>
+          <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">On point</th>
+          <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">On group</th>
+          <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Orphaned</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for name, data in live_census.models.items %}
+        <tr>
+          <td class="border-b border-slate-100 px-3 py-1.5 font-medium text-slate-800">{{ name }}</td>
+          <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-800">{{ data.total_rows }}</td>
+          <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-800">{{ data.duplication.shared_rows }}</td>
+          <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-800">{{ data.duplication.distinct_shared }}</td>
+          <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono
+                     {% if data.duplication.rows_per_object and data.duplication.rows_per_object > 1 %}bg-amber-50 font-semibold text-amber-900{% else %}text-slate-800{% endif %}">
+            {{ data.duplication.rows_per_object|default:"&ndash;" }}
+          </td>
+          <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-600">{{ data.by_owner.enforcement_point|default:"&ndash;" }}</td>
+          <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-600">{{ data.by_owner.appliance_group|default:"&ndash;" }}</td>
+          <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono
+                     {% if data.by_owner.orphaned %}bg-red-50 font-semibold text-red-900{% else %}text-slate-600{% endif %}">
+            {{ data.by_owner.orphaned|default:"&ndash;" }}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  {# ---------------- capture ---------------- #}
+  <section class="rounded border border-slate-200 bg-white p-4">
+    <h2 class="text-sm font-semibold text-slate-900">Capture a snapshot</h2>
+    <p class="mt-1 text-xs text-slate-600">
+      Capture <span class="font-mono">before</span> while the old schema is in place, then
+      <span class="font-mono">after</span> once migration 0015 and a renormalize have run.
+      Snapshots are written to <span class="font-mono">./policy-object-census/</span> beside the host project.
+    </p>
+    <form method="post" action="{% url 'policy_object_census_capture' %}" class="mt-3 flex items-center gap-2">
+      {% csrf_token %}
+      <input type="text" name="label" value="before-renormalize" class="{{ text_input_class }}
+             rounded border border-slate-300 px-2 py-1 text-xs" style="min-width:16rem">
+      <button type="submit" class="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700">
+        Capture snapshot
+      </button>
+    </form>
+  </section>
+
+  {# ---------------- saved snapshots + compare ---------------- #}
+  <section class="rounded border border-slate-200 bg-white">
+    <div class="border-b border-slate-200 px-4 py-3">
+      <h2 class="text-sm font-semibold text-slate-900">Saved snapshots</h2>
+    </div>
+    {% if censuses %}
+      <form method="get" class="px-4 py-3">
+        <table class="w-full text-[11px]">
+          <thead class="bg-slate-50 text-slate-600">
+            <tr>
+              <th class="border-b border-slate-200 px-2 py-1.5 text-left font-medium">Before</th>
+              <th class="border-b border-slate-200 px-2 py-1.5 text-left font-medium">After</th>
+              <th class="border-b border-slate-200 px-2 py-1.5 text-left font-medium">Label</th>
+              <th class="border-b border-slate-200 px-2 py-1.5 text-left font-medium">Captured</th>
+              <th class="border-b border-slate-200 px-2 py-1.5 text-left font-medium">File</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for entry in censuses %}
+            <tr>
+              <td class="border-b border-slate-100 px-2 py-1.5">
+                <input type="radio" name="before" value="{{ entry.path }}" {% if entry.path == selected_before %}checked{% endif %}>
+              </td>
+              <td class="border-b border-slate-100 px-2 py-1.5">
+                <input type="radio" name="after" value="{{ entry.path }}" {% if entry.path == selected_after %}checked{% endif %}>
+              </td>
+              <td class="border-b border-slate-100 px-2 py-1.5 text-slate-800">{{ entry.label|default:"&ndash;" }}</td>
+              <td class="border-b border-slate-100 px-2 py-1.5 font-mono text-slate-600">{{ entry.captured_at }}</td>
+              <td class="border-b border-slate-100 px-2 py-1.5 font-mono text-slate-500">
+                {{ entry.filename }}
+                {% if entry.error %}<span class="text-red-700">&mdash; unreadable: {{ entry.error }}</span>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <button type="submit" class="mt-3 rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700">
+          Compare selected
+        </button>
+      </form>
+    {% else %}
+      <p class="px-4 py-3 text-xs text-slate-500">No snapshots captured yet.</p>
+    {% endif %}
+  </section>
+
+  {# ---------------- comparison ---------------- #}
+  {% if comparison %}
+  <section class="rounded border border-slate-200 bg-white">
+    <div class="border-b border-slate-200 px-4 py-3">
+      <h2 class="text-sm font-semibold text-slate-900">
+        Comparison &mdash; {{ comparison.before_label }} &rarr; {{ comparison.after_label }}
+      </h2>
+    </div>
+    {% if comparison.error %}
+      <p class="px-4 py-3 text-xs text-red-700">{{ comparison.error }}</p>
+    {% else %}
+      <table class="w-full text-[11px]">
+        <thead class="bg-slate-50 text-slate-600">
+          <tr>
+            <th class="border-b border-slate-200 px-3 py-2 text-left font-medium">Model</th>
+            <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Total before</th>
+            <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Total after</th>
+            <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Delta</th>
+            <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Shared before</th>
+            <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Shared after</th>
+            <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Distinct before</th>
+            <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Distinct after</th>
+            <th class="border-b border-slate-200 px-3 py-2 text-right font-medium">Rows/obj</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for name, d in comparison.models.items %}
+          <tr>
+            <td class="border-b border-slate-100 px-3 py-1.5 font-medium text-slate-800">{{ name }}</td>
+            <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-600">{{ d.total_rows.before }}</td>
+            <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-800">{{ d.total_rows.after }}</td>
+            <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono
+                       {% if d.total_rows.delta < 0 %}text-emerald-700{% endif %}">{{ d.total_rows.delta }}</td>
+            <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-600">{{ d.shared_rows.before }}</td>
+            <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-800">{{ d.shared_rows.after }}</td>
+            <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-600">{{ d.distinct_shared.before }}</td>
+            <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono
+                       {% if d.distinct_shared.before != d.distinct_shared.after %}bg-amber-50 font-semibold text-amber-900{% else %}text-slate-800{% endif %}">
+              {{ d.distinct_shared.after }}
+            </td>
+            <td class="border-b border-slate-100 px-3 py-1.5 text-right font-mono text-slate-800">
+              {{ d.rows_per_object.before|default:"&ndash;" }} &rarr; {{ d.rows_per_object.after|default:"&ndash;" }}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+
+      <div class="border-t border-slate-200 px-4 py-3">
+        <h3 class="text-xs font-semibold text-slate-900">Observations</h3>
+        <ul class="mt-1 space-y-1">
+          {% for observation in comparison.observations %}
+          <li class="text-xs text-slate-700">&bull; {{ observation }}</li>
+          {% endfor %}
+        </ul>
+        <p class="mt-2 text-[11px] text-slate-500">
+          Distinct shared should not change &mdash; deduplication removes copies, not objects.
+        </p>
+      </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
+</div>
+{% endblock %}

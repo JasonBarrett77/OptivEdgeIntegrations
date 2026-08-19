@@ -2,6 +2,7 @@ from django.urls import path
 
 from optivedge_integrations.integrations.views import (
     ApplianceGroupSnapshotView,
+    DeveloperView,
     EnforcementPointAddressListView,
     EnforcementPointDetailView,
     EnforcementPointListView,
@@ -20,9 +21,17 @@ from optivedge_integrations.integrations.views import (
     NoteCreateView,
     NoteListView,
     NoteUpdateView,
+    PolicyObjectCensusCaptureView,
 )
 
 urlpatterns = [
+    # Hidden operations page - intentionally not registered in app_meta.py's sidebar.
+    path("developer/", DeveloperView.as_view(), name="developer"),
+    path(
+        "developer/policy-object-census/capture/",
+        PolicyObjectCensusCaptureView.as_view(),
+        name="policy_object_census_capture",
+    ),
     path(
         "management-stations/",
         ManagementStationListView.as_view(),

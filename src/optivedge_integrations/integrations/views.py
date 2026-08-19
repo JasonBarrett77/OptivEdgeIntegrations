@@ -24,6 +24,13 @@ from django.views.generic.edit import CreateView, DeleteView, UpdateView
 from django.contrib.contenttypes.models import ContentType
 from optivedge.views import RightOverlayMixin
 from optivedge_integrations.integrations.forms import ManagementStationForm, NoteForm
+from optivedge_integrations.integrations.diagnostics import (
+    capture_census,
+    compare_censuses,
+    list_censuses,
+    load_census,
+    write_census,
+)
 from optivedge_integrations.integrations.models import (
     ApplianceGroup,
     EnforcementPoint,
@@ -1223,3 +1230,63 @@ class NoteUpdateView(RightOverlayMixin, NoteListBackgroundMixin, UpdateView):
         form.instance.content_type = ContentType.objects.get_for_model(ApplianceGroup)
         form.instance.object_id = appliance_group.pk
         return super().form_valid(form)
+
+
+class DeveloperView(TemplateView):
+    """Hidden operations page. Deliberately absent from the sidebar (`app_meta.py`).
+
+    Reachable only by typing /developer/. It is not access-controlled by this package —
+    a downstream project that exposes it publicly should gate it in its own middleware or
+    URL conf, since this repo has no auth model of its own.
+    """
+
+    template_name = "integrations/developer.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["censuses"] = list_censuses()
+        context["live_census"] = capture_census(label="(live, unsaved)")
+
+        comparison = None
+        before_path = self.request.GET.get("before")
+        after_path = self.request.GET.get("after")
+        if before_path and after_path:
+            try:
+                comparison = compare_censuses(load_census(before_path), load_census(after_path))
+            except (OSError, ValueError) as exc:
+                comparison = {"error": f"Could not compare: {exc}"}
+        context["comparison"] = comparison
+        context["selected_before"] = before_path or ""
+        context["selected_after"] = after_path or ""
+        return context
+
+
+class PolicyObjectCensusCaptureView(View):
+    """Capture a census and write it to disk.
+
+    Two labels matter for the shared-scope migration: capture `before` while the old
+    schema is still in place, then `after` once migration 0015 and a renormalize have
+    run. Any label is accepted — the page compares whichever two files you pick.
+    """
+
+    def post(self, request):
+        label = (request.POST.get("label") or "").strip() or "census"
+        try:
+            path = write_census(capture_census(label=label))
+        except OSError as exc:
+            messages.error(request, f"Could not write the census file: {exc}")
+            return HttpResponseRedirect(reverse("developer"))
+
+        census = load_census(path)
+        rows = sum(m.get("total_rows", 0) for m in census.get("models", {}).values())
+        messages.success(
+            request,
+            f'Captured "{label}": {rows:,} scoped policy object row(s) written to {path}.',
+        )
+        if not census.get("schema_has_appliance_group_owner"):
+            messages.warning(
+                request,
+                "This database predates migration 0015 — scoped objects have no appliance-group "
+                "owner yet, so this is a pre-migration baseline.",
+            )
+        return HttpResponseRedirect(reverse("developer"))

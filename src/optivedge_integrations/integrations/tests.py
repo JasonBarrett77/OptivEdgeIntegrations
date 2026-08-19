@@ -3960,3 +3960,90 @@ class PolicyObjectCensusTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_census(census, Path(tmp) / "census.json")
             self.assertEqual(load_census(path), census)
+
+
+class DeveloperPageTests(TestCase):
+    """The hidden operations page: renders live counts, captures, and compares."""
+
+    def setUp(self):
+        self.census_dir = tempfile.TemporaryDirectory()
+        patcher = patch(
+            "optivedge_integrations.integrations.diagnostics.policy_object_census.DEFAULT_CENSUS_DIR",
+            Path(self.census_dir.name),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self.census_dir.cleanup)
+
+    def test_page_renders_live_counts_without_writing_anything(self):
+        response = self.client.get(reverse("developer"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Policy object census")
+        self.assertContains(response, "Rows / object")
+        self.assertEqual(list(Path(self.census_dir.name).glob("*.json")), [],
+                         "viewing the page must not write a snapshot")
+
+    def test_page_is_not_advertised_in_the_sidebar(self):
+        """It is reachable only by typing the URL; app_meta must not list it."""
+        from optivedge_integrations.integrations import app_meta
+        self.assertNotIn("developer", str(getattr(app_meta, "SIDEBAR_SECTION", "")))
+
+    def test_capture_writes_a_snapshot_and_reports_it(self):
+        response = self.client.post(
+            reverse("policy_object_census_capture"), {"label": "before-renormalize"}, follow=True)
+        self.assertEqual(response.status_code, 200)
+        written = list(Path(self.census_dir.name).glob("*.json"))
+        self.assertEqual(len(written), 1)
+        self.assertIn("before-renormalize", written[0].name)
+        self.assertContains(response, "Captured &quot;before-renormalize&quot;")
+
+    def test_capture_warns_when_the_database_predates_the_migration(self):
+        with patch(
+            "optivedge_integrations.integrations.diagnostics.policy_object_census._has_owner_column",
+            return_value=False,
+        ):
+            response = self.client.post(
+                reverse("policy_object_census_capture"), {"label": "old-schema"}, follow=True)
+        self.assertContains(response, "predates migration 0015")
+
+    def test_comparing_two_snapshots_shows_the_drop(self):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="8700", appliance_hostname="fw-dev", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-dev")
+        snapshot = Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(), payload={})
+
+        def shared(owner, name):
+            kwargs = ({"enforcement_point": owner} if isinstance(owner, EnforcementPoint)
+                      else {"appliance_group": owner})
+            AddressObject.objects.create(
+                management_station=station, source_snapshot=snapshot, config_source="pushed_pre",
+                name=name, namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
+                namespace_value="shared",
+                precedence_rank=precedence_for(PolicyObjectNamespace.PANORAMA_SHARED),
+                address_type=AddressObject.TYPE_IP_NETMASK, value="10.0.0.1/32",
+                last_synced_at=timezone.now(), **kwargs)
+
+        point_b = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group, vsys_name="vsys2")
+        for owner in (point, point_b):
+            shared(owner, "shr-a")
+        before = write_census(capture_census(label="before"))
+
+        AddressObject.objects.all().delete()
+        shared(group, "shr-a")
+        after = write_census(capture_census(label="after"))
+
+        response = self.client.get(
+            reverse("developer"), {"before": str(before), "after": str(after)})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "before &rarr; after")
+        self.assertContains(response, "No anomalies")
+
+    def test_comparing_an_unreadable_snapshot_reports_instead_of_500ing(self):
+        bad = Path(self.census_dir.name) / "corrupt.json"
+        bad.write_text("{not json")
+        response = self.client.get(reverse("developer"), {"before": str(bad), "after": str(bad)})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Could not compare")
