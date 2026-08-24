@@ -4661,3 +4661,34 @@ class UnmarkedPushedEntryInventoryTests(TestCase):
             {"@loc": "shared", "@name": "marked", "ip-netmask": "10.1.1.1/32"}])
         result = explain_address_reference(point, "marked")
         self.assertFalse(any("carry no @loc" in f for f in result["findings"]), result["findings"])
+
+
+class TemplateCommentHygieneTests(TestCase):
+    """Django's `{# #}` comment is SINGLE-LINE only.
+
+    A multi-line one is not stripped - it renders as literal text on the page. Nothing
+    errors, the page still returns 200, and it is only caught by looking at it. So it is
+    asserted rather than reviewed.
+    """
+
+    def test_no_template_uses_a_multi_line_hash_comment(self):
+        offenders = []
+        for path in (Path(__file__).resolve().parent).rglob("*.html"):
+            text = path.read_text()
+            for match in re.finditer(r"\{#", text):
+                tail = text[match.start():]
+                close = tail.find("#}")
+                if close == -1 or "\n" in tail[:close]:
+                    offenders.append(f"{path.name}:{text[:match.start()].count(chr(10)) + 1}")
+        self.assertEqual(
+            offenders, [],
+            "multi-line {# #} is not stripped by Django and renders as page text; "
+            "use {% comment %}...{% endcomment %}",
+        )
+
+    def test_the_developer_page_renders_no_comment_delimiters(self):
+        response = self.client.get(reverse("developer"))
+        body = response.content.decode()
+        self.assertNotIn("{#", body)
+        self.assertNotIn("#}", body)
+        self.assertNotIn("overflow-auto wrapper", body, "comment prose leaked into the page")

@@ -3,9 +3,14 @@
 {% block title %} | Developer{% endblock %}
 
 {% block content %}
-{# base.html sets overflow-hidden on <body>, so each content template owns its own
-   scrolling - matching enforcement_point_detail_content.html. Without the
-   overflow-auto wrapper this page simply clips at the viewport. #}
+{% comment %}
+base.html sets overflow-hidden on <body>, so each content template owns its own
+scrolling - matching enforcement_point_detail_content.html. Without the
+overflow-auto wrapper this page simply clips at the viewport.
+
+{% comment %} rather than {# #}: Django's hash comment is SINGLE-LINE only, so a
+multi-line one is not stripped and renders as literal text on the page.
+{% endcomment %}
 <section class="flex h-full w-full min-h-0 min-w-0">
   <div class="min-h-0 flex-1 overflow-auto">
     <div class="space-y-6 px-4 py-3">

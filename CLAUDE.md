@@ -287,6 +287,11 @@ It also catches the failure that masquerades as one missing object: a pushed ent
 `pushed_entry_scope()` raise, which fails the whole build for that point — so *every* object from that read
 is missing, not just the one named in the rule error.
 
+**Django's `{# #}` comment is single-line only.** A multi-line one is *not* stripped — it renders as literal
+text on the page, with no error and a 200 response. Use `{% comment %}…{% endcomment %}` for anything
+spanning lines. `TemplateCommentHygieneTests` asserts this across every template, because it is invisible in
+review and only shows up by looking at the rendered page.
+
 **Content templates own their own scrolling.** `base.html` puts `overflow-hidden` on `<body>` and gives the
 content block a full-height flex container, so a page that just emits a tall `<div>` clips at the viewport
 with no scrollbar. Wrap it the way `enforcement_point_detail_content.html` does — a
