@@ -23,6 +23,7 @@ from optivedge_integrations.integrations.models import (
     IntegrationEvent,
     IntegrationRun,
     ManagementStation,
+    NormalizationIssue,
     Note,
     PolicyObjectNamespace,
     PolicyObjectPrecedence,
@@ -4872,3 +4873,99 @@ class FailedObjectRuleInteractionTests(TestCase):
         object_errors = [i for i in addresses.policy_object_issues if i.severity == "error"]
         self.assertEqual(len(object_errors), 1, "one root cause")
         self.assertGreaterEqual(len(rules.security_rule_failures), 1, "and its consequences")
+
+
+class NormalizationIssuePersistenceTests(TestCase):
+    """Issues are current state, not history: replaced per run, so a clean run clears them.
+
+    That is the whole reason this is a model rather than IntegrationEvent. The event log
+    is append-only and answers "what happened"; the health indicator needs "what is wrong
+    right now", and has to become an EXISTS because it runs on every page load.
+    """
+
+    def _point(self, *, vsys_entries):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9950", appliance_hostname="fw-persist", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-persist")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name,
+                                    "address": {"entry": list(vsys_entries)}}]}}]}}})
+        body = {"policy": {"panorama": {}}}
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {}})
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload=body)
+        return station, group, point, appliance
+
+    def _remerge(self, station, appliance, point, entries):
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name,
+                                    "address": {"entry": list(entries)}}]}}]}}})
+
+    def test_an_issue_is_persisted_with_its_detail(self):
+        station, group, point, _ = self._point(vsys_entries=[{"@name": "broken"}])
+        normalize_enforcement_point_addresses(point)
+
+        issue = NormalizationIssue.objects.get(enforcement_point=point)
+        self.assertEqual(issue.name, "broken")
+        self.assertEqual(issue.severity, NormalizationIssue.Severity.ERROR)
+        self.assertEqual(issue.disposition, NormalizationIssue.Disposition.SKIPPED)
+        self.assertEqual(issue.raw_entry, {"@name": "broken"}, "raw entry kept for drill-through")
+        self.assertEqual(issue.management_station, station)
+
+    def test_a_clean_run_clears_the_previous_issues(self):
+        """The requirement the whole design rests on: it does not disappear until
+        everything is normalized, and it DOES disappear when it is."""
+        station, group, point, appliance = self._point(vsys_entries=[{"@name": "broken"}])
+        normalize_enforcement_point_addresses(point)
+        self.assertTrue(NormalizationIssue.objects.filter(enforcement_point=point).exists())
+
+        self._remerge(station, appliance, point, [{"@name": "fixed", "ip-netmask": "10.0.0.1/32"}])
+        normalize_enforcement_point_addresses(point)
+        self.assertFalse(NormalizationIssue.objects.filter(enforcement_point=point).exists(),
+                         "a clean run must leave nothing behind")
+
+    def test_issues_do_not_accumulate_across_runs(self):
+        station, group, point, appliance = self._point(vsys_entries=[{"@name": "broken"}])
+        for _ in range(3):
+            normalize_enforcement_point_addresses(point)
+        self.assertEqual(NormalizationIssue.objects.filter(enforcement_point=point).count(), 1,
+                         "replaced, not appended - this is state, not history")
+
+    def test_shared_scope_issues_belong_to_the_appliance_group(self):
+        station, group, point, appliance = self._point(vsys_entries=[])
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {"address": {"entry": [{"@loc": "shared", "@name": "bad-shared"}]}}})
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {}}})
+        normalize_appliance_group_shared_scope(group)
+
+        issue = NormalizationIssue.objects.get(appliance_group=group)
+        self.assertEqual(issue.name, "bad-shared")
+        self.assertIsNone(issue.enforcement_point)
+
+    def test_an_issue_must_have_exactly_one_owner(self):
+        station, group, point, _ = self._point(vsys_entries=[])
+        orphan = NormalizationIssue(
+            management_station=station, kind="address object", name="x",
+            severity=NormalizationIssue.Severity.ERROR,
+            disposition=NormalizationIssue.Disposition.SKIPPED, reason="r")
+        with self.assertRaisesMessage(ValidationError, "exactly one owner"):
+            orphan.clean()

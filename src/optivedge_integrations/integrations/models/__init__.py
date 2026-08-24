@@ -17,6 +17,7 @@ from .collected import (
 )
 from .events import IntegrationEvent, IntegrationRun
 from .device_configuration import DeviceConfigurationProfile
+from .normalization import NormalizationIssue
 from .notes import Note
 from .zones import Zone, ZoneInterface
 from .policy import (
@@ -73,6 +74,7 @@ __all__ = [
     "IntegrationRun",
     "ManagementStation",
     "DeviceConfigurationProfile",
+    "NormalizationIssue",
     "Note",
     "PolicyObjectBase",
     "PolicyObjectNamespace",

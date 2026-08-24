@@ -240,6 +240,19 @@ state and the scope is a documented fallback, not a fault.
 
 `raw_entry` is carried for drill-through, since a name and a reason rarely explain a payload problem alone.
 
+`NormalizationIssue` (`models/normalization.py`) persists them, and is **state, not history** — replaced per
+owner on every run, in the same transaction that replaces that owner's objects. That is the whole reason it
+is a model rather than an `IntegrationEvent`: a health indicator has to clear itself when a clean run
+happens, and an append-only log never does. Answering "is anything wrong right now?" against events would
+mean joining to the latest run per point — a query that grows with history and would run on every page load.
+Replacing the rows makes it an `EXISTS`.
+
+Both are worth keeping. The event log answers *what happened during that sync*; this answers *can I trust the
+data I am looking at*.
+
+Owned like the objects it describes — enforcement point for vsys-scoped work, appliance group for
+shared-scoped — so the two cannot disagree about what a run produced.
+
 ### Diagnostics (`integrations/diagnostics/`)
 
 Read-only reporting over normalized data. Plain functions — no views, no management commands — so the same

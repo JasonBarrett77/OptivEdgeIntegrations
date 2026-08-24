@@ -23,6 +23,7 @@ from optivedge_integrations.integrations.models import (
     ApplianceGroup,
     EnforcementPoint,
     FieldProvenance,
+    NormalizationIssue,
     PolicyObjectNamespace,
     PolicyObjectScope,
     precedence_for,
@@ -486,6 +487,39 @@ def _drop_unnamed_and_duplicates(normalized, kind):
     return kept, issues
 
 
+def replace_normalization_issues(owner, issues) -> list:
+    """Replace this owner's recorded issues with the ones from the run just completed.
+
+    Replaced rather than appended, for the same reason the objects are: this table answers
+    "what is currently wrong", so a clean run must leave nothing behind. An append-only
+    log cannot clear itself, and the health indicator that reads this runs on every page.
+
+    Called from the same transaction that replaces the owner's objects, so the two cannot
+    disagree about what a run produced.
+    """
+    owner_kwargs = (
+        {"enforcement_point": owner}
+        if isinstance(owner, EnforcementPoint)
+        else {"appliance_group": owner}
+    )
+    NormalizationIssue.objects.filter(**owner_kwargs).delete()
+    return NormalizationIssue.objects.bulk_create([
+        NormalizationIssue(
+            management_station=owner.management_station,
+            kind=issue.kind,
+            name=issue.name,
+            severity=issue.severity,
+            disposition=issue.disposition,
+            reason=issue.reason,
+            node=issue.node,
+            source=issue.source,
+            raw_entry=issue.raw_entry,
+            **owner_kwargs,
+        )
+        for issue in issues
+    ])
+
+
 def build_normalized_addresses(
     enforcement_point: EnforcementPoint,
 ) -> tuple[list[NormalizedAddressObject], list[NormalizedAddressGroup], list[PolicyObjectIssue]]:
@@ -898,6 +932,7 @@ def normalize_appliance_group_shared_objects(appliance_group: ApplianceGroup) ->
             appliance_group, list(shared_objects.values()), list(shared_groups.values())
         )
         created_regions = replace_regions(appliance_group, list(shared_regions.values()))
+        replace_normalization_issues(appliance_group, issues)
 
     return PANOSNormalizedCollection(
         address_objects=created_objects,
@@ -924,6 +959,7 @@ def normalize_addresses(enforcement_point: EnforcementPoint) -> PANOSNormalizedC
         normalized_regions, region_issues = build_normalized_regions(enforcement_point)
         issues.extend(region_issues)
         created_regions = replace_regions(enforcement_point, normalized_regions)
+        replace_normalization_issues(enforcement_point, issues)
 
     return PANOSNormalizedCollection(
         address_objects=created_objects,
