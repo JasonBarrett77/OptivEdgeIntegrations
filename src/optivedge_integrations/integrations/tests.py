@@ -4437,3 +4437,65 @@ class BuildFailureDiagnosisTests(TestCase):
         self.assertTrue(result["build_outcome"]["succeeded"])
         self.assertGreater(result["build_outcome"]["object_count"], 0)
         self.assertFalse(any("ADDRESS NORMALIZATION FAILS" in f for f in result["findings"]))
+
+
+class OwnerTotalsDiagnosisTests(TestCase):
+    """When shared references fail wholesale, the decisive number is how many objects the
+    GROUP holds - not anything about the object named in the rule error."""
+
+    def _fixture(self, *, in_scope=True):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9500", appliance_hostname="cloud-ngfw", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            group_name="standalone-9500")
+        point.in_scope = in_scope
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name}]}}]}}})
+        body = {"policy": {"panorama": {"address": {"entry": [
+            {"@loc": "shared", "@name": "NET-A",
+             "ip-netmask": {"#text": "10.130.49.0/27", "@loc": "shared"}}]}}}}
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(), payload=body)
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload=body)
+        return station, group, point
+
+    def test_an_empty_group_is_named_as_the_cause_when_the_build_is_fine(self):
+        """The reported signature: build succeeds, shared objects exist in the payload,
+        but nothing owns them because the shared pass did not run."""
+        _, group, point = self._fixture()
+        result = explain_address_reference(point, "NET-A")
+
+        self.assertTrue(result["build_outcome"]["succeeded"])
+        self.assertEqual(result["owner_totals"]["appliance_group"]["address_objects"], 0)
+        self.assertTrue(result["findings"][0].startswith("The appliance group holds ZERO objects"),
+                        result["findings"])
+        self.assertIn("AddressNormalizationFailed", result["findings"][0])
+
+    def test_a_group_with_no_in_scope_points_is_reported_as_never_selected(self):
+        """Separates "ran and failed" from "was never selected" - the second leaves no
+        failure event at all, so it is invisible in the log."""
+        _, group, point = self._fixture(in_scope=False)
+        result = explain_address_reference(point, "NET-A")
+
+        self.assertIs(result["owner_totals"]["group_in_scope_for_shared_pass"], False)
+        self.assertTrue(result["findings"][0].startswith("This appliance group is NOT selected"),
+                        result["findings"])
+
+    def test_a_healthy_group_reports_its_counts_and_no_ownership_finding(self):
+        _, group, point = self._fixture()
+        normalize_appliance_group_shared_scope(group)
+        normalize_enforcement_point_addresses(point)
+
+        result = explain_address_reference(point, "NET-A")
+        self.assertIs(result["owner_totals"]["group_in_scope_for_shared_pass"], True)
+        self.assertEqual(result["owner_totals"]["appliance_group"]["address_objects"], 1)
+        self.assertTrue(result["persisted"]["resolvable"])
+        self.assertFalse(any("ZERO objects" in f for f in result["findings"]))

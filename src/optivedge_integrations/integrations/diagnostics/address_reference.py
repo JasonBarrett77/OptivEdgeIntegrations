@@ -224,12 +224,51 @@ def _pushed_payload_roots(enforcement_point: EnforcementPoint) -> dict[str, Any]
     return roots
 
 
+def _owner_totals(enforcement_point: EnforcementPoint) -> dict[str, Any]:
+    """How many objects each owner holds, and whether the group is even eligible for the
+    shared pass.
+
+    The decisive number when shared references fail wholesale: if the GROUP holds zero
+    objects, the shared pass either never ran or failed, and the object named in a rule
+    error is incidental. `group_in_scope_for_shared_pass` separates "it ran and failed"
+    from "it was never selected" - get_in_scope_appliance_groups() picks groups by having
+    at least one in-scope enforcement point, so a group whose points are all out of scope
+    is skipped silently.
+    """
+    from optivedge_integrations.integrations.platforms.pan_os.flows import (
+        get_in_scope_appliance_groups,
+    )
+
+    group = enforcement_point.appliance_group
+    totals: dict[str, Any] = {
+        "enforcement_point": {
+            "address_objects": enforcement_point.address_objects.count(),
+            "address_groups": enforcement_point.address_groups.count(),
+            "regions": enforcement_point.regions.count(),
+        },
+        "appliance_group": None,
+        "group_in_scope_for_shared_pass": None,
+    }
+    if group is None:
+        return totals
+
+    totals["appliance_group"] = {
+        "address_objects": group.address_objects.count(),
+        "address_groups": group.address_groups.count(),
+        "regions": group.regions.count(),
+    }
+    eligible = get_in_scope_appliance_groups(enforcement_point.management_station)
+    totals["group_in_scope_for_shared_pass"] = any(g.pk == group.pk for g in eligible)
+    return totals
+
+
 def explain_address_reference(enforcement_point: EnforcementPoint, name: str) -> dict[str, Any]:
     """Report where `name` is, where the device says it should be, and any gap."""
     persisted = _persisted(enforcement_point, name)
     raw = _raw_sources(enforcement_point, name)
     appliances = _appliance_context(enforcement_point)
     build = _build_outcome(enforcement_point)
+    totals = _owner_totals(enforcement_point)
     payload_roots = _pushed_payload_roots(enforcement_point)
 
     findings: list[str] = []
@@ -274,6 +313,22 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
             f"references a name the device never reported here - check whether the snapshots "
             f"are stale, or whether the reference resolves from a scope not collected."
         )
+
+    group_totals = totals.get("appliance_group") or {}
+    if totals.get("group_in_scope_for_shared_pass") is False:
+        findings.insert(0, (
+            "This appliance group is NOT selected by get_in_scope_appliance_groups(), so the "
+            "shared pass never runs for it and nothing owns its shared scope. That selection "
+            "requires at least one in-scope enforcement point on the group."
+        ))
+    elif group_totals and not any(group_totals.values()) and build.get("succeeded"):
+        findings.insert(0, (
+            "The appliance group holds ZERO objects while the build for this point succeeds and "
+            "produces shared-scoped ones. The shared pass either never ran or failed - look for "
+            "an AddressNormalizationFailed event naming 'shared scope for appliance group'. Every "
+            "shared reference here will be unresolved, so the object named in a rule error is "
+            "incidental."
+        ))
 
     if not build["succeeded"]:
         findings.insert(0, (
@@ -338,6 +393,7 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
         "name": name,
         "appliance_context": appliances,
         "build_outcome": build,
+        "owner_totals": totals,
         "pushed_payload_roots": payload_roots,
         "persisted": persisted,
         "raw_sources": raw,

@@ -163,6 +163,22 @@
         </table>
         {% endif %}
 
+        {% with totals=reference_explanation.owner_totals %}
+        <div class="rounded px-3 py-2 text-[11px]
+                    {% if totals.appliance_group and not totals.appliance_group.address_objects %}bg-red-50 text-red-900{% else %}bg-slate-50 text-slate-700{% endif %}">
+          Owner totals &mdash;
+          point: <span class="font-mono">{{ totals.enforcement_point.address_objects }}</span> objects,
+          <span class="font-mono">{{ totals.enforcement_point.address_groups }}</span> groups;
+          appliance group:
+          {% if totals.appliance_group %}
+            <span class="font-mono font-semibold">{{ totals.appliance_group.address_objects }}</span> objects,
+            <span class="font-mono">{{ totals.appliance_group.address_groups }}</span> groups
+          {% else %}<span class="font-mono">no group</span>{% endif %}.
+          Group selected for the shared pass:
+          <span class="font-mono {% if totals.group_in_scope_for_shared_pass is False %}font-semibold text-red-900{% endif %}">{{ totals.group_in_scope_for_shared_pass }}</span>
+        </div>
+        {% endwith %}
+
         {% with build=reference_explanation.build_outcome %}
         <div class="rounded px-3 py-2 text-[11px] {% if build.succeeded %}bg-slate-50 text-slate-700{% else %}bg-red-50 text-red-900{% endif %}">
           Address build for this point:

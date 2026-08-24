@@ -254,6 +254,12 @@ should therefore hold it, and where it actually is — and separates the two cas
 event log: **the device never reported it** (collection or stale snapshots) versus **the device reported it
 and nothing stored it** (normalization).
 
+It reports **owner totals** first, because that is the decisive number when shared references fail
+wholesale: a group holding zero objects means the shared pass never ran or failed, and the object named in
+the rule error is incidental. `group_in_scope_for_shared_pass` separates *ran and failed* — which leaves an
+`AddressNormalizationFailed` event — from *was never selected*, which leaves no event at all, since
+`get_in_scope_appliance_groups()` picks groups by having at least one in-scope enforcement point.
+
 The explainer **runs the real address build** and reports what it does, because a rule error naming one
 object is usually downstream of the whole build failing: `resolve_rule_address_refs()` raises on the *first*
 unresolved member and source is processed before destination, so "every rule fails on a `NET-*` source" is
