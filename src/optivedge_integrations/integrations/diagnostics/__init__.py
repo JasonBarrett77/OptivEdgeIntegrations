@@ -6,6 +6,7 @@ developer page, a shell session, or a script. Nothing here writes to the databas
 
 from optivedge_integrations.integrations.diagnostics.address_reference import (
     explain_address_reference,
+    unmarked_pushed_entries,
 )
 from optivedge_integrations.integrations.diagnostics.policy_object_census import (
     CENSUS_VERSION,
@@ -18,6 +19,7 @@ from optivedge_integrations.integrations.diagnostics.policy_object_census import
 
 __all__ = [
     "explain_address_reference",
+    "unmarked_pushed_entries",
     "CENSUS_VERSION",
     "capture_census",
     "compare_censuses",

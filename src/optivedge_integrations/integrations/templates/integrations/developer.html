@@ -163,6 +163,19 @@
         </table>
         {% endif %}
 
+        {% with u=reference_explanation.unmarked_pushed %}
+        {% if u.also_local or u.pushed_only %}
+        <div class="rounded px-3 py-2 text-[11px] {% if u.also_local %}bg-amber-50 text-amber-900{% else %}bg-slate-50 text-slate-700{% endif %}">
+          Pushed entries with no <span class="font-mono">@loc</span> &mdash;
+          also in merged local config: <span class="font-mono font-semibold">{{ u.also_local|length }}</span>;
+          pushed only: <span class="font-mono">{{ u.pushed_only|length }}</span>.
+          {% if u.also_local %}
+          Names that are also local duplicate what merged yields, which resolution rejects.
+          {% endif %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
         {% with totals=reference_explanation.owner_totals %}
         <div class="rounded px-3 py-2 text-[11px]
                     {% if totals.appliance_group and not totals.appliance_group.address_objects %}bg-red-50 text-red-900{% else %}bg-slate-50 text-slate-700{% endif %}">

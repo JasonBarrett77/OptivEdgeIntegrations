@@ -412,6 +412,13 @@ way a wrong shared classification would. What scope such an entry really occupie
 a conservative default, and `pushed_entry_is_unmarked()` exists so diagnostics can surface it rather than
 letting it become another silent inference.
 
+**What unmarked entries actually are is not established.** `azure-healthcheck-address` reads like a vendor
+injection, but that is a reading of a name. A firewall-local object surfacing in the pushed response fits
+equally — local objects carry no marker anywhere. That distinction matters: if they are local, the vsys
+fallback duplicates what `merged` already yields, and two candidates in one scope is rejected at resolution.
+`diagnostics.unmarked_pushed_entries()` counts them and splits them by whether the same name appears in
+`merged`, which settles it.
+
 This used to raise, on the grounds that all 398 pushed entries across both lab devices carried a marker.
 That count was right and the generalisation wrong: an Azure cloud firewall pushes `azure-healthcheck-address`
 with no provenance key, and the raise failed one enforcement point's **entire** address build — 242 objects

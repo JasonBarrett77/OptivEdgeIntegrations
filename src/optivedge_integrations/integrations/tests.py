@@ -75,6 +75,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
     explain_address_reference,
+    unmarked_pushed_entries,
     CENSUS_VERSION,
     compare_censuses,
     load_census,
@@ -4588,3 +4589,75 @@ class DeveloperPageExplanationRenderTests(TestCase):
             reverse("developer"), {"reference_point": 999999, "reference_name": "X"})
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "no longer exists")
+
+
+class UnmarkedPushedEntryInventoryTests(TestCase):
+    """What ARE the entries without @loc? The fallback is a guess, so it matters whether
+    they are vendor-injected objects or firewall-local ones surfacing in the pushed read.
+
+    If they are also in merged, the vsys fallback duplicates what local config yields -
+    two candidates in one scope, which resolution rejects. That would trade one failure
+    for another, so it has to be checkable rather than assumed.
+    """
+
+    def _point(self, *, merged_vsys_entries=(), pushed_entries=()):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9700", appliance_hostname="cloud-ngfw", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="standalone-9700")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name,
+                                    "address": {"entry": list(merged_vsys_entries)}}]}}]}}})
+        body = {"policy": {"panorama": {"address": {"entry": list(pushed_entries)}}}}
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(), payload=body)
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload=body)
+        return point
+
+    def test_separates_pushed_only_names_from_names_that_are_also_local(self):
+        point = self._point(
+            merged_vsys_entries=[{"@name": "local-thing", "ip-netmask": "10.9.9.9/32"}],
+            pushed_entries=[
+                {"@name": "local-thing", "ip-netmask": "10.9.9.9/32"},        # no @loc, also local
+                {"@name": "azure-healthcheck-address", "ip-netmask": "168.63.129.16/32"},
+                {"@loc": "shared", "@name": "marked", "ip-netmask": "10.1.1.1/32"},
+            ])
+        inventory = unmarked_pushed_entries(point)
+
+        self.assertEqual([r["name"] for r in inventory["also_local"]], ["local-thing"])
+        self.assertEqual([r["name"] for r in inventory["pushed_only"]], ["azure-healthcheck-address"])
+        self.assertEqual(inventory["reads"]["pushed_non_vsys"]["unmarked_count"], 2,
+                         "the marked entry is not counted")
+
+    def test_counts_every_unmarked_entry_not_just_the_first(self):
+        """merge_pushed_entries() stopped at the first, so a build error names one entry
+        whether there is one or a hundred."""
+        point = self._point(pushed_entries=[
+            {"@name": f"unmarked-{i}", "ip-netmask": f"10.0.0.{i}/32"} for i in range(1, 8)])
+        inventory = unmarked_pushed_entries(point)
+        self.assertEqual(inventory["reads"]["pushed_non_vsys"]["unmarked_count"], 7)
+        self.assertEqual(len(inventory["pushed_only"]), 7)
+
+    def test_the_explainer_reports_the_split_and_warns_about_duplication(self):
+        point = self._point(
+            merged_vsys_entries=[{"@name": "local-thing", "ip-netmask": "10.9.9.9/32"}],
+            pushed_entries=[{"@name": "local-thing", "ip-netmask": "10.9.9.9/32"}])
+        result = explain_address_reference(point, "local-thing")
+        self.assertTrue(any("ALSO exist in merged local config" in f for f in result["findings"]),
+                        result["findings"])
+        self.assertTrue(any("two" in f and "candidates in one scope" in f
+                            for f in result["findings"]), result["findings"])
+
+    def test_a_deployment_with_no_unmarked_entries_says_nothing_about_them(self):
+        point = self._point(pushed_entries=[
+            {"@loc": "shared", "@name": "marked", "ip-netmask": "10.1.1.1/32"}])
+        result = explain_address_reference(point, "marked")
+        self.assertFalse(any("carry no @loc" in f for f in result["findings"]), result["findings"])

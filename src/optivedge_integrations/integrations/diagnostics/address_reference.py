@@ -24,6 +24,7 @@ from optivedge_integrations.integrations.models import (
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     ensure_list,
+    pushed_entry_is_unmarked,
     entry_provenance,
     merged_shared,
     merged_vsys_entry,
@@ -274,6 +275,79 @@ def _owner_totals(enforcement_point: EnforcementPoint) -> dict[str, Any]:
     return totals
 
 
+def unmarked_pushed_entries(enforcement_point: EnforcementPoint) -> dict[str, Any]:
+    """Every pushed entry lacking @loc, and whether it also exists in local config.
+
+    Scope for these is a fallback, not a reading, so what they actually ARE matters:
+
+    - If the same name appears in `merged` they are firewall-local objects surfacing in
+      the pushed response, and the fallback is duplicating something local config already
+      yields - two candidates in one scope, which effective_in_scope_order() rejects.
+    - If they appear nowhere in `merged` they exist only in the pushed payload, which is
+      consistent with vendor injection but does not prove it.
+
+    Counting them also settles whether the one named in a build error is special or merely
+    the first encountered - merge_pushed_entries() stops at the first.
+    """
+    merged = latest_merged_snapshot(enforcement_point)
+    local_vsys: set[str] = set()
+    local_shared: set[str] = set()
+    if merged is not None:
+        for node in OBJECT_NODES:
+            vsys_root = merged_vsys_entry(merged.payload, enforcement_point.vsys_name)
+            shared_root = merged_shared(merged.payload)
+            for root, sink in ((vsys_root, local_vsys), (shared_root, local_shared)):
+                container = root.get(node)
+                if isinstance(container, dict):
+                    for entry in ensure_list(container.get("entry")):
+                        if isinstance(entry, dict) and entry.get("@name"):
+                            sink.add(entry["@name"])
+
+    reads = {
+        "pushed_non_vsys": latest_pushed_shared_snapshot(enforcement_point),
+        "pushed_vsys": latest_pushed_vsys_snapshot(enforcement_point),
+    }
+    result: dict[str, Any] = {"reads": {}, "also_local": [], "pushed_only": []}
+    seen: dict[str, set[str]] = {}
+
+    for label, snapshot in reads.items():
+        if snapshot is None:
+            result["reads"][label] = None
+            continue
+        try:
+            root = pushed_shared(snapshot.payload) if label == "pushed_non_vsys" \
+                else pushed_vsys_panorama(snapshot.payload)
+        except ValueError as exc:
+            result["reads"][label] = {"error": str(exc)}
+            continue
+
+        unmarked: list[dict[str, str]] = []
+        total = 0
+        for node in OBJECT_NODES:
+            container = root.get(node)
+            if not isinstance(container, dict):
+                continue
+            for entry in ensure_list(container.get("entry")):
+                if not isinstance(entry, dict) or not entry.get("@name"):
+                    continue
+                total += 1
+                if pushed_entry_is_unmarked(entry):
+                    unmarked.append({"name": entry["@name"], "node": node})
+                    seen.setdefault(entry["@name"], set()).add(label)
+        result["reads"][label] = {
+            "total_entries": total,
+            "unmarked_count": len(unmarked),
+            "unmarked_examples": unmarked[:25],
+        }
+
+    for name, labels in sorted(seen.items()):
+        row = {"name": name, "in_reads": sorted(labels),
+               "in_merged_vsys": name in local_vsys, "in_merged_shared": name in local_shared}
+        (result["also_local"] if (row["in_merged_vsys"] or row["in_merged_shared"])
+         else result["pushed_only"]).append(row)
+    return result
+
+
 def explain_address_reference(enforcement_point: EnforcementPoint, name: str) -> dict[str, Any]:
     """Report where `name` is, where the device says it should be, and any gap."""
     persisted = _persisted(enforcement_point, name)
@@ -281,6 +355,7 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
     appliances = _appliance_context(enforcement_point)
     build = _build_outcome(enforcement_point)
     totals = _owner_totals(enforcement_point)
+    unmarked = unmarked_pushed_entries(enforcement_point)
     payload_roots = _pushed_payload_roots(enforcement_point)
 
     findings: list[str] = []
@@ -325,6 +400,26 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
             f"references a name the device never reported here - check whether the snapshots "
             f"are stale, or whether the reference resolves from a scope not collected."
         )
+
+    unmarked_total = sum(
+        (read or {}).get("unmarked_count", 0) for read in (unmarked.get("reads") or {}).values()
+    )
+    if unmarked_total:
+        also_local = unmarked.get("also_local") or []
+        pushed_only = unmarked.get("pushed_only") or []
+        findings.append(
+            f"{unmarked_total} pushed entr(ies) carry no @loc. Of the distinct names, "
+            f"{len(also_local)} ALSO exist in merged local config and {len(pushed_only)} do not. "
+            f"Names present in merged are firewall-local objects surfacing in the pushed read - "
+            f"the vsys-scope fallback then duplicates what local config already yields, and two "
+            f"candidates in one scope is rejected at resolution. Names absent from merged exist "
+            f"only in the pushed payload."
+        )
+        if also_local:
+            findings.append(
+                f"Also-local unmarked names (first few): "
+                f"{', '.join(r['name'] for r in also_local[:5])}"
+            )
 
     group_totals = totals.get("appliance_group") or {}
     if totals.get("group_in_scope_for_shared_pass") is False:
@@ -406,6 +501,7 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
         "appliance_context": appliances,
         "build_outcome": build,
         "owner_totals": totals,
+        "unmarked_pushed": unmarked,
         "pushed_payload_roots": payload_roots,
         "persisted": persisted,
         "raw_sources": raw,
