@@ -218,9 +218,21 @@ def _pushed_payload_roots(enforcement_point: EnforcementPoint) -> dict[str, Any]
             continue
         payload = snapshot.payload
         if isinstance(payload, dict):
-            roots[label] = {"type": "dict", "keys": sorted(payload)[:12]}
+            keys = sorted(payload)[:12]
+            roots[label] = {
+                "type": "dict",
+                "keys": keys,
+                # A single rendered string so the template never has to branch on shape.
+                # It previously chose between two keys with `default:`, whose argument
+                # Django resolves eagerly - so the absent one raised and 500'd the page.
+                "summary": ", ".join(keys) or "(empty)",
+            }
         else:
-            roots[label] = {"type": type(payload).__name__, "value": repr(payload)[:200]}
+            roots[label] = {
+                "type": type(payload).__name__,
+                "keys": [],
+                "summary": f"{type(payload).__name__}: {repr(payload)[:160]}",
+            }
     return roots
 
 

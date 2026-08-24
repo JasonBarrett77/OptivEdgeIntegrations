@@ -4499,3 +4499,73 @@ class OwnerTotalsDiagnosisTests(TestCase):
         self.assertEqual(result["owner_totals"]["appliance_group"]["address_objects"], 1)
         self.assertTrue(result["persisted"]["resolvable"])
         self.assertFalse(any("ZERO objects" in f for f in result["findings"]))
+
+
+class DeveloperPageExplanationRenderTests(TestCase):
+    """The explainer's own tests all called the function directly, so the TEMPLATE was
+    never exercised with an explanation present - and it 500'd in the field on the first
+    real use. A diagnostic that fails during an incident is worse than none.
+
+    The view's try/except cannot help here: a template error happens after the view
+    returns. So these render the page.
+    """
+
+    def _point(self, *, payload):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9600", appliance_hostname="cloud-ngfw", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="standalone-9600")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name}]}}]}}})
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(), payload=payload)
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload=payload)
+        return point
+
+    def _explain(self, point, name):
+        return self.client.get(
+            reverse("developer"), {"reference_point": point.pk, "reference_name": name})
+
+    def test_renders_a_dict_payload_without_erroring(self):
+        """The reported 500: `{{ root.keys|default:root.value }}` resolved its default
+        argument eagerly, so the absent key raised VariableDoesNotExist."""
+        point = self._point(payload={"policy": {"panorama": {"address": {"entry": [
+            {"@loc": "shared", "@name": "NET-A",
+             "ip-netmask": {"#text": "10.130.49.0/27", "@loc": "shared"}}]}}}})
+        response = self._explain(point, "NET-A")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Pushed payload roots")
+        self.assertContains(response, "Owner totals")
+
+    def test_renders_a_string_payload_without_erroring(self):
+        """The other branch: a bare NO_PUSHED_POLICY_MESSAGE payload."""
+        point = self._point(payload="No shared policy pushed to device")
+        response = self._explain(point, "NET-A")
+        self.assertEqual(response.status_code, 200)
+
+    def test_renders_when_the_build_fails(self):
+        point = self._point(payload={"rulestack": {"address": {"entry": []}}})
+        response = self._explain(point, "NET-A")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "ADDRESS NORMALIZATION FAILS")
+
+    def test_renders_for_a_name_absent_everywhere(self):
+        point = self._point(payload={"policy": {"panorama": {}}})
+        response = self._explain(point, "NOTHING-BY-THIS-NAME")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "appears in NO collected source")
+
+    def test_a_missing_enforcement_point_reports_instead_of_erroring(self):
+        response = self.client.get(
+            reverse("developer"), {"reference_point": 999999, "reference_name": "X"})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "no longer exists")

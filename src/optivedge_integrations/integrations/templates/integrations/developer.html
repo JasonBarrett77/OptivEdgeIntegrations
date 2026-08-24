@@ -193,7 +193,7 @@
           Pushed payload roots &mdash;
           {% for label, root in reference_explanation.pushed_payload_roots.items %}
             <span class="font-mono">{{ label }}</span>:
-            {% if root %}{{ root.keys|default:root.value }}{% else %}absent{% endif %}{% if not forloop.last %}; {% endif %}
+            {% if root %}{{ root.summary }}{% else %}absent{% endif %}{% if not forloop.last %}; {% endif %}
           {% endfor %}
         </div>
 

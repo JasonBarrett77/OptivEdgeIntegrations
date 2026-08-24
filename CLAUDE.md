@@ -287,6 +287,13 @@ It also catches the failure that masquerades as one missing object: a pushed ent
 `pushed_entry_scope()` raise, which fails the whole build for that point — so *every* object from that read
 is missing, not just the one named in the rule error.
 
+**Test the developer page by rendering it, not by calling the function.** The explainer's own tests all
+called `explain_address_reference()` directly, so the template was never exercised with an explanation
+present and it 500'd on first real use. The view's `try/except` cannot help — a template error happens after
+the view returns. Note also that Django resolves a `default:` filter argument **eagerly**, so
+`{{ a|default:b }}` raises when `b` is absent; prefer building a single display string in Python over making
+the template branch on shape.
+
 ### The developer page (`/developer/`)
 
 `DeveloperView` renders the live census, captures labelled snapshots, and compares any two. It is
