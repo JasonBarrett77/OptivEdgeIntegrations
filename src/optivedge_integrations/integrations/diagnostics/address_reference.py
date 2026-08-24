@@ -169,11 +169,68 @@ def _raw_sources(enforcement_point: EnforcementPoint, name: str) -> dict[str, An
     return sources
 
 
+def _build_outcome(enforcement_point: EnforcementPoint) -> dict[str, Any]:
+    """Run the real address build and report what it does.
+
+    A rule error naming one object is often downstream of the whole build failing:
+    resolve_rule_address_refs() raises on the FIRST unresolved member and source is
+    processed before destination, so "every rule fails on a NET-* source" looks identical
+    to "this point has no objects at all". Running the build settles which.
+
+    Several paths that used to return an empty result now raise deliberately - an absent
+    @loc, conflicting pushed definitions, an unrecognised pushed payload root. Each is a
+    better failure than a silent wrong answer, but each also converts a partial result
+    into none at all, so the exception text is the thing worth reading.
+    """
+    from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
+        build_normalized_addresses,
+    )
+
+    try:
+        objects, groups = build_normalized_addresses(enforcement_point)
+    except Exception as exc:  # noqa: BLE001 - the exception IS the diagnosis
+        return {
+            "succeeded": False,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+    return {
+        "succeeded": True,
+        "object_count": len(objects),
+        "group_count": len(groups),
+    }
+
+
+def _pushed_payload_roots(enforcement_point: EnforcementPoint) -> dict[str, Any]:
+    """Top-level keys of each pushed payload, before any parsing.
+
+    A product whose response roots at neither `shared` nor `policy.panorama` - a cloud
+    NGFW is a different product from VM-series, not merely a different configuration -
+    would show up here as an unfamiliar key.
+    """
+    roots: dict[str, Any] = {}
+    for label, snapshot in (
+        ("pushed_non_vsys", latest_pushed_shared_snapshot(enforcement_point)),
+        ("pushed_vsys", latest_pushed_vsys_snapshot(enforcement_point)),
+    ):
+        if snapshot is None:
+            roots[label] = None
+            continue
+        payload = snapshot.payload
+        if isinstance(payload, dict):
+            roots[label] = {"type": "dict", "keys": sorted(payload)[:12]}
+        else:
+            roots[label] = {"type": type(payload).__name__, "value": repr(payload)[:200]}
+    return roots
+
+
 def explain_address_reference(enforcement_point: EnforcementPoint, name: str) -> dict[str, Any]:
     """Report where `name` is, where the device says it should be, and any gap."""
     persisted = _persisted(enforcement_point, name)
     raw = _raw_sources(enforcement_point, name)
     appliances = _appliance_context(enforcement_point)
+    build = _build_outcome(enforcement_point)
+    payload_roots = _pushed_payload_roots(enforcement_point)
 
     findings: list[str] = []
     seen_in_pushed = [
@@ -218,6 +275,29 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
             f"are stale, or whether the reference resolves from a scope not collected."
         )
 
+    if not build["succeeded"]:
+        findings.insert(0, (
+            f"ADDRESS NORMALIZATION FAILS FOR THIS POINT: {build['error_type']}: {build['error']}. "
+            f"Every rule here will report an unresolved reference to whatever its first source "
+            f"member happens to be - the named object is a symptom, not the cause. Fix this first."
+        ))
+    elif build["object_count"] == 0:
+        findings.insert(0, (
+            "The address build succeeds but yields NO objects for this point, so every rule "
+            "reference will be unresolved regardless of the name in the error."
+        ))
+
+    for label, root in payload_roots.items():
+        if isinstance(root, dict) and root.get("type") == "dict":
+            keys = root["keys"]
+            if not ({"shared", "policy"} & set(keys)):
+                findings.append(
+                    f"{label} payload roots at {keys} - neither 'shared' nor 'policy'. "
+                    f"pushed_shared() raises on an unrecognised root, which fails the whole build. "
+                    f"Before that raise was added it returned {{}} silently, which is why this "
+                    f"could have worked previously while losing objects."
+                )
+
     in_group = appliances.get("appliances_in_group") or []
     if len(in_group) > 1:
         findings.append(
@@ -257,6 +337,8 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
         "panorama_managed": is_panorama_managed(enforcement_point),
         "name": name,
         "appliance_context": appliances,
+        "build_outcome": build,
+        "pushed_payload_roots": payload_roots,
         "persisted": persisted,
         "raw_sources": raw,
         "findings": findings,

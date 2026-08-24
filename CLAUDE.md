@@ -254,6 +254,19 @@ should therefore hold it, and where it actually is — and separates the two cas
 event log: **the device never reported it** (collection or stale snapshots) versus **the device reported it
 and nothing stored it** (normalization).
 
+The explainer **runs the real address build** and reports what it does, because a rule error naming one
+object is usually downstream of the whole build failing: `resolve_rule_address_refs()` raises on the *first*
+unresolved member and source is processed before destination, so "every rule fails on a `NET-*` source" is
+indistinguishable from "this point has no objects at all" by reading the event log. It also prints each
+pushed payload's top-level keys, so a product whose response roots at neither `shared` nor `policy.panorama`
+is visible immediately — a cloud NGFW is a different product from VM-series, not merely a different
+configuration.
+
+**Several paths now raise where they used to return empty**, deliberately: an absent `@loc`, conflicting
+pushed definitions, an unrecognised pushed payload root. Each is a better failure than a silent wrong
+answer — but each also converts a partial result into *none at all*, which is a plausible cause for
+normalization that "worked before" and now fails wholesale for one enforcement point.
+
 **The two pushed responses are stored at different scopes**, and that asymmetry matters when a group holds
 more than one appliance: the per-vsys response is stored on the **enforcement point**, the non-vsys response
 on the **appliance group**. So shared scope can be built from a different appliance's snapshot than the one

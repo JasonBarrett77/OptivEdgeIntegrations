@@ -4378,3 +4378,62 @@ class MultiApplianceGroupDiagnosisTests(TestCase):
                             for f in result["findings"]), result["findings"])
         self.assertTrue(any("gap is in normalization, not collection" in f
                             for f in result["findings"]), result["findings"])
+
+
+class BuildFailureDiagnosisTests(TestCase):
+    """A rule error naming one object is often downstream of the whole build failing.
+
+    resolve_rule_address_refs() raises on the FIRST unresolved member and source comes
+    before destination, so "every rule fails on a NET-* source" is indistinguishable from
+    "this point has no objects at all" by reading the event log alone.
+    """
+
+    def _point(self, *, shared_payload):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9400", appliance_hostname="cloud-ngfw", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="standalone-9400")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name}]}}]}}})
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload=shared_payload)
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {"address": {"entry": [
+                {"@name": "NET-A", "@loc": "shared", "ip-netmask": "10.1.0.0/24"}]}}}})
+        return point
+
+    def test_an_unfamiliar_payload_root_is_named_as_the_root_cause(self):
+        """A cloud NGFW is a different product; nothing guarantees the VM-series roots."""
+        point = self._point(shared_payload={"rulestack": {"address": {"entry": []}}})
+        result = explain_address_reference(point, "NET-A")
+
+        self.assertFalse(result["build_outcome"]["succeeded"])
+        self.assertEqual(result["pushed_payload_roots"]["pushed_non_vsys"]["keys"], ["rulestack"])
+        self.assertTrue(result["findings"][0].startswith("ADDRESS NORMALIZATION FAILS"),
+                        result["findings"])
+        self.assertTrue(any("neither 'shared' nor 'policy'" in f for f in result["findings"]),
+                        result["findings"])
+        self.assertTrue(any("returned {} silently" in f for f in result["findings"]),
+                        result["findings"])
+
+    def test_the_named_object_is_called_out_as_a_symptom_not_the_cause(self):
+        point = self._point(shared_payload={"rulestack": {}})
+        result = explain_address_reference(point, "NET-A")
+        self.assertTrue(any("symptom, not the cause" in f for f in result["findings"]),
+                        result["findings"])
+
+    def test_a_healthy_point_reports_the_build_succeeding(self):
+        point = self._point(shared_payload={"shared": {"address": {"entry": []}}})
+        result = explain_address_reference(point, "NET-A")
+        self.assertTrue(result["build_outcome"]["succeeded"])
+        self.assertGreater(result["build_outcome"]["object_count"], 0)
+        self.assertFalse(any("ADDRESS NORMALIZATION FAILS" in f for f in result["findings"]))

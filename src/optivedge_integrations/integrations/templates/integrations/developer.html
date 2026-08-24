@@ -163,6 +163,24 @@
         </table>
         {% endif %}
 
+        {% with build=reference_explanation.build_outcome %}
+        <div class="rounded px-3 py-2 text-[11px] {% if build.succeeded %}bg-slate-50 text-slate-700{% else %}bg-red-50 text-red-900{% endif %}">
+          Address build for this point:
+          {% if build.succeeded %}
+            <span class="font-mono">OK</span> &mdash; {{ build.object_count }} object(s), {{ build.group_count }} group(s)
+          {% else %}
+            <span class="font-mono font-semibold">{{ build.error_type }}</span>: {{ build.error }}
+          {% endif %}
+        </div>
+        {% endwith %}
+        <div class="rounded bg-slate-50 px-3 py-2 text-[11px] text-slate-700">
+          Pushed payload roots &mdash;
+          {% for label, root in reference_explanation.pushed_payload_roots.items %}
+            <span class="font-mono">{{ label }}</span>:
+            {% if root %}{{ root.keys|default:root.value }}{% else %}absent{% endif %}{% if not forloop.last %}; {% endif %}
+          {% endfor %}
+        </div>
+
         {% with ctx=reference_explanation.appliance_context %}
         <div class="rounded bg-slate-50 px-3 py-2 text-[11px] text-slate-700">
           Local reads resolve to <span class="font-mono">{{ ctx.chosen_local_appliance|default:"&ndash;" }}</span>;
