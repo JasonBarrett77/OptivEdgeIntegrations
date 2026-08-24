@@ -254,6 +254,16 @@ should therefore hold it, and where it actually is — and separates the two cas
 event log: **the device never reported it** (collection or stale snapshots) versus **the device reported it
 and nothing stored it** (normalization).
 
+**The two pushed responses are stored at different scopes**, and that asymmetry matters when a group holds
+more than one appliance: the per-vsys response is stored on the **enforcement point**, the non-vsys response
+on the **appliance group**. So shared scope can be built from a different appliance's snapshot than the one
+the point's own reads resolve to — `latest_pushed_shared_snapshot()` takes the newest snapshot on the group
+regardless of which appliance produced it. While pushed objects were scoped by read position this was
+invisible, because everything came from the point's own response; once `@loc` routes shared objects to the
+non-vsys read it becomes load-bearing. A cloud NGFW presenting several instances under one group, with only
+one in scope, is the case to watch. The explainer reports the chosen appliance, the group's appliances,
+duplicate hostnames, and how many group-scoped pushed snapshots compete.
+
 It also catches the failure that masquerades as one missing object: a pushed entry with **no `@loc`** makes
 `pushed_entry_scope()` raise, which fails the whole build for that point — so *every* object from that read
 is missing, not just the one named in the rule error.

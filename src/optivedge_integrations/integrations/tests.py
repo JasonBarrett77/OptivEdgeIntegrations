@@ -4296,3 +4296,85 @@ class AddressReferenceExplainerTests(TestCase):
         self.assertFalse(result["persisted"]["resolvable"])
         self.assertTrue(any("gap is in normalization, not collection" in f
                             for f in result["findings"]), result["findings"])
+
+
+class MultiApplianceGroupDiagnosisTests(TestCase):
+    """A group holding several appliances - a cloud NGFW presenting multiple instances,
+    only one in scope - reads its two pushed responses from DIFFERENT scopes:
+
+        per-vsys response   stored on the enforcement point
+        non-vsys response   stored on the appliance GROUP
+
+    While pushed objects were scoped by read position that asymmetry was invisible, since
+    everything came from the point's own response. Once @loc routes shared objects to the
+    non-vsys read, the group-scoped lookup decides which appliance's shared policy is used.
+    """
+
+    def _group_with_two_appliances(self):
+        station, group, first, point = _create_grouped_enforcement_point(
+            serial_number="AAA111", appliance_hostname="cloud-ngfw",
+            station_hostname="pan.local", group_name="standalone-AAA111",
+            station_type=ManagementStation.StationType.PAN_PANORAMA)
+        point.in_scope = True
+        point.save()
+        # same hostname, different serial, not in scope
+        second = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="BBB222", hostname="cloud-ngfw")
+        Snapshot.objects.create(
+            management_station=station, appliance=first, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name}]}}]}}})
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {"address": {"entry": [
+                {"@name": "NET-A", "@loc": "shared", "ip-netmask": "10.1.0.0/24"}]}}}})
+        return station, group, first, second, point
+
+    def test_reports_the_multi_appliance_group_and_duplicate_hostnames(self):
+        station, group, first, second, point = self._group_with_two_appliances()
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {"address": {"entry": []}}})
+
+        result = explain_address_reference(point, "NET-A")
+        context = result["appliance_context"]
+        self.assertEqual(len(context["appliances_in_group"]), 2)
+        self.assertEqual(context["duplicate_hostnames_in_group"], ["cloud-ngfw"])
+        self.assertTrue(any("stored on the GROUP" in f for f in result["findings"]),
+                        result["findings"])
+        self.assertTrue(any("cannot distinguish them" in f for f in result["findings"]),
+                        result["findings"])
+
+    def test_reports_competing_group_scoped_snapshots(self):
+        station, group, first, second, point = self._group_with_two_appliances()
+        for _ in range(2):
+            Snapshot.objects.create(
+                management_station=station, appliance_group=group,
+                source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+                payload={"shared": {"address": {"entry": []}}})
+
+        result = explain_address_reference(point, "NET-A")
+        self.assertEqual(result["appliance_context"]["group_pushed_shared_snapshots"], 2)
+        self.assertTrue(any("newest wins regardless of which appliance" in f
+                            for f in result["findings"]), result["findings"])
+
+    def test_names_the_object_as_reported_but_unstored(self):
+        """The signature of the reported failure: the device sent it on the per-vsys read,
+        but shared scope is built from the group-scoped read, and nothing persisted it."""
+        station, group, first, second, point = self._group_with_two_appliances()
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {"address": {"entry": []}}})
+
+        result = explain_address_reference(point, "NET-A")
+        self.assertFalse(result["persisted"]["resolvable"])
+        self.assertTrue(any("@loc='shared'" in f and "appliance_group" in f
+                            for f in result["findings"]), result["findings"])
+        self.assertTrue(any("gap is in normalization, not collection" in f
+                            for f in result["findings"]), result["findings"])

@@ -31,6 +31,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_vsys_panorama,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
+    choose_local_appliance,
     is_panorama_managed,
     latest_merged_snapshot,
     latest_pushed_shared_snapshot,
@@ -74,6 +75,52 @@ def _entries_named(root: dict[str, Any], name: str) -> list[dict[str, Any]]:
                 raw_key, raw_value = entry_provenance(entry)
                 hits.append({"node": node, "provenance_key": raw_key, "loc": raw_value})
     return hits
+
+
+def _appliance_context(enforcement_point: EnforcementPoint) -> dict[str, Any]:
+    """Which appliance the local reads resolve to, and what else is in the group.
+
+    The two pushed reads are stored at DIFFERENT scopes: the per-vsys response on the
+    enforcement point, the non-vsys response on the appliance group. When a group holds
+    several appliances - a cloud NGFW presenting multiple instances, only one in scope -
+    the group-scoped lookup takes the most recent snapshot on the GROUP, which need not
+    come from the appliance the point actually reads. That asymmetry is invisible while
+    pushed objects are scoped by read position, and becomes load-bearing once @loc routes
+    shared objects to the non-vsys read.
+    """
+    group = enforcement_point.appliance_group
+    chosen = choose_local_appliance(enforcement_point)
+    context: dict[str, Any] = {
+        "chosen_local_appliance": str(chosen) if chosen else None,
+        "chosen_serial": getattr(chosen, "serial_number", None),
+        "group_active_appliance": str(group.active_appliance) if group and group.active_appliance else None,
+        "nodes": [str(node.appliance) for node in
+                  enforcement_point.nodes.select_related("appliance").order_by("id")],
+        "appliances_in_group": [],
+    }
+    if group is None:
+        return context
+
+    for appliance in group.appliances.order_by("hostname", "serial_number", "pk"):
+        context["appliances_in_group"].append({
+            "appliance": str(appliance),
+            "serial_number": appliance.serial_number,
+            "hostname": appliance.hostname,
+            "is_chosen": chosen is not None and appliance.pk == chosen.pk,
+            "snapshot_counts": {
+                source_type: appliance.snapshots.filter(source_type=source_type).count()
+                for source_type in ("show_merged_config",)
+            },
+        })
+
+    group_shared = group.snapshots.filter(source_type="show_pushed_shared_policy")
+    context["group_pushed_shared_snapshots"] = group_shared.count()
+    context["duplicate_hostnames_in_group"] = sorted(
+        {a["hostname"] for a in context["appliances_in_group"]
+         if [b["hostname"] for b in context["appliances_in_group"]].count(a["hostname"]) > 1
+         and a["hostname"]}
+    )
+    return context
 
 
 def _raw_sources(enforcement_point: EnforcementPoint, name: str) -> dict[str, Any]:
@@ -126,6 +173,7 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
     """Report where `name` is, where the device says it should be, and any gap."""
     persisted = _persisted(enforcement_point, name)
     raw = _raw_sources(enforcement_point, name)
+    appliances = _appliance_context(enforcement_point)
 
     findings: list[str] = []
     seen_in_pushed = [
@@ -170,6 +218,27 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
             f"are stale, or whether the reference resolves from a scope not collected."
         )
 
+    in_group = appliances.get("appliances_in_group") or []
+    if len(in_group) > 1:
+        findings.append(
+            f"The appliance group holds {len(in_group)} appliances; local reads resolve to "
+            f"{appliances['chosen_local_appliance']!r}. The per-vsys pushed response is stored on "
+            f"the enforcement point, but the non-vsys response is stored on the GROUP - so shared "
+            f"scope can come from a different appliance than the point's own reads. Compare the "
+            f"snapshot identities above."
+        )
+    if appliances.get("duplicate_hostnames_in_group"):
+        findings.append(
+            f"Appliances in this group share hostname(s) "
+            f"{appliances['duplicate_hostnames_in_group']}, so choose_local_appliance()'s "
+            f"hostname ordering cannot distinguish them and falls through to serial then pk."
+        )
+    if appliances.get("group_pushed_shared_snapshots", 0) > 1:
+        findings.append(
+            f"{appliances['group_pushed_shared_snapshots']} non-vsys pushed snapshots exist on this "
+            f"group; the newest wins regardless of which appliance produced it."
+        )
+
     if persisted["resolvable"]:
         findings.append(
             "The name IS persisted, so a rule failing on it now would be a lookup problem "
@@ -187,6 +256,7 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
         "appliance_group": str(enforcement_point.appliance_group) if enforcement_point.appliance_group else None,
         "panorama_managed": is_panorama_managed(enforcement_point),
         "name": name,
+        "appliance_context": appliances,
         "persisted": persisted,
         "raw_sources": raw,
         "findings": findings,

@@ -163,6 +163,17 @@
         </table>
         {% endif %}
 
+        {% with ctx=reference_explanation.appliance_context %}
+        <div class="rounded bg-slate-50 px-3 py-2 text-[11px] text-slate-700">
+          Local reads resolve to <span class="font-mono">{{ ctx.chosen_local_appliance|default:"&ndash;" }}</span>;
+          group holds {{ ctx.appliances_in_group|length }} appliance(s);
+          non-vsys pushed snapshots on the group: <span class="font-mono">{{ ctx.group_pushed_shared_snapshots|default:0 }}</span>.
+          {% if ctx.duplicate_hostnames_in_group %}
+          <span class="font-semibold text-amber-800">Duplicate hostname(s): {{ ctx.duplicate_hostnames_in_group|join:", " }}</span>
+          {% endif %}
+        </div>
+        {% endwith %}
+
         <div>
           <h3 class="text-xs font-semibold text-slate-900">Findings</h3>
           <ul class="mt-1 space-y-1">
