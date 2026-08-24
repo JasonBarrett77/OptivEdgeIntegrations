@@ -287,6 +287,11 @@ It also catches the failure that masquerades as one missing object: a pushed ent
 `pushed_entry_scope()` raise, which fails the whole build for that point — so *every* object from that read
 is missing, not just the one named in the rule error.
 
+**Content templates own their own scrolling.** `base.html` puts `overflow-hidden` on `<body>` and gives the
+content block a full-height flex container, so a page that just emits a tall `<div>` clips at the viewport
+with no scrollbar. Wrap it the way `enforcement_point_detail_content.html` does — a
+`flex h-full w-full min-h-0 min-w-0` section around a `min-h-0 flex-1 overflow-auto` div.
+
 **Test the developer page by rendering it, not by calling the function.** The explainer's own tests all
 called `explain_address_reference()` directly, so the template was never exercised with an explanation
 present and it 500'd on first real use. The view's `try/except` cannot help — a template error happens after
