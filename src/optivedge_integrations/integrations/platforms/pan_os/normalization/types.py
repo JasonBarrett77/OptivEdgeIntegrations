@@ -26,6 +26,10 @@ class SecurityRuleFailure:
     config_source: str
     rule_position: int
     error_text: str
+    #: The object name this rule could not resolve, when that is why it failed. Lets a
+    #: rule failure be linked to the object issue that caused it, so a report can say
+    #: "1 root, 1300 consequent" instead of "1301 errors".
+    unresolved_name: str = ""
 
 
 @dataclass(slots=True)
@@ -58,6 +62,14 @@ class PolicyObjectIssue:
     severity: str
     reason: str
     disposition: str = "skipped"
+    #: For a rule failure, the object name it could not resolve.
+    related_object_name: str = ""
+    #: Set when this issue is a consequence of another in the same run.
+    is_consequent: bool = False
+    #: Whether the entry belongs to shared scope. Issues follow the same ownership rule as
+    #: the objects they describe - shared to the appliance group, everything else to the
+    #: enforcement point - so the two passes cannot both record the same one.
+    shared_scope: bool = False
     node: str = ""
     source: str = ""
     raw_entry: dict = field(default_factory=dict)

@@ -40,6 +40,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     merged_shared,
     merged_vsys_entry,
     merge_pushed_entries,
+    pushed_entry_scope,
     pushed_shared,
     pushed_vsys_panorama,
     scalar_value,
@@ -487,7 +488,14 @@ def _drop_unnamed_and_duplicates(normalized, kind):
     return kept, issues
 
 
-def replace_normalization_issues(owner, issues) -> list:
+#: Kinds produced by object normalization, versus by rule normalization. Each pass
+#: replaces only its OWN kinds, so the rule pass cannot wipe what the object pass just
+#: recorded - they run separately and both own rows for the same enforcement point.
+POLICY_OBJECT_KINDS = ("address object", "address group", "region")
+SECURITY_RULE_KIND = "security rule"
+
+
+def replace_normalization_issues(owner, issues, *, kinds=POLICY_OBJECT_KINDS) -> list:
     """Replace this owner's recorded issues with the ones from the run just completed.
 
     Replaced rather than appended, for the same reason the objects are: this table answers
@@ -502,7 +510,13 @@ def replace_normalization_issues(owner, issues) -> list:
         if isinstance(owner, EnforcementPoint)
         else {"appliance_group": owner}
     )
-    NormalizationIssue.objects.filter(**owner_kwargs).delete()
+    # Issues follow their objects: shared scope to the group, everything else to the
+    # point. Both passes see every issue, so without this filter each is stored twice.
+    if kinds == POLICY_OBJECT_KINDS:
+        want_shared = not isinstance(owner, EnforcementPoint)
+        issues = [i for i in issues if getattr(i, "shared_scope", False) == want_shared]
+
+    NormalizationIssue.objects.filter(**owner_kwargs, kind__in=kinds).delete()
     return NormalizationIssue.objects.bulk_create([
         NormalizationIssue(
             management_station=owner.management_station,
@@ -514,6 +528,8 @@ def replace_normalization_issues(owner, issues) -> list:
             node=issue.node,
             source=issue.source,
             raw_entry=issue.raw_entry,
+            related_object_name=getattr(issue, "related_object_name", ""),
+            is_consequent=getattr(issue, "is_consequent", False),
             **owner_kwargs,
         )
         for issue in issues
@@ -553,14 +569,19 @@ def build_normalized_addresses(
     normalized_groups: list[NormalizedAddressGroup] = []
     issues: list[PolicyObjectIssue] = []
 
-    def collect(target, kind, node, source, entry, build):
-        """Run one entry's normalization; record and skip it if that fails."""
+    def collect(target, kind, node, source, entry, build, shared=False):
+        """Run one entry's normalization; record and skip it if that fails.
+
+        `shared` records which owner the entry was headed for, so the issue is stored by
+        the same pass that would have stored the object. Without it both passes record
+        every issue and each one is counted twice.
+        """
         name = str(entry.get("@name") or "") if isinstance(entry, dict) else ""
         if not name:
             issues.append(PolicyObjectIssue(
                 kind=kind, name="", severity=PolicyObjectIssue.ERROR, node=node, source=source,
                 reason="entry has no @name, so it cannot be identified or referenced",
-                raw_entry=entry if isinstance(entry, dict) else {},
+                raw_entry=entry if isinstance(entry, dict) else {}, shared_scope=shared,
             ))
             return
         try:
@@ -568,7 +589,7 @@ def build_normalized_addresses(
         except Exception as exc:  # noqa: BLE001 - one bad entry must not take the rest
             issues.append(PolicyObjectIssue(
                 kind=kind, name=name, severity=PolicyObjectIssue.ERROR, node=node, source=source,
-                reason=f"{type(exc).__name__}: {exc}", raw_entry=entry,
+                reason=f"{type(exc).__name__}: {exc}", raw_entry=entry, shared_scope=shared,
             ))
 
     for entry in ensure_list((merged_root.get("address") or {}).get("entry") if isinstance(merged_root.get("address"), dict) else None):
@@ -611,6 +632,7 @@ def build_normalized_addresses(
                 namespace_value="shared",
                 entry=entry,
             ),
+            shared=True,
         )
 
     for entry in ensure_list((merged_shared_root.get("address-group") or {}).get("entry") if isinstance(merged_shared_root.get("address-group"), dict) else None):
@@ -625,6 +647,7 @@ def build_normalized_addresses(
                 namespace_value="shared",
                 entry=entry,
             ),
+            shared=True,
         )
 
     # Both pushed reads are merged and classified per entry by @loc - never by which
@@ -642,6 +665,7 @@ def build_normalized_addresses(
             kind="address object", name=str(entry.get("@name") or ""),
             severity=severity, node="address", source="pushed",
             reason=reason, raw_entry=entry, disposition=PolicyObjectIssue.KEPT,
+            shared_scope=is_shared_scope(pushed_entry_scope(entry, enforcement_point.vsys_name)[0]),
         ))
     for entry, snapshot, namespace_type, namespace_value in address_entries:
         collect(
@@ -653,6 +677,7 @@ def build_normalized_addresses(
                 namespace_value=namespace_value,
                 entry=entry,
             ),
+            shared=is_shared_scope(namespace_type),
         )
 
     external_list_entries, external_list_notes = merge_pushed_entries(
@@ -663,6 +688,7 @@ def build_normalized_addresses(
             kind="address object", name=str(entry.get("@name") or ""),
             severity=severity, node="external-list", source="pushed",
             reason=reason, raw_entry=entry, disposition=PolicyObjectIssue.KEPT,
+            shared_scope=is_shared_scope(pushed_entry_scope(entry, enforcement_point.vsys_name)[0]),
         ))
     for entry, snapshot, namespace_type, namespace_value in external_list_entries:
         collect(
@@ -674,6 +700,7 @@ def build_normalized_addresses(
                 namespace_value=namespace_value,
                 entry=entry,
             ),
+            shared=is_shared_scope(namespace_type),
         )
 
     address_group_entries, address_group_notes = merge_pushed_entries(
@@ -684,6 +711,7 @@ def build_normalized_addresses(
             kind="address group", name=str(entry.get("@name") or ""),
             severity=severity, node="address-group", source="pushed",
             reason=reason, raw_entry=entry, disposition=PolicyObjectIssue.KEPT,
+            shared_scope=is_shared_scope(pushed_entry_scope(entry, enforcement_point.vsys_name)[0]),
         ))
     for entry, snapshot, namespace_type, namespace_value in address_group_entries:
         collect(
@@ -695,6 +723,7 @@ def build_normalized_addresses(
                 namespace_value=namespace_value,
                 entry=entry,
             ),
+            shared=is_shared_scope(namespace_type),
         )
 
     normalized_objects.extend(build_normalized_predefined_address_objects(enforcement_point))

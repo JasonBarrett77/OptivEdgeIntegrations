@@ -61,6 +61,7 @@ class NormalizationIssue(TimestampedModel):
     )
 
     #: What kind of object - "address object", "address group", "region".
+    #: "address object", "address group", "region", "security rule".
     kind = models.CharField(max_length=64)
     #: Empty when the entry had no @name; that is itself the problem.
     name = models.CharField(max_length=255, blank=True)
@@ -72,6 +73,17 @@ class NormalizationIssue(TimestampedModel):
     disposition = models.CharField(max_length=16, choices=Disposition.choices)
 
     reason = models.TextField()
+
+    #: For a rule failure: the object name it could not resolve. Empty otherwise.
+    related_object_name = models.CharField(max_length=255, blank=True)
+    #: True when this issue is a CONSEQUENCE of another issue in the same run - a rule
+    #: failing because an object it references failed to normalize.
+    #:
+    #: Computed at write time, when both sets are in hand, and safe to store because these
+    #: rows are replaced every run rather than accumulated. Without it a report counts
+    #: 1,301 errors where there is one cause and 1,300 symptoms, and points at the
+    #: symptoms - which is exactly how a one-object fault took several rounds to find.
+    is_consequent = models.BooleanField(default=False)
     #: Which payload node and which read it came from, for locating it by hand.
     node = models.CharField(max_length=64, blank=True)
     source = models.CharField(max_length=64, blank=True)
@@ -83,6 +95,7 @@ class NormalizationIssue(TimestampedModel):
         indexes = [
             # The health indicator asks only "does a row exist"; these keep that cheap.
             models.Index(fields=["management_station", "severity"]),
+            models.Index(fields=["management_station", "severity", "is_consequent"]),
             models.Index(fields=["enforcement_point", "severity"]),
             models.Index(fields=["appliance_group", "severity"]),
         ]

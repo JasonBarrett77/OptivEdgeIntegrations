@@ -27,3 +27,11 @@ __all__ = [
     "load_census",
     "write_census",
 ]
+
+
+from optivedge_integrations.integrations.diagnostics.health import (  # noqa: E402
+    normalization_health,
+    has_normalization_errors,
+)
+
+__all__ += ["normalization_health", "has_normalization_errors"]

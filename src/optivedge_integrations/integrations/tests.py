@@ -75,6 +75,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
 )
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
+    has_normalization_errors,
+    normalization_health,
     explain_address_reference,
     unmarked_pushed_entries,
     CENSUS_VERSION,
@@ -4969,3 +4971,104 @@ class NormalizationIssuePersistenceTests(TestCase):
             disposition=NormalizationIssue.Disposition.SKIPPED, reason="r")
         with self.assertRaisesMessage(ValidationError, "exactly one owner"):
             orphan.clean()
+
+
+class NormalizationHealthTests(TestCase):
+    """Root causes separated from their consequences.
+
+    One object that fails to normalize makes every rule referencing it fail. Counting
+    those together reports 1,301 problems where there is one cause and 1,300 symptoms,
+    and points at the symptoms - which is how a single unclassifiable object took several
+    rounds to diagnose.
+    """
+
+    def _fixture(self, *, rule_count=3):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9960", appliance_hostname="fw-health", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-health")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name, "address": {"entry": [
+                    {"@name": "broken-obj"},                      # one root cause
+                ]}}]}}]}}})
+        rules = [
+            {"@name": f"rule-{i}", "from": {"member": ["trust"]}, "to": {"member": ["untrust"]},
+             "source": {"member": ["broken-obj"]}, "destination": {"member": ["any"]},
+             "application": {"member": ["any"]}, "service": {"member": ["application-default"]},
+             "action": "allow"}
+            for i in range(rule_count)
+        ]
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {}})
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {
+                "pre-rulebase": {"security": {"rules": {"entry": rules}}},
+                "post-rulebase": {"security": {"rules": {"entry": []}},
+                                  "default-security-rules": {"rules": {"entry": []}}}}}})
+        return station, group, point
+
+    def test_one_bad_object_counts_as_one_root_and_its_rules_as_consequences(self):
+        station, group, point = self._fixture(rule_count=3)
+        normalize_appliance_group_shared_scope(group)
+        normalize_enforcement_point_addresses(point)
+        normalize_enforcement_point_security_rules(point)
+
+        health = normalization_health(station)
+        self.assertEqual(health["root_errors"], 1, "the object is the cause")
+        self.assertEqual(health["consequent_errors"], 3, "the rules are symptoms")
+        self.assertEqual(health["root_errors_by_kind"], {"address object": 1})
+        self.assertTrue(health["has_errors"])
+
+    def test_a_rule_failing_for_its_own_reasons_is_a_root(self):
+        """Not every rule failure is downstream - one referencing a name that never
+        existed anywhere is its own problem."""
+        station, group, point = self._fixture(rule_count=0)
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {
+                "pre-rulebase": {"security": {"rules": {"entry": [
+                    {"@name": "rule-ghost", "from": {"member": ["trust"]},
+                     "to": {"member": ["untrust"]}, "source": {"member": ["never-existed"]},
+                     "destination": {"member": ["any"]}, "application": {"member": ["any"]},
+                     "service": {"member": ["application-default"]}, "action": "allow"}]}}},
+                "post-rulebase": {"security": {"rules": {"entry": []}},
+                                  "default-security-rules": {"rules": {"entry": []}}}}}})
+        normalize_appliance_group_shared_scope(group)
+        normalize_enforcement_point_addresses(point)
+        normalize_enforcement_point_security_rules(point)
+
+        rule_issue = NormalizationIssue.objects.get(kind="security rule", name="rule-ghost")
+        self.assertFalse(rule_issue.is_consequent, "nothing else failed to explain it")
+        self.assertEqual(rule_issue.related_object_name, "never-existed")
+
+    def test_the_indicator_is_binary_and_clears_on_a_clean_run(self):
+        station, group, point = self._fixture(rule_count=1)
+        normalize_appliance_group_shared_scope(group)
+        normalize_enforcement_point_addresses(point)
+        self.assertTrue(has_normalization_errors(station))
+
+        NormalizationIssue.objects.all().delete()
+        self.assertFalse(has_normalization_errors(station))
+
+    def test_the_rule_pass_does_not_wipe_object_issues(self):
+        """Both passes own rows for the same enforcement point, and each replaces only its
+        own kinds - otherwise the later pass silently erases the earlier one's findings."""
+        station, group, point = self._fixture(rule_count=1)
+        normalize_appliance_group_shared_scope(group)
+        normalize_enforcement_point_addresses(point)
+        self.assertTrue(NormalizationIssue.objects.filter(kind="address object").exists())
+
+        normalize_enforcement_point_security_rules(point)
+        self.assertTrue(NormalizationIssue.objects.filter(kind="address object").exists(),
+                        "the object issue must survive the rule pass")
+        self.assertTrue(NormalizationIssue.objects.filter(kind="security rule").exists())

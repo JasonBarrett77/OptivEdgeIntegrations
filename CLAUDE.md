@@ -251,7 +251,21 @@ Both are worth keeping. The event log answers *what happened during that sync*; 
 data I am looking at*.
 
 Owned like the objects it describes — enforcement point for vsys-scoped work, appliance group for
-shared-scoped — so the two cannot disagree about what a run produced.
+shared-scoped. `PolicyObjectIssue.shared_scope` carries which owner an entry was headed for, because **both**
+passes see every issue; without it each one is recorded twice.
+
+Rule failures live in the same table (`kind="security rule"`), which is what makes **root-versus-consequent**
+computable. A rule that failed because an object it references also failed is marked `is_consequent`, so a
+report says *1 root, 1,300 consequent* rather than *1,301 errors* pointing at objects that were fine. The
+link is structural: `UnresolvedAddressReference` carries the name, and `_with_rule_context()` preserves it
+when adding rule context — the wrapper used to rebuild a plain `ValueError` and threw the link away.
+
+Each pass replaces only its **own kinds**, since both own rows for the same enforcement point and the rule
+pass would otherwise erase what the object pass just recorded.
+
+`diagnostics.health` exposes the two shapes the UI needs: `has_normalization_errors()` is an `EXISTS` for the
+shell indicator — binary, because a count invites a threshold and no number of unnormalized objects is fine —
+and `normalization_health()` counts for the report, roots separated from consequences.
 
 ### Diagnostics (`integrations/diagnostics/`)
 

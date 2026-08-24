@@ -14,6 +14,7 @@ from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
@@ -68,7 +69,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
     latest_merged_snapshot,
     latest_pushed_vsys_snapshot,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
+    SECURITY_RULE_KIND,
+    replace_normalization_issues,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import (
+    PolicyObjectIssue,
     PANOSNormalizedCollection,
     SecurityRuleFailure,
 )
@@ -677,6 +683,31 @@ def resolve_static_group_members(
     return resolved
 
 
+def _with_rule_context(exc: Exception, field: str, rule_context: str) -> ValueError:
+    """Re-raise with rule context, preserving an unresolved name if the original had one.
+
+    The context wrapper used to build a plain ValueError, which discarded the typed
+    exception and with it the link between a failing rule and the object that caused it -
+    so every rule failure looked like its own root cause.
+    """
+    detail = f"{exc} (field={field}, {rule_context})"
+    name = getattr(exc, "name", "")
+    return UnresolvedAddressReference(name, detail) if name else ValueError(detail)
+
+
+class UnresolvedAddressReference(ValueError):
+    """A rule referenced a name nothing resolves to.
+
+    Carries the name structurally so the failure can be linked to the object issue that
+    caused it. Parsing it back out of the message would work until someone rewords the
+    message, and the whole point of the link is that it survives.
+    """
+
+    def __init__(self, name: str, detail: str) -> None:
+        super().__init__(detail)
+        self.name = name
+
+
 def resolve_rule_address_refs(
     *,
     members: list[NormalizedSecurityRuleMember],
@@ -770,7 +801,9 @@ def resolve_rule_address_refs(
             continue
 
         if address_group is None:
-            raise ValueError(f"unresolved address reference: {raw_value}")
+            raise UnresolvedAddressReference(
+                raw_value, f"unresolved address reference: {raw_value}"
+            )
 
         if address_group.dynamic_filter:
             resolved.append(
@@ -1049,7 +1082,7 @@ def _persist_one_security_rule(
             regions_by_name=regions_by_name,
         )
     except ValueError as exc:
-        raise ValueError(f"{exc} (field=source_address, {rule_context})") from exc
+        raise _with_rule_context(exc, "source_address", rule_context) from exc
     try:
         destination_resolved_refs = resolve_rule_address_refs(
             members=normalized_rule.destination_address_members,
@@ -1058,7 +1091,7 @@ def _persist_one_security_rule(
             regions_by_name=regions_by_name,
         )
     except ValueError as exc:
-        raise ValueError(f"{exc} (field=destination_address, {rule_context})") from exc
+        raise _with_rule_context(exc, "destination_address", rule_context) from exc
 
     if normalized_rule.negate_source:
         complement_ref = _materialize_negated_complement_ref(
@@ -1184,6 +1217,7 @@ def replace_security_rules(
                     config_source=normalized_rule.config_source,
                     rule_position=normalized_rule.rule_position,
                     error_text=str(exc),
+                    unresolved_name=getattr(exc, "name", ""),
                 )
             )
             continue
@@ -1192,10 +1226,54 @@ def replace_security_rules(
     return created_rules, failures
 
 
+def rule_failures_as_issues(enforcement_point: EnforcementPoint, failures) -> list[PolicyObjectIssue]:
+    """Turn rule failures into issues, marking the ones caused by an object that failed.
+
+    A rule that could not resolve a name is a CONSEQUENCE when that same name already has
+    an object issue - which is the case that made a single unclassifiable object look like
+    1,300 separate problems, each naming an object that was fine.
+
+    Both owners are consulted, because a rule sees the union of its point's objects and
+    its appliance group's shared scope; a rule can therefore fail on an object whose issue
+    is recorded against the group.
+    """
+    from optivedge_integrations.integrations.models import NormalizationIssue
+
+    owners = Q(enforcement_point=enforcement_point)
+    if enforcement_point.appliance_group_id is not None:
+        owners |= Q(appliance_group_id=enforcement_point.appliance_group_id)
+    failed_object_names = set(
+        NormalizationIssue.objects.filter(owners)
+        .exclude(kind="security rule")
+        .exclude(name="")
+        .values_list("name", flat=True)
+    )
+
+    issues = []
+    for failure in failures:
+        unresolved = getattr(failure, "unresolved_name", "")
+        issues.append(PolicyObjectIssue(
+            kind="security rule",
+            name=failure.name,
+            severity=PolicyObjectIssue.ERROR,
+            disposition=PolicyObjectIssue.SKIPPED,
+            reason=failure.error_text,
+            source=failure.config_source,
+            related_object_name=unresolved,
+            is_consequent=bool(unresolved) and unresolved in failed_object_names,
+        ))
+    return issues
+
+
 def normalize_security_rules(enforcement_point: EnforcementPoint) -> PANOSNormalizedCollection:
     with transaction.atomic():
         normalized_rules = build_normalized_security_rules(enforcement_point)
         created_rules, failures = replace_security_rules(enforcement_point, normalized_rules)
+        replace_normalization_issues(
+            enforcement_point,
+            rule_failures_as_issues(enforcement_point, failures),
+            kinds=(SECURITY_RULE_KIND,),
+        )
 
     return PANOSNormalizedCollection(
         address_objects=[],
