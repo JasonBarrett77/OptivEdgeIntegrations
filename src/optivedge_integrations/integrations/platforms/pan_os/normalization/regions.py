@@ -149,15 +149,15 @@ def build_normalized_regions(
 
     # Both pushed reads merged, then classified per entry by @loc - never by which read
     # returned them. See common.merge_pushed_entries() / common.pushed_entry_scope().
-    region_entries, region_conflicts = merge_pushed_entries(
+    region_entries, region_notes = merge_pushed_entries(
         [(pushed_shared_root, pushed_shared_snapshot), (pushed_root, pushed_snapshot)],
         "region", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point),
     )
-    for reason, entry in region_conflicts:
+    for severity, reason, entry in region_notes:
         issues.append(PolicyObjectIssue(
             kind="region", name=str(entry.get("@name") or ""),
-            severity=PolicyObjectIssue.WARNING, node="region", source="pushed",
-            reason=reason, raw_entry=entry,
+            severity=severity, node="region", source="pushed",
+            reason=reason, raw_entry=entry, disposition=PolicyObjectIssue.KEPT,
         ))
     for entry, snapshot, namespace_type, namespace_value in region_entries:
         collect(entry, "pushed", lambda entry=entry, snapshot=snapshot, namespace_type=namespace_type, namespace_value=namespace_value: normalize_region(

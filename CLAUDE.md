@@ -213,17 +213,32 @@ missing pushed-vsys snapshot        duplicate name in one scope
 unusable pushed payload or root     the two pushed reads disagreeing about a name
 ```
 
-`PolicyObjectIssue.severity` distinguishes what the report must tell apart:
+`PolicyObjectIssue` carries **severity** and **disposition**, and they are independent — conflating them was
+the first version's mistake:
 
-- **error** — the object was skipped. Rules referencing it fail, visibly.
-- **warning** — the object was kept but something was *inferred*: a duplicate resolved by insertion order,
-  or reads that disagree. Nothing downstream fails, which is exactly why it needs surfacing.
+```
+severity=error    this should not be possible, so the data cannot be trusted
+severity=warning  something had to be inferred, but the state itself is expected
+
+disposition=skipped   the object is absent; rules referencing it fail, visibly
+disposition=kept      the object is present, possibly on a guess
+```
+
+| Case | severity | disposition |
+|---|---|---|
+| entry with an unsupported type, or no `@name` | error | skipped |
+| duplicate name in one scope | **error** | kept |
+| the two pushed reads disagreeing about a name | **error** | kept |
+| pushed entry with no `@loc` | warning | kept |
+
+The two `error`+`kept` rows are the ones that need explaining. Both are states PAN-OS rejects, so they can
+only be our fault — hence *error*. But dropping the object makes every referencing rule fail, reporting the
+fault against rules that are fine, which is the misattribution this design exists to remove — hence *kept*.
+
+The **only** genuine warning is a pushed entry with no `@loc`: absence of the marker is a real, observed
+state and the scope is a documented fallback, not a fault.
 
 `raw_entry` is carried for drill-through, since a name and a reason rarely explain a payload problem alone.
-
-**Duplicates keep the first rather than dropping both.** Dropping both makes every referencing rule fail,
-reporting the fault against rules that are fine; keeping one is a guess, which is why it is a recorded
-warning rather than silent.
 
 ### Diagnostics (`integrations/diagnostics/`)
 

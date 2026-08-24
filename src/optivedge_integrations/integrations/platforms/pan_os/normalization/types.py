@@ -30,16 +30,24 @@ class SecurityRuleFailure:
 
 @dataclass(slots=True)
 class PolicyObjectIssue:
-    """One object's normalization failed or was inferred - scoped to that object, not the
-    whole enforcement point. The sibling of SecurityRuleFailure, which has worked this way
-    all along; objects were the outlier, where one bad entry discarded everything.
+    """One object's normalization went wrong - scoped to that object, not the whole
+    enforcement point. The sibling of SecurityRuleFailure, which has worked this way all
+    along; objects were the outlier, where one bad entry discarded everything.
 
-    severity distinguishes the two cases the report has to tell apart:
+    `severity` describes THE PROBLEM. `disposition` describes WHAT WE DID. They are
+    independent, and conflating them was the first version's mistake:
 
-        error    the object was SKIPPED. Rules referencing it will fail, visibly.
-        warning  the object was KEPT, but something about it was inferred rather than
-                 read - an unmarked @loc, a duplicate resolved by insertion order. Nothing
-                 downstream fails, which is exactly why it needs surfacing somewhere.
+        severity=error   this should not be possible, so the data cannot be trusted
+        severity=warning something had to be inferred, but the state itself is expected
+
+        disposition=skipped  the object is absent; rules referencing it will fail, visibly
+        disposition=kept     the object is present, possibly on a guess
+
+    A duplicate name in one scope is error+kept: PAN-OS rejects that configuration, so it
+    can only be our fault (error) - but dropping it makes every referencing rule fail,
+    reporting the fault against rules that are fine, so the first is kept (kept). An
+    unmarked @loc is warning+kept: absence of the marker is a real, observed state, and
+    the scope is a documented fallback rather than a fault.
 
     raw_entry is carried for drill-through: a name and a reason rarely explain a payload
     problem on their own.
@@ -49,12 +57,15 @@ class PolicyObjectIssue:
     name: str
     severity: str
     reason: str
+    disposition: str = "skipped"
     node: str = ""
     source: str = ""
     raw_entry: dict = field(default_factory=dict)
 
     ERROR = "error"
     WARNING = "warning"
+    SKIPPED = "skipped"
+    KEPT = "kept"
 
 
 @dataclass(slots=True)

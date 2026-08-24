@@ -450,11 +450,13 @@ def _drop_unnamed_and_duplicates(normalized, kind):
     """Remove unnamed entries and same-scope duplicates, reporting each.
 
     A duplicate means two definitions of one name in one scope - a state PAN-OS rejects,
-    so it can only be a collection or classification fault on our side. The FIRST is kept
-    rather than dropping both: dropping both makes every referencing rule fail, which
-    reports the fault against rules that are fine. Keeping one is a guess, which is why it
-    is recorded as a warning rather than passed over - the object resolves, and the
-    ambiguity is visible somewhere.
+    so it can only be a collection or classification fault on our side. That makes it an
+    ERROR: the data for that name cannot be trusted.
+
+    The first is still KEPT, which is a separate question from severity. Dropping it makes
+    every referencing rule fail, reporting the fault against rules that are fine - the
+    misattribution this whole design exists to remove. Severity says the data is wrong;
+    disposition says what was done about it.
     """
     issues: list[PolicyObjectIssue] = []
     kept: list = []
@@ -470,7 +472,7 @@ def _drop_unnamed_and_duplicates(normalized, kind):
         key = (item.name, str(item.namespace_type), item.namespace_value)
         if key in seen:
             issues.append(PolicyObjectIssue(
-                kind=kind, name=item.name, severity=PolicyObjectIssue.WARNING,
+                kind=kind, name=item.name, severity=severity,
                 reason=(
                     f"a second definition of {item.name!r} in scope "
                     f"{item.namespace_type}/{item.namespace_value}; PAN-OS rejects that "
@@ -598,14 +600,14 @@ def build_normalized_addresses(
         (pushed_root, pushed_snapshot),
     ]
 
-    address_entries, address_conflicts = merge_pushed_entries(
+    address_entries, address_notes = merge_pushed_entries(
         pushed_reads, "address", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
     )
-    for reason, entry in address_conflicts:
+    for severity, reason, entry in address_notes:
         issues.append(PolicyObjectIssue(
             kind="address object", name=str(entry.get("@name") or ""),
-            severity=PolicyObjectIssue.WARNING, node="address", source="pushed",
-            reason=reason, raw_entry=entry,
+            severity=severity, node="address", source="pushed",
+            reason=reason, raw_entry=entry, disposition=PolicyObjectIssue.KEPT,
         ))
     for entry, snapshot, namespace_type, namespace_value in address_entries:
         collect(
@@ -619,14 +621,14 @@ def build_normalized_addresses(
             ),
         )
 
-    external_list_entries, external_list_conflicts = merge_pushed_entries(
+    external_list_entries, external_list_notes = merge_pushed_entries(
         pushed_reads, "external-list", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
     )
-    for reason, entry in external_list_conflicts:
+    for severity, reason, entry in external_list_notes:
         issues.append(PolicyObjectIssue(
             kind="address object", name=str(entry.get("@name") or ""),
-            severity=PolicyObjectIssue.WARNING, node="external-list", source="pushed",
-            reason=reason, raw_entry=entry,
+            severity=severity, node="external-list", source="pushed",
+            reason=reason, raw_entry=entry, disposition=PolicyObjectIssue.KEPT,
         ))
     for entry, snapshot, namespace_type, namespace_value in external_list_entries:
         collect(
@@ -640,14 +642,14 @@ def build_normalized_addresses(
             ),
         )
 
-    address_group_entries, address_group_conflicts = merge_pushed_entries(
+    address_group_entries, address_group_notes = merge_pushed_entries(
         pushed_reads, "address-group", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
     )
-    for reason, entry in address_group_conflicts:
+    for severity, reason, entry in address_group_notes:
         issues.append(PolicyObjectIssue(
             kind="address group", name=str(entry.get("@name") or ""),
-            severity=PolicyObjectIssue.WARNING, node="address-group", source="pushed",
-            reason=reason, raw_entry=entry,
+            severity=severity, node="address-group", source="pushed",
+            reason=reason, raw_entry=entry, disposition=PolicyObjectIssue.KEPT,
         ))
     for entry, snapshot, namespace_type, namespace_value in address_group_entries:
         collect(

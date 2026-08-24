@@ -3465,7 +3465,9 @@ class PushedScopeClassificationTests(TestCase):
 
     def test_conflicting_definitions_are_reported_per_name_not_raised(self):
         """This used to raise and discard every pushed object for the point. One name the
-        two reads disagree about is now scoped to that name."""
+        two reads disagree about is now scoped to that name - as an ERROR, since two views
+        of one pushed policy cannot legitimately differ, but KEPT so referencing rules do
+        not fail and misattribute the fault."""
         station, point = self._point()
         self._pushed(
             station, point,
@@ -3479,7 +3481,8 @@ class PushedScopeClassificationTests(TestCase):
 
         conflict = [i for i in issues if i.name == "clash"]
         self.assertEqual(len(conflict), 1)
-        self.assertEqual(conflict[0].severity, "warning")
+        self.assertEqual(conflict[0].severity, "error")
+        self.assertEqual(conflict[0].disposition, "kept")
         self.assertIn("disagree", conflict[0].reason)
         # the unaffected object survives, which is the whole point
         self.assertIn("fine", {o.name for o in objects})
@@ -4788,3 +4791,84 @@ class PerObjectIndependenceTests(TestCase):
             station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-nosnap")
         with self.assertRaisesMessage(ValueError, "missing merged config snapshot"):
             build_normalized_addresses(point)
+
+
+class FailedObjectRuleInteractionTests(TestCase):
+    """Where the two independence layers meet.
+
+    An object that fails to normalize is absent, so rules referencing it fail. That is
+    correct and visible - but it must stay confined: other rules on the same point, and
+    other members of the same rule, must survive. This is the composition that was never
+    tested, and it is exactly the path that misattributed 1,300 failures.
+    """
+
+    def _fixture(self):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9900", appliance_hostname="fw-mix", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-mix")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name, "address": {"entry": [
+                    {"@name": "good-src", "ip-netmask": "10.1.1.1/32"},
+                    {"@name": "broken-src"},                       # unnormalizable
+                ]}}]}}]}}})
+        rules = [
+            {"@name": "rule-uses-broken", "from": {"member": ["trust"]},
+             "to": {"member": ["untrust"]}, "source": {"member": ["broken-src"]},
+             "destination": {"member": ["any"]}, "application": {"member": ["any"]},
+             "service": {"member": ["application-default"]}, "action": "allow"},
+            {"@name": "rule-uses-good", "from": {"member": ["trust"]},
+             "to": {"member": ["untrust"]}, "source": {"member": ["good-src"]},
+             "destination": {"member": ["any"]}, "application": {"member": ["any"]},
+             "service": {"member": ["application-default"]}, "action": "allow"},
+        ]
+        body = {"policy": {"panorama": {
+            "pre-rulebase": {"security": {"rules": {"entry": rules}}},
+            "post-rulebase": {"security": {"rules": {"entry": []}},
+                              "default-security-rules": {"rules": {"entry": []}}}}}}
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {}})
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload=body)
+        return group, point
+
+    def test_only_the_rule_using_the_failed_object_fails(self):
+        group, point = self._fixture()
+        normalize_appliance_group_shared_scope(group)
+        addresses = normalize_enforcement_point_addresses(point)
+        rules = normalize_enforcement_point_security_rules(point)
+
+        # the object failure is recorded once, against the object
+        broken = [i for i in addresses.policy_object_issues if i.name == "broken-src"]
+        self.assertEqual(len(broken), 1)
+        self.assertEqual(broken[0].severity, "error")
+        self.assertEqual(broken[0].disposition, "skipped")
+
+        # exactly one rule fails, and it is the one that referenced it
+        failed = list(rules.security_rule_failures)
+        self.assertEqual([f.name for f in failed], ["rule-uses-broken"])
+        self.assertIn("broken-src", failed[0].error_text)
+
+        # the other rule persists - the failure did not cascade
+        self.assertEqual([r.name for r in rules.security_rules], ["rule-uses-good"])
+
+    def test_the_object_failure_is_reported_once_not_once_per_referencing_rule(self):
+        """The misattribution being removed: N rule errors naming one object should not be
+        mistaken for N problems. The object is the cause and is counted once."""
+        group, point = self._fixture()
+        normalize_appliance_group_shared_scope(group)
+        addresses = normalize_enforcement_point_addresses(point)
+        rules = normalize_enforcement_point_security_rules(point)
+
+        object_errors = [i for i in addresses.policy_object_issues if i.severity == "error"]
+        self.assertEqual(len(object_errors), 1, "one root cause")
+        self.assertGreaterEqual(len(rules.security_rule_failures), 1, "and its consequences")

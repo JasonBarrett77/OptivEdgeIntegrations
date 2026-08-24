@@ -707,12 +707,14 @@ def merge_pushed_entries(
 
     Returns ([(entry, source_snapshot, namespace_type, namespace_value), ...], conflicts)
     with the first read winning and insertion order preserved, so output stays
-    reproducible. `conflicts` is [(reason, entry), ...] for names the two reads disagree
-    about - reported per name rather than raised, since one disagreement should not
-    discard every pushed object for the enforcement point.
+    reproducible. `notes` is [(severity, reason, entry), ...] - names the two reads disagree
+    about (an error: two views of one policy cannot legitimately differ), and entries with
+    no @loc (a warning: an observed state whose scope is a documented fallback). Both are
+    reported per entry rather than raised, since neither should discard every pushed
+    object for the enforcement point.
     """
     merged: dict[tuple[str, str, str], tuple[dict[str, Any], Any, str, str]] = {}
-    conflicts: list[tuple[str, dict[str, Any]]] = []
+    notes: list[tuple[str, str, dict[str, Any]]] = []  # (severity, reason, entry)
     for root, snapshot in reads:
         node = root.get(kind)
         if not isinstance(node, dict):
@@ -720,6 +722,15 @@ def merge_pushed_entries(
         for entry in ensure_list(node.get("entry")):
             if not isinstance(entry, dict):
                 continue
+            if pushed_entry_is_unmarked(entry):
+                # A real, observed state - see pushed_entry_scope(). The object is kept;
+                # only its scope is a fallback, so this is a warning, not a fault.
+                notes.append((
+                    "warning",
+                    f"pushed {kind} {entry.get('@name')!r} carries no @loc, so its scope "
+                    f"cannot be read from the payload; falling back to vsys scope",
+                    entry,
+                ))
             namespace_type, namespace_value = pushed_entry_scope(entry, vsys_name)
             key = (str(entry.get("@name") or ""), str(namespace_type), namespace_value)
             existing = merged.get(key)
@@ -730,9 +741,12 @@ def merge_pushed_entries(
                 # Scoped to this name rather than raised. One disagreeing definition used
                 # to discard every pushed object for the point, which misattributes the
                 # fault to whatever a rule happened to reference first.
-                conflicts.append((
-                    f"the two pushed reads disagree about {kind} {'/'.join(key)} on {label}; "
-                    f"keeping the first and reporting the conflict",
+                notes.append((
+                    "error",
+                    f"the two pushed reads disagree about {kind} {'/'.join(key)} on {label}. "
+                    f"They are two views of one pushed policy, so they cannot legitimately "
+                    f"differ - this indicates a collection fault. Keeping the first, because "
+                    f"dropping it would fail every rule referencing it.",
                     entry,
                 ))
-    return list(merged.values()), conflicts
+    return list(merged.values()), notes
