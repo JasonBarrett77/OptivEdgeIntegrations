@@ -117,22 +117,43 @@ def pushed_entry_scope(entry: dict[str, Any], vsys_name: str) -> tuple[str, str]
     namespace it occupies on the firewall. The authoring location is recorded separately
     as FieldProvenance via entry_provenance().
 
-    An absent @loc raises. Every pushed object on both lab devices carries one, so this
-    is an unobserved state - and inferring scope from read position when the explicit
-    signal is missing is exactly the defect this function exists to remove.
+    An absent @loc falls back to VSYS scope. This used to raise, on the grounds that all
+    398 pushed entries across both lab devices carried one, so absence was unobserved and
+    guessing looked worse than failing. Absence is observed now: an Azure cloud firewall
+    pushes `azure-healthcheck-address` with no marker, and the raise took down the whole
+    address build for that enforcement point - 242 objects and every rule on it - over one
+    plugin-injected entry.
+
+    Vsys is the conservative fallback. It is the narrower scope, so an unmarked entry
+    cannot leak across the other vsys of a group the way a wrong shared classification
+    would; the cost is that an unmarked object appearing in the group-wide read is stored
+    once per point instead of once. It is also what the pre-@loc code effectively did for
+    entries from the per-vsys read.
+
+    Callers that need to know use `pushed_entry_is_unmarked()` - the fallback must stay
+    visible rather than becoming another silent inference.
     """
     # Imported here to avoid a circular import: models.policy imports from this package.
     from optivedge_integrations.integrations.models.policy.base import PolicyObjectNamespace
 
     raw_key, raw_value = entry_provenance(entry)
     if raw_key != "@loc" or not raw_value:
-        raise ValueError(
-            f"pushed entry {entry.get('@name')!r} has no @loc marker "
-            f"(provenance key {raw_key!r}); cannot determine its scope"
-        )
+        return PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, vsys_name
     if raw_value == SHARED_LOC:
         return PolicyObjectNamespace.PANORAMA_SHARED, SHARED_LOC
     return PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, vsys_name
+
+
+def pushed_entry_is_unmarked(entry: dict[str, Any]) -> bool:
+    """Whether a pushed entry lacks the @loc marker that would fix its scope.
+
+    Separate from pushed_entry_scope() so the fallback can be reported without repeating
+    the classification rule. Diagnostics surface these; normalization does not fail on
+    them, because failing one point's entire build over a single vendor-injected object
+    is out of proportion to not knowing its scope.
+    """
+    raw_key, raw_value = entry_provenance(entry)
+    return raw_key != "@loc" or not raw_value
 
 
 def iter_member_values(node: Any) -> list[tuple[str, str]]:

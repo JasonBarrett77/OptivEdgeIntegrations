@@ -406,9 +406,17 @@ code path work for both multi-vsys and single-vsys devices, with no branch on op
 ```
 
 Neither signal suffices alone: `@loc` separates the two Panorama scopes, read position separates the two
-local ones. `common.pushed_entry_scope()` is the single implementation; an absent `@loc` on a pushed entry
-**raises** rather than falling back to read position (398 pushed entries were checked across both lab
-devices and every one carries it, so absence is unobserved and guessing is what produced the original bug).
+local ones. `common.pushed_entry_scope()` is the single implementation. An absent `@loc` on a pushed entry falls back to
+**vsys scope** — the narrower of the two, so an unmarked entry cannot leak across a group's other vsys the
+way a wrong shared classification would. What scope such an entry really occupies is **unmeasured**; this is
+a conservative default, and `pushed_entry_is_unmarked()` exists so diagnostics can surface it rather than
+letting it become another silent inference.
+
+This used to raise, on the grounds that all 398 pushed entries across both lab devices carried a marker.
+That count was right and the generalisation wrong: an Azure cloud firewall pushes `azure-healthcheck-address`
+with no provenance key, and the raise failed one enforcement point's **entire** address build — 242 objects
+and ~1,300 rules — over a single vendor-injected entry. **Failure has to be proportionate to what is
+unknown**: not knowing one object's scope is not a reason to discard every object and rule for a point.
 
 `common.merge_pushed_entries()` merges the non-vsys and per-vsys reads into one set before classifying,
 keyed by `(name, namespace_type, namespace_value)`. That key is what makes both measured cases work without

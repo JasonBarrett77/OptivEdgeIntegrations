@@ -3474,16 +3474,34 @@ class PushedScopeClassificationTests(TestCase):
         with self.assertRaisesMessage(ValueError, "conflicting pushed address definitions"):
             build_normalized_addresses(point)
 
-    def test_pushed_entry_without_loc_raises_rather_than_guessing(self):
+    def test_an_entry_without_loc_falls_back_to_vsys_scope_and_keeps_the_build_alive(self):
+        """This used to raise. An Azure cloud firewall pushes `azure-healthcheck-address`
+        with no marker, and the raise took down that point's entire address build - 242
+        objects and every rule on it - over one vendor-injected entry.
+
+        Vsys is the conservative fallback: the narrower scope, so an unmarked entry cannot
+        leak across the other vsys of a group the way a wrong shared classification would.
+        """
         station, point = self._point()
         self._pushed(
             station, point,
             group_payload={"shared": {"address": {"entry": [
-                {"@name": "no-loc", "ip-netmask": "10.0.0.1"}]}}},
+                {"@name": "azure-healthcheck-address", "ip-netmask": "168.63.129.16"},
+                self._addr("shared-ok", "shared", "10.0.0.1"),
+            ]}}},
             vsys_payload={"policy": {"panorama": {}}},
         )
-        with self.assertRaisesMessage(ValueError, "has no @loc marker"):
-            build_normalized_addresses(point)
+        objects, _ = build_normalized_addresses(point)
+        by_name = {o.name: o for o in objects}
+
+        self.assertIn("azure-healthcheck-address", by_name, "the unmarked entry is kept")
+        self.assertEqual(by_name["azure-healthcheck-address"].namespace_type,
+                         PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE)
+        self.assertEqual(by_name["azure-healthcheck-address"].namespace_value, point.vsys_name)
+        # and, critically, it does not take the marked objects down with it
+        self.assertIn("shared-ok", by_name)
+        self.assertEqual(by_name["shared-ok"].namespace_type,
+                         PolicyObjectNamespace.PANORAMA_SHARED)
 
 
 class PushedSharedPayloadShapeTests(TestCase):
@@ -4269,16 +4287,17 @@ class AddressReferenceExplainerTests(TestCase):
         self.assertTrue(any("@loc='shared'" in f and "appliance_group" in f
                             for f in result["findings"]), result["findings"])
 
-    def test_flags_an_entry_with_no_loc_as_failing_the_whole_build(self):
-        """The raise is deliberate, but it takes every object from that read with it -
-        which looks like one missing object and is actually all of them."""
+    def test_flags_an_entry_with_no_loc_and_names_the_fallback(self):
+        """Unmarked entries are kept at vsys scope rather than failing the build, but the
+        fallback stays visible - it is an inference, and inferences should be reported."""
         _, _, point = self._point(shared_entries=[
             {"@name": "NET-B", "ip-netmask": "10.2.0.0/24"}])          # no @loc
         result = explain_address_reference(point, "NET-B")
-        self.assertFalse(result["persisted"]["resolvable"])
+        self.assertTrue(result["build_outcome"]["succeeded"],
+                        "one unmarked entry must not fail the whole build")
         self.assertTrue(any("NO @loc marker" in f for f in result["findings"]), result["findings"])
-        self.assertTrue(any("every object from this read is missing" in f
-                            for f in result["findings"]), result["findings"])
+        self.assertTrue(any("falls back to vsys scope" in f for f in result["findings"]),
+                        result["findings"])
 
     def test_says_so_when_no_collected_source_mentions_the_name(self):
         _, _, point = self._point()

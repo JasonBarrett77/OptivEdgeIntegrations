@@ -308,9 +308,9 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
         if entry["provenance_key"] != "@loc" or not entry["loc"]:
             findings.append(
                 f"{source} carries {name!r} under <{entry['node']}> with NO @loc marker "
-                f"(provenance key {entry['provenance_key']!r}). pushed_entry_scope() raises on "
-                f"that, which fails the whole build for this point - so every object from this "
-                f"read is missing, not just this one."
+                f"(provenance key {entry['provenance_key']!r}), so its scope cannot be read from "
+                f"the payload. It falls back to vsys scope and is owned by the enforcement point. "
+                f"Vendor plugins inject such entries - Azure's health-check address is one."
             )
         else:
             expected = "appliance_group" if entry["loc"] == "shared" else "enforcement_point"
