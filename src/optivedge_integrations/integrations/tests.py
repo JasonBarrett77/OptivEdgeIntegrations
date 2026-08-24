@@ -3359,7 +3359,7 @@ class PanoramaManagementDiscriminantTests(TestCase):
         )
         self._merged_snapshot(station, appliance, point)
 
-        objects, groups = build_normalized_addresses(point)
+        objects, groups, _issues = build_normalized_addresses(point)
         # Only the synthesized builtin "any" survives - nothing Panorama-derived, because
         # there is no Panorama. Previously this call raised instead of returning.
         self.assertEqual(
@@ -3367,7 +3367,7 @@ class PanoramaManagementDiscriminantTests(TestCase):
             [("any", "builtin")],
         )
         self.assertEqual(groups, [])
-        self.assertEqual(build_normalized_regions(point), [])
+        self.assertEqual(build_normalized_regions(point)[0], [])
         self.assertEqual(build_normalized_security_rules(point), [])
 
     def test_panorama_managed_point_still_requires_its_pushed_snapshots(self):
@@ -3436,7 +3436,7 @@ class PushedScopeClassificationTests(TestCase):
         self._pushed(station, point, group_payload=payload,
                      vsys_payload={"policy": {"panorama": {"address": {"entry": entries}}}})
 
-        objects, _ = build_normalized_addresses(point)
+        objects, _, _issues = build_normalized_addresses(point)
         by_name = {o.name: o for o in objects if o.name in {"shared-a", "dg-b"}}
         self.assertEqual(len(by_name), 2, "each object must appear exactly once")
         self.assertEqual(by_name["shared-a"].namespace_type, PolicyObjectNamespace.PANORAMA_SHARED)
@@ -3455,7 +3455,7 @@ class PushedScopeClassificationTests(TestCase):
             vsys_payload={"policy": {"panorama": {"address": {"entry": [
                 self._addr("ovr", "dg_app", "10.214.1.1")]}}}},
         )
-        objects, _ = build_normalized_addresses(point)
+        objects, _, _issues = build_normalized_addresses(point)
         ovr = sorted((o for o in objects if o.name == "ovr"), key=lambda o: o.namespace_type)
         self.assertEqual(
             [(o.namespace_type, o.value) for o in ovr],
@@ -3463,17 +3463,27 @@ class PushedScopeClassificationTests(TestCase):
              (PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE, "10.214.1.1")],
         )
 
-    def test_same_key_with_conflicting_definitions_raises(self):
+    def test_conflicting_definitions_are_reported_per_name_not_raised(self):
+        """This used to raise and discard every pushed object for the point. One name the
+        two reads disagree about is now scoped to that name."""
         station, point = self._point()
         self._pushed(
             station, point,
             group_payload={"shared": {"address": {"entry": [
-                self._addr("clash", "shared", "10.0.0.1")]}}},
+                self._addr("clash", "shared", "10.0.0.1"),
+                self._addr("fine", "shared", "10.0.0.2")]}}},
             vsys_payload={"policy": {"panorama": {"address": {"entry": [
                 self._addr("clash", "shared", "10.0.0.99")]}}}},
         )
-        with self.assertRaisesMessage(ValueError, "conflicting pushed address definitions"):
-            build_normalized_addresses(point)
+        objects, _, issues = build_normalized_addresses(point)
+
+        conflict = [i for i in issues if i.name == "clash"]
+        self.assertEqual(len(conflict), 1)
+        self.assertEqual(conflict[0].severity, "warning")
+        self.assertIn("disagree", conflict[0].reason)
+        # the unaffected object survives, which is the whole point
+        self.assertIn("fine", {o.name for o in objects})
+        self.assertIn("clash", {o.name for o in objects}, "first definition kept")
 
     def test_an_entry_without_loc_falls_back_to_vsys_scope_and_keeps_the_build_alive(self):
         """This used to raise. An Azure cloud firewall pushes `azure-healthcheck-address`
@@ -3492,7 +3502,7 @@ class PushedScopeClassificationTests(TestCase):
             ]}}},
             vsys_payload={"policy": {"panorama": {}}},
         )
-        objects, _ = build_normalized_addresses(point)
+        objects, _, _issues = build_normalized_addresses(point)
         by_name = {o.name: o for o in objects}
 
         self.assertIn("azure-healthcheck-address", by_name, "the unmarked entry is kept")
@@ -3563,7 +3573,7 @@ class PushedSharedPayloadShapeTests(TestCase):
             source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload=body,
         )
 
-        objects, _ = build_normalized_addresses(point)
+        objects, _, _issues = build_normalized_addresses(point)
         got = {o.name: (o.namespace_type, o.namespace_value)
                for o in objects if o.name in {"shr-1", "dg-1"}}
         self.assertEqual(got, {
@@ -4692,3 +4702,89 @@ class TemplateCommentHygieneTests(TestCase):
         self.assertNotIn("{#", body)
         self.assertNotIn("#}", body)
         self.assertNotIn("overflow-auto wrapper", body, "comment prose leaked into the page")
+
+
+class PerObjectIndependenceTests(TestCase):
+    """One bad entry must not discard the rest.
+
+    Security rules have always failed independently; objects were the outlier, where a
+    single unclassifiable entry took the whole enforcement point with it - and then every
+    rule reported the fault against whatever it happened to reference first, so the cause
+    was invisible among its own consequences.
+    """
+
+    def _point(self, *, vsys_entries=(), pushed_entries=()):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9800", appliance_hostname="fw-ind", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-ind")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name,
+                                    "address": {"entry": list(vsys_entries)}}]}}]}}})
+        body = {"policy": {"panorama": {"address": {"entry": list(pushed_entries)}}}}
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(), payload=body)
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload=body)
+        return point
+
+    def test_an_unnormalizable_entry_is_skipped_and_the_rest_survive(self):
+        point = self._point(vsys_entries=[
+            {"@name": "good-1", "ip-netmask": "10.1.1.1/32"},
+            {"@name": "broken"},                                  # no recognised type node
+            {"@name": "good-2", "ip-netmask": "10.1.1.2/32"},
+        ])
+        objects, _, issues = build_normalized_addresses(point)
+
+        names = {o.name for o in objects}
+        self.assertIn("good-1", names)
+        self.assertIn("good-2", names)
+        self.assertNotIn("broken", names)
+
+        broken = [i for i in issues if i.name == "broken"]
+        self.assertEqual(len(broken), 1)
+        self.assertEqual(broken[0].severity, "error")
+        self.assertEqual(broken[0].kind, "address object")
+        self.assertEqual(broken[0].raw_entry, {"@name": "broken"}, "raw entry kept for drill-through")
+
+    def test_an_entry_with_no_name_is_reported_rather_than_failing_the_point(self):
+        point = self._point(vsys_entries=[
+            {"ip-netmask": "10.1.1.1/32"},                        # no @name
+            {"@name": "good", "ip-netmask": "10.1.1.2/32"},
+        ])
+        objects, _, issues = build_normalized_addresses(point)
+        self.assertIn("good", {o.name for o in objects})
+        self.assertTrue(any(i.severity == "error" and "no @name" in i.reason for i in issues),
+                        [i.reason for i in issues])
+
+    def test_a_clean_point_reports_no_issues(self):
+        point = self._point(vsys_entries=[{"@name": "fine", "ip-netmask": "10.1.1.1/32"}])
+        objects, _, issues = build_normalized_addresses(point)
+        self.assertIn("fine", {o.name for o in objects})
+        self.assertEqual([i for i in issues if i.severity == "error"], [])
+
+    def test_issues_reach_the_normalized_collection(self):
+        point = self._point(vsys_entries=[
+            {"@name": "broken"},
+            {"@name": "good", "ip-netmask": "10.1.1.2/32"},
+        ])
+        result = normalize_enforcement_point_addresses(point)
+        self.assertTrue(result.address_objects, "the good object still persisted")
+        self.assertTrue(any(i.name == "broken" for i in result.policy_object_issues),
+                        result.policy_object_issues)
+
+    def test_point_level_problems_still_raise(self):
+        """A missing snapshot is not one bad entry - there is nothing to iterate and no
+        partial result worth keeping."""
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9801", appliance_hostname="fw-nosnap", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-nosnap")
+        with self.assertRaisesMessage(ValueError, "missing merged config snapshot"):
+            build_normalized_addresses(point)

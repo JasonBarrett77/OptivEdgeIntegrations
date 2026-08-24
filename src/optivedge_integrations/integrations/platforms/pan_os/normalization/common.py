@@ -705,10 +705,14 @@ def merge_pushed_entries(
     definitions of one object in one scope is a state PAN-OS rejects, so it can only mean
     a collection or classification fault.
 
-    Returns [(entry, source_snapshot, namespace_type, namespace_value), ...] with the
-    first read winning and insertion order preserved, so output stays reproducible.
+    Returns ([(entry, source_snapshot, namespace_type, namespace_value), ...], conflicts)
+    with the first read winning and insertion order preserved, so output stays
+    reproducible. `conflicts` is [(reason, entry), ...] for names the two reads disagree
+    about - reported per name rather than raised, since one disagreement should not
+    discard every pushed object for the enforcement point.
     """
     merged: dict[tuple[str, str, str], tuple[dict[str, Any], Any, str, str]] = {}
+    conflicts: list[tuple[str, dict[str, Any]]] = []
     for root, snapshot in reads:
         node = root.get(kind)
         if not isinstance(node, dict):
@@ -723,8 +727,12 @@ def merge_pushed_entries(
                 merged[key] = (entry, snapshot, namespace_type, namespace_value)
                 continue
             if existing[0] != entry:
-                raise ValueError(
-                    f"conflicting pushed {kind} definitions for {'/'.join(key)} "
-                    f"on {label}"
-                )
-    return list(merged.values())
+                # Scoped to this name rather than raised. One disagreeing definition used
+                # to discard every pushed object for the point, which misattributes the
+                # fault to whatever a rule happened to reference first.
+                conflicts.append((
+                    f"the two pushed reads disagree about {kind} {'/'.join(key)} on {label}; "
+                    f"keeping the first and reporting the conflict",
+                    entry,
+                ))
+    return list(merged.values()), conflicts

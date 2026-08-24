@@ -87,7 +87,11 @@ def _region_entries(root: dict[str, Any]) -> list[dict[str, Any]]:
     return [entry for entry in ensure_list(region_node.get("entry")) if isinstance(entry, dict)]
 
 
-def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[NormalizedRegion]:
+def build_normalized_regions(
+    enforcement_point: EnforcementPoint,
+) -> tuple[list[NormalizedRegion], list[PolicyObjectIssue]]:
+    """Regions for this point. Per-entry failures are reported, not raised - see
+    build_normalized_addresses() for the reasoning and the point-level exceptions."""
     merged_snapshot = latest_merged_snapshot(enforcement_point)
     pushed_shared_snapshot = latest_pushed_shared_snapshot(enforcement_point)
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
@@ -104,61 +108,73 @@ def build_normalized_regions(enforcement_point: EnforcementPoint) -> list[Normal
     pushed_root = pushed_vsys_panorama(pushed_snapshot.payload) if pushed_snapshot is not None else {}
 
     normalized_regions: list[NormalizedRegion] = []
+    issues: list[PolicyObjectIssue] = []
+
+    def collect(entry, source, build):
+        name = str(entry.get("@name") or "") if isinstance(entry, dict) else ""
+        if not name:
+            issues.append(PolicyObjectIssue(
+                kind="region", name="", severity=PolicyObjectIssue.ERROR,
+                node="region", source=source,
+                reason="entry has no @name, so it cannot be identified or referenced",
+                raw_entry=entry if isinstance(entry, dict) else {},
+            ))
+            return
+        try:
+            normalized_regions.append(build())
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not take the rest
+            issues.append(PolicyObjectIssue(
+                kind="region", name=name, severity=PolicyObjectIssue.ERROR,
+                node="region", source=source,
+                reason=f"{type(exc).__name__}: {exc}", raw_entry=entry,
+            ))
 
     for entry in _region_entries(merged_root):
-        normalized_regions.append(
-            normalize_region(
+        collect(entry, "merged vsys", lambda entry=entry: normalize_region(
                 source_snapshot=merged_snapshot,
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
                 namespace_value=enforcement_point.vsys_name,
                 entry=entry,
-            )
-        )
+        ))
 
     for entry in _region_entries(merged_shared_root):
-        normalized_regions.append(
-            normalize_region(
+        collect(entry, "merged shared", lambda entry=entry: normalize_region(
                 source_snapshot=merged_snapshot,
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
                 namespace_value="shared",
                 entry=entry,
-            )
-        )
+        ))
 
     # Both pushed reads merged, then classified per entry by @loc - never by which read
     # returned them. See common.merge_pushed_entries() / common.pushed_entry_scope().
-    for entry, snapshot, namespace_type, namespace_value in merge_pushed_entries(
+    region_entries, region_conflicts = merge_pushed_entries(
         [(pushed_shared_root, pushed_shared_snapshot), (pushed_root, pushed_snapshot)],
-        "region",
-        vsys_name=enforcement_point.vsys_name,
-        label=str(enforcement_point),
-    ):
-        normalized_regions.append(
-            normalize_region(
+        "region", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point),
+    )
+    for reason, entry in region_conflicts:
+        issues.append(PolicyObjectIssue(
+            kind="region", name=str(entry.get("@name") or ""),
+            severity=PolicyObjectIssue.WARNING, node="region", source="pushed",
+            reason=reason, raw_entry=entry,
+        ))
+    for entry, snapshot, namespace_type, namespace_value in region_entries:
+        collect(entry, "pushed", lambda entry=entry, snapshot=snapshot, namespace_type=namespace_type, namespace_value=namespace_value: normalize_region(
                 source_snapshot=snapshot,
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 namespace_type=namespace_type,
                 namespace_value=namespace_value,
                 entry=entry,
-            )
-        )
+        ))
 
-    if any(not region.name for region in normalized_regions):
-        raise ValueError(f"encountered region without a name for {enforcement_point}")
+    from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
+        _drop_unnamed_and_duplicates,
+    )
 
-    duplicate_region_keys = [
-        key for key, count in Counter(
-            (region.name, region.namespace_type, region.namespace_value) for region in normalized_regions
-        ).items() if count > 1
-    ]
-    if duplicate_region_keys:
-        raise ValueError(
-            f"duplicate region namespaces for {enforcement_point}: {', '.join(sorted('/'.join(key) for key in duplicate_region_keys))}"
-        )
-
-    return normalized_regions
+    normalized_regions, tail_issues = _drop_unnamed_and_duplicates(normalized_regions, "region")
+    issues.extend(tail_issues)
+    return normalized_regions, issues
 
 
 def replace_regions(

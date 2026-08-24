@@ -56,7 +56,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
     latest_pushed_shared_snapshot,
     latest_pushed_vsys_snapshot,
 )
-from optivedge_integrations.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
+from optivedge_integrations.integrations.platforms.pan_os.normalization.types import (
+    PANOSNormalizedCollection,
+    PolicyObjectIssue,
+)
 
 
 ANY_OBJECT_NAME = "any"
@@ -443,7 +446,58 @@ def normalize_address_group(
     )
 
 
-def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[list[NormalizedAddressObject], list[NormalizedAddressGroup]]:
+def _drop_unnamed_and_duplicates(normalized, kind):
+    """Remove unnamed entries and same-scope duplicates, reporting each.
+
+    A duplicate means two definitions of one name in one scope - a state PAN-OS rejects,
+    so it can only be a collection or classification fault on our side. The FIRST is kept
+    rather than dropping both: dropping both makes every referencing rule fail, which
+    reports the fault against rules that are fine. Keeping one is a guess, which is why it
+    is recorded as a warning rather than passed over - the object resolves, and the
+    ambiguity is visible somewhere.
+    """
+    issues: list[PolicyObjectIssue] = []
+    kept: list = []
+    seen: dict[tuple[str, str, str], object] = {}
+
+    for item in normalized:
+        if not item.name:
+            issues.append(PolicyObjectIssue(
+                kind=kind, name="", severity=PolicyObjectIssue.ERROR,
+                reason="normalized without a name, so nothing can reference it",
+            ))
+            continue
+        key = (item.name, str(item.namespace_type), item.namespace_value)
+        if key in seen:
+            issues.append(PolicyObjectIssue(
+                kind=kind, name=item.name, severity=PolicyObjectIssue.WARNING,
+                reason=(
+                    f"a second definition of {item.name!r} in scope "
+                    f"{item.namespace_type}/{item.namespace_value}; PAN-OS rejects that "
+                    f"configuration, so this indicates a collection or classification "
+                    f"fault. Keeping the first."
+                ),
+            ))
+            continue
+        seen[key] = item
+        kept.append(item)
+    return kept, issues
+
+
+def build_normalized_addresses(
+    enforcement_point: EnforcementPoint,
+) -> tuple[list[NormalizedAddressObject], list[NormalizedAddressGroup], list[PolicyObjectIssue]]:
+    """Normalize this point's address objects and groups.
+
+    Failures are scoped to the ENTRY that caused them wherever there is an entry to blame.
+    One unclassifiable object used to discard every object and rule for the point, which
+    reports the fault against whatever a rule happened to reference first - the named
+    object is then a symptom and the cause is invisible.
+
+    Still raised, because there is nothing to iterate and no partial result worth having:
+    a missing merged/pushed snapshot, or a pushed payload whose root cannot be recognised.
+    Those mean the READ is unusable, not that one entry is bad.
+    """
     merged_snapshot = latest_merged_snapshot(enforcement_point)
     pushed_shared_snapshot = latest_pushed_shared_snapshot(enforcement_point)
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
@@ -461,57 +515,80 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
 
     normalized_objects: list[NormalizedAddressObject] = []
     normalized_groups: list[NormalizedAddressGroup] = []
+    issues: list[PolicyObjectIssue] = []
+
+    def collect(target, kind, node, source, entry, build):
+        """Run one entry's normalization; record and skip it if that fails."""
+        name = str(entry.get("@name") or "") if isinstance(entry, dict) else ""
+        if not name:
+            issues.append(PolicyObjectIssue(
+                kind=kind, name="", severity=PolicyObjectIssue.ERROR, node=node, source=source,
+                reason="entry has no @name, so it cannot be identified or referenced",
+                raw_entry=entry if isinstance(entry, dict) else {},
+            ))
+            return
+        try:
+            target.append(build())
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not take the rest
+            issues.append(PolicyObjectIssue(
+                kind=kind, name=name, severity=PolicyObjectIssue.ERROR, node=node, source=source,
+                reason=f"{type(exc).__name__}: {exc}", raw_entry=entry,
+            ))
 
     for entry in ensure_list((merged_root.get("address") or {}).get("entry") if isinstance(merged_root.get("address"), dict) else None):
         if not isinstance(entry, dict):
             continue
-        normalized_objects.append(
-            normalize_address_object(
+        collect(
+            normalized_objects, "address object", "address", "merged vsys", entry,
+            lambda entry=entry: normalize_address_object(
                 source_snapshot=merged_snapshot,
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
                 namespace_value=enforcement_point.vsys_name,
                 entry=entry,
-            )
+            ),
         )
 
     for entry in ensure_list((merged_root.get("address-group") or {}).get("entry") if isinstance(merged_root.get("address-group"), dict) else None):
         if not isinstance(entry, dict):
             continue
-        normalized_groups.append(
-            normalize_address_group(
+        collect(
+            normalized_groups, "address group", "address-group", "merged vsys", entry,
+            lambda entry=entry: normalize_address_group(
                 source_snapshot=merged_snapshot,
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
                 namespace_value=enforcement_point.vsys_name,
                 entry=entry,
-            )
+            ),
         )
 
     for entry in ensure_list((merged_shared_root.get("address") or {}).get("entry") if isinstance(merged_shared_root.get("address"), dict) else None):
         if not isinstance(entry, dict):
             continue
-        normalized_objects.append(
-            normalize_address_object(
+        collect(
+            normalized_objects, "address object", "address", "merged shared", entry,
+            lambda entry=entry: normalize_address_object(
                 source_snapshot=merged_snapshot,
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
                 namespace_value="shared",
                 entry=entry,
-            )
+            ),
         )
 
     for entry in ensure_list((merged_shared_root.get("address-group") or {}).get("entry") if isinstance(merged_shared_root.get("address-group"), dict) else None):
         if not isinstance(entry, dict):
             continue
-        normalized_groups.append(
-            normalize_address_group(
+        collect(
+            normalized_groups, "address group", "address-group", "merged shared", entry,
+            lambda entry=entry: normalize_address_group(
                 source_snapshot=merged_snapshot,
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
                 namespace_value="shared",
                 entry=entry,
-            )
+            ),
         )
 
     # Both pushed reads are merged and classified per entry by @loc - never by which
@@ -521,73 +598,80 @@ def build_normalized_addresses(enforcement_point: EnforcementPoint) -> tuple[lis
         (pushed_root, pushed_snapshot),
     ]
 
-    for entry, snapshot, namespace_type, namespace_value in merge_pushed_entries(
-            pushed_reads, "address", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
-    ):
-        normalized_objects.append(
-            normalize_address_object(
+    address_entries, address_conflicts = merge_pushed_entries(
+        pushed_reads, "address", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
+    )
+    for reason, entry in address_conflicts:
+        issues.append(PolicyObjectIssue(
+            kind="address object", name=str(entry.get("@name") or ""),
+            severity=PolicyObjectIssue.WARNING, node="address", source="pushed",
+            reason=reason, raw_entry=entry,
+        ))
+    for entry, snapshot, namespace_type, namespace_value in address_entries:
+        collect(
+            normalized_objects, "address object", "address", "pushed", entry,
+            lambda entry=entry, snapshot=snapshot, namespace_type=namespace_type, namespace_value=namespace_value: normalize_address_object(
                 source_snapshot=snapshot,
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 namespace_type=namespace_type,
                 namespace_value=namespace_value,
                 entry=entry,
-            )
+            ),
         )
 
-    for entry, snapshot, namespace_type, namespace_value in merge_pushed_entries(
-            pushed_reads, "external-list", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
-    ):
-        normalized_objects.append(
-            normalize_external_list_object(
+    external_list_entries, external_list_conflicts = merge_pushed_entries(
+        pushed_reads, "external-list", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
+    )
+    for reason, entry in external_list_conflicts:
+        issues.append(PolicyObjectIssue(
+            kind="address object", name=str(entry.get("@name") or ""),
+            severity=PolicyObjectIssue.WARNING, node="external-list", source="pushed",
+            reason=reason, raw_entry=entry,
+        ))
+    for entry, snapshot, namespace_type, namespace_value in external_list_entries:
+        collect(
+            normalized_objects, "address object", "external-list", "pushed", entry,
+            lambda entry=entry, snapshot=snapshot, namespace_type=namespace_type, namespace_value=namespace_value: normalize_external_list_object(
                 source_snapshot=snapshot,
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 namespace_type=namespace_type,
                 namespace_value=namespace_value,
                 entry=entry,
-            )
+            ),
         )
 
-    for entry, snapshot, namespace_type, namespace_value in merge_pushed_entries(
-            pushed_reads, "address-group", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
-    ):
-        normalized_groups.append(
-            normalize_address_group(
+    address_group_entries, address_group_conflicts = merge_pushed_entries(
+        pushed_reads, "address-group", vsys_name=enforcement_point.vsys_name, label=str(enforcement_point)
+    )
+    for reason, entry in address_group_conflicts:
+        issues.append(PolicyObjectIssue(
+            kind="address group", name=str(entry.get("@name") or ""),
+            severity=PolicyObjectIssue.WARNING, node="address-group", source="pushed",
+            reason=reason, raw_entry=entry,
+        ))
+    for entry, snapshot, namespace_type, namespace_value in address_group_entries:
+        collect(
+            normalized_groups, "address group", "address-group", "pushed", entry,
+            lambda entry=entry, snapshot=snapshot, namespace_type=namespace_type, namespace_value=namespace_value: normalize_address_group(
                 source_snapshot=snapshot,
                 config_source=SecurityRule.SOURCE_PUSHED_PRE,
                 namespace_type=namespace_type,
                 namespace_value=namespace_value,
                 entry=entry,
-            )
+            ),
         )
 
     normalized_objects.extend(build_normalized_predefined_address_objects(enforcement_point))
     normalized_objects.append(build_builtin_any_object(merged_snapshot))
 
-    if any(not address.name for address in normalized_objects):
-        raise ValueError(f"encountered address object without a name for {enforcement_point}")
-    if any(not group.name for group in normalized_groups):
-        raise ValueError(f"encountered address group without a name for {enforcement_point}")
+    normalized_objects, object_issues = _drop_unnamed_and_duplicates(
+        normalized_objects, "address object")
+    normalized_groups, group_issues = _drop_unnamed_and_duplicates(
+        normalized_groups, "address group")
+    issues.extend(object_issues)
+    issues.extend(group_issues)
 
-    duplicate_object_keys = [
-        key for key, count in Counter(
-            (address.name, address.namespace_type, address.namespace_value) for address in normalized_objects
-        ).items() if count > 1
-    ]
-    duplicate_group_keys = [
-        key for key, count in Counter(
-            (group.name, group.namespace_type, group.namespace_value) for group in normalized_groups
-        ).items() if count > 1
-    ]
-    if duplicate_object_keys:
-        raise ValueError(
-            f"duplicate address object namespaces for {enforcement_point}: {', '.join(sorted('/'.join(key) for key in duplicate_object_keys))}"
-        )
-    if duplicate_group_keys:
-        raise ValueError(
-            f"duplicate address group namespaces for {enforcement_point}: {', '.join(sorted('/'.join(key) for key in duplicate_group_keys))}"
-        )
-
-    return normalized_objects, normalized_groups
+    return normalized_objects, normalized_groups, issues
 
 
 def is_shared_scope(namespace_type: str) -> bool:
@@ -797,12 +881,16 @@ def normalize_appliance_group_shared_objects(appliance_group: ApplianceGroup) ->
     shared_objects: dict = {}
     shared_groups: dict = {}
     shared_regions: dict = {}
+    issues: list[PolicyObjectIssue] = []
     with transaction.atomic():
         for point in points:
-            normalized_objects, normalized_groups = build_normalized_addresses(point)
+            normalized_objects, normalized_groups, point_issues = build_normalized_addresses(point)
+            normalized_regions, region_issues = build_normalized_regions(point)
+            issues.extend(point_issues)
+            issues.extend(region_issues)
             union(shared_objects, normalized_objects, "address object")
             union(shared_groups, normalized_groups, "address group")
-            union(shared_regions, build_normalized_regions(point), "region")
+            union(shared_regions, normalized_regions, "region")
 
         created_objects, created_groups = replace_addresses(
             appliance_group, list(shared_objects.values()), list(shared_groups.values())
@@ -819,18 +907,20 @@ def normalize_appliance_group_shared_objects(appliance_group: ApplianceGroup) ->
         enforcement_nodes=[],
         device_configuration_profiles=[],
         security_rules=[],
+        policy_object_issues=issues,
     )
 
 
 def normalize_addresses(enforcement_point: EnforcementPoint) -> PANOSNormalizedCollection:
     with transaction.atomic():
-        normalized_objects, normalized_groups = build_normalized_addresses(enforcement_point)
+        normalized_objects, normalized_groups, issues = build_normalized_addresses(enforcement_point)
         created_objects, created_groups = replace_addresses(
             enforcement_point,
             normalized_objects,
             normalized_groups,
         )
-        normalized_regions = build_normalized_regions(enforcement_point)
+        normalized_regions, region_issues = build_normalized_regions(enforcement_point)
+        issues.extend(region_issues)
         created_regions = replace_regions(enforcement_point, normalized_regions)
 
     return PANOSNormalizedCollection(
@@ -843,4 +933,5 @@ def normalize_addresses(enforcement_point: EnforcementPoint) -> PANOSNormalizedC
         enforcement_nodes=[],
         device_configuration_profiles=[],
         security_rules=[],
+        policy_object_issues=issues,
     )

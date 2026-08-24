@@ -188,7 +188,7 @@ def _build_outcome(enforcement_point: EnforcementPoint) -> dict[str, Any]:
     )
 
     try:
-        objects, groups = build_normalized_addresses(enforcement_point)
+        objects, groups, issues = build_normalized_addresses(enforcement_point)
     except Exception as exc:  # noqa: BLE001 - the exception IS the diagnosis
         return {
             "succeeded": False,
@@ -199,6 +199,12 @@ def _build_outcome(enforcement_point: EnforcementPoint) -> dict[str, Any]:
         "succeeded": True,
         "object_count": len(objects),
         "group_count": len(groups),
+        "issue_count": len(issues),
+        "error_count": sum(1 for i in issues if i.severity == "error"),
+        "issues": [
+            {"kind": i.kind, "name": i.name, "severity": i.severity, "reason": i.reason}
+            for i in issues[:25]
+        ],
     }
 
 

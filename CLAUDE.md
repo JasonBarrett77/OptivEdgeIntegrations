@@ -194,6 +194,37 @@ information lives in the raw `Snapshot` payload, not in the normalized row — s
 objects and security rules and requires a **renormalize** to repopulate. That is safe because the data is
 fully re-derivable from stored snapshots without contacting a device.
 
+### Object normalization fails per object, not per enforcement point
+
+`build_normalized_addresses()` and `build_normalized_regions()` return
+`(..., list[PolicyObjectIssue])`. One entry that cannot be normalized is **skipped and recorded**; the rest
+still normalize. Security rules have always worked this way (`SecurityRuleFailure`) — objects were the
+outlier, and the cost was misattribution: one unclassifiable entry discarded the whole point, and every rule
+then reported the fault against whatever it happened to reference first, so the cause was invisible among its
+own consequences.
+
+The split is "is there anything to iterate":
+
+```
+POINT-LEVEL — still raises          PER-ENTRY — recorded and skipped
+missing merged snapshot             entry with an unsupported type
+missing pushed-shared snapshot      entry with no @name
+missing pushed-vsys snapshot        duplicate name in one scope
+unusable pushed payload or root     the two pushed reads disagreeing about a name
+```
+
+`PolicyObjectIssue.severity` distinguishes what the report must tell apart:
+
+- **error** — the object was skipped. Rules referencing it fail, visibly.
+- **warning** — the object was kept but something was *inferred*: a duplicate resolved by insertion order,
+  or reads that disagree. Nothing downstream fails, which is exactly why it needs surfacing.
+
+`raw_entry` is carried for drill-through, since a name and a reason rarely explain a payload problem alone.
+
+**Duplicates keep the first rather than dropping both.** Dropping both makes every referencing rule fail,
+reporting the fault against rules that are fine; keeping one is a guess, which is why it is a recorded
+warning rather than silent.
+
 ### Diagnostics (`integrations/diagnostics/`)
 
 Read-only reporting over normalized data. Plain functions — no views, no management commands — so the same

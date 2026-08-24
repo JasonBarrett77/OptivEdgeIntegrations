@@ -147,6 +147,9 @@ class PANOSAddressNormalizedPoint:
     appliance_group: ApplianceGroup | None = None
     address_objects: list[AddressObject] = field(default_factory=list)
     address_groups: list[AddressGroup] = field(default_factory=list)
+    #: Per-object failures and inferences. A pass can succeed and still carry these -
+    #: that is the point, and it is why a count of them is worth surfacing.
+    policy_object_issues: list = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -546,6 +549,7 @@ def renormalize_in_scope_configuration(
                 appliance_group=appliance_group,
                 address_objects=shared.address_objects,
                 address_groups=shared.address_groups,
+                policy_object_issues=shared.policy_object_issues,
             )
         )
 
@@ -565,6 +569,7 @@ def renormalize_in_scope_configuration(
                 enforcement_point=enforcement_point,
                 address_objects=normalized.address_objects,
                 address_groups=normalized.address_groups,
+                policy_object_issues=normalized.policy_object_issues,
             )
         )
 
