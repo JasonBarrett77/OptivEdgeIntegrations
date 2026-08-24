@@ -246,6 +246,18 @@ migration partway through, and seeing the offenders as data beats seeing them as
 `rows_per_object` covers only the shared side; this also covers the enforcement point, where a vsys-scoped
 object and a vendor object could share a name.
 
+`address_reference.explain_address_reference(point, name)` diagnoses
+`unresolved address reference: <name>`. That message says a name is in neither the point's objects nor its
+group's; it does not say why, and the answer is usually in the raw snapshot rather than the normalized rows.
+The explainer walks the same path normalization does — which read carried the entry, its `@loc`, which owner
+should therefore hold it, and where it actually is — and separates the two cases that look identical from the
+event log: **the device never reported it** (collection or stale snapshots) versus **the device reported it
+and nothing stored it** (normalization).
+
+It also catches the failure that masquerades as one missing object: a pushed entry with **no `@loc`** makes
+`pushed_entry_scope()` raise, which fails the whole build for that point — so *every* object from that read
+is missing, not just the one named in the rule error.
+
 ### The developer page (`/developer/`)
 
 `DeveloperView` renders the live census, captures labelled snapshots, and compares any two. It is

@@ -26,6 +26,7 @@ from optivedge.views import RightOverlayMixin
 from optivedge_integrations.integrations.forms import ManagementStationForm, NoteForm
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
+    explain_address_reference,
     compare_censuses,
     list_censuses,
     load_census,
@@ -1256,6 +1257,24 @@ class DeveloperView(TemplateView):
             except (OSError, ValueError) as exc:
                 comparison = {"error": f"Could not compare: {exc}"}
         context["comparison"] = comparison
+
+        # Address-reference explainer: why did "unresolved address reference: X" happen?
+        context["reference_points"] = EnforcementPoint.objects.select_related(
+            "management_station", "appliance_group"
+        ).order_by("appliance_group__name", "vsys_name", "pk")
+        context["reference_name"] = (self.request.GET.get("reference_name") or "").strip()
+        context["reference_point_id"] = self.request.GET.get("reference_point") or ""
+        context["reference_explanation"] = None
+        if context["reference_name"] and context["reference_point_id"]:
+            point = EnforcementPoint.objects.filter(pk=context["reference_point_id"]).first()
+            if point is None:
+                context["reference_explanation"] = {"error": "That enforcement point no longer exists."}
+            else:
+                try:
+                    context["reference_explanation"] = explain_address_reference(
+                        point, context["reference_name"])
+                except Exception as exc:  # noqa: BLE001 - a diagnostic must not 500
+                    context["reference_explanation"] = {"error": f"{type(exc).__name__}: {exc}"}
         context["selected_before"] = before_path or ""
         context["selected_after"] = after_path or ""
         return context

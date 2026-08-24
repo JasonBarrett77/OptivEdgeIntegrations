@@ -4,6 +4,9 @@ Plain functions, no Django views or management commands, so the same logic serve
 developer page, a shell session, or a script. Nothing here writes to the database.
 """
 
+from optivedge_integrations.integrations.diagnostics.address_reference import (
+    explain_address_reference,
+)
 from optivedge_integrations.integrations.diagnostics.policy_object_census import (
     CENSUS_VERSION,
     capture_census,
@@ -14,6 +17,7 @@ from optivedge_integrations.integrations.diagnostics.policy_object_census import
 )
 
 __all__ = [
+    "explain_address_reference",
     "CENSUS_VERSION",
     "capture_census",
     "compare_censuses",

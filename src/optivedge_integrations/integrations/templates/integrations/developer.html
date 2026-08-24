@@ -105,6 +105,82 @@
     </form>
   </section>
 
+  {# ---------------- address reference explainer ---------------- #}
+  <section class="rounded border border-slate-200 bg-white p-4">
+    <h2 class="text-sm font-semibold text-slate-900">Explain an address reference</h2>
+    <p class="mt-1 text-xs text-slate-600">
+      For <span class="font-mono">unresolved address reference: X</span>. Walks the same path
+      normalization does &mdash; which collected read carried the name, what <span class="font-mono">@loc</span>
+      it had, which owner should hold it, and where it actually is.
+    </p>
+    <form method="get" class="mt-3 flex flex-wrap items-center gap-2">
+      <select name="reference_point" class="rounded border border-slate-300 px-2 py-1 text-xs">
+        {% for point in reference_points %}
+        <option value="{{ point.pk }}" {% if point.pk|stringformat:"s" == reference_point_id %}selected{% endif %}>
+          {{ point }}
+        </option>
+        {% endfor %}
+      </select>
+      <input type="text" name="reference_name" value="{{ reference_name }}" placeholder="NET-10.130.49.0_27"
+             class="rounded border border-slate-300 px-2 py-1 text-xs" style="min-width:18rem">
+      <button type="submit" class="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700">
+        Explain
+      </button>
+    </form>
+
+    {% if reference_explanation %}
+      {% if reference_explanation.error %}
+        <p class="mt-3 text-xs text-red-700">{{ reference_explanation.error }}</p>
+      {% else %}
+      <div class="mt-3 space-y-2">
+        <div class="text-xs text-slate-700">
+          <span class="font-mono font-medium">{{ reference_explanation.name }}</span> on
+          {{ reference_explanation.enforcement_point }}
+          &mdash; Panorama-managed: <span class="font-mono">{{ reference_explanation.panorama_managed }}</span>,
+          persisted: <span class="font-mono {% if not reference_explanation.persisted.resolvable %}text-red-700 font-semibold{% endif %}">{{ reference_explanation.persisted.resolvable }}</span>
+        </div>
+
+        {% if reference_explanation.persisted.rows %}
+        <table class="w-full text-[11px]">
+          <thead class="bg-slate-50 text-slate-600"><tr>
+            <th class="border-b border-slate-200 px-2 py-1 text-left font-medium">Kind</th>
+            <th class="border-b border-slate-200 px-2 py-1 text-left font-medium">Owner</th>
+            <th class="border-b border-slate-200 px-2 py-1 text-left font-medium">Namespace</th>
+            <th class="border-b border-slate-200 px-2 py-1 text-left font-medium">Scope</th>
+            <th class="border-b border-slate-200 px-2 py-1 text-left font-medium">Value</th>
+          </tr></thead>
+          <tbody>
+            {% for row in reference_explanation.persisted.rows %}
+            <tr>
+              <td class="border-b border-slate-100 px-2 py-1">{{ row.kind }}</td>
+              <td class="border-b border-slate-100 px-2 py-1 font-mono">{{ row.owner }}</td>
+              <td class="border-b border-slate-100 px-2 py-1 font-mono">{{ row.namespace_type }}</td>
+              <td class="border-b border-slate-100 px-2 py-1 font-mono">{{ row.scope }}</td>
+              <td class="border-b border-slate-100 px-2 py-1 font-mono">{{ row.value|default:"&ndash;" }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        {% endif %}
+
+        <div>
+          <h3 class="text-xs font-semibold text-slate-900">Findings</h3>
+          <ul class="mt-1 space-y-1">
+            {% for finding in reference_explanation.findings %}
+            <li class="text-xs text-slate-700">&bull; {{ finding }}</li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <details class="text-xs">
+          <summary class="cursor-pointer text-slate-600">Raw source detail</summary>
+          <pre class="mt-1 overflow-x-auto rounded bg-slate-50 p-2 text-[10px] leading-4">{{ reference_explanation.raw_sources|pprint }}</pre>
+        </details>
+      </div>
+      {% endif %}
+    {% endif %}
+  </section>
+
   {# ---------------- saved snapshots + compare ---------------- #}
   <section class="rounded border border-slate-200 bg-white">
     <div class="border-b border-slate-200 px-4 py-3">

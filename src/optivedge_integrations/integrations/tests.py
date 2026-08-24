@@ -74,6 +74,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
 )
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
+    explain_address_reference,
     CENSUS_VERSION,
     compare_censuses,
     load_census,
@@ -4229,3 +4230,69 @@ class SharedScopeAcrossPointsTests(TestCase):
         self.assertEqual(len(result.security_rules), 1)
         self.assertEqual(list(result.security_rule_failures), [],
                          "an unresolved reference here means the object was owned by nobody")
+
+
+class AddressReferenceExplainerTests(TestCase):
+    """Diagnose "unresolved address reference" without guessing at the cause."""
+
+    def _point(self, *, shared_entries=(), vsys_entries=(), merged_shared_entries=()):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9300", appliance_hostname="fw-ref", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-ref")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {
+                "shared": {"address": {"entry": list(merged_shared_entries)}},
+                "devices": {"entry": [{"@name": "localhost.localdomain", "vsys": {"entry": [
+                    {"@name": point.vsys_name}]}}]}}})
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {"address": {"entry": list(shared_entries)}}})
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {"address": {"entry": list(vsys_entries)}}}})
+        return station, group, point
+
+    def test_reports_which_read_carried_it_and_which_owner_should_hold_it(self):
+        _, group, point = self._point(shared_entries=[
+            {"@name": "NET-A", "@loc": "shared", "ip-netmask": "10.1.0.0/24"}])
+        normalize_appliance_group_shared_scope(group)
+
+        result = explain_address_reference(point, "NET-A")
+        self.assertTrue(result["persisted"]["resolvable"])
+        self.assertEqual(result["persisted"]["rows"][0]["owner"], "appliance_group")
+        self.assertTrue(any("@loc='shared'" in f and "appliance_group" in f
+                            for f in result["findings"]), result["findings"])
+
+    def test_flags_an_entry_with_no_loc_as_failing_the_whole_build(self):
+        """The raise is deliberate, but it takes every object from that read with it -
+        which looks like one missing object and is actually all of them."""
+        _, _, point = self._point(shared_entries=[
+            {"@name": "NET-B", "ip-netmask": "10.2.0.0/24"}])          # no @loc
+        result = explain_address_reference(point, "NET-B")
+        self.assertFalse(result["persisted"]["resolvable"])
+        self.assertTrue(any("NO @loc marker" in f for f in result["findings"]), result["findings"])
+        self.assertTrue(any("every object from this read is missing" in f
+                            for f in result["findings"]), result["findings"])
+
+    def test_says_so_when_no_collected_source_mentions_the_name(self):
+        _, _, point = self._point()
+        result = explain_address_reference(point, "NET-GHOST")
+        self.assertFalse(result["persisted"]["resolvable"])
+        self.assertTrue(any("appears in NO collected source" in f
+                            for f in result["findings"]), result["findings"])
+
+    def test_distinguishes_a_normalization_gap_from_a_collection_gap(self):
+        """Device reported it, nothing stored it - that is the interesting case."""
+        _, _, point = self._point(shared_entries=[
+            {"@name": "NET-C", "@loc": "shared", "ip-netmask": "10.3.0.0/24"}])
+        # deliberately do NOT run the shared pass
+        result = explain_address_reference(point, "NET-C")
+        self.assertFalse(result["persisted"]["resolvable"])
+        self.assertTrue(any("gap is in normalization, not collection" in f
+                            for f in result["findings"]), result["findings"])
