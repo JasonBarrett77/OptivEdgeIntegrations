@@ -755,6 +755,64 @@ Panorama-Shared object for that enforcement point.
 Symmetry between sibling functions is not a reason on its own. The per-vsys reader earned its tolerance by
 measurement; the non-vsys one has no such warrant.
 
+### Known gap — `show config merged` is CANDIDATE-based, so collection can normalize uncommitted config
+
+**Not yet addressed. Measured 2026-08-25** (OptivEdgeProbe `merged-config-is-candidate-based`).
+
+`collect_show_merged_config` is the source for local address objects, zones and regions. It does **not**
+return what the firewall enforces:
+
+```
+local candidate    show config candidate         uncommitted
+local running      show config running           committed, NO template content
+pushed template    show config pushed-template   committed by a Panorama push
+merged             = candidate + pushed-template
+```
+
+Three failure shapes, and the middle one is the dangerous one because nothing looks wrong:
+
+| Staged, uncommitted | Enforced | Collected |
+|---|---|---|
+| addition | absent | **present** — object that enforces nothing |
+| modification | `10.99.1.1/32` | **`10.99.2.2/32`** — same name, wrong value, no error anywhere |
+| deletion | present | **absent** — a live control missing from the assessment |
+
+**The candidate is a full copy of running, not a delta**, so a contaminated payload cannot be repaired
+after the fact — the candidate *replaced* running in that view. Correct-when-clean is the whole property:
+with nothing staged, `candidate == running` byte for byte, and `merged` is then exactly right.
+
+**What to do about it, when someone gets to it:**
+
+1. **Detect, don't reconstruct.** `sha(show config running) == sha(show config candidate)` — byte-identical
+   when clean, divergent the moment anything is staged. No diffing, per device, two extra op calls.
+2. On a dirty candidate, prefer stamping the snapshot and raising a `NormalizationIssue` over refusing the
+   sync: it is usually one admin mid-edit, most of the config is still fine, and the health indicator already
+   exists to carry the signal.
+3. **`show config running` is NOT a substitute** — it contains no template config at all and no `@ptpl`
+   markers. Zones and interfaces defined in a template are simply absent from it.
+4. **`show config effective-running`** is the source that would make this a non-problem, and it requires
+   **Superuser**. Rejected — a collector should not hold Superuser to read configuration.
+5. Reconstructing from `running` + `pushed-template` is blocked on **local-versus-template precedence**,
+   which is unmeasured. PAN-OS tracks it (`set failed, may need to override template object first`), but
+   guessing would produce a merged view wrong in a new way.
+
+Related: Panorama's `merge-with-candidate-cfg` push option (off by default, and the probe's pushes omit it)
+commits the device candidate as part of a policy push — which turns this contamination from transient into
+permanent.
+
+### Known gap — `Zone.packet_buffer_protection` reads an element that does not exist
+
+**Not yet addressed. Measured 2026-08-25.** `normalization/zones.py` reads
+`network.get("packet-buffer-protection")`. PAN-OS 11.1.13-h3 rejects that element outright on a fresh zone —
+`packet-buffer-protection unexpected here` — and accepts **`enable-packet-buffer-protection`**. The field can
+therefore never be populated and is permanently `None`. One-word fix; left with the rest of the zone work.
+
+The rest of `zones.py` **was** validated against the lab and is correct: the zone path, all six type subtrees
+(mutually exclusive by silent replacement, so "first subtree found wins" is safe), `zone-protection-profile`
+and `log-setting` under `network`, `enable-user-identification` at entry level, `user-acl` member lists, both
+interface-address shapes (`layer3.ip` for physicals, `ip` for units), and `unique(enforcement_point, name)`.
+Its module docstring still says the shapes are inferred — that is now stale except for the item above.
+
 ### Known gap — only the address family is normalized into models
 
 Rule fields divide into two families, and they are modelled very differently:
