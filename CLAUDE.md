@@ -362,6 +362,19 @@ never ran.
 `name_collisions` reports (owner, name) pairs appearing more than once — exactly what the **Stage B** unique
 constraints will reject. Check it reads `0 / 0` before adding them: a constraint added blind fails the
 migration partway through, and seeing the offenders as data beats seeing them as an `IntegrityError`.
+
+Each colliding pair carries `rows_detail` — `namespace_type`, `namespace_value`, `precedence_rank` and the
+synthetic flags of every row involved. Those are exactly the columns the *existing*
+`unique(owner, name, namespace_type, namespace_value)` constraint permits to differ, so they always contain
+the answer. `diagnose_collisions()` turns them into a verdict, and `/developer/` renders it for the **live**
+census — a collision is current state, not a delta, so seeing why should not require capturing a snapshot.
+The three verdicts are not interchangeable:
+
+- **synthetic + collected** — we manufactured the collision. The device never had it, and no constraint on
+  collected data is at fault. Stage B has to either exclude synthetic rows or namespace them separately.
+- **all synthetic** — we produced the same object twice; a dedupe bug on our side.
+- **all collected** — either the device really presents it, contradicting the measured PAN-OS rejection, or
+  the namespace classification is wrong.
 `rows_per_object` covers only the shared side; this also covers the enforcement point, where a vsys-scoped
 object and a vendor object could share a name.
 

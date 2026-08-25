@@ -75,6 +75,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
 )
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
+    diagnose_collisions,
     has_normalization_errors,
     normalization_health,
     normalization_indicator,
@@ -4187,6 +4188,60 @@ class NameCollisionPrecheckTests(TestCase):
         observations = compare_censuses(capture_census(label="before"), census)["observations"]
         self.assertTrue(any("Stage B unique constraint would fail" in o for o in observations),
                         observations)
+
+
+    def test_a_collision_says_which_rows_differ_and_how(self):
+        """A count says a fault exists. The namespaces say which fault it is."""
+        station, group, point, snapshot = self._setup()
+        self._object(station, snapshot, "any", owner=point,
+                     namespace_type=PolicyObjectNamespace.LOCAL_VSYS)
+        self._object(station, snapshot, "any", owner=point,
+                     namespace_type=PolicyObjectNamespace.BUILTIN)
+
+        example = (capture_census()["models"]["AddressObject"]["name_collisions"]
+                   ["enforcement_point_id"]["examples"][0])
+        namespaces = {row["namespace_type"] for row in example["rows_detail"]}
+        self.assertEqual(namespaces, {PolicyObjectNamespace.LOCAL_VSYS,
+                                      PolicyObjectNamespace.BUILTIN})
+        self.assertTrue(all("precedence_rank" in row for row in example["rows_detail"]))
+
+    def test_a_synthetic_row_colliding_with_a_collected_one_is_named_as_ours(self):
+        """The distinction that decides what Stage B should do.
+
+        Two collected rows colliding would mean the device presented something PAN-OS
+        rejects. A synthesized row colliding with a collected one means we manufactured the
+        collision, and no constraint on collected data can be blamed for it.
+        """
+        station, group, point, snapshot = self._setup()
+        self._object(station, snapshot, "172.200.255.254", owner=point,
+                     namespace_type=PolicyObjectNamespace.LOCAL_VSYS)
+        synthetic = self._object(station, snapshot, "172.200.255.254", owner=point,
+                                 namespace_type=PolicyObjectNamespace.PANORAMA_DEVICE_GROUP)
+        synthetic.is_synthetic = True
+        synthetic.synthetic_kind = AddressObject.SYNTHETIC_KIND_RULE_LITERAL
+        synthetic.save(update_fields=["is_synthetic", "synthetic_kind"])
+
+        diagnoses = diagnose_collisions(capture_census())
+        self.assertEqual(len(diagnoses), 1)
+        line = diagnoses[0]["diagnoses"][0]
+        self.assertIn("172.200.255.254", line)
+        self.assertIn("SYNTHESIZED", line)
+        self.assertIn("COLLECTED", line)
+        self.assertIn(AddressObject.SYNTHETIC_KIND_RULE_LITERAL, line)
+
+    def test_the_developer_page_renders_the_collision_detail(self):
+        """Render it, do not just call it - the explainer's 500 was invisible to unit tests."""
+        station, group, point, snapshot = self._setup()
+        self._object(station, snapshot, "any", owner=point,
+                     namespace_type=PolicyObjectNamespace.LOCAL_VSYS)
+        self._object(station, snapshot, "any", owner=point,
+                     namespace_type=PolicyObjectNamespace.BUILTIN)
+
+        response = self.client.get(reverse("developer"))
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        self.assertIn("Stage B is blocked", body)
+        self.assertIn(PolicyObjectNamespace.BUILTIN, body)
 
 
 class SharedScopeAcrossPointsTests(TestCase):

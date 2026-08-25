@@ -53,12 +53,16 @@ DEFAULT_CENSUS_DIR = Path("policy-object-census")
 #: rather than letting stale numbers read as a live result.
 #:
 #: 1: initial.
+#: 4: name_collisions carries rows_detail — the namespace and synthetic flags of each
+#:    colliding row. Without it a collision count says a fault exists but not which kind,
+#:    and the answer is always in the columns the existing per-namespace unique constraint
+#:    allows to differ.
 #: 3: adds name_collisions — the pairs that would violate the Stage B unique constraints.
 #: 2: duplication keyed by (appliance_group, name). Version 1 keyed on
 #:    (namespace_value, name), which is the constant "shared" for every shared-scope
 #:    object, so distinct groups collapsed together and rows_per_object was inflated by
 #:    roughly the number of appliance groups.
-CENSUS_VERSION = 3
+CENSUS_VERSION = 4
 
 SCOPED_MODELS = {
     "AddressObject": AddressObject,
@@ -169,6 +173,25 @@ def _model_census(model, *, has_owner_column: bool) -> dict[str, Any]:
     return census
 
 
+#: Reported for each colliding row. These are exactly the columns the existing
+#: unique(owner, name, namespace_type, namespace_value) constraint permits to differ, plus
+#: the synthetic flags - so between them they identify which kind of fault a collision is.
+COLLISION_DETAIL_FIELDS = (
+    "id",
+    "namespace_type",
+    "namespace_value",
+    "precedence_rank",
+    "is_synthetic",
+    "synthetic_kind",
+)
+
+
+def _collision_detail_fields(model) -> list[str]:
+    """Only the detail columns this model actually has - groups and regions have fewer."""
+    available = {field.name for field in model._meta.get_fields() if hasattr(field, "attname")}
+    return [name for name in COLLISION_DETAIL_FIELDS if name == "id" or name in available]
+
+
 def _name_collisions(model, *, has_owner_column: bool) -> dict[str, Any]:
     """Rows that would violate the Stage B unique constraints, if any.
 
@@ -182,6 +205,7 @@ def _name_collisions(model, *, has_owner_column: bool) -> dict[str, Any]:
     point, where a vsys-scoped object and a vendor object could share a name.
     """
     owners = ["enforcement_point_id"] + (["appliance_group_id"] if has_owner_column else [])
+    detail_fields = _collision_detail_fields(model)
     collisions: dict[str, Any] = {}
     for owner in owners:
         counts = Counter(
@@ -194,10 +218,14 @@ def _name_collisions(model, *, has_owner_column: bool) -> dict[str, Any]:
             for (owner_id, name), count in counts.items()
             if count > 1
         ]
-        collisions[owner] = {
-            "violating_pairs": len(offenders),
-            "examples": sorted(offenders, key=lambda o: -o["rows"])[:10],
-        }
+        examples = sorted(offenders, key=lambda o: -o["rows"])[:10]
+        for example in examples:
+            example["rows_detail"] = list(
+                model.objects.filter(**{owner: example["owner_id"], "name": example["name"]})
+                .order_by("id")
+                .values(*detail_fields)[:10]
+            )
+        collisions[owner] = {"violating_pairs": len(offenders), "examples": examples}
     return collisions
 
 
@@ -380,6 +408,8 @@ def compare_censuses(before: dict[str, Any], after: dict[str, Any]) -> dict[str,
                     f"fail on these; PAN-OS rejects such a configuration, so they indicate a "
                     f"collection or classification fault rather than a real device state."
                 )
+                for detail in _collision_diagnosis(data["examples"]):
+                    result["observations"].append(f"{label}: {detail}")
 
         owner = a.get("by_owner") or {}
         if owner.get("orphaned"):
@@ -405,6 +435,72 @@ def compare_censuses(before: dict[str, Any], after: dict[str, Any]) -> dict[str,
             "rows were rebuilt."
         )
     return result
+
+
+def diagnose_collisions(census: dict[str, Any]) -> list[dict[str, Any]]:
+    """Collision diagnoses for a single census, so the LIVE page can show them.
+
+    compare_censuses() reports these too, but only for a pair of saved snapshots. A
+    collision is current state, not a delta, so requiring a capture to see why one exists
+    puts a snapshot between the reader and an answer they can have immediately.
+    """
+    found: list[dict[str, Any]] = []
+    for label, data in (census.get("models") or {}).items():
+        for owner_field, collisions in (data.get("name_collisions") or {}).items():
+            examples = collisions.get("examples") or []
+            if not collisions.get("violating_pairs"):
+                continue
+            found.append({
+                "model": label,
+                "owner_field": owner_field,
+                "violating_pairs": collisions["violating_pairs"],
+                "diagnoses": _collision_diagnosis(examples),
+                "examples": examples,
+            })
+    return found
+
+
+def _collision_diagnosis(examples: list[dict[str, Any]]) -> list[str]:
+    """Name the fault behind each collision, from the columns that differ.
+
+    A collision always differs in namespace_type or namespace_value - the existing
+    per-namespace unique constraint guarantees it - so the interesting question is which,
+    and whether either row is one we synthesized rather than collected. A synthetic row
+    colliding with a collected one is our own doing and reads very differently from two
+    collected rows colliding, which would mean a device presented something PAN-OS rejects.
+    """
+    lines: list[str] = []
+    for example in examples[:3]:
+        rows = example.get("rows_detail") or []
+        if not rows:
+            continue
+        synthetic = [r for r in rows if r.get("is_synthetic")]
+        collected = [r for r in rows if not r.get("is_synthetic")]
+        shape = " vs ".join(
+            f"{r.get('namespace_type')}/{r.get('namespace_value')}"
+            f"{' [synthetic:' + (r.get('synthetic_kind') or '?') + ']' if r.get('is_synthetic') else ''}"
+            f" rank={r.get('precedence_rank')}"
+            for r in rows[:4]
+        )
+        if synthetic and collected:
+            verdict = (
+                "one row is SYNTHESIZED by us and one was COLLECTED - the device never had "
+                "this collision, we created it. Stage B must either exclude synthetic rows "
+                "or give them their own namespace."
+            )
+        elif synthetic and not collected:
+            verdict = (
+                "every row is SYNTHESIZED - we produced the same object twice. A dedupe bug "
+                "on our side, invisible to the device."
+            )
+        else:
+            verdict = (
+                "every row was COLLECTED, in different namespaces that now share one scope. "
+                "Either the device really presents this (contradicting the measured PAN-OS "
+                "rejection) or the namespace classification is wrong."
+            )
+        lines.append(f"{example['name']} — {shape}. {verdict}")
+    return lines
 
 
 def _delta(before: int | None, after: int | None) -> int | None:

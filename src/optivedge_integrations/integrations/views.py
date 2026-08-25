@@ -26,6 +26,7 @@ from optivedge.views import RightOverlayMixin
 from optivedge_integrations.integrations.forms import ManagementStationForm, NoteForm
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
+    diagnose_collisions,
     normalization_health,
     explain_address_reference,
     compare_censuses,
@@ -1249,6 +1250,7 @@ class DeveloperView(TemplateView):
         context = super().get_context_data(**kwargs)
         context["censuses"] = list_censuses()
         context["live_census"] = capture_census(label="(live, unsaved)")
+        context["live_collisions"] = diagnose_collisions(context["live_census"])
 
         comparison = None
         before_path = self.request.GET.get("before")
