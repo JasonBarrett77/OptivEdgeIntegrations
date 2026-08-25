@@ -399,7 +399,25 @@ address the firewall does not enforce. The general rule is stronger than the syn
 `resolve_rule_address_refs()` must resolve **every** member as a name first, whatever it looks like, since
 reading an IP-shaped member as an address fails silently and completely.
 
-Checking the group matters since shared-scope objects moved there; the point's own rows cannot see them.
+Checking the group matters since shared-scope objects moved there; the EP's own rows cannot see them.
+
+#### Three things are called "synthesis" and only one of them can collide
+
+Confusing them leads to applying the suppression rule above where it does not belong:
+
+| Path | Creates | Name | Can collide with a collected object? |
+|---|---|---|---|
+| rule literal | `AddressObject`, `synthetic_kind=rule_literal` | the literal as written | **yes** — this is the suppression case |
+| negated complement | `AddressObject`, `synthetic_kind=negated_complement` | `__negated_complement__<rule>__<side>` | no — rule-scoped and `__`-prefixed |
+| EDL/FQDN refresh | `AddressObjectResolvedEntry` | none — FK to an existing `AddressObject` | no — it never creates an `AddressObject` |
+
+The **"Refresh EDL/FQDN cache"** action resolves runtime content onto objects that were already
+collected. It matches nothing by name and synthesises no object, so nothing suppresses it and nothing can:
+it must always run, exactly as intended. There is no guarantee that a collected object's value matches
+anything we compute, which is precisely why resolved entries hang off the object rather than replacing it.
+
+Only the rule-literal path shares a namespace with collected objects, and it is the only one where "does an
+object already own this name?" is even a question.
 `rows_per_object` covers only the shared side; this also covers the enforcement point, where a vsys-scoped
 object and a vendor object could share a name.
 
