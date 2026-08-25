@@ -455,21 +455,61 @@ def build_address_lookup_maps(
     return address_objects, address_groups, regions
 
 
+#: Which provenance to record when one literal appears in rules of both kinds. The choice
+#: is cosmetic - both are vsys scope at the same rank, so resolution is unaffected - but it
+#: has to be deterministic, or the row's namespace would depend on rule iteration order.
+LITERAL_NAMESPACE_PREFERENCE = (
+    PolicyObjectNamespace.LOCAL_VSYS,
+    PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE,
+)
+
+
+def _literal_rank(spec: "LiteralAddressObjectSpec") -> int:
+    """Position in LITERAL_NAMESPACE_PREFERENCE; unknown namespaces sort last."""
+    try:
+        return LITERAL_NAMESPACE_PREFERENCE.index(spec.namespace_type)
+    except ValueError:
+        return len(LITERAL_NAMESPACE_PREFERENCE)
+
+
 def realize_literal_address_objects(
     enforcement_point: EnforcementPoint,
     normalized_rules: list[NormalizedSecurityRule],
 ) -> None:
-    existing_keys = {
-        (obj.name, obj.namespace_type, obj.namespace_value)
-        for obj in enforcement_point.address_objects.all()
-    }
-    existing_group_names = {group.name for group in enforcement_point.address_groups.all()}
-    created_specs: set[tuple[str, str, str]] = set()
+    """Materialise inline rule addresses as synthetic AddressObjects, once each.
+
+    A literal is deduplicated **by name alone**, not by (name, namespace). The namespace of
+    a literal records only provenance - local rule versus pushed rule - and provenance is
+    not a precedence level, so two rows for one inline IP are identical in name, value,
+    scope, rank and owner. They are a duplicate, not two candidates to resolve between, and
+    PAN-OS would reject the equivalent configuration.
+
+    Keying on the namespace produced exactly that: `172.200.255.254` typed into both a local
+    and a pushed rule became `local_vsys` and `pushed_vsys_effective` rows on one
+    enforcement point, blocking the Stage B unique constraint on a duplicate we invented.
+
+    Synthesis is also skipped when a **collected** object of that name exists in any
+    namespace, on the point or its group. A rule member is a name reference first; PAN-OS
+    only treats it as an inline address when nothing owns that name. An object legitimately
+    named for an IP is unusual but legal, and synthesising alongside it would manufacture a
+    second collision - this time between something real and something we made up.
+    """
+    group = enforcement_point.appliance_group
+    existing_names = {obj.name for obj in enforcement_point.address_objects.all()}
+    if group is not None:
+        existing_names |= {obj.name for obj in group.address_objects.all()}
+    existing_group_names = {g.name for g in enforcement_point.address_groups.all()}
+    if group is not None:
+        existing_group_names |= {g.name for g in group.address_groups.all()}
+
+    #: name -> spec, keeping the preferred provenance and remembering every one seen.
+    chosen: dict[str, LiteralAddressObjectSpec] = {}
+    namespaces_seen: dict[str, set[str]] = {}
 
     for normalized_rule in normalized_rules:
         for member in [*normalized_rule.source_address_members, *normalized_rule.destination_address_members]:
             raw_value = member.value
-            if raw_value in existing_group_names:
+            if raw_value in existing_group_names or raw_value in existing_names:
                 continue
 
             spec = build_literal_address_object_spec(
@@ -481,34 +521,44 @@ def realize_literal_address_objects(
             if spec is None:
                 continue
 
-            key = (spec.name, spec.namespace_type, spec.namespace_value)
-            if key in existing_keys or key in created_specs:
-                continue
+            namespaces_seen.setdefault(spec.name, set()).add(spec.namespace_type)
+            incumbent = chosen.get(spec.name)
+            if incumbent is None or _literal_rank(spec) < _literal_rank(incumbent):
+                chosen[spec.name] = spec
 
-            AddressObject.objects.create(
-                management_station=enforcement_point.management_station,
-                enforcement_point=enforcement_point,
-                source_snapshot=spec.source_snapshot,
-                config_source=spec.config_source,
-                name=spec.name,
-                namespace_type=spec.namespace_type,
-                namespace_value=spec.namespace_value,
-                precedence_rank=spec.precedence_rank,
-                address_type=spec.address_type,
-                value=spec.value,
-                normalized_value=spec.normalized_value,
-                ipv4_start_int=spec.ipv4_start_int,
-                ipv4_end_int=spec.ipv4_end_int,
-                num_hosts=spec.num_hosts,
-                is_any=False,
-                is_builtin=False,
-                is_synthetic=True,
-                synthetic_kind=AddressObject.SYNTHETIC_KIND_RULE_LITERAL,
-                description="Synthetic literal address reference",
-                raw_object={"synthetic": True, "kind": "rule_literal", "raw_value": raw_value},
-                last_synced_at=spec.source_snapshot.collected_at,
-            )
-            created_specs.add(key)
+    for spec in chosen.values():
+        seen = sorted(namespaces_seen.get(spec.name, {spec.namespace_type}))
+        AddressObject.objects.create(
+            management_station=enforcement_point.management_station,
+            enforcement_point=enforcement_point,
+            source_snapshot=spec.source_snapshot,
+            config_source=spec.config_source,
+            name=spec.name,
+            namespace_type=spec.namespace_type,
+            namespace_value=spec.namespace_value,
+            precedence_rank=spec.precedence_rank,
+            address_type=spec.address_type,
+            value=spec.value,
+            normalized_value=spec.normalized_value,
+            ipv4_start_int=spec.ipv4_start_int,
+            ipv4_end_int=spec.ipv4_end_int,
+            num_hosts=spec.num_hosts,
+            is_any=False,
+            is_builtin=False,
+            is_synthetic=True,
+            synthetic_kind=AddressObject.SYNTHETIC_KIND_RULE_LITERAL,
+            description="Synthetic literal address reference",
+            # `namespaces` keeps what the single namespace_type above has to drop: a literal
+            # appearing in both a local and a pushed rule has both provenances, and the row
+            # can only carry one.
+            raw_object={
+                "synthetic": True,
+                "kind": "rule_literal",
+                "raw_value": spec.name,
+                "namespaces": seen,
+            },
+            last_synced_at=spec.source_snapshot.collected_at,
+        )
 
 
 def effective_in_scope_order(name: str, candidates_by_name: dict, kind: str):

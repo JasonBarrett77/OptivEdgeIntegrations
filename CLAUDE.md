@@ -375,6 +375,21 @@ The three verdicts are not interchangeable:
 - **all synthetic** — we produced the same object twice; a dedupe bug on our side.
 - **all collected** — either the device really presents it, contradicting the measured PAN-OS rejection, or
   the namespace classification is wrong.
+
+The first collision found in real data was **all synthetic**, and its fix is instructive.
+`realize_literal_address_objects()` keyed its dedupe on `(name, namespace_type, namespace_value)`, so
+`172.200.255.254` typed into a local rule *and* a pushed rule became two rows — `local_vsys` and
+`pushed_vsys_effective`, same value, same scope, same rank, same owner. But `literal_namespace()` returns
+those two purely by **provenance**, and provenance is not a precedence level, so they were never two
+candidates to resolve between. **A literal is deduplicated by name alone.** When one appears with both
+provenances, `LITERAL_NAMESPACE_PREFERENCE` picks deterministically (local first — cosmetic, since scope and
+rank are identical either way) and `raw_object["namespaces"]` keeps the full set, because a row can carry
+only one `namespace_type` and dropping the other silently would be worse.
+
+Synthesis is also skipped when a **collected** object of that name exists in any namespace, on the point *or
+its group* — a rule member is a name reference first, and PAN-OS treats it as an inline address only when
+nothing owns the name. Checking the group matters since shared-scope objects moved there; the point's own
+rows cannot see them.
 `rows_per_object` covers only the shared side; this also covers the enforcement point, where a vsys-scoped
 object and a vendor object could share a name.
 

@@ -60,6 +60,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     build_address_lookup_maps,
     first_effective_object,
     literal_namespace,
+    realize_literal_address_objects,
+    NormalizedSecurityRule,
+    NormalizedSecurityRuleMember,
     resolve_rule_address_refs,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
@@ -3792,6 +3795,100 @@ class ScopePrecedenceTests(TestCase):
             self.assertEqual(value, "vsys1")
             self.assertEqual(scope_for(ns), PolicyObjectScope.VSYS)
             self.assertEqual(precedence_for(ns), PolicyObjectPrecedence.VSYS)
+
+
+class RuleLiteralDedupeTests(TestCase):
+    """One inline IP is one address, however many rulebases mention it.
+
+    A literal's namespace records provenance - local rule or pushed rule - and provenance
+    is not a precedence level. Keying the dedupe on it produced two identical rows for
+    172.200.255.254 on a live enforcement point, which blocked the Stage B unique
+    constraint on a duplicate we manufactured.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pan.local")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="grp", group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="9100", hostname="fw-lit")
+        self.point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance_group=self.group, vsys_name="vsys1")
+        self.local_snap = Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(), payload={})
+        self.pushed_snap = Snapshot.objects.create(
+            management_station=self.station, enforcement_point=self.point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload={})
+
+    def _rule(self, snapshot, value):
+        member = NormalizedSecurityRuleMember(
+            model=SecurityRuleSourceAddressRef, value=value, prov="", position=0)
+        return NormalizedSecurityRule(
+            source_snapshot=snapshot, config_source="local", effective_order=0, rule_position=0,
+            name="r", uuid="", action="allow", disabled=False, rule_type="universal",
+            description="", log_start=None, log_end=None, log_setting="",
+            negate_source=False, negate_destination=False, raw_rule={},
+            members=[member], source_address_members=[member], destination_address_members=[],
+            field_provenance_data=[])
+
+    def test_one_literal_in_a_local_and_a_pushed_rule_makes_one_row(self):
+        realize_literal_address_objects(self.point, [
+            self._rule(self.local_snap, "172.200.255.254"),
+            self._rule(self.pushed_snap, "172.200.255.254"),
+        ])
+        rows = self.point.address_objects.filter(name="172.200.255.254")
+        self.assertEqual(rows.count(), 1, "one inline IP is one address")
+
+    def test_the_surviving_row_records_both_provenances(self):
+        """namespace_type can only carry one. Losing the other silently would be worse."""
+        realize_literal_address_objects(self.point, [
+            self._rule(self.pushed_snap, "172.200.255.254"),
+            self._rule(self.local_snap, "172.200.255.254"),
+        ])
+        row = self.point.address_objects.get(name="172.200.255.254")
+        self.assertEqual(row.namespace_type, PolicyObjectNamespace.LOCAL_VSYS)
+        self.assertEqual(
+            row.raw_object["namespaces"],
+            [PolicyObjectNamespace.LOCAL_VSYS, PolicyObjectNamespace.PUSHED_VSYS_EFFECTIVE])
+
+    def test_the_choice_does_not_depend_on_rule_order(self):
+        for rules in ([self.local_snap, self.pushed_snap], [self.pushed_snap, self.local_snap]):
+            self.point.address_objects.all().delete()
+            realize_literal_address_objects(self.point, [self._rule(s, "10.9.9.9") for s in rules])
+            self.assertEqual(
+                self.point.address_objects.get(name="10.9.9.9").namespace_type,
+                PolicyObjectNamespace.LOCAL_VSYS)
+
+    def test_a_collected_object_of_that_name_suppresses_the_literal(self):
+        """A rule member is a name reference first. An object named for an IP is legal."""
+        AddressObject.objects.create(
+            management_station=self.station, enforcement_point=self.point,
+            source_snapshot=self.local_snap, config_source="local", name="172.200.255.254",
+            namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1",
+            precedence_rank=precedence_for(PolicyObjectNamespace.LOCAL_VSYS),
+            address_type=AddressObject.TYPE_IP_NETMASK, value="1.1.1.1/32",
+            last_synced_at=timezone.now())
+
+        realize_literal_address_objects(self.point, [self._rule(self.pushed_snap, "172.200.255.254")])
+        rows = self.point.address_objects.filter(name="172.200.255.254")
+        self.assertEqual(rows.count(), 1)
+        self.assertFalse(rows.get().is_synthetic, "must not shadow a collected object")
+
+    def test_a_shared_scope_object_of_that_name_also_suppresses_it(self):
+        """Shared objects live on the group now, so the point's own rows cannot see them."""
+        AddressObject.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            source_snapshot=self.local_snap, config_source="local", name="172.16.5.5",
+            namespace_type=PolicyObjectNamespace.LOCAL_SHARED, namespace_value="shared",
+            precedence_rank=precedence_for(PolicyObjectNamespace.LOCAL_SHARED),
+            address_type=AddressObject.TYPE_IP_NETMASK, value="2.2.2.2/32",
+            last_synced_at=timezone.now())
+
+        realize_literal_address_objects(self.point, [self._rule(self.local_snap, "172.16.5.5")])
+        self.assertEqual(self.point.address_objects.filter(name="172.16.5.5").count(), 0)
 
 
 class SharedScopeOwnershipTests(TestCase):
