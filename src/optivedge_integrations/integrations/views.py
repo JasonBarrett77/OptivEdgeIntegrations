@@ -26,6 +26,7 @@ from optivedge.views import RightOverlayMixin
 from optivedge_integrations.integrations.forms import ManagementStationForm, NoteForm
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
+    normalization_health,
     explain_address_reference,
     compare_censuses,
     list_censuses,
@@ -38,6 +39,7 @@ from optivedge_integrations.integrations.models import (
     IntegrationEvent,
     IntegrationRun,
     ManagementStation,
+    NormalizationIssue,
     Note,
     SecurityRule,
     Snapshot,
@@ -1309,3 +1311,53 @@ class PolicyObjectCensusCaptureView(View):
                 "owner yet, so this is a pre-migration baseline.",
             )
         return HttpResponseRedirect(reverse("developer"))
+
+
+class NormalizationIssueListView(TemplateView):
+    """What is currently unnormalized, root causes first.
+
+    The shell indicator says only *whether* something is wrong. This says what, and it
+    leads with root causes: one object that fails to normalize makes every rule
+    referencing it fail, and listing those together buries the cause among its own
+    symptoms. Consequences are shown, but after, and grouped under what caused them.
+    """
+
+    template_name = "integrations/normalization_issue_list.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        issues = NormalizationIssue.objects.select_related(
+            "management_station", "enforcement_point", "appliance_group"
+        )
+
+        station_id = self.request.GET.get("management_station")
+        station = ManagementStation.objects.filter(pk=station_id).first() if station_id else None
+        if station is not None:
+            issues = issues.filter(management_station=station)
+
+        context["stations"] = ManagementStation.objects.order_by("hostname", "pk")
+        context["selected_station"] = station
+        context["health"] = normalization_health(station)
+
+        roots = [i for i in issues if not i.is_consequent]
+        consequents = [i for i in issues if i.is_consequent]
+
+        # Group consequences under the root they point at, so the page reads as
+        # "this failed, and here is everything it took with it".
+        by_cause: dict[str, list] = {}
+        for issue in consequents:
+            by_cause.setdefault(issue.related_object_name or "(unknown)", []).append(issue)
+
+        context["root_issues"] = sorted(
+            roots, key=lambda i: (i.severity != "error", i.kind, i.name)
+        )
+        context["consequences_by_cause"] = sorted(
+            by_cause.items(), key=lambda pair: (-len(pair[1]), pair[0])
+        )
+        context["orphan_consequences"] = [
+            issue for issue in consequents
+            if issue.related_object_name and not any(
+                r.name == issue.related_object_name for r in roots
+            )
+        ]
+        return context

@@ -20,6 +20,7 @@ from optivedge_integrations.integrations.views import (
     ManagementStationUpdateView,
     NoteCreateView,
     NoteListView,
+    NormalizationIssueListView,
     NoteUpdateView,
     PolicyObjectCensusCaptureView,
 )
@@ -27,6 +28,12 @@ from optivedge_integrations.integrations.views import (
 urlpatterns = [
     # Hidden operations page - intentionally not registered in app_meta.py's sidebar.
     path("developer/", DeveloperView.as_view(), name="developer"),
+    # Reachable from the shell health indicator, which is the only thing that links here.
+    path(
+        "normalization-issues/",
+        NormalizationIssueListView.as_view(),
+        name="normalization_issue_list",
+    ),
     path(
         "developer/policy-object-census/capture/",
         PolicyObjectCensusCaptureView.as_view(),

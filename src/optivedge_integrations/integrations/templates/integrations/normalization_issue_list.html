@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+
+{% block title %} | Normalization Issues{% endblock %}
+
+{% block content %}
+{% comment %}
+Content templates own their own scrolling - base.html sets overflow-hidden on <body>.
+{% endcomment %}
+<section class="flex h-full w-full min-h-0 min-w-0">
+  <div class="min-h-0 flex-1 overflow-auto">
+    <div class="space-y-5 px-4 py-3">
+
+      <div>
+        <h1 class="text-lg font-semibold text-slate-900">Normalization issues</h1>
+        <p class="mt-1 text-sm text-slate-600">
+          What is currently unnormalized. Replaced on every run, so this clears itself once
+          everything normalizes cleanly.
+        </p>
+      </div>
+
+      <form method="get" class="flex items-center gap-2">
+        <select name="management_station" class="rounded border border-slate-300 px-2 py-1 text-xs">
+          <option value="">All management stations</option>
+          {% for station in stations %}
+          <option value="{{ station.pk }}" {% if selected_station and station.pk == selected_station.pk %}selected{% endif %}>
+            {{ station.hostname }}
+          </option>
+          {% endfor %}
+        </select>
+        <button type="submit" class="rounded bg-slate-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-700">Filter</button>
+      </form>
+
+      {% if health.has_errors %}
+      <div class="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+        <span class="font-semibold">{{ health.root_errors }}</span> root
+        problem{{ health.root_errors|pluralize }},
+        <span class="font-semibold">{{ health.consequent_errors }}</span>
+        consequence{{ health.consequent_errors|pluralize }}.
+        {% if health.warnings %}{{ health.warnings }} warning{{ health.warnings|pluralize }}.{% endif %}
+        Affecting {{ health.affected_enforcement_points }} enforcement point{{ health.affected_enforcement_points|pluralize }}
+        and {{ health.affected_appliance_groups }} appliance group{{ health.affected_appliance_groups|pluralize }}.
+        <div class="mt-1 text-[11px] text-amber-800">
+          Fix the roots. Consequences are rules that failed because something they reference
+          did &mdash; they are symptoms, and they clear when the cause does.
+        </div>
+      </div>
+      {% else %}
+      <div class="rounded border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+        Nothing is unnormalized{% if selected_station %} for {{ selected_station.hostname }}{% endif %}.
+      </div>
+      {% endif %}
+
+      {% if root_issues %}
+      <section class="rounded border border-slate-200 bg-white">
+        <div class="border-b border-slate-200 px-4 py-2">
+          <h2 class="text-sm font-semibold text-slate-900">Root causes</h2>
+        </div>
+        <table class="w-full text-[11px]">
+          <thead class="bg-slate-50 text-slate-600">
+            <tr>
+              <th class="border-b border-slate-200 px-3 py-2 text-left font-medium">Severity</th>
+              <th class="border-b border-slate-200 px-3 py-2 text-left font-medium">Kind</th>
+              <th class="border-b border-slate-200 px-3 py-2 text-left font-medium">Name</th>
+              <th class="border-b border-slate-200 px-3 py-2 text-left font-medium">Owner</th>
+              <th class="border-b border-slate-200 px-3 py-2 text-left font-medium">Kept?</th>
+              <th class="border-b border-slate-200 px-3 py-2 text-left font-medium">Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for issue in root_issues %}
+            <tr>
+              <td class="border-b border-slate-100 px-3 py-1.5 font-mono
+                         {% if issue.severity == 'error' %}font-semibold text-red-800{% else %}text-amber-800{% endif %}">
+                {{ issue.severity }}
+              </td>
+              <td class="border-b border-slate-100 px-3 py-1.5 text-slate-700">{{ issue.kind }}</td>
+              <td class="border-b border-slate-100 px-3 py-1.5 font-mono text-slate-900">{{ issue.name|default:"(unnamed)" }}</td>
+              <td class="border-b border-slate-100 px-3 py-1.5 text-slate-600">{{ issue.owner }}</td>
+              <td class="border-b border-slate-100 px-3 py-1.5 font-mono text-slate-600">{{ issue.disposition }}</td>
+              <td class="border-b border-slate-100 px-3 py-1.5 text-slate-700">
+                {{ issue.reason }}
+                {% if issue.raw_entry %}
+                <details class="mt-1">
+                  <summary class="cursor-pointer text-slate-500">raw entry</summary>
+                  <pre class="mt-1 overflow-x-auto rounded bg-slate-50 p-2 text-[10px] leading-4">{{ issue.raw_entry|pprint }}</pre>
+                </details>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </section>
+      {% endif %}
+
+      {% if consequences_by_cause %}
+      <section class="rounded border border-slate-200 bg-white">
+        <div class="border-b border-slate-200 px-4 py-2">
+          <h2 class="text-sm font-semibold text-slate-900">Consequences</h2>
+          <p class="mt-0.5 text-[11px] text-slate-600">
+            Grouped by what they could not resolve. Fixing the cause clears these.
+          </p>
+        </div>
+        <div class="divide-y divide-slate-100">
+          {% for cause, issues in consequences_by_cause %}
+          <details class="px-4 py-2">
+            <summary class="cursor-pointer text-xs text-slate-800">
+              <span class="font-mono font-medium">{{ cause }}</span>
+              &mdash; {{ issues|length }} rule{{ issues|length|pluralize }} could not resolve it
+            </summary>
+            <ul class="mt-1 space-y-0.5">
+              {% for issue in issues %}
+              <li class="font-mono text-[11px] text-slate-600">{{ issue.name }} <span class="text-slate-400">({{ issue.source }})</span></li>
+              {% endfor %}
+            </ul>
+          </details>
+          {% endfor %}
+        </div>
+      </section>
+      {% endif %}
+
+      {% if orphan_consequences %}
+      <div class="rounded border border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-600">
+        {{ orphan_consequences|length }} consequence{{ orphan_consequences|length|pluralize }} name a cause that is
+        not listed as a root &mdash; the cause is likely owned by another management station, or was filtered out.
+      </div>
+      {% endif %}
+
+    </div>
+  </div>
+</section>
+{% endblock %}

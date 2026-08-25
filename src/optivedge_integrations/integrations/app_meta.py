@@ -8,6 +8,12 @@ URL_MOUNT = {
     "module": "optivedge_integrations.integrations.urls",
 }
 
+#: The shell renders this on every page when it returns something. Deliberately binary
+#: and icon-only - see optivedge.app_registry.health_indicators().
+HEALTH_INDICATOR = {
+    "check": "optivedge_integrations.integrations.diagnostics.health:normalization_indicator",
+}
+
 SIDEBAR_SECTION = [
     {
         "label": "Firewall Integrations",

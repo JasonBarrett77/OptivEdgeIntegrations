@@ -77,6 +77,7 @@ from optivedge_integrations.integrations.diagnostics import (
     capture_census,
     has_normalization_errors,
     normalization_health,
+    normalization_indicator,
     explain_address_reference,
     unmarked_pushed_entries,
     CENSUS_VERSION,
@@ -5072,3 +5073,103 @@ class NormalizationHealthTests(TestCase):
         self.assertTrue(NormalizationIssue.objects.filter(kind="address object").exists(),
                         "the object issue must survive the rule pass")
         self.assertTrue(NormalizationIssue.objects.filter(kind="security rule").exists())
+
+
+class NormalizationIndicatorAndReportTests(TestCase):
+    """The shell indicator and the report it links to.
+
+    The indicator is binary and absent when healthy - its presence is the signal. The
+    report is where counts and severity live, and it leads with root causes so the cause
+    is not buried among its own symptoms.
+    """
+
+    def _broken_point(self, *, rule_count=2):
+        station, group, appliance, point = _create_grouped_enforcement_point(
+            serial_number="9970", appliance_hostname="fw-ind", station_hostname="pan.local",
+            station_type=ManagementStation.StationType.PAN_PANORAMA, group_name="grp-ind")
+        point.in_scope = True
+        point.save()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"shared": {}, "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [{"@name": point.vsys_name, "address": {"entry": [
+                    {"@name": "broken-obj"}]}}]}}]}}})
+        rules = [{"@name": f"rule-{i}", "from": {"member": ["trust"]},
+                  "to": {"member": ["untrust"]}, "source": {"member": ["broken-obj"]},
+                  "destination": {"member": ["any"]}, "application": {"member": ["any"]},
+                  "service": {"member": ["application-default"]}, "action": "allow"}
+                 for i in range(rule_count)]
+        Snapshot.objects.create(
+            management_station=station, appliance_group=group,
+            source_type="show_pushed_shared_policy", collected_at=timezone.now(),
+            payload={"shared": {}})
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {
+                "pre-rulebase": {"security": {"rules": {"entry": rules}}},
+                "post-rulebase": {"security": {"rules": {"entry": []}},
+                                  "default-security-rules": {"rules": {"entry": []}}}}}})
+        normalize_appliance_group_shared_scope(group)
+        normalize_enforcement_point_addresses(point)
+        normalize_enforcement_point_security_rules(point)
+        return station, point
+
+    def test_the_indicator_is_absent_when_nothing_is_wrong(self):
+        self.assertIsNone(normalization_indicator())
+
+    def test_the_indicator_appears_and_carries_no_count_in_the_chrome(self):
+        self._broken_point()
+        indicator = normalization_indicator()
+        self.assertIsNotNone(indicator)
+        self.assertIn("Normalization is incomplete", indicator["label"])
+        self.assertEqual(indicator["url"], reverse("normalization_issue_list"))
+
+    def test_the_shell_renders_the_icon_on_an_unrelated_page(self):
+        """It must show everywhere, not only on pages that know about health."""
+        self._broken_point()
+        response = self.client.get(reverse("management_station_list"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Normalization is incomplete")
+        self.assertContains(response, reverse("normalization_issue_list"))
+
+    def test_the_shell_renders_nothing_when_healthy(self):
+        response = self.client.get(reverse("management_station_list"))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Normalization is incomplete")
+
+    def test_a_broken_health_check_reports_itself_rather_than_hiding(self):
+        """An indicator that fails silently is worse than none - its absence would read
+        as all clear."""
+        from optivedge.app_registry import health_indicators
+        with patch(
+            "optivedge_integrations.integrations.diagnostics.health.has_normalization_errors",
+            side_effect=RuntimeError("boom"),
+        ):
+            indicators = health_indicators()
+        self.assertTrue(any("Health check failed" in i["label"] for i in indicators), indicators)
+
+    def test_the_report_leads_with_roots_and_groups_consequences(self):
+        station, point = self._broken_point(rule_count=2)
+        response = self.client.get(reverse("normalization_issue_list"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Root causes")
+        self.assertContains(response, "broken-obj")
+        self.assertContains(response, "Consequences")
+        self.assertContains(response, "2 rules could not resolve it")
+        self.assertContains(response, "1 root problem")
+
+    def test_the_report_says_so_when_there_is_nothing_wrong(self):
+        response = self.client.get(reverse("normalization_issue_list"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Nothing is unnormalized")
+
+    def test_the_report_filters_by_management_station(self):
+        station, point = self._broken_point()
+        other = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="other.local")
+        response = self.client.get(
+            reverse("normalization_issue_list"), {"management_station": other.pk})
+        self.assertContains(response, "Nothing is unnormalized")

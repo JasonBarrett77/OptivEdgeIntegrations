@@ -56,3 +56,30 @@ def normalization_health(management_station: ManagementStation | None = None) ->
         "affected_appliance_groups": roots.filter(appliance_group__isnull=False)
         .values_list("appliance_group_id", flat=True).distinct().count(),
     }
+
+
+def normalization_indicator() -> dict[str, str] | None:
+    """The shell health indicator, per the app_registry HEALTH_INDICATOR contract.
+
+    Returns None when nothing is wrong, so the shell renders nothing and the indicator's
+    presence is itself the signal. No count: a number invites a threshold, and there is no
+    amount of unnormalized data that is acceptable.
+
+    The label carries the root count for the tooltip only - it explains what the icon
+    means once you hover, without putting a number in the chrome.
+    """
+    from django.urls import reverse
+
+    if not has_normalization_errors():
+        return None
+
+    roots = (
+        NormalizationIssue.objects.filter(
+            severity=NormalizationIssue.Severity.ERROR, is_consequent=False
+        ).count()
+    )
+    subject = "problem" if roots == 1 else "problems"
+    return {
+        "label": f"Normalization is incomplete - {roots} root {subject}. Click for details.",
+        "url": reverse("normalization_issue_list"),
+    }

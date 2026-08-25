@@ -263,6 +263,18 @@ when adding rule context — the wrapper used to rebuild a plain `ValueError` an
 Each pass replaces only its **own kinds**, since both own rows for the same enforcement point and the rule
 pass would otherwise erase what the object pass just recorded.
 
+### Surfacing it — the shell indicator and the report
+
+`app_meta.HEALTH_INDICATOR` points at `diagnostics.health:normalization_indicator`, which returns **None**
+when nothing is wrong. OptivEdge's shell then renders nothing at all, on every page, so the icon's presence
+*is* the signal — there is no count in the chrome, because a number invites a threshold and no amount of
+unnormalized data is acceptable. The root count appears in the tooltip only.
+
+`NormalizationIssueListView` (`/integrations/normalization-issues/`) is where counts and severity live. It
+**leads with root causes** and groups consequences under what they could not resolve, so one failed object
+reads as *"this failed, and here is everything it took with it"* rather than as N separate problems. The
+shell indicator is the only thing that links to it.
+
 `diagnostics.health` exposes the two shapes the UI needs: `has_normalization_errors()` is an `EXISTS` for the
 shell indicator — binary, because a count invites a threshold and no number of unnormalized objects is fine —
 and `normalization_health()` counts for the report, roots separated from consequences.
