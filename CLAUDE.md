@@ -387,9 +387,19 @@ rank are identical either way) and `raw_object["namespaces"]` keeps the full set
 only one `namespace_type` and dropping the other silently would be worse.
 
 Synthesis is also skipped when a **collected** object of that name exists in any namespace, on the point *or
-its group* — a rule member is a name reference first, and PAN-OS treats it as an inline address only when
-nothing owns the name. Checking the group matters since shared-scope objects moved there; the point's own
-rows cannot see them.
+its group*. A rule member is a name reference first — **measured**, not assumed: an object *named*
+`172.200.255.254` holding `10.99.99.99/32` makes a rule sourcing that string compile to `10.99.99.99`, while
+a control member no object owns compiles to itself (OptivEdgeProbe `rule-member-name-beats-literal`). PAN-OS
+accepts both the name and the unrelated value, and nothing in the configuration marks which reading applies.
+
+Note the reasoning runs opposite to the intuition. Suppressing synthesis does **not** assume the collected
+object matches the literal; it is correct *because* they may differ — synthesising
+`172.200.255.254 = 172.200.255.254` beside a collected `172.200.255.254 = 10.99.99.99/32` would record an
+address the firewall does not enforce. The general rule is stronger than the synthesis case:
+`resolve_rule_address_refs()` must resolve **every** member as a name first, whatever it looks like, since
+reading an IP-shaped member as an address fails silently and completely.
+
+Checking the group matters since shared-scope objects moved there; the point's own rows cannot see them.
 `rows_per_object` covers only the shared side; this also covers the enforcement point, where a vsys-scoped
 object and a vendor object could share a name.
 
