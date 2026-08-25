@@ -146,8 +146,42 @@ non-Panorama collection path is completed, that helper is the seam.
 
 `EnforcementPoint.appliance` / `.appliance_group` still carry the two conditional `UniqueConstraint`s (one
 enforcement point per vsys name per owner), which is not expressible through `EnforcementNode` — so
-preserve that guarantee in any replacement. `get_in_scope_*` in `flows.py` `select_related`s
+preserve that guarantee in any replacement. Note what it guarantees: one row per **slot**, not one row per
+firewall (see "`vsys_name` is the key" below). `get_in_scope_*` in `flows.py` `select_related`s
 `management_station` to keep the discriminant from costing a query per point.
+
+### `vsys_name` is the key, and it identifies a slot rather than a firewall
+
+`EnforcementPoint` is keyed on `vsys_name` (`@name`, always `vsysN`), and that is correct — it is the only
+vsys identifier that is always present and always unique. `vsys_display_name` is stored for **display only**;
+never match, join or re-key on it. Three reasons, all measured (OptivEdgeProbe catalog, findings
+`vsys-identity`, `vsys-template-vs-device-group-binding`, `ha-peer-vsys-label-divergence`):
+
+* It is **optional** on the device, and Panorama **synthesises** it from `@name` when absent. We read it from
+  `show devices all`, so an unlabelled vsys arrives as `vsys_display_name="vsys6"` — Panorama's invention,
+  indistinguishable from a real label. The UI then renders `vsys6 / vsys6`.
+* It is often **not device-local state**: when a Panorama template supplies it the device marks the node
+  `@src="tpl"` and refuses to change it locally.
+* Panorama binds **device groups by slot and templates by label**. Relabelling a vsys moves its zones and
+  interfaces to a different slot while its policy stays put. The two identifiers can disagree, and on an HA
+  pair the label can occupy a different slot on each peer.
+
+`vsys_name` identifying a slot rather than a firewall is the part with teeth: a vsys can be deleted and a
+different one created in the same slot, and the device-group assignment follows the slot. There is no
+vendor-supplied durable identity to use instead.
+
+Follow the stance in that catalog — expect best practice, check it, report the deviation — which leaves two
+known gaps here, both in `normalization/panorama.py`:
+
+* `enforcement_point.vsys_display_name = vsys_display_name; save()` overwrites on every sync. A changed
+  display-name is the strongest available signal that a slot changed hands, and it is currently discarded
+  rather than reported. No signal is conclusive, so this should surface for a human, never auto-re-key.
+* A synthesised display-name is stored as though it were configured. Distinguishing "no label" from
+  "labelled `vsys6`" needs the device's own config, not `show devices all`.
+
+**HA pairs:** collecting from the active and treating it as authoritative for the group is right for
+addresses and policy, and wrong for the label-to-slot map, which is per appliance. `observed_vsys_entries`
+is already read per appliance; keep it that way.
 
 `Snapshot` (raw collected JSON payload + metadata) attaches to **exactly one** scope target
 (management_station / appliance_group / appliance / enforcement_point / enforcement_node) — `clean()`
