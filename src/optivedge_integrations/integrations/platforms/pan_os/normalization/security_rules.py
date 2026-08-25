@@ -475,8 +475,23 @@ def _literal_rank(spec: "LiteralAddressObjectSpec") -> int:
 def realize_literal_address_objects(
     enforcement_point: EnforcementPoint,
     normalized_rules: list[NormalizedSecurityRule],
+    address_objects_by_name: dict[str, list[AddressObject]],
+    address_groups_by_name: dict[str, list[AddressGroup]],
+    regions_by_name: dict[str, list[Region]],
 ) -> None:
     """Materialise inline rule addresses as synthetic AddressObjects, once each.
+
+    Runs AFTER the lookup maps are built and BEFORE rules resolve, and both halves of that
+    matter. Building the maps first means this can ask `name_is_owned()` - the same
+    question the resolver asks - instead of approximating it. Running before resolution
+    means the rows it creates are already in the maps when refs resolve against them, so
+    it appends each new row rather than relying on a second map build.
+
+    The maps are mutated in place. That is safe here and would not be inside the per-rule
+    loop: this runs outside any savepoint, so nothing it writes can be rolled back while
+    the map keeps pointing at it. A synthesized row created inside a rule's
+    `transaction.atomic()` would vanish on that rule's failure and leave a dead pk in the
+    map for every later rule to resolve against.
 
     A literal is deduplicated **by name alone**, not by (name, namespace). The namespace of
     a literal records only provenance - local rule versus pushed rule - and provenance is
@@ -494,14 +509,6 @@ def realize_literal_address_objects(
     named for an IP is unusual but legal, and synthesising alongside it would manufacture a
     second collision - this time between something real and something we made up.
     """
-    group = enforcement_point.appliance_group
-    existing_names = {obj.name for obj in enforcement_point.address_objects.all()}
-    if group is not None:
-        existing_names |= {obj.name for obj in group.address_objects.all()}
-    existing_group_names = {g.name for g in enforcement_point.address_groups.all()}
-    if group is not None:
-        existing_group_names |= {g.name for g in group.address_groups.all()}
-
     #: name -> spec, keeping the preferred provenance and remembering every one seen.
     chosen: dict[str, LiteralAddressObjectSpec] = {}
     namespaces_seen: dict[str, set[str]] = {}
@@ -509,7 +516,9 @@ def realize_literal_address_objects(
     for normalized_rule in normalized_rules:
         for member in [*normalized_rule.source_address_members, *normalized_rule.destination_address_members]:
             raw_value = member.value
-            if raw_value in existing_group_names or raw_value in existing_names:
+            if name_is_owned(
+                raw_value, address_objects_by_name, address_groups_by_name, regions_by_name
+            ):
                 continue
 
             spec = build_literal_address_object_spec(
@@ -528,7 +537,15 @@ def realize_literal_address_objects(
 
     for spec in chosen.values():
         seen = sorted(namespaces_seen.get(spec.name, {spec.namespace_type}))
-        AddressObject.objects.create(
+        # Nothing owned this name - name_is_owned() said so - so the map entry is empty and
+        # this append cannot create a second candidate in one scope, which is the state
+        # effective_in_scope_order() raises on. Asserted rather than commented because it
+        # is the invariant that would break silently if the ownership check were relaxed.
+        assert not address_objects_by_name.get(spec.name), (
+            f"synthesizing {spec.name!r} over an existing candidate: the ownership check "
+            f"and the map disagree, which means one of them is wrong"
+        )
+        address_object = AddressObject.objects.create(
             management_station=enforcement_point.management_station,
             enforcement_point=enforcement_point,
             source_snapshot=spec.source_snapshot,
@@ -559,6 +576,9 @@ def realize_literal_address_objects(
             },
             last_synced_at=spec.source_snapshot.collected_at,
         )
+        # In place, so the resolve pass below sees it. Position in the list is irrelevant -
+        # effective_in_scope_order() groups by scope before choosing.
+        address_objects_by_name.setdefault(spec.name, []).append(address_object)
 
 
 def effective_in_scope_order(name: str, candidates_by_name: dict, kind: str):
@@ -620,6 +640,40 @@ def first_effective_region(
     regions_by_name: dict[str, list[Region]],
 ) -> Region | None:
     return effective_in_scope_order(name, regions_by_name, "region")
+
+
+def name_is_owned(
+    name: str,
+    address_objects_by_name: dict[str, list[AddressObject]],
+    address_groups_by_name: dict[str, list[AddressGroup]],
+    regions_by_name: dict[str, list[Region]],
+) -> bool:
+    """Does anything on this enforcement point already answer to `name`?
+
+    The single definition of that question. `resolve_rule_address_refs()` asks it to decide
+    whether to raise `UnresolvedAddressReference`; `realize_literal_address_objects()` asks
+    it to decide whether an IP-shaped member is a literal at all. The two MUST agree - a
+    name the resolver would have matched must never be synthesized over, or the synthetic
+    row shadows a real object and the rule is reported as matching traffic the firewall
+    never matches.
+
+    It previously had two implementations. The synthesis side used a flat set of names
+    gathered from its own queries, which asked a subtly different question ("does a row
+    with this name exist") and omitted regions entirely. Keeping them in one function is
+    the point: any future check that resolution grows is inherited here for free.
+
+    Measured basis: a rule member is a name reference first. An address object *named*
+    `172.200.255.254` and holding `10.99.99.99/32` makes a rule sourcing that string
+    compile to `10.99.99.99` - the name wins, and the literal reading is what PAN-OS falls
+    back to when nothing owns the name (OptivEdgeProbe `rule-member-name-beats-literal`).
+    """
+    return (
+        first_effective_object(name, address_objects_by_name) is not None
+        or first_effective_group(name, address_groups_by_name) is not None
+        or first_effective_region(name, regions_by_name) is not None
+        or name in ISO_3166_1_ALPHA2_REGIONS
+        or name in PANOS_VENDOR_REGION_CODES
+    )
 
 
 def resolve_group_member_object(
@@ -851,6 +905,10 @@ def resolve_rule_address_refs(
             continue
 
         if address_group is None:
+            # Same question name_is_owned() answers, reached from the other side: nothing
+            # matched, so nothing owns the name. A literal that could be synthesized was
+            # already turned into an object by the pre-pass, so reaching here means the
+            # name is genuinely unresolvable.
             raise UnresolvedAddressReference(
                 raw_value, f"unresolved address reference: {raw_value}"
             )
@@ -1239,8 +1297,20 @@ def replace_security_rules(
     enforcement_point.address_objects.filter(
         synthetic_kind=AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT,
     ).delete()
-    realize_literal_address_objects(enforcement_point, normalized_rules)
+    # Maps FIRST, then synthesis, then resolution. The order is the design: synthesis has
+    # to know whether a name is already owned, and the maps are what answer that. Built the
+    # other way round - as this was - synthesis ran before the answer existed and had to
+    # approximate it with a flat set of names, which asked a different question and omitted
+    # regions. realize_literal_address_objects() appends what it creates, so one build
+    # serves both passes.
     address_objects_by_name, address_groups_by_name, regions_by_name = build_address_lookup_maps(enforcement_point)
+    realize_literal_address_objects(
+        enforcement_point,
+        normalized_rules,
+        address_objects_by_name,
+        address_groups_by_name,
+        regions_by_name,
+    )
     sr_ct = ContentType.objects.get_for_model(SecurityRule)
     created_rules: list[SecurityRule] = []
     failures: list[SecurityRuleFailure] = []

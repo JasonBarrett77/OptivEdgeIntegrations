@@ -376,6 +376,40 @@ The three verdicts are not interchangeable:
 - **all collected** — either the device really presents it, contradicting the measured PAN-OS rejection, or
   the namespace classification is wrong.
 
+#### Ordering inside `normalize_enforcement_point_security_rules()` is load-bearing
+
+```
+delete rules + stale negated complements
+build_address_lookup_maps()          <- FIRST
+realize_literal_address_objects()    <- reads the maps, appends what it creates
+per-rule: resolve + persist          <- reads the same maps
+```
+
+Synthesis has to know whether a name is already owned, and the maps are what answer that. Built the other way
+round — as this was — synthesis ran *before* the answer existed and had to approximate it with a flat set of
+names gathered from its own queries: a subtly different question ("does a row with this name exist"), blind
+to regions, and re-hydrating every `AddressObject` row a second time purely to read `.name`.
+
+`name_is_owned()` is now the single definition of that question, called by the synthesis guard and reached
+from the other side by `resolve_rule_address_refs()` before it raises `UnresolvedAddressReference`. **They
+must agree**: a name the resolver would have matched must never be synthesized over, or the synthetic row
+shadows a real object and the rule is reported as matching traffic the firewall never matches. One function
+means any check resolution grows is inherited by synthesis for free.
+
+Two properties keep the in-place map mutation safe, and both would break if synthesis moved:
+
+- It runs **outside any savepoint**. Inside the per-rule `transaction.atomic()`, a synthesized row would
+  vanish on that rule's failure while the map kept pointing at it, leaving a dead pk for every later rule to
+  resolve against — an FK error blamed on the wrong rule, or a reused pk silently naming a different object.
+- It only writes names **nothing owns**, so the map entry is empty and the append cannot create a second
+  candidate in one scope — the state `effective_in_scope_order()` raises on. That is an `assert`, not a
+  comment, because it is what would break silently if the ownership check were relaxed.
+
+Do not move literal synthesis into the per-rule loop. Resolution raises on the *first* miss rather than
+collecting misses, so on-miss synthesis needs a re-resolve after each one, and the obvious loop does not
+terminate when the name is not IP-shaped: `build_literal_address_object_spec()` returns `None` and the
+identical miss recurs.
+
 The first collision found in real data was **all synthetic**, and its fix is instructive.
 `realize_literal_address_objects()` keyed its dedupe on `(name, namespace_type, namespace_value)`, so
 `172.200.255.254` typed into a local rule *and* a pushed rule became two rows — `local_vsys` and

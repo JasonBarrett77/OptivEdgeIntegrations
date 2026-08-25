@@ -60,6 +60,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     build_address_lookup_maps,
     first_effective_object,
     literal_namespace,
+    name_is_owned,
+    build_address_lookup_maps,
+    resolve_rule_address_refs,
     realize_literal_address_objects,
     NormalizedSecurityRule,
     NormalizedSecurityRuleMember,
@@ -3823,6 +3826,12 @@ class RuleLiteralDedupeTests(TestCase):
             management_station=self.station, enforcement_point=self.point,
             source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(), payload={})
 
+    def _realize(self, rules):
+        """Call it the way production does: maps built first, then passed in."""
+        maps = build_address_lookup_maps(self.point)
+        realize_literal_address_objects(self.point, rules, *maps)
+        return maps
+
     def _rule(self, snapshot, value):
         member = NormalizedSecurityRuleMember(
             model=SecurityRuleSourceAddressRef, value=value, prov="", position=0)
@@ -3835,7 +3844,7 @@ class RuleLiteralDedupeTests(TestCase):
             field_provenance_data=[])
 
     def test_one_literal_in_a_local_and_a_pushed_rule_makes_one_row(self):
-        realize_literal_address_objects(self.point, [
+        self._realize([
             self._rule(self.local_snap, "172.200.255.254"),
             self._rule(self.pushed_snap, "172.200.255.254"),
         ])
@@ -3844,7 +3853,7 @@ class RuleLiteralDedupeTests(TestCase):
 
     def test_the_surviving_row_records_both_provenances(self):
         """namespace_type can only carry one. Losing the other silently would be worse."""
-        realize_literal_address_objects(self.point, [
+        self._realize([
             self._rule(self.pushed_snap, "172.200.255.254"),
             self._rule(self.local_snap, "172.200.255.254"),
         ])
@@ -3857,7 +3866,7 @@ class RuleLiteralDedupeTests(TestCase):
     def test_the_choice_does_not_depend_on_rule_order(self):
         for rules in ([self.local_snap, self.pushed_snap], [self.pushed_snap, self.local_snap]):
             self.point.address_objects.all().delete()
-            realize_literal_address_objects(self.point, [self._rule(s, "10.9.9.9") for s in rules])
+            self._realize([self._rule(s, "10.9.9.9") for s in rules])
             self.assertEqual(
                 self.point.address_objects.get(name="10.9.9.9").namespace_type,
                 PolicyObjectNamespace.LOCAL_VSYS)
@@ -3872,7 +3881,7 @@ class RuleLiteralDedupeTests(TestCase):
             address_type=AddressObject.TYPE_IP_NETMASK, value="1.1.1.1/32",
             last_synced_at=timezone.now())
 
-        realize_literal_address_objects(self.point, [self._rule(self.pushed_snap, "172.200.255.254")])
+        self._realize([self._rule(self.pushed_snap, "172.200.255.254")])
         rows = self.point.address_objects.filter(name="172.200.255.254")
         self.assertEqual(rows.count(), 1)
         self.assertFalse(rows.get().is_synthetic, "must not shadow a collected object")
@@ -3887,8 +3896,41 @@ class RuleLiteralDedupeTests(TestCase):
             address_type=AddressObject.TYPE_IP_NETMASK, value="2.2.2.2/32",
             last_synced_at=timezone.now())
 
-        realize_literal_address_objects(self.point, [self._rule(self.local_snap, "172.16.5.5")])
+        self._realize([self._rule(self.local_snap, "172.16.5.5")])
         self.assertEqual(self.point.address_objects.filter(name="172.16.5.5").count(), 0)
+
+    def test_the_new_row_is_added_to_the_map_the_resolve_pass_uses(self):
+        """The maps are built once. If synthesis did not append, resolution would raise
+        UnresolvedAddressReference on a name it had just created."""
+        maps = self._realize([self._rule(self.local_snap, "10.7.7.7")])
+        address_objects_by_name, _groups, _regions = maps
+        self.assertIn("10.7.7.7", address_objects_by_name)
+
+        resolved = resolve_rule_address_refs(
+            members=[NormalizedSecurityRuleMember(
+                model=SecurityRuleSourceAddressRef, value="10.7.7.7", prov="", position=0)],
+            address_objects_by_name=address_objects_by_name,
+            address_groups_by_name=_groups,
+            regions_by_name=_regions,
+        )
+        self.assertEqual(len(resolved), 1)
+        self.assertEqual(resolved[0].address_object.name, "10.7.7.7")
+
+    def test_a_region_name_is_owned_and_is_never_synthesized_over(self):
+        """The flat-set guard omitted regions entirely. name_is_owned does not."""
+        self.assertTrue(name_is_owned("US", {}, {}, {}))
+        self.assertFalse(name_is_owned("10.4.4.4", {}, {}, {}))
+
+    def test_an_address_group_of_that_name_suppresses_the_literal(self):
+        AddressGroup.objects.create(
+            management_station=self.station, enforcement_point=self.point,
+            source_snapshot=self.local_snap, config_source="local", name="10.5.5.5",
+            namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1",
+            precedence_rank=precedence_for(PolicyObjectNamespace.LOCAL_VSYS),
+            last_synced_at=timezone.now())
+
+        self._realize([self._rule(self.local_snap, "10.5.5.5")])
+        self.assertEqual(self.point.address_objects.filter(name="10.5.5.5").count(), 0)
 
 
 class SharedScopeOwnershipTests(TestCase):
