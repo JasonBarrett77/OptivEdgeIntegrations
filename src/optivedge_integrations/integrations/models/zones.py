@@ -62,12 +62,38 @@ class Zone(SyncTrackedModel):
 
     name = models.CharField(max_length=64)
     zone_type = models.CharField(max_length=32, choices=ZONE_TYPE_CHOICES, default=TYPE_UNKNOWN)
-    enable_user_identification = models.BooleanField(default=False)
     zone_protection_profile = models.CharField(max_length=128, blank=True)
     log_setting = models.CharField(max_length=128, blank=True)
+
+    #: Tri-state, unlike every other flag here, because its default is ENABLED. Absent
+    #: means on; only an explicit `no` means off. See the normalizer for the measurements.
     packet_buffer_protection = models.BooleanField(null=True, blank=True)
+
+    #: PAN-OS "Enable L3 & L4 Header Inspection" - element `net-inspection`, which is not
+    #: derivable from that label and was captured from a device rather than guessed.
+    net_inspection = models.BooleanField(default=False)
+
+    # User-ID and Device-ID are structurally identical ACLs and are modelled the same way.
+    # Their members mix literal addresses with address-object and address-group NAMES
+    # (`ag-agent-desktop-services` is a group), stored as written with no resolution -
+    # anything computing the addresses an ACL covers has to resolve them itself.
+    enable_user_identification = models.BooleanField(default=False)
     include_acl = models.JSONField(default=list, blank=True)
     exclude_acl = models.JSONField(default=list, blank=True)
+    enable_device_identification = models.BooleanField(default=False)
+    device_include_acl = models.JSONField(default=list, blank=True)
+    device_exclude_acl = models.JSONField(default=list, blank=True)
+
+    # Pre-NAT Identification. Four independent flags under `network/prenat-identification`,
+    # whose element names bear almost no relation to their UI labels - "Source Lookup" is
+    # `enable-prenat-source-policy-lookup` and "Enable Original ID Downstream" is
+    # `enable-prenat-source-ip-downstream`. Named after the elements, not the labels, so a
+    # reader who greps the payload finds them.
+    prenat_user_identification = models.BooleanField(default=False)
+    prenat_device_identification = models.BooleanField(default=False)
+    prenat_source_policy_lookup = models.BooleanField(default=False)
+    prenat_source_ip_downstream = models.BooleanField(default=False)
+
     raw_entry = models.JSONField(default=dict, blank=True)
 
     class Meta:

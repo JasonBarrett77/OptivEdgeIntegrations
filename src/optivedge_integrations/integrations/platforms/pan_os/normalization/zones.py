@@ -68,6 +68,17 @@ class NormalizedZoneInterface:
     ip_addresses: list[str]
 
 
+#: UI label -> element, for the four flags under `network/prenat-identification`. Kept as
+#: data because the mapping is arbitrary: "Source Lookup" is `enable-prenat-source-policy-
+#: lookup` and "Enable Original ID Downstream" is `enable-prenat-source-ip-downstream`.
+PRENAT_FLAGS = {
+    "prenat_user_identification": "enable-prenat-user-identification",
+    "prenat_device_identification": "enable-prenat-device-identification",
+    "prenat_source_policy_lookup": "enable-prenat-source-policy-lookup",
+    "prenat_source_ip_downstream": "enable-prenat-source-ip-downstream",
+}
+
+
 @dataclass(slots=True)
 class NormalizedZone:
     name: str
@@ -76,8 +87,16 @@ class NormalizedZone:
     zone_protection_profile: str
     log_setting: str
     packet_buffer_protection: bool | None
+    net_inspection: bool
     include_acl: list[str]
     exclude_acl: list[str]
+    enable_device_identification: bool
+    device_include_acl: list[str]
+    device_exclude_acl: list[str]
+    prenat_user_identification: bool
+    prenat_device_identification: bool
+    prenat_source_policy_lookup: bool
+    prenat_source_ip_downstream: bool
     raw_entry: dict[str, Any]
     interfaces: list[NormalizedZoneInterface] = field(default_factory=list)
 
@@ -234,10 +253,19 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
                 break
 
         user_acl = entry.get("user-acl") if isinstance(entry.get("user-acl"), dict) else {}
-        enable_user_identification, _rk, _rv = parse_yes_no_field(
-            entry.get("enable-user-identification"),
-            default_effective=False,
-        )
+        # `device-acl`, NOT `device-id-acl` - measured, and the difference is invisible
+        # until nothing parses.
+        device_acl = entry.get("device-acl") if isinstance(entry.get("device-acl"), dict) else {}
+        prenat = network.get("prenat-identification")
+        prenat = prenat if isinstance(prenat, dict) else {}
+
+        def flag(node: Any) -> bool:
+            """These default OFF, unlike packet-buffer protection - absent means False."""
+            value, _raw_key, _raw_prov = parse_yes_no_field(node, default_effective=False)
+            return value
+
+        enable_user_identification = flag(entry.get("enable-user-identification"))
+        prenat_values = {name: flag(prenat.get(element)) for name, element in PRENAT_FLAGS.items()}
         # `enable-packet-buffer-protection`, NOT `packet-buffer-protection` - PAN-OS
         # rejects the latter outright ("packet-buffer-protection unexpected here"), so the
         # field read here for its first year was one that cannot exist and the value was
@@ -259,8 +287,13 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
                 # None is the normal reading for a real zone, not an edge case. Anything
                 # reporting on this must not render None as disabled - it is the opposite.
                 packet_buffer_protection=None if not packet_buffer_raw else packet_buffer_raw.lower() == "yes",
+                net_inspection=flag(network.get("net-inspection")),
                 include_acl=_members(user_acl.get("include-list")),
                 exclude_acl=_members(user_acl.get("exclude-list")),
+                enable_device_identification=flag(entry.get("enable-device-identification")),
+                device_include_acl=_members(device_acl.get("include-list")),
+                device_exclude_acl=_members(device_acl.get("exclude-list")),
+                **prenat_values,
                 raw_entry=entry,
                 interfaces=[
                     NormalizedZoneInterface(
@@ -300,12 +333,20 @@ def normalize_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
                 source_snapshot=snapshot,
                 name=normalized.name,
                 zone_type=normalized.zone_type,
-                enable_user_identification=normalized.enable_user_identification,
                 zone_protection_profile=normalized.zone_protection_profile,
                 log_setting=normalized.log_setting,
                 packet_buffer_protection=normalized.packet_buffer_protection,
+                net_inspection=normalized.net_inspection,
+                enable_user_identification=normalized.enable_user_identification,
                 include_acl=normalized.include_acl,
                 exclude_acl=normalized.exclude_acl,
+                enable_device_identification=normalized.enable_device_identification,
+                device_include_acl=normalized.device_include_acl,
+                device_exclude_acl=normalized.device_exclude_acl,
+                prenat_user_identification=normalized.prenat_user_identification,
+                prenat_device_identification=normalized.prenat_device_identification,
+                prenat_source_policy_lookup=normalized.prenat_source_policy_lookup,
+                prenat_source_ip_downstream=normalized.prenat_source_ip_downstream,
                 raw_entry=normalized.raw_entry,
             )
             ZoneInterface.objects.bulk_create(

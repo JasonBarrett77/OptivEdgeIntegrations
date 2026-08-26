@@ -840,41 +840,32 @@ Three details worth not re-deriving:
   which `ZoneInterface` documents as meaning "we did not reach them". `ipv6.enabled` is deliberately not
   consulted: the field is what is *configured*, so an address under a disabled stack still shows.
 
-Still unmeasured: DHCP-addressed interfaces, and a non-layer3 zone carrying members (PAN-OS refuses a layer3
-interface in a layer2 zone, so testing it needs a layer2 or virtual-wire interface).
+* **Layer2 and virtual-wire zones carry members and parse correctly** — measured by configuring `ethernet1/2`
+  as layer2 and `ethernet1/3`+`1/4` as a virtual-wire pair. Non-layer3 interfaces are indexed with an *empty*
+  address list rather than omitted, which is the distinction `ZoneInterface` exists to preserve.
 
-**Model gaps** — present in the PAN-OS UI, absent from `Zone`, none collected today. The element names were
-captured from a zone configured in the firewall UI (11.1.13-h3, 2026-08-25) rather than guessed, because
-**not one of them is derivable from its UI label**:
+Still unmeasured: DHCP-addressed interfaces.
+
+**Every UI field is now collected** (migration `0018`). The element names were captured from a zone
+configured in the firewall UI rather than guessed, because **not one is derivable from its label**:
 
 | UI label | Element | Location |
 |---|---|---|
 | Enable Device Identification | `enable-device-identification` | zone entry, beside `enable-user-identification` |
-| Device-ID ACL include/exclude | `device-acl` / `include-list` / `exclude-list` / `member` | zone entry, twin of `user-acl` — note `device-acl`, not `device-id-acl` |
+| Device-ID ACL include/exclude | `device-acl` / `include-list` / `exclude-list` / `member` | zone entry — `device-acl`, **not** `device-id-acl` |
 | Enable L3 & L4 Header Inspection | `net-inspection` | under `network` |
 | Pre-NAT: User-ID | `prenat-identification` / `enable-prenat-user-identification` | under `network` |
 | Pre-NAT: Device-ID | `prenat-identification` / `enable-prenat-device-identification` | under `network` |
 | Pre-NAT: Source Lookup | `prenat-identification` / `enable-prenat-source-policy-lookup` | under `network` |
 | Pre-NAT: Enable Original ID Downstream | `prenat-identification` / `enable-prenat-source-ip-downstream` | under `network` |
 
-Verbatim shape:
+All eight new fields default **off** when absent — the opposite of `packet_buffer_protection`, which is the
+only tri-state on the model.
 
-```json
-"network": {"layer3": {},
-            "net-inspection": "yes",
-            "log-setting": "default",
-            "prenat-identification": {"enable-prenat-user-identification": "yes",
-                                      "enable-prenat-source-policy-lookup": "yes",
-                                      "enable-prenat-device-identification": "yes",
-                                      "enable-prenat-source-ip-downstream": "yes"}},
-"enable-device-identification": "yes",
-"device-acl": {"include-list": {"member": ["99.99.98.0/24", "ag-agent-desktop-services"]},
-               "exclude-list": {"member": ["88.88.88.0/24", "ag-b2b-integration-services-dg"]}}
-```
-
-Note the ACL members mix **literal addresses and address-object/group names** — `ag-agent-desktop-services`
-above is a group. The same is true of the `user-acl` lists already collected, which store them as plain
-strings with no reference resolution.
+`user-acl` and `device-acl` are structurally identical and modelled the same way. Their members **mix literal
+addresses with address-object and address-group names** — `ag-agent-desktop-services` in the captured sample
+is a group. They are stored as written with no reference resolution, so anything computing the addresses an
+ACL covers has to resolve them itself.
 
 ### Known gap — only the address family is normalized into models
 

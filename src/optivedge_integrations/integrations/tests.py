@@ -2801,6 +2801,56 @@ class ZoneNormalizationTests(TestCase):
         # IPv6-only, under layer3 rather than directly on the unit.
         self.assertEqual(index["ethernet1/9"], ["2001:db8:2::1/64"])
 
+    def test_device_id_acl_and_prenat_flags_are_read_from_their_real_elements(self):
+        """Shapes captured from a zone configured in the PAN-OS UI (11.1.13-h3, 2026-08-25).
+
+        Every element here is worth pinning because none is derivable from its UI label:
+        "Enable L3 & L4 Header Inspection" is `net-inspection`, "Source Lookup" is
+        `enable-prenat-source-policy-lookup`, and the Device-ID ACL is `device-acl` rather
+        than `device-id-acl`. A typo in any of them yields a silent False.
+        """
+        payload = {"config": {"devices": {"entry": [{"vsys": {"entry": [{
+            "@name": "vsys1", "zone": {"entry": [{
+                "@name": "scratch_zone",
+                "network": {
+                    "layer3": {},
+                    "net-inspection": "yes",
+                    "log-setting": "default",
+                    "prenat-identification": {
+                        "enable-prenat-user-identification": "yes",
+                        "enable-prenat-source-policy-lookup": "yes",
+                        "enable-prenat-device-identification": "yes",
+                        "enable-prenat-source-ip-downstream": "yes"}},
+                "enable-device-identification": "yes",
+                "device-acl": {
+                    "include-list": {"member": ["99.99.98.0/24", "ag-agent-desktop-services"]},
+                    "exclude-list": {"member": ["88.88.88.0/24", "ag-b2b-integration-services-dg"]}},
+            }]}}]}}]}}}
+
+        zone = build_normalized_zones(payload, "vsys1")[0]
+        self.assertTrue(zone.net_inspection)
+        self.assertTrue(zone.enable_device_identification)
+        self.assertTrue(zone.prenat_user_identification)
+        self.assertTrue(zone.prenat_device_identification)
+        self.assertTrue(zone.prenat_source_policy_lookup)
+        self.assertTrue(zone.prenat_source_ip_downstream)
+        # Members mix literal addresses with address-GROUP names, kept as written.
+        self.assertEqual(zone.device_include_acl, ["99.99.98.0/24", "ag-agent-desktop-services"])
+        self.assertEqual(zone.device_exclude_acl, ["88.88.88.0/24", "ag-b2b-integration-services-dg"])
+        # The User-ID ACL is a separate list and this zone has none - the two must not bleed.
+        self.assertFalse(zone.enable_user_identification)
+        self.assertEqual(zone.include_acl, [])
+
+    def test_the_new_flags_default_to_false_when_absent(self):
+        """Unlike packet-buffer protection, these default OFF - absent means False, and a
+        bare zone must not report Device-ID or Pre-NAT as enabled."""
+        zone = {z.name: z for z in build_normalized_zones(ZONE_MERGED_CONFIG_PAYLOAD, "vsys1")}["dmz"]
+        self.assertFalse(zone.net_inspection)
+        self.assertFalse(zone.enable_device_identification)
+        self.assertFalse(zone.prenat_user_identification)
+        self.assertFalse(zone.prenat_source_ip_downstream)
+        self.assertEqual(zone.device_include_acl, [])
+
     def test_unrecognised_payload_yields_no_zones_instead_of_raising(self):
         """These payload shapes are inferred, not measured - degrade, don't fail the run."""
         for payload in ({}, {"config": "not-a-dict"}, {"config": {"devices": {}}}):
