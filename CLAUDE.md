@@ -818,12 +818,22 @@ Three details worth not re-deriving:
   iteration order of `ZONE_NETWORK_TYPES` cannot matter.
 * **An empty subtree serializes as `"layer2": null`**, so the type check must test *key presence*, not
   truthiness. A truthiness check returns `unknown` for every bare zone.
-* **`packet_buffer_protection` is `None` for almost every real zone, and `None` means ON.** PAN-OS omits the
-  element when it matches the default, and the default is enabled. Confirmed twice: all 19 lab zones show the
-  box ticked in the UI while carrying no element, and a zone configured **through the UI with the box ticked**
-  still wrote no element — while an explicit `yes` set over the API *is* stored. So absence is the default
-  state, not missing data. Do not render it as disabled. (The field also read the wrong element name,
-  `packet-buffer-protection`, until 2026-08-25; PAN-OS rejects that one outright.)
+* **`packet_buffer_protection` is a true tri-state, and `None` means ON.** All three states were driven on a
+  live device (11.1.13-h3, 2026-08-25):
+
+  | Config | Meaning | Field |
+  |---|---|---|
+  | element **absent** | default, which is **enabled** | `None` |
+  | `enable-packet-buffer-protection: no` | explicitly off — what the UI writes when you untick | `False` |
+  | `enable-packet-buffer-protection: yes` | explicitly on | `True` |
+
+  `None` is the normal reading for a real zone, not an edge case: all 19 lab zones show the box ticked in the
+  UI and carry no element. **Never render `None` as disabled** — it is the opposite.
+
+  Note the UI can only produce *absent* or *no*: ticking the box writes nothing, because ticked is the
+  default. So a stored `yes` came from the API, a template, or Panorama — never from a human in the UI. (The
+  field also read the wrong element name, `packet-buffer-protection`, until 2026-08-25; PAN-OS rejects that
+  one outright.)
 
 * **IPv4 and IPv6 sit under different nodes and both are collected.** `ipv6.address.entry[@name]` was not
   read at all until 2026-08-25, so every IPv6 address was dropped and an IPv6-only interface reported none —

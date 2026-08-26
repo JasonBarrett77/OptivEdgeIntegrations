@@ -251,11 +251,13 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
                 enable_user_identification=enable_user_identification,
                 zone_protection_profile=_text(network.get("zone-protection-profile")),
                 log_setting=_text(network.get("log-setting")),
-                # Tri-state on purpose, and None is the COMMON case: PAN-OS omits the
-                # element whenever it matches the default, and the default is ENABLED.
-                # Every zone on the lab device reads None here while the UI shows the box
-                # ticked. So None means "default (on)", not "off" and not "unknown" -
-                # anything reporting on this must not render it as disabled.
+                # Tri-state, all three states measured on a live device:
+                #   absent -> None   the default, which is ENABLED
+                #   "no"   -> False  explicitly off; what the UI writes when you untick
+                #   "yes"  -> True   explicitly on; unreachable from the UI, which writes
+                #                    nothing when ticked because ticked IS the default
+                # None is the normal reading for a real zone, not an edge case. Anything
+                # reporting on this must not render None as disabled - it is the opposite.
                 packet_buffer_protection=None if not packet_buffer_raw else packet_buffer_raw.lower() == "yes",
                 include_acl=_members(user_acl.get("include-list")),
                 exclude_acl=_members(user_acl.get("exclude-list")),
