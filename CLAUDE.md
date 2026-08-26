@@ -823,8 +823,13 @@ Three details worth not re-deriving:
   shows the box ticked. Do not render it as disabled. (The field also read the wrong element name,
   `packet-buffer-protection`, until 2026-08-25; PAN-OS rejects that one outright.)
 
-Still unmeasured: IPv6 addressing, DHCP-addressed interfaces, and a non-layer3 zone carrying members (PAN-OS
-refuses a layer3 interface in a layer2 zone, so testing it needs a layer2 interface).
+* **IPv4 and IPv6 sit under different nodes and both are collected.** `ipv6.address.entry[@name]` was not
+  read at all until 2026-08-25, so every IPv6 address was dropped and an IPv6-only interface reported none —
+  which `ZoneInterface` documents as meaning "we did not reach them". `ipv6.enabled` is deliberately not
+  consulted: the field is what is *configured*, so an address under a disabled stack still shows.
+
+Still unmeasured: DHCP-addressed interfaces, and a non-layer3 zone carrying members (PAN-OS refuses a layer3
+interface in a layer2 zone, so testing it needs a layer2 or virtual-wire interface).
 
 **Model gaps** — present in the PAN-OS UI, absent from `Zone`: the Device-ID ACL (enable + include/exclude
 lists, structurally a twin of the User-ID ACL already modelled), the four Pre-NAT Identification flags

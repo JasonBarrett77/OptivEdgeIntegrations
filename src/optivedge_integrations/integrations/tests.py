@@ -2778,6 +2778,29 @@ class ZoneNormalizationTests(TestCase):
         # More than one address on a single interface is ordinary, not exotic.
         self.assertEqual(index["loopback.1"], ["10.200.1.1/32", "10.200.1.2/32"])
 
+    def test_ipv6_addresses_are_collected_alongside_ipv4(self):
+        """Measured on 11.1.13-h3: IPv4 and IPv6 sit under different nodes.
+
+        Reading only `ip` dropped every IPv6 address, and an IPv6-only interface then
+        reported none at all - which ZoneInterface documents as meaning "we did not reach
+        them", so the loss was invisible.
+        """
+        payload = {"config": {"devices": {"entry": [{"network": {"interface": {
+            "loopback": {"units": {"entry": [{
+                "@name": "loopback.9",
+                "ip": {"entry": [{"@name": "10.201.1.1/32"}]},
+                "ipv6": {"enabled": "yes",
+                         "address": {"entry": [{"@name": "2001:db8:1::1/128"}]}}}]}},
+            "ethernet": {"entry": [{"@name": "ethernet1/9", "layer3": {
+                "ipv6": {"enabled": "yes",
+                         "address": {"entry": [{"@name": "2001:db8:2::1/64"}]}}}}]},
+        }}}]}}}
+
+        index = build_interface_address_index(payload)
+        self.assertEqual(index["loopback.9"], ["10.201.1.1/32", "2001:db8:1::1/128"])
+        # IPv6-only, under layer3 rather than directly on the unit.
+        self.assertEqual(index["ethernet1/9"], ["2001:db8:2::1/64"])
+
     def test_unrecognised_payload_yields_no_zones_instead_of_raising(self):
         """These payload shapes are inferred, not measured - degrade, don't fail the run."""
         for payload in ({}, {"config": "not-a-dict"}, {"config": {"devices": {}}}):

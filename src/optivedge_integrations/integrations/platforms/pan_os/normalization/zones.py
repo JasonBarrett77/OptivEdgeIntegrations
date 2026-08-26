@@ -16,7 +16,7 @@ That was the right call while the shapes were guesses and is now a liability wor
 about - a container type this code has not met would produce silently empty addresses,
 indistinguishable from an interface that genuinely has none (see `ZoneInterface`).
 
-Still **not** measured: IPv6 addressing, DHCP-addressed interfaces, and non-layer3 zones
+Still **not** measured: DHCP-addressed interfaces, and non-layer3 zones
 carrying interface members (PAN-OS refuses to put a layer3 interface in a layer2 zone, so
 that pairing needs a layer2 interface to test).
 
@@ -122,13 +122,32 @@ def _interface_addresses(entry: Any) -> list[str]:
     Layer 3 physical interfaces carry them under `layer3.ip`; vlan/loopback/tunnel units
     carry them under `ip` directly. A DHCP-addressed interface has neither, and is
     correctly reported as having no configured address - the runtime lease is not config.
+
+    IPv4 and IPv6 live under different nodes and both are collected, IPv4 first. Measured
+    on 11.1.13-h3, an interface with both reports:
+
+        {"ip":   {"entry": [{"@name": "10.201.1.1/32"}]},
+         "ipv6": {"enabled": "yes", "address": {"entry": [{"@name": "2001:db8:1::1/128"}]}}}
+
+    Reading only `ip` - as this did until 2026-08-25 - drops every IPv6 address silently,
+    and an IPv6-only interface then reports no addresses at all, which `ZoneInterface`
+    documents as indistinguishable from an interface that genuinely has none.
+
+    `ipv6.enabled` is deliberately NOT consulted: this field is what is *configured*, and a
+    configured address under a disabled stack is still worth showing. It does mean an
+    address here is not proof the interface answers on it.
     """
     if not isinstance(entry, dict):
         return []
     layer3 = entry.get("layer3")
-    if isinstance(layer3, dict):
-        return _ip_entry_names(layer3.get("ip"))
-    return _ip_entry_names(entry.get("ip"))
+    holder = layer3 if isinstance(layer3, dict) else entry
+    ipv6 = holder.get("ipv6")
+    addresses = _ip_entry_names(holder.get("ip"))
+    if isinstance(ipv6, dict):
+        for address in _ip_entry_names(ipv6.get("address")):
+            if address not in addresses:
+                addresses.append(address)
+    return addresses
 
 
 def _unit_entries(node: Any) -> list[dict[str, Any]]:
