@@ -800,18 +800,36 @@ Related: Panorama's `merge-with-candidate-cfg` push option (off by default, and 
 commits the device candidate as part of a policy push — which turns this contamination from transient into
 permanent.
 
-### Known gap — `Zone.packet_buffer_protection` reads an element that does not exist
+### Zone normalization is measured, not inferred (2026-08-25)
 
-**Not yet addressed. Measured 2026-08-25.** `normalization/zones.py` reads
-`network.get("packet-buffer-protection")`. PAN-OS 11.1.13-h3 rejects that element outright on a fresh zone —
-`packet-buffer-protection unexpected here` — and accepts **`enable-packet-buffer-protection`**. The field can
-therefore never be populated and is permanently `None`. One-word fix; left with the rest of the zone work.
+`normalization/zones.py` was validated against a PA-5220 (11.1.13-h3) by creating each shape live. Its
+docstring used to warn that the payload shapes were guesses; that is no longer true.
 
-The rest of `zones.py` **was** validated against the lab and is correct: the zone path, all six type subtrees
-(mutually exclusive by silent replacement, so "first subtree found wins" is safe), `zone-protection-profile`
-and `log-setting` under `network`, `enable-user-identification` at entry level, `user-acl` member lists, both
-interface-address shapes (`layer3.ip` for physicals, `ip` for units), and `unique(enforcement_point, name)`.
-Its module docstring still says the shapes are inferred — that is now stale except for the item above.
+Confirmed correct: the zone path; all six type subtrees; `zone-protection-profile` and `log-setting` under
+`network`; `enable-user-identification` at entry level; `user-acl` member lists; both interface-address
+shapes; every container under `network.interface` (ethernet, aggregate-ethernet, loopback, tunnel, vlan);
+multiple addresses on one interface; and `unique(enforcement_point, name)` — `transit` exists in five vsys at
+once, so per-EP scoping is load-bearing rather than decorative.
+
+Three details worth not re-deriving:
+
+* **The type subtrees are mutually exclusive by silent REPLACEMENT.** Adding `layer2` to a zone that had
+  `layer3` deletes `layer3` — PAN-OS does not reject it. So "first subtree found wins" is safe and the
+  iteration order of `ZONE_NETWORK_TYPES` cannot matter.
+* **An empty subtree serializes as `"layer2": null`**, so the type check must test *key presence*, not
+  truthiness. A truthiness check returns `unknown` for every bare zone.
+* **`packet_buffer_protection` is `None` for almost every real zone, and `None` means ON.** PAN-OS omits the
+  element when it matches the default and the default is enabled — every lab zone reads `None` while the UI
+  shows the box ticked. Do not render it as disabled. (The field also read the wrong element name,
+  `packet-buffer-protection`, until 2026-08-25; PAN-OS rejects that one outright.)
+
+Still unmeasured: IPv6 addressing, DHCP-addressed interfaces, and a non-layer3 zone carrying members (PAN-OS
+refuses a layer3 interface in a layer2 zone, so testing it needs a layer2 interface).
+
+**Model gaps** — present in the PAN-OS UI, absent from `Zone`: the Device-ID ACL (enable + include/exclude
+lists, structurally a twin of the User-ID ACL already modelled), the four Pre-NAT Identification flags
+(User-ID, Device-ID, Source Lookup, Enable Original ID Downstream), and Enable L3 & L4 Header Inspection.
+None is collected today.
 
 ### Known gap — only the address family is normalized into models
 

@@ -2647,7 +2647,7 @@ ZONE_MERGED_CONFIG_PAYLOAD = {
                                         "layer3": {"member": ["ethernet1/1", "ethernet1/2.100"]},
                                         "zone-protection-profile": "zp-strict",
                                         "log-setting": "log-fwd",
-                                        "packet-buffer-protection": "yes",
+                                        "enable-packet-buffer-protection": "yes",
                                     },
                                     "enable-user-identification": "yes",
                                     "user-acl": {
@@ -2717,17 +2717,66 @@ class ZoneNormalizationTests(TestCase):
         self.assertEqual([i.name for i in zones["l2-segment"].interfaces], ["ethernet1/3"])
 
     def test_absent_packet_buffer_protection_is_unset_rather_than_disabled(self):
-        """Not reported and reported-as-no are different facts; don't collapse them."""
+        """Not reported and reported-as-no are different facts; don't collapse them.
+
+        None is the COMMON case, not an edge one: PAN-OS omits the element when it matches
+        the default, and the default is enabled. Every zone on the lab device reads None
+        while the UI shows the box ticked.
+        """
         zones = {zone.name: zone for zone in build_normalized_zones(ZONE_MERGED_CONFIG_PAYLOAD, "vsys1")}
 
         self.assertIsNone(zones["dmz"].packet_buffer_protection)
         self.assertFalse(zones["dmz"].enable_user_identification)
+
+    def test_the_legacy_element_name_is_not_read(self):
+        """`packet-buffer-protection` is what this read for its first year, and PAN-OS
+        rejects that element outright - "packet-buffer-protection unexpected here" on a
+        fresh zone. Measured 11.1.13-h3. A payload carrying the wrong name must not
+        satisfy the field, or the bug comes back invisibly."""
+        payload = {"config": {"devices": {"entry": [{"vsys": {"entry": [{
+            "@name": "vsys1", "zone": {"entry": [{
+                "@name": "z", "network": {"layer3": None, "packet-buffer-protection": "yes"}}]}}]}}]}}}
+        zone = build_normalized_zones(payload, "vsys1")[0]
+        self.assertIsNone(zone.packet_buffer_protection)
 
     def test_single_member_is_read_as_one_interface_not_characters(self):
         """xmltodict collapses a one-element member list to a bare string."""
         zones = {zone.name: zone for zone in build_normalized_zones(ZONE_MERGED_CONFIG_PAYLOAD, "vsys1")}
 
         self.assertEqual([i.name for i in zones["dmz"].interfaces], ["loopback.1"])
+
+    def test_every_container_shape_a_real_device_uses_is_indexed(self):
+        """Measured on a PA-5220 (11.1.13-h3), 2026-08-25, with all five created live.
+
+        Two container shapes exist and both are real:
+
+            ethernet / aggregate-ethernet   entry -> layer3 -> ip, and layer3 -> units
+            loopback / tunnel / vlan        units directly on the container, ip on the unit
+
+        The second was written from the schema and had never met a real payload. It is
+        also the one that fails silently: an unhandled container yields no addresses, which
+        is indistinguishable from an interface that has none.
+        """
+        payload = {"config": {"devices": {"entry": [{"network": {"interface": {
+            "aggregate-ethernet": {"entry": [{"@name": "ae1", "layer3": {
+                "ip": {"entry": [{"@name": "10.200.4.1/24"}]},
+                "units": {"entry": [{"@name": "ae1.10", "tag": "10",
+                                     "ip": {"entry": [{"@name": "10.200.5.1/24"}]}}]}}}]},
+            "loopback": {"units": {"entry": [{"@name": "loopback.1", "ip": {"entry": [
+                {"@name": "10.200.1.1/32"}, {"@name": "10.200.1.2/32"}]}}]}},
+            "tunnel": {"units": {"entry": [{"@name": "tunnel.1",
+                                            "ip": {"entry": [{"@name": "10.200.2.1/32"}]}}]}},
+            "vlan": {"units": {"entry": [{"@name": "vlan.1",
+                                          "ip": {"entry": [{"@name": "10.200.3.1/24"}]}}]}},
+        }}}]}}}
+
+        index = build_interface_address_index(payload)
+        self.assertEqual(index["ae1"], ["10.200.4.1/24"])
+        self.assertEqual(index["ae1.10"], ["10.200.5.1/24"])
+        self.assertEqual(index["tunnel.1"], ["10.200.2.1/32"])
+        self.assertEqual(index["vlan.1"], ["10.200.3.1/24"])
+        # More than one address on a single interface is ordinary, not exotic.
+        self.assertEqual(index["loopback.1"], ["10.200.1.1/32", "10.200.1.2/32"])
 
     def test_unrecognised_payload_yields_no_zones_instead_of_raising(self):
         """These payload shapes are inferred, not measured - degrade, don't fail the run."""

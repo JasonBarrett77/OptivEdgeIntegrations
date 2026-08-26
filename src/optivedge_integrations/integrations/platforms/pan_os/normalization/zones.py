@@ -5,14 +5,20 @@ Zones and interface addresses both come out of the already-collected
 (`devices.entry.vsys.entry[@name=V].zone`), while interface addresses are device-wide
 (`devices.entry.network.interface`) and are joined onto the zone by interface name.
 
-**The payload shapes here are inferred from the PAN-OS configuration schema, not
-measured against a device** - unlike the object-scope rules in CLAUDE.md, which were
-established by direct measurement. That is why nothing in this module raises on a shape
-it does not recognise: it degrades to "no zones" or "no addresses" instead. An
-unrecognised shape here costs a display-only page some rows, whereas raising would fail
-the whole renormalization of an enforcement point over a page nothing else depends on.
-Verify against a real device before anything starts *depending* on this data - assessment
-controls especially.
+**Validated against a PA-5220 (11.1.13-h3) on 2026-08-25.** The shapes below were
+originally inferred from the PAN-OS schema; they have since been measured, including the
+zone path, all six type subtrees, both interface-address shapes, and every container under
+`network.interface` (ethernet, aggregate-ethernet, loopback, tunnel, vlan). One inferred
+field was wrong - see `enable-packet-buffer-protection` below.
+
+Nothing here raises on an unrecognised shape: it degrades to "no zones" or "no addresses".
+That was the right call while the shapes were guesses and is now a liability worth knowing
+about - a container type this code has not met would produce silently empty addresses,
+indistinguishable from an interface that genuinely has none (see `ZoneInterface`).
+
+Still **not** measured: IPv6 addressing, DHCP-addressed interfaces, and non-layer3 zones
+carrying interface members (PAN-OS refuses to put a layer3 interface in a layer2 zone, so
+that pairing needs a layer2 interface to test).
 
 `show config merged` is the firewall's local config merged with Panorama *template*
 config. Network and zone configuration is exactly what templates carry, so unlike policy
@@ -213,7 +219,11 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
             entry.get("enable-user-identification"),
             default_effective=False,
         )
-        packet_buffer_raw = _text(network.get("packet-buffer-protection"))
+        # `enable-packet-buffer-protection`, NOT `packet-buffer-protection` - PAN-OS
+        # rejects the latter outright ("packet-buffer-protection unexpected here"), so the
+        # field read here for its first year was one that cannot exist and the value was
+        # permanently None. Measured on 11.1.13-h3.
+        packet_buffer_raw = _text(network.get("enable-packet-buffer-protection"))
 
         zones.append(
             NormalizedZone(
@@ -222,8 +232,11 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
                 enable_user_identification=enable_user_identification,
                 zone_protection_profile=_text(network.get("zone-protection-profile")),
                 log_setting=_text(network.get("log-setting")),
-                # Tri-state on purpose: unset means the device did not report the field,
-                # which is not the same as it being off.
+                # Tri-state on purpose, and None is the COMMON case: PAN-OS omits the
+                # element whenever it matches the default, and the default is ENABLED.
+                # Every zone on the lab device reads None here while the UI shows the box
+                # ticked. So None means "default (on)", not "off" and not "unknown" -
+                # anything reporting on this must not render it as disabled.
                 packet_buffer_protection=None if not packet_buffer_raw else packet_buffer_raw.lower() == "yes",
                 include_acl=_members(user_acl.get("include-list")),
                 exclude_acl=_members(user_acl.get("exclude-list")),
