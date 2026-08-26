@@ -506,7 +506,9 @@ content block a full-height flex container, so a page that just emits a tall `<d
 with no scrollbar. Wrap it the way `enforcement_point_detail_content.html` does — a
 `flex h-full w-full min-h-0 min-w-0` section around a `min-h-0 flex-1 overflow-auto` div.
 
-**Test the developer page by rendering it, not by calling the function.** The explainer's own tests all
+**Test the developer page by rendering it, not by calling the function.** (This and the
+other method lessons in this file are consolidated in OptivEdgeProbe
+`catalog/procedures/establish-a-fact.md`, which is the canonical list — add new ones there.) The explainer's own tests all
 called `explain_address_reference()` directly, so the template was never exercised with an explanation
 present and it 500'd on first real use. The view's `try/except` cannot help — a template error happens after
 the view returns. Note also that Django resolves a `default:` filter argument **eagerly**, so
