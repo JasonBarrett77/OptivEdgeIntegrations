@@ -819,8 +819,10 @@ Three details worth not re-deriving:
 * **An empty subtree serializes as `"layer2": null`**, so the type check must test *key presence*, not
   truthiness. A truthiness check returns `unknown` for every bare zone.
 * **`packet_buffer_protection` is `None` for almost every real zone, and `None` means ON.** PAN-OS omits the
-  element when it matches the default and the default is enabled — every lab zone reads `None` while the UI
-  shows the box ticked. Do not render it as disabled. (The field also read the wrong element name,
+  element when it matches the default, and the default is enabled. Confirmed twice: all 19 lab zones show the
+  box ticked in the UI while carrying no element, and a zone configured **through the UI with the box ticked**
+  still wrote no element — while an explicit `yes` set over the API *is* stored. So absence is the default
+  state, not missing data. Do not render it as disabled. (The field also read the wrong element name,
   `packet-buffer-protection`, until 2026-08-25; PAN-OS rejects that one outright.)
 
 * **IPv4 and IPv6 sit under different nodes and both are collected.** `ipv6.address.entry[@name]` was not
@@ -831,10 +833,38 @@ Three details worth not re-deriving:
 Still unmeasured: DHCP-addressed interfaces, and a non-layer3 zone carrying members (PAN-OS refuses a layer3
 interface in a layer2 zone, so testing it needs a layer2 or virtual-wire interface).
 
-**Model gaps** — present in the PAN-OS UI, absent from `Zone`: the Device-ID ACL (enable + include/exclude
-lists, structurally a twin of the User-ID ACL already modelled), the four Pre-NAT Identification flags
-(User-ID, Device-ID, Source Lookup, Enable Original ID Downstream), and Enable L3 & L4 Header Inspection.
-None is collected today.
+**Model gaps** — present in the PAN-OS UI, absent from `Zone`, none collected today. The element names were
+captured from a zone configured in the firewall UI (11.1.13-h3, 2026-08-25) rather than guessed, because
+**not one of them is derivable from its UI label**:
+
+| UI label | Element | Location |
+|---|---|---|
+| Enable Device Identification | `enable-device-identification` | zone entry, beside `enable-user-identification` |
+| Device-ID ACL include/exclude | `device-acl` / `include-list` / `exclude-list` / `member` | zone entry, twin of `user-acl` — note `device-acl`, not `device-id-acl` |
+| Enable L3 & L4 Header Inspection | `net-inspection` | under `network` |
+| Pre-NAT: User-ID | `prenat-identification` / `enable-prenat-user-identification` | under `network` |
+| Pre-NAT: Device-ID | `prenat-identification` / `enable-prenat-device-identification` | under `network` |
+| Pre-NAT: Source Lookup | `prenat-identification` / `enable-prenat-source-policy-lookup` | under `network` |
+| Pre-NAT: Enable Original ID Downstream | `prenat-identification` / `enable-prenat-source-ip-downstream` | under `network` |
+
+Verbatim shape:
+
+```json
+"network": {"layer3": {},
+            "net-inspection": "yes",
+            "log-setting": "default",
+            "prenat-identification": {"enable-prenat-user-identification": "yes",
+                                      "enable-prenat-source-policy-lookup": "yes",
+                                      "enable-prenat-device-identification": "yes",
+                                      "enable-prenat-source-ip-downstream": "yes"}},
+"enable-device-identification": "yes",
+"device-acl": {"include-list": {"member": ["99.99.98.0/24", "ag-agent-desktop-services"]},
+               "exclude-list": {"member": ["88.88.88.0/24", "ag-b2b-integration-services-dg"]}}
+```
+
+Note the ACL members mix **literal addresses and address-object/group names** — `ag-agent-desktop-services`
+above is a group. The same is true of the `user-acl` lists already collected, which store them as plain
+strings with no reference resolution.
 
 ### Known gap — only the address family is normalized into models
 
