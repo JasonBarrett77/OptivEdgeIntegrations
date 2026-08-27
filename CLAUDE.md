@@ -26,6 +26,14 @@ the `deployment_template/` engagement generator, the offline wheel bundle) for t
 dependencies, the `integrations` app label, packaging rules — and defers to OptivEdge's for the rest. Read both
 before changing anything that affects how downstream projects consume this package.
 
+Vendor reading guides live in `src/optivedge_integrations/integrations/docs/`, partitioned by **API
+surface** (`docs/<vendor>/<api-surface>/`). They record how to read a vendor's configuration without
+getting a plausible wrong answer — which source silently omits what, which parameter is ignored rather
+than rejected, which absent key means "on". That is knowledge that cuts across modules, so it belongs
+neither in a docstring nor here: this file stays architecture, boundaries and model semantics, and points
+at them. `docs/README.md` explains the partition rule and why the manager/managed relationship is
+deliberately not in the directory tree. Start at `docs/palo-alto/pan-os/read-config-sources.md`.
+
 ## Commands
 
 Editable install for local development. `optivedge` must be installed alongside it, and this cannot be one
@@ -154,7 +162,7 @@ firewall (see "`vsys_name` is the key" below). `get_in_scope_*` in `flows.py` `s
 
 `EnforcementPoint` is keyed on `vsys_name` (`@name`, always `vsysN`), and that is correct — it is the only
 vsys identifier that is always present and always unique. `vsys_display_name` is stored for **display only**;
-never match, join or re-key on it. Three reasons, all measured (OptivEdgeProbe catalog, findings
+never match, join or re-key on it. Three reasons, all measured (OptivEdgeProbe `archive/catalog/findings/`:
 `vsys-identity`, `vsys-template-vs-device-group-binding`, `ha-peer-vsys-label-divergence`):
 
 * It is **optional** on the device, and Panorama **synthesises** it from `@name` when absent. We read it from
@@ -508,7 +516,8 @@ with no scrollbar. Wrap it the way `enforcement_point_detail_content.html` does 
 
 **Test the developer page by rendering it, not by calling the function.** (This and the
 other method lessons in this file are consolidated in OptivEdgeProbe
-`catalog/procedures/establish-a-fact.md`, which is the canonical list — add new ones there.) The explainer's own tests all
+`archive/catalog/procedures/establish-a-fact.md` — worth reading before measuring anything,
+though it is now frozen: new lessons go here, beside the code they bear on.) The explainer's own tests all
 called `explain_address_reference()` directly, so the template was never exercised with an explanation
 present and it 500'd on first real use. The view's `try/except` cannot help — a template error happens after
 the view returns. Note also that Django resolves a `default:` filter argument **eagerly**, so
@@ -787,6 +796,11 @@ with nothing staged, `candidate == running` byte for byte, and `merged` is then 
 
 1. **Detect, don't reconstruct.** `sha(show config running) == sha(show config candidate)` — byte-identical
    when clean, divergent the moment anything is staged. No diffing, per device, two extra op calls.
+   `check pending-changes` is the cheaper alternative — one call, returns yes/no, exists on both
+   Panorama and firewalls — but it is **journal-based, not a candidate-vs-running diff**: an edit
+   followed by its own reversal still reports dirty until a revert. So it cannot prove two configs
+   equal, only that nobody has touched anything. Over-reporting is the safe direction here, and it
+   is a configure-mode command dispatched as `type=op`.
 2. On a dirty candidate, prefer stamping the snapshot and raising a `NormalizationIssue` over refusing the
    sync: it is usually one admin mid-edit, most of the config is still fine, and the health indicator already
    exists to carry the signal.

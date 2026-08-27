@@ -1,4 +1,13 @@
-"""Panorama-specific normalization helpers."""
+"""Panorama-specific normalization helpers.
+
+Topology here is built from `show devices all`. **`show devicegroups` is a second,
+unconsumed Panorama source** and worth knowing about: it returns device-group membership
+*and* a per-device `shared-policy-md5sum`, which is the only observed signal for whether a
+device's pushed policy is current. Two cautions, both measured: it does not exist on a
+firewall, and `shared-policy-md5sum` was seen twice under a single device entry with the
+same value, so it needs `force_list` treatment rather than being read as a scalar. See
+`docs/palo-alto/pan-os/read-config-sources.md`.
+"""
 
 from __future__ import annotations
 

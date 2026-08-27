@@ -20,4 +20,5 @@ where = ["src"]
 [tool.setuptools.package-data]
 "optivedge_integrations.integrations" = [
     "templates/**/*.html",
+    "docs/**/*.md",
 ]
