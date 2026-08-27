@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 
 
 DEFAULT_TIMEOUT = (5.0, 30.0)
+#: Sent as User-Agent on every PAN-OS API call, so it lands in the customer's
+#: device logs. Defined once because it used to be a literal repeated at 21 call
+#: sites, which is how two stale product names drifted in.
+DEFAULT_USER_AGENT = "OptivEdgeIntegrations/1.0"
 _DEFAULT_FORCE_LIST = ("entry", "member")
 SHOW_CLOCK_COMMAND = "<show><clock/></show>"
 REDACTED = "[REDACTED]"
@@ -178,7 +182,7 @@ class PANSession(requests.Session):
         target: str | None = None,
         verify: bool | str = True,
         timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-        user_agent: str = "AegisGo/1.0",
+        user_agent: str = DEFAULT_USER_AGENT,
     ) -> None:
         super().__init__()
 
@@ -222,7 +226,7 @@ class PANSession(requests.Session):
         target: str | None = None,
         verify: bool | str = True,
         timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-        user_agent: str = "OptivAegis/1.0",
+        user_agent: str = DEFAULT_USER_AGENT,
     ) -> PANSessionOpenResult:
         """
         Open a usable PANSession.
@@ -710,7 +714,7 @@ def open_session(
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     target: str | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANSession:
     """
     Open a PANSession for a ManagementStation.

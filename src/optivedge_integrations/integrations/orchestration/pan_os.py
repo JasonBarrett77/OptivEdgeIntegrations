@@ -8,6 +8,7 @@ from typing import Callable
 from optivedge_integrations.integrations.models import ManagementStation
 from optivedge_integrations.integrations.platforms.pan_os.flows import (
     DEFAULT_TIMEOUT,
+    DEFAULT_USER_AGENT,
     PANOSInScopeRefreshCollection,
     refresh_in_scope_configuration_snapshots,
 )
@@ -28,7 +29,7 @@ def refresh_panorama_in_scope_data(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSIntegrationRefreshResult:
     """Run the PAN-OS in-scope refresh, then rebuild integration-level derived data."""
 

@@ -57,6 +57,7 @@ from optivedge_integrations.integrations.platforms.pan_os.persistence import (
 )
 from optivedge_integrations.integrations.platforms.pan_os.session import (
     DEFAULT_TIMEOUT,
+    DEFAULT_USER_AGENT,
     PANSession,
     open_session,
 )
@@ -313,7 +314,7 @@ def collect_and_persist(
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     target: str | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSPersistedCollection:
     session = open_session(
         management_station,
@@ -333,7 +334,7 @@ def collect_persist_and_normalize(
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     target: str | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSProcessedCollection:
     session = open_session(
         management_station,
@@ -357,7 +358,7 @@ def collect_appliance_and_persist(
     collector: Callable[[PANSession], PANOSCollectedResponse],
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSPersistedCollection:
     session = open_session(
         appliance.management_station,
@@ -414,7 +415,7 @@ def collect_appliance_merged_config(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSPersistedCollection:
     return collect_appliance_and_persist(
         appliance,
@@ -430,7 +431,7 @@ def collect_appliance_predefined_address_lists(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> list[PANOSPersistedCollection]:
     """Collect PAN-OS's predefined (vendor-shipped) IP block list and URL list catalogs for
     one appliance. Appliance-wide, not vsys-scoped, so one session covers both calls."""
@@ -452,7 +453,7 @@ def collect_appliance_group_pushed_shared_policy(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSPersistedCollection:
     appliance = resolve_group_collection_appliance(appliance_group)
     session = open_session(
@@ -471,7 +472,7 @@ def collect_enforcement_point_pushed_shared_policy(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSPersistedCollection:
     appliance = resolve_enforcement_point_collection_appliance(enforcement_point)
     session = open_session(
@@ -639,7 +640,7 @@ def collect_in_scope_configuration_snapshots(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSInScopeConfigCollection:
     appliances = get_in_scope_appliances(management_station)
     appliance_groups = get_in_scope_appliance_groups(management_station)
@@ -777,7 +778,7 @@ def refresh_in_scope_configuration_snapshots(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSInScopeRefreshCollection:
     with transaction.atomic():
         inventory = collect_persist_and_normalize(
@@ -805,7 +806,7 @@ def collect_appliance_fqdn_cache(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSPersistedCollection:
     session = open_session(
         appliance.management_station,
@@ -845,7 +846,7 @@ def collect_enforcement_point_external_lists(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> list[PANOSPersistedCollection]:
     """Collect every candidate EDL for one enforcement point (vsys).
 
@@ -890,7 +891,7 @@ def refresh_in_scope_dynamic_content(
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
-    user_agent: str = "AegisGo/1.0",
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> PANOSDynamicContentRefreshResult:
     """Collect and normalize runtime EDL/FQDN resolved content for a station's in-scope
     appliances/enforcement points.

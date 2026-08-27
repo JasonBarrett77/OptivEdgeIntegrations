@@ -1,7 +1,7 @@
 """PAN-OS persistence package.
 
 This package owns raw response persistence for collected PAN-OS data, such as
-management-station snapshots. Normalization into AegisGo domain models should
+management-station snapshots. Normalization into OptivEdge domain models should
 remain a separate concern, even when endpoint-specific routing lives nearby.
 """
 

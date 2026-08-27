@@ -1,6 +1,6 @@
 """PAN-OS normalization package.
 
-This package owns translation from vendor-specific PAN-OS payloads into AegisGo
+This package owns translation from vendor-specific PAN-OS payloads into OptivEdge
 domain models. Raw response persistence should remain a separate concern.
 """
 
