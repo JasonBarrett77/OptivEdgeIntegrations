@@ -53,10 +53,11 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     icmp_disabled = models.BooleanField(default=False)
     snmp_disabled = models.BooleanField(default=True)
 
+    #: The MGT plane's permitted-source list as collected. Whether that list is acceptable
+    #: is a verdict, and verdicts belong to the consumer - see ManagementInterface /
+    #: PermittedSource for the per-surface model OptivEdgeAssessments assesses.
     permitted_ip_values = models.JSONField(default=list, blank=True)
     permitted_ip_count = models.PositiveIntegerField(default=0)
-    has_permitted_ip_restrictions = models.BooleanField(default=False)
-    has_unrestricted_permitted_ips = models.BooleanField(default=False)
 
     login_banner = models.TextField(blank=True)
     idle_timeout_minutes = models.PositiveIntegerField(default=60)
@@ -69,8 +70,6 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
             models.Index(fields=["management_station"]),
             models.Index(fields=["appliance_group"]),
             models.Index(fields=["ha_required"]),
-            models.Index(fields=["has_permitted_ip_restrictions"]),
-            models.Index(fields=["has_unrestricted_permitted_ips"]),
         ]
         constraints = [
             models.UniqueConstraint(

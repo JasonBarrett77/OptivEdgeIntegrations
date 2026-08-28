@@ -52,6 +52,9 @@ class ManagementInterface(SyncTrackedModel):
         "integrations.Snapshot", on_delete=models.CASCADE,
         related_name="management_interfaces")
 
+    #: `plane` and `interface_name` together identify the surface. How it is NAMED in a
+    #: report - "MGT", "Aux-1", "ethernet1/1" - is a consumer's choice, not stored here;
+    #: OptivEdgeAssessments composes it. This model stores what was collected and stops.
     plane = models.CharField(max_length=16, choices=PLANE_CHOICES)
     #: Empty for the deviceconfig planes, which are not named interfaces. For a data-plane
     #: surface this is the interface, e.g. "ethernet1/1" - and it is what a report names.
@@ -82,15 +85,7 @@ class ManagementInterface(SyncTrackedModel):
         ]
 
     def __str__(self) -> str:
-        return f"{self.appliance} / {self.display_name}"
-
-    @property
-    def display_name(self) -> str:
-        """How a report names this surface. 'MGT', 'Aux-1', or the interface name."""
-        if self.plane == self.PLANE_DATAPLANE:
-            return self.interface_name or "(unnamed interface)"
-        return {self.PLANE_MGT: "MGT", self.PLANE_AUX1: "Aux-1",
-                self.PLANE_AUX2: "Aux-2"}.get(self.plane, self.plane)
+        return f"{self.appliance} / {self.plane}{f':{self.interface_name}' if self.interface_name else ''}"
 
     def clean(self) -> None:
         if self.appliance.management_station_id != self.management_station_id:

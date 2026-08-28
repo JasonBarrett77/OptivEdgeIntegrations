@@ -2062,8 +2062,6 @@ class DeviceConfigurationNormalizationTests(TestCase):
         self.assertTrue(profile.telnet_disabled)
         self.assertFalse(profile.ssh_disabled)
         self.assertEqual(profile.permitted_ip_values, ["10.10.10.0/24"])
-        self.assertTrue(profile.has_permitted_ip_restrictions)
-        self.assertFalse(profile.has_unrestricted_permitted_ips)
         self.assertEqual(profile.login_banner, "Authorized users only.")
         self.assertEqual(profile.idle_timeout_minutes, 10)
 
@@ -2130,8 +2128,6 @@ class DeviceConfigurationNormalizationTests(TestCase):
         self.assertFalse(profile.https_disabled)
         self.assertFalse(profile.ssh_disabled)
         self.assertTrue(profile.snmp_disabled)
-        self.assertTrue(profile.has_permitted_ip_restrictions)
-        self.assertTrue(profile.has_unrestricted_permitted_ips)
         self.assertEqual(profile.idle_timeout_minutes, 60)
 
     def test_normalize_enforcement_point_security_rules_persists_rules_with_edl_objects(self):
@@ -5553,12 +5549,12 @@ class ManagementInterfaceNormalizationTests(TestCase):
         })
 
         surfaces = normalize_management_interfaces(appliance)
-        by_name = {s.display_name: s for s in surfaces}
+        by_name = {(s.interface_name or s.plane): s for s in surfaces}
         self.assertEqual(
-            sorted(by_name), ["Aux-1", "MGT", "ethernet1/1", "ethernet1/1.10", "loopback"])
+            sorted(by_name), ["aux-1", "ethernet1/1", "ethernet1/1.10", "loopback", "mgt"])
 
         # MGT: one v4 entry with an interval and a description, one v6 with neither
-        mgt = list(by_name["MGT"].permitted_sources.all())
+        mgt = list(by_name["mgt"].permitted_sources.all())
         self.assertEqual([s.value for s in mgt], ["10.0.0.0/8", "2001:db8::/32"])
         self.assertEqual(mgt[0].description, "corp")
         self.assertEqual(mgt[0].family, 4)
@@ -5583,7 +5579,7 @@ class ManagementInterfaceNormalizationTests(TestCase):
                 "@name": "ethernet1/9", "layer3": {"ip": {"entry": {"@name": "10.1.1.1/24"}}}}}}},
         })
         surfaces = normalize_management_interfaces(appliance)
-        self.assertEqual([s.display_name for s in surfaces], ["MGT"])
+        self.assertEqual([s.plane for s in surfaces], ["mgt"])
 
     def test_renormalizing_replaces_rather_than_accumulates(self):
         appliance = self._appliance()

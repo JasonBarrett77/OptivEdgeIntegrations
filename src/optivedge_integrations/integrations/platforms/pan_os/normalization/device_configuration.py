@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import ipaddress
 from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
@@ -50,8 +49,6 @@ class NormalizedDeviceConfigurationProfile:
     snmp_disabled: bool
     permitted_ip_values: list[str]
     permitted_ip_count: int
-    has_permitted_ip_restrictions: bool
-    has_unrestricted_permitted_ips: bool
     login_banner: str
     idle_timeout_minutes: int
     raw_profile: dict[str, Any]
@@ -102,31 +99,6 @@ def entry_names(node: Any) -> list[str]:
         return [str(value).strip() for value in node if str(value).strip()]
     text = str(node).strip()
     return [text] if text else []
-
-
-def value_is_unrestricted(value: str) -> bool:
-    normalized = value.strip()
-    if not normalized:
-        return False
-    if normalized == "0.0.0.0/0":
-        return True
-    if "-" in normalized:
-        start_text, end_text = [part.strip() for part in normalized.split("-", 1)]
-        try:
-            start = int(ipaddress.IPv4Address(start_text))
-            end = int(ipaddress.IPv4Address(end_text))
-        except ipaddress.AddressValueError:
-            return False
-        return start == 0 and end == 4_294_967_295
-    try:
-        network = ipaddress.ip_network(normalized, strict=False)
-    except ValueError:
-        return False
-    return (
-        isinstance(network, ipaddress.IPv4Network)
-        and int(network.network_address) == 0
-        and int(network.broadcast_address) == 4_294_967_295
-    )
 
 
 def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormalizedCollection:
@@ -234,8 +206,6 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
 
     permitted_ip_values = entry_names(system.get("permitted-ip"))
     permitted_ip_count = len(permitted_ip_values)
-    has_permitted_ip_restrictions = permitted_ip_count > 0
-    has_unrestricted_permitted_ips = any(value_is_unrestricted(v) for v in permitted_ip_values)
 
     login_banner, login_banner_rk, login_banner_rv = scalar_value(system.get("login-banner"))
     idle_timeout_minutes, idle_timeout_rk, idle_timeout_rv = parse_integer_field(
@@ -260,8 +230,6 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         snmp_disabled=snmp_disabled,
         permitted_ip_values=permitted_ip_values,
         permitted_ip_count=permitted_ip_count,
-        has_permitted_ip_restrictions=has_permitted_ip_restrictions,
-        has_unrestricted_permitted_ips=has_unrestricted_permitted_ips,
         login_banner=login_banner,
         idle_timeout_minutes=idle_timeout_minutes,
         raw_profile=deviceconfig,
@@ -304,8 +272,6 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "snmp_disabled": normalized.snmp_disabled,
                 "permitted_ip_values": normalized.permitted_ip_values,
                 "permitted_ip_count": normalized.permitted_ip_count,
-                "has_permitted_ip_restrictions": normalized.has_permitted_ip_restrictions,
-                "has_unrestricted_permitted_ips": normalized.has_unrestricted_permitted_ips,
                 "login_banner": normalized.login_banner,
                 "idle_timeout_minutes": normalized.idle_timeout_minutes,
                 "raw_profile": normalized.raw_profile,
