@@ -58,6 +58,15 @@ class ManagementInterface(SyncTrackedModel):
     interface_name = models.CharField(max_length=64, blank=True)
     #: The interface-management-profile bound to this interface. Data plane only; a surface
     #: exists on the data plane ONLY because a profile is bound, so this is never empty there.
+    #:
+    #: Deliberately a NAME rather than a foreign key to a profile model. PAN-OS profiles are
+    #: named, reusable objects and one may be bound to many interfaces, so an
+    #: InterfaceManagementProfile model would be the faithful shape - it was designed and
+    #: then not built, because no control needs to query the profile as a thing. Every
+    #: question so far is asked of the surface: what is THIS interface exposed to. Promoting
+    #: it later is additive - a model, a FK, and a normalizer that already reads the profile
+    #: node to populate PermittedSource. Do that when a control asks "which interfaces does
+    #: this profile expose", and not before.
     profile_name = models.CharField(max_length=64, blank=True)
 
     class Meta:
