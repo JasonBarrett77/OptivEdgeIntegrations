@@ -12,6 +12,8 @@ from django.urls import reverse
 from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
+    ManagementInterface,
+    PermittedSource,
     AddressGroup,
     AddressObject,
     AddressObjectResolvedEntry,
@@ -70,6 +72,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     pushed_shared,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
+    normalize_management_interfaces,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.zones import (
     build_interface_address_index,
@@ -5489,3 +5494,113 @@ class NormalizationIndicatorAndReportTests(TestCase):
         response = self.client.get(
             reverse("normalization_issue_list"), {"management_station": other.pk})
         self.assertContains(response, "Nothing is unnormalized")
+
+
+class ManagementInterfaceNormalizationTests(TestCase):
+    """Every management surface on one appliance, from one merged-config snapshot.
+
+    The payload shapes here are the ones the payload contract records, including the two
+    that bite: a leaf arriving as {'#text': ..., '@loc': ...} rather than a bare string, and
+    vlan/loopback carrying the profile with NO layer3 node in the path.
+    """
+
+    def _appliance(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.mgmt-if",
+        )
+        return Appliance.objects.create(
+            management_station=station, serial_number="SERIAL-MGMT-IF", hostname="fw-mgmt-if")
+
+    def _snapshot(self, appliance, device_entry):
+        return Snapshot.objects.create(
+            management_station=appliance.management_station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": device_entry}}},
+        )
+
+    def test_every_surface_becomes_its_own_row(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "deviceconfig": {"system": {
+                "permitted-ip": {"entry": [
+                    {"@name": "10.0.0.0/8", "description": "corp"},
+                    {"@name": "2001:db8::/32"},
+                ]},
+                "aux-1": {"permitted-ip": {"entry": {"@name": "192.168.5.5"}}},
+            }},
+            "network": {
+                "profiles": {"interface-management-profile": {"entry": [
+                    {"@name": "mgmt-open"},
+                    {"@name": "mgmt-tight", "permitted-ip": {"entry": {"@name": "172.16.0.0/12"}}},
+                ]}},
+                "interface": {
+                    "ethernet": {"entry": [
+                        {"@name": "ethernet1/1", "layer3": {
+                            # a leaf carrying provenance rather than a bare string
+                            "interface-management-profile": {"@loc": "tpl", "#text": "mgmt-tight"},
+                            "units": {"entry": {"@name": "ethernet1/1.10",
+                                                "interface-management-profile": "mgmt-open"}},
+                        }},
+                        {"@name": "ethernet1/2", "layer3": {}},
+                    ]},
+                    # the trap: no layer3 node in the path
+                    "loopback": {"interface-management-profile": "mgmt-open"},
+                },
+            },
+        })
+
+        surfaces = normalize_management_interfaces(appliance)
+        by_name = {s.display_name: s for s in surfaces}
+        self.assertEqual(
+            sorted(by_name), ["Aux-1", "MGT", "ethernet1/1", "ethernet1/1.10", "loopback"])
+
+        # MGT: one v4 entry with an interval and a description, one v6 with neither
+        mgt = list(by_name["MGT"].permitted_sources.all())
+        self.assertEqual([s.value for s in mgt], ["10.0.0.0/8", "2001:db8::/32"])
+        self.assertEqual(mgt[0].description, "corp")
+        self.assertEqual(mgt[0].family, 4)
+        self.assertEqual(mgt[0].ipv4_start_int, int(ipaddress.IPv4Address("10.0.0.0")))
+        self.assertEqual(mgt[1].family, 6)
+        self.assertIsNone(mgt[1].ipv4_start_int)
+
+        # the provenance-wrapped leaf resolved to the profile name
+        self.assertEqual(by_name["ethernet1/1"].profile_name, "mgmt-tight")
+        self.assertEqual([s.value for s in by_name["ethernet1/1"].permitted_sources.all()],
+                         ["172.16.0.0/12"])
+
+        # a profile with no permitted-ip yields a surface with NO sources - unrestricted
+        self.assertEqual(by_name["loopback"].permitted_sources.count(), 0)
+        self.assertEqual(by_name["ethernet1/1.10"].permitted_sources.count(), 0)
+
+    def test_an_interface_without_a_profile_is_not_a_surface(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "deviceconfig": {"system": {}},
+            "network": {"interface": {"ethernet": {"entry": {
+                "@name": "ethernet1/9", "layer3": {"ip": {"entry": {"@name": "10.1.1.1/24"}}}}}}},
+        })
+        surfaces = normalize_management_interfaces(appliance)
+        self.assertEqual([s.display_name for s in surfaces], ["MGT"])
+
+    def test_renormalizing_replaces_rather_than_accumulates(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"deviceconfig": {"system": {
+            "permitted-ip": {"entry": {"@name": "10.0.0.1"}}}}})
+        normalize_management_interfaces(appliance)
+        normalize_management_interfaces(appliance)
+        self.assertEqual(ManagementInterface.objects.filter(appliance=appliance).count(), 1)
+        self.assertEqual(PermittedSource.objects.count(), 1)
+
+    def test_an_unparseable_source_is_kept_with_no_family(self):
+        """Undetermined is a verdict, so the row must survive with its family null."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"deviceconfig": {"system": {
+            "permitted-ip": {"entry": {"@name": "not-an-address"}}}}})
+        surface = normalize_management_interfaces(appliance)[0]
+        source = surface.permitted_sources.get()
+        self.assertEqual(source.value, "not-an-address")
+        self.assertIsNone(source.family)
+        self.assertIsNone(source.ipv4_start_int)

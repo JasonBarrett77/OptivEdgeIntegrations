@@ -17,6 +17,11 @@ from .collected import (
 )
 from .events import IntegrationEvent, IntegrationRun
 from .device_configuration import DeviceConfigurationProfile
+from .management_interface import (
+    ManagementInterface,
+    PermittedSource,
+    parse_permitted_source,
+)
 from .normalization import NormalizationIssue
 from .notes import Note
 from .zones import Zone, ZoneInterface
@@ -74,6 +79,9 @@ __all__ = [
     "IntegrationRun",
     "ManagementStation",
     "DeviceConfigurationProfile",
+    "ManagementInterface",
+    "PermittedSource",
+    "parse_permitted_source",
     "NormalizationIssue",
     "Note",
     "PolicyObjectBase",
