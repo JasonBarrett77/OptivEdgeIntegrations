@@ -32,6 +32,45 @@ Entry shape:
 
 ---
 
+## 2026-08-27/28 — interface management profiles, from schema to connection
+
+**Did:** Enumerated interface-management-profile attachment in the CLI corpus, then probed
+every candidate node with action=complete on a PA-5220 and an Azure PA-VM. Drove every
+permitted-ip form against both management planes on the candidate config and reverted.
+Enumerated the field sets of all ten layer-3 attachment points. Then committed for real:
+bound a profile to ethernet1/1 and attempted IPv4 connections across five permitted-ip
+states. Cross-checked against Palo Alto's Interface Mgmt web-interface help.
+
+**Found:** Nine attachment points, layer 3 only; vlan, loopback and tunnel carry the profile
+with no layer3 node in the path. IPv6 accepted on both planes, ranges and object names
+rejected on both, `description` accepted only under deviceconfig/system. An empty profile
+stores as a bare entry, so all eleven services default absent — the opposite polarity to
+deviceconfig's `disable-*` keys. By connection: no list means any routable source; a
+non-empty list restricts whatever family its entries are; an IPv6-only list denies IPv4
+outright, and adding a matching v4 range reopens it. There is no runtime witness for a
+data-plane surface — `cfg.net` holds management-plane ports only.
+
+**Landed:** `network/read-an-interface-management-profile.md` and
+`network/read-a-layer3-interface-field-map.md`; edits to
+`management/read-device-configuration.md`, `policy/read-a-security-rule.md` and the
+repository `CLAUDE.md`. OptivEdgeProbe gained `reference/panos-payload-contract.json`, and
+per-command payload facts went onto the commands' own records in `cli-commands.jsonl`.
+OptivEdgeIntegrations gained ManagementInterface, PermittedSource and their normalizer;
+OptivEdgeAssessments gained the management-surface control target and its `exposure` field.
+MGMT-002 runs end to end.
+
+**Corrected mid-flight:** three claims that did not survive re-checking — `cellular` marked
+unmeasured without being probed, `ha` reported as absent when it is present but childless,
+and an IPv6-only list predicted to leave IPv4 open when it denies it. All three were
+negatives taken from an instrument nobody had characterised, which is now a technique note
+rather than three separate accidents.
+
+**Open:** whether `0.0.0.0/0` alongside populated entries is ignored here as it is on MGT.
+No connection was ever attempted over IPv6 — the v6 rows establish what a v6 entry does to
+IPv4 reachability and nothing about v6 reachability itself. The v6 mechanism is inferred:
+the compiled ACL is legible only on the management plane, and reading it there would have
+meant setting MGT to IPv6-only.
+
 ## 2026-08-27 — provenance of everything above this line
 
 **Did:** Migrated eleven vendor reading guides into this directory from OptivEdgeProbe's

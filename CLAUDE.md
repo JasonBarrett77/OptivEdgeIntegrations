@@ -924,6 +924,26 @@ Both helpers now build the production shape, enforcement point on the group:
 Do not reintroduce an enforcement point whose `appliance` is set directly; nothing in production does that,
 and it silently disables the pushed-shared path.
 
+### Management surfaces are a second model, not more fields
+
+`DeviceConfigurationProfile` models one appliance's management-plane settings — services,
+banner, idle timeout — and is one row per appliance. It does **not** model administrative
+*surfaces*: three exist on the management side alone (MGT, aux-1, aux-2), and a fourth axis
+lives entirely outside `deviceconfig`, since any layer-3 data-plane interface may carry an
+`interface-management-profile`.
+
+`ManagementInterface` (`models/management_interface.py`) is the row for those, one per
+surface, because a finding has to name the door it found open — "allowed to `ethernet1/1`",
+not "allowed". `PermittedSource` holds its literal source restrictions; PAN-OS rejects
+address objects, groups, hostnames and ranges on both planes, so nothing there resolves.
+`normalize_management_interfaces()` populates all four planes from one merged-config
+snapshot, and the traversal is a data list rather than a branch because vlan, loopback and
+tunnel carry the profile with **no `layer3` node in the path** — a uniform walk misses them.
+
+Services are deliberately absent from that model. The two planes disagree about both the
+service set and the polarity of an absent key, and no control has needed them yet. See
+`docs/palo-alto/pan-os/network/read-an-interface-management-profile.md`.
+
 ### Observability model (`models/events.py`)
 
 `IntegrationRun` (one row per sync attempt, `station`/`appliance` scope, `succeeded`/`partial`/`failed`)

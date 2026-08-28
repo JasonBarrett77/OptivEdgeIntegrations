@@ -79,7 +79,11 @@ otherwise identical documents differ.
 
 Before treating a collection as fact, ask the device: `<check><pending-changes/></check>`.
 `yes` means what was just read includes edits nobody has committed. Do not use the presence
-of `dirtyId` attributes for this.
+of `dirtyId` attributes for this: `show config merged` contains uncommitted content **and
+carries no `dirtyId` markers at all**. Measured by staging one edit — it appears in `merged`,
+is absent from `running`, and neither carries a marker. The attributes are real, and an
+`action=get` against a dirty candidate shows them on the edited node and its ancestors, but
+the source collection actually reads strips them. The marker exists and never reaches us.
 
 ## When writing a rule
 

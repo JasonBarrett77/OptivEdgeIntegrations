@@ -39,6 +39,8 @@ Filing any of them under a plane would hide them from the other two.
 |---|---|
 | `read-a-zone.md` | Zone data, without inverting a default or mistaking a group for an address. |
 | `read-an-interface.md` | The four places an interface lives, and which question each one answers. |
+| `read-an-interface-management-profile.md` | The second management plane: which data-plane interfaces are administrative surfaces, and who may reach them. |
+| `read-a-layer3-interface-field-map.md` | Which element backs each field of the Ethernet Interface dialog, and what a blank one means. |
 
 `management/` — how the device is administered
 

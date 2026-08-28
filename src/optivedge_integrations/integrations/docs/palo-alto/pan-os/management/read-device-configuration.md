@@ -4,6 +4,18 @@
 
 *Established against the lab — PA-5220 ×2 (11.1.13-h3), PA-VM (11.2.3), Panorama (11.2.5-h1) — through 2026-08-26. Re-verify after a PAN-OS upgrade.*
 
+## `deviceconfig/system` is not the whole management plane
+
+A data-plane interface carrying an `interface-management-profile` is a second
+administrative surface, with its own services and its own permitted-source list, configured
+nowhere near here — see `../network/read-an-interface-management-profile.md`. **Neither
+guide answers "is this device administratively exposed" on its own.**
+
+The two planes also disagree about what silence means. Keys here are negative
+(`disable-http`) and absent means the service is **on**; interface-profile keys are positive
+(`http`) and absent means **off**. Reading one with the other's assumption inverts every
+service.
+
 ## Never infer a management service from the config subtree alone
 
 `deviceconfig/system/service` holds only **negative** keys (`disable-telnet`,
@@ -168,6 +180,28 @@ When reporting on management exposure, say so explicitly: `permitted-ip` restric
 management only. The firewall's connection to Panorama is device-initiated and unaffected, so
 a fully locked-down `permitted-ip` still leaves Panorama-mediated management available. It is
 also the reliable way back from a lockout.
+
+## What a permitted-ip entry may hold
+
+Driven against a live device, form by form, on both planes:
+
+| form | this plane | interface profile |
+|---|---|---|
+| IPv4 host, CIDR, `/32`, `0.0.0.0/0` | accepted | accepted |
+| IPv6 host and CIDR | **accepted** | **accepted** |
+| IPv4 range `a-b` | rejected | rejected |
+| address-object or group name | rejected | rejected |
+| a `<description>` child | **accepted** | **rejected** |
+
+So every entry is a literal — nothing needs resolving, unlike zone `user-acl` members which
+genuinely do mix names in. IPv6 is first class, and any consumer treating the list as
+IPv4-only mis-reads a v6-restricted device.
+
+`description` is the single field the two planes do not share, which a shared model must
+make nullable. **Unmeasured:** whether any deployment populates it; no lab capture has one.
+
+A write containing one invalid entry rejects the whole element, so a stored list never holds
+an entry PAN-OS considers invalid.
 
 ## Distinguish absent from empty, and pick your action deliberately
 
