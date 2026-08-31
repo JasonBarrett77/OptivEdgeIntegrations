@@ -5571,6 +5571,26 @@ class ManagementInterfaceNormalizationTests(TestCase):
         self.assertEqual(by_name["loopback"].permitted_sources.count(), 0)
         self.assertEqual(by_name["ethernet1/1.10"].permitted_sources.count(), 0)
 
+    def test_an_empty_units_element_does_not_raise(self):
+        """<units/> parses to None, so a default on .get() never applies. Real configs carry
+        these; the fixtures above do not, which is how it reached the lab before it was caught."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "deviceconfig": {"system": {}},
+            "network": {
+                "profiles": {"interface-management-profile": {"entry": {"@name": "p"}}},
+                "interface": {
+                    "loopback": {"units": None, "interface-management-profile": "p"},
+                    "ethernet": {"entry": {"@name": "ethernet1/3",
+                                           "layer3": {"units": None,
+                                                      "interface-management-profile": "p"}}},
+                },
+            },
+        })
+        surfaces = normalize_management_interfaces(appliance)
+        self.assertEqual(sorted(s.interface_name or s.plane for s in surfaces),
+                         ["ethernet1/3", "loopback", "mgt"])
+
     def test_an_interface_without_a_profile_is_not_a_surface(self):
         appliance = self._appliance()
         self._snapshot(appliance, {
@@ -5600,3 +5620,101 @@ class ManagementInterfaceNormalizationTests(TestCase):
         self.assertEqual(source.value, "not-an-address")
         self.assertIsNone(source.family)
         self.assertIsNone(source.ipv4_start_int)
+
+    def test_deviceconfig_polarity_is_inverted_and_defaults_applied(self):
+        """`disable-telnet: yes` means OFF, and an absent key does NOT mean off.
+
+        This is the assertion the whole child table exists to make safe. A consumer reading
+        the raw key would report the exact opposite of the truth for the three services
+        that run when nothing is written.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {"deviceconfig": {"system": {
+            "service": {"disable-telnet": "yes", "disable-https": "yes", "disable-http": "no"},
+        }}})
+        normalize_management_interfaces(appliance)
+        surface = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_MGT)
+        state = dict(surface.services.values_list("name", "enabled"))
+
+        self.assertFalse(state["telnet"], "disable-telnet: yes must store enabled=False")
+        self.assertFalse(state["https"], "an explicit disable must beat the implicit default")
+        self.assertTrue(state["http"], "disable-http: no must store enabled=True")
+        # Absent keys: the measured defaults, not a blanket off.
+        self.assertTrue(state["ssh"])
+        self.assertTrue(state["icmp"])
+        self.assertFalse(state["snmp"])
+        self.assertFalse(state["http-ocsp"])
+        self.assertFalse(state["userid-service"])
+
+    def test_a_plane_with_no_service_node_gets_the_defaults(self):
+        """tpa-a's real shape: no `service` element at all, and three services still on."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"deviceconfig": {"system": {}}})
+        normalize_management_interfaces(appliance)
+        surface = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_MGT)
+        on = set(surface.services.filter(enabled=True).values_list("name", flat=True))
+        self.assertEqual(on, {"https", "ssh", "icmp"})
+        self.assertEqual(surface.services.count(), 10)
+
+    def test_an_aux_plane_reads_its_own_service_node(self):
+        """aux-1 carries its own `service`; it must not inherit MGT's."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"deviceconfig": {"system": {
+            "service": {"disable-ssh": "yes"},
+            "aux-1": {"service": {"disable-telnet": "no"}},
+        }}})
+        normalize_management_interfaces(appliance)
+        mgt = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_MGT)
+        aux = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_AUX1)
+        self.assertFalse(dict(mgt.services.values_list("name", "enabled"))["ssh"])
+        self.assertTrue(dict(aux.services.values_list("name", "enabled"))["ssh"],
+                        "aux-1 has no disable-ssh of its own, so ssh stays on there")
+        self.assertTrue(dict(aux.services.values_list("name", "enabled"))["telnet"])
+
+    def test_profile_polarity_is_positive_and_absent_means_off(self):
+        """The opposite polarity: a bare profile entry exposes nothing."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"network": {
+            "profiles": {"interface-management-profile": {"entry": [
+                {"@name": "bare"},
+                {"@name": "web", "https": "yes", "telnet": "yes", "ping": "no"},
+            ]}},
+            "interface": {"ethernet": {"entry": [
+                {"@name": "ethernet1/1", "layer3": {"interface-management-profile": "bare"}},
+                {"@name": "ethernet1/2", "layer3": {"interface-management-profile": "web"}},
+            ]}},
+        }})
+        normalize_management_interfaces(appliance)
+        bare = ManagementInterface.objects.get(interface_name="ethernet1/1")
+        web = ManagementInterface.objects.get(interface_name="ethernet1/2")
+
+        self.assertEqual(bare.services.filter(enabled=True).count(), 0,
+                         "a bare profile enables nothing - absent is OFF here")
+        self.assertEqual(bare.services.count(), 11)
+        self.assertEqual(set(web.services.filter(enabled=True).values_list("name", flat=True)),
+                         {"https", "telnet"})
+
+    def test_the_planes_carry_different_service_sets(self):
+        """icmp exists only on deviceconfig, ping/response-pages only on a profile.
+
+        Absence of a row means the service does not exist on that plane, which is why this
+        is a child table rather than a column per service.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "deviceconfig": {"system": {}},
+            "network": {
+                "profiles": {"interface-management-profile": {"entry": {"@name": "p"}}},
+                "interface": {"ethernet": {"entry": {
+                    "@name": "ethernet1/1", "layer3": {"interface-management-profile": "p"}}}},
+            },
+        })
+        normalize_management_interfaces(appliance)
+        mgt = set(ManagementInterface.objects.get(plane=ManagementInterface.PLANE_MGT)
+                  .services.values_list("name", flat=True))
+        prof = set(ManagementInterface.objects.get(plane=ManagementInterface.PLANE_DATAPLANE)
+                   .services.values_list("name", flat=True))
+        self.assertEqual(mgt - prof, {"icmp"})
+        self.assertEqual(prof - mgt, {"ping", "response-pages"})
+        self.assertEqual(len(mgt & prof), 9)
+

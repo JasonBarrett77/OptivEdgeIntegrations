@@ -19,6 +19,8 @@ from .events import IntegrationEvent, IntegrationRun
 from .device_configuration import DeviceConfigurationProfile
 from .management_interface import (
     ManagementInterface,
+    ManagementService,
+    SERVICE_NAMES,
     PermittedSource,
     parse_permitted_source,
 )
@@ -80,6 +82,8 @@ __all__ = [
     "ManagementStation",
     "DeviceConfigurationProfile",
     "ManagementInterface",
+    "ManagementService",
+    "SERVICE_NAMES",
     "PermittedSource",
     "parse_permitted_source",
     "NormalizationIssue",

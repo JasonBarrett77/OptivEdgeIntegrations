@@ -31,6 +31,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     normalize_security_rules,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
+from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
+    normalize_management_interfaces,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.zones import (
     normalize_zones,
 )
@@ -76,12 +79,18 @@ def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> li
     return normalize_zones(enforcement_point)
 
 
+def normalize_appliance_management_interfaces(appliance: Appliance) -> list:
+    """Every administrative surface on one appliance - MGT, aux, and bound layer-3 interfaces."""
+    return normalize_management_interfaces(appliance)
+
+
 __all__ = [
     "NormalizedDynamicAddressContent",
     "PANOSNormalizedCollection",
     "normalize_addresses",
     "normalize_appliance_device_configuration",
     "normalize_appliance_group_shared_scope",
+    "normalize_appliance_management_interfaces",
     "normalize_enforcement_point_addresses",
     "normalize_enforcement_point_dynamic_address_content",
     "normalize_enforcement_point_security_rules",

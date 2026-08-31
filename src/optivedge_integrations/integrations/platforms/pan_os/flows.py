@@ -46,6 +46,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
     normalize_appliance_device_configuration,
+    normalize_appliance_management_interfaces,
     normalize_collected_response,
 )
 from optivedge_integrations.integrations.platforms.pan_os.persistence import (
@@ -166,6 +167,18 @@ class PANOSDeviceConfigurationNormalizationFailure:
 
 
 @dataclass(slots=True)
+class PANOSManagementInterfaceNormalizedAppliance:
+    appliance: Appliance
+    management_interfaces: list
+
+
+@dataclass(slots=True)
+class PANOSManagementInterfaceNormalizationFailure:
+    appliance: Appliance
+    error_text: str
+
+
+@dataclass(slots=True)
 class PANOSAddressNormalizationFailure:
     """enforcement_point is None when the shared-scope pass for an appliance group failed;
     error_text names the group in that case."""
@@ -233,6 +246,10 @@ class PANOSInScopeConfigCollection:
     security_rule_item_failures: list[PANOSSecurityRuleFailure]
     zone_normalizations: list[PANOSZoneNormalizedPoint]
     zone_failures: list[PANOSZoneNormalizationFailure]
+    management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = field(
+        default_factory=list)
+    management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = field(
+        default_factory=list)
 
 
 @dataclass(slots=True)
@@ -254,6 +271,10 @@ class PANOSInScopeRenormalizationResult:
     security_rule_item_failures: list[PANOSSecurityRuleFailure]
     zone_normalizations: list[PANOSZoneNormalizedPoint]
     zone_failures: list[PANOSZoneNormalizationFailure]
+    management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = field(
+        default_factory=list)
+    management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = field(
+        default_factory=list)
 
 
 def get_in_scope_appliances(management_station: ManagementStation) -> list[Appliance]:
@@ -503,6 +524,8 @@ def renormalize_in_scope_configuration(
     appliances = get_in_scope_appliances(management_station)
     enforcement_points = get_in_scope_enforcement_points(management_station)
     device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance] = []
+    management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = []
+    management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = []
     device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure] = []
     address_normalizations: list[PANOSAddressNormalizedPoint] = []
     address_failures: list[PANOSAddressNormalizationFailure] = []
@@ -522,13 +545,30 @@ def renormalize_in_scope_configuration(
                     error_text=str(exc),
                 )
             )
-            continue
-        device_configuration_normalizations.append(
-            PANOSDeviceConfigurationNormalizedAppliance(
-                appliance=appliance,
-                device_configuration_profiles=normalized.device_configuration_profiles,
+        else:
+            device_configuration_normalizations.append(
+                PANOSDeviceConfigurationNormalizedAppliance(
+                    appliance=appliance,
+                    device_configuration_profiles=normalized.device_configuration_profiles,
+                )
             )
-        )
+
+        # Management surfaces read the same merged snapshot but are a separate model and a
+        # separate failure. Deliberately NOT gated on the device-configuration result: they
+        # answer a different question - which doors are open, and to whom - and one failing
+        # must not silently take the other's rows away.
+        try:
+            surfaces = normalize_appliance_management_interfaces(appliance)
+        except Exception as exc:
+            management_interface_failures.append(
+                PANOSManagementInterfaceNormalizationFailure(appliance=appliance, error_text=str(exc))
+            )
+        else:
+            management_interface_normalizations.append(
+                PANOSManagementInterfaceNormalizedAppliance(
+                    appliance=appliance, management_interfaces=surfaces
+                )
+            )
 
     # Shared scope belongs to the appliance group and must be rebuilt BEFORE any of its
     # enforcement points: replace_addresses() is a delete-and-recreate, and security rule
@@ -625,6 +665,8 @@ def renormalize_in_scope_configuration(
         enforcement_points=enforcement_points,
         device_configuration_normalizations=device_configuration_normalizations,
         device_configuration_failures=device_configuration_failures,
+        management_interface_normalizations=management_interface_normalizations,
+        management_interface_failures=management_interface_failures,
         address_normalizations=address_normalizations,
         address_failures=address_failures,
         security_rule_normalizations=security_rule_normalizations,
@@ -762,6 +804,8 @@ def collect_in_scope_configuration_snapshots(
         vsys_policy_collections=vsys_policy_collections,
         vsys_policy_failures=vsys_policy_failures,
         device_configuration_normalizations=renormalized.device_configuration_normalizations,
+        management_interface_normalizations=renormalized.management_interface_normalizations,
+        management_interface_failures=renormalized.management_interface_failures,
         device_configuration_failures=renormalized.device_configuration_failures,
         address_normalizations=renormalized.address_normalizations,
         address_failures=renormalized.address_failures,

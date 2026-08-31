@@ -13,11 +13,10 @@ one finding per surface rather than one per appliance. On an HA pair that is del
 two rows for the two peers' MGT ports: the peers have different management addresses and
 are separately reachable, so collapsing them would hide a real difference.
 
-Deliberately NOT modelled here: which services each surface exposes. That is a different
-assertion (MGMT-001), and the two planes disagree about both the service set and the
-polarity of an absent key - see
-`docs/palo-alto/pan-os/network/read-an-interface-management-profile.md`. Adding it here
-before a control needs it is how this model over-grows.
+Which services a surface exposes is `ManagementService` below - a child table rather than
+columns, because the two planes carry overlapping but unequal service sets and a column per
+service would mean permanently-NULL fields whose NULL meant "not applicable here" rather
+than "unknown".
 """
 
 from __future__ import annotations
@@ -159,3 +158,69 @@ def parse_permitted_source(value: str) -> tuple[int | None, int | None, int | No
         return (PermittedSource.FAMILY_V6, None, None)
     return (PermittedSource.FAMILY_V4,
             int(network.network_address), int(network.broadcast_address))
+
+
+#: Every service either management plane can carry, as the POSITIVE name.
+#:
+#: Measured 2026-08-31 by `action=complete` against a PA-5220 on both nodes: the
+#: deviceconfig planes accept ten keys, all spelled `disable-*`; an interface management
+#: profile accepts eleven, all positive. Nine names are shared. `icmp` exists only on the
+#: deviceconfig planes and `ping`/`response-pages` only on a profile.
+#:
+#: `icmp` and `ping` are stored as the distinct keys the configuration uses. Whether they
+#: denote the same underlying service is UNMEASURED - `action=complete` returned no help
+#: strings, and no control needs the answer, since neither is an administrative service.
+#: Deciding they are the same would be interpretation, which is not this layer's job.
+SERVICE_NAMES = (
+    "http",
+    "https",
+    "ssh",
+    "telnet",
+    "snmp",
+    "icmp",
+    "ping",
+    "response-pages",
+    "http-ocsp",
+    "userid-service",
+    "userid-syslog-listener-ssl",
+    "userid-syslog-listener-udp",
+)
+
+
+class ManagementService(models.Model):
+    """One service on one management surface, with plane polarity already resolved.
+
+    The polarity difference is the whole reason this is normalized at collection. A
+    deviceconfig plane says `disable-telnet: yes` and a profile says nothing at all, and
+    both mean telnet is off. Storing the raw key would push that inversion into every
+    consumer, and a consumer that forgets it reports the exact opposite of the truth.
+
+    So `enabled` is always the effective answer: True means the service is on. Nothing here
+    records WHICH plane spelling produced it, because no question so far is asked of the
+    spelling - the surface and the effective value are what a control asserts against.
+
+    A row exists for every service its plane supports, whether on or off. Absence therefore
+    means the service does not exist on that plane at all, which is a different fact from
+    "off" and one a consumer would otherwise have to reconstruct from the plane.
+    """
+
+    management_interface = models.ForeignKey(
+        ManagementInterface, on_delete=models.CASCADE, related_name="services")
+    name = models.CharField(max_length=32, choices=[(n, n) for n in SERVICE_NAMES])
+    #: The effective state, implicit values already applied. Never null: a service valid on
+    #: this plane is either on or off, and one that is not valid has no row.
+    enabled = models.BooleanField()
+
+    class Meta:
+        ordering = ["management_interface", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["management_interface", "name"],
+                name="integrations_unique_management_service_per_surface"),
+        ]
+        #: (name, enabled) serves the question every services control asks: which surfaces
+        #: have any of these services on.
+        indexes = [models.Index(fields=["name", "enabled"])]
+
+    def __str__(self) -> str:
+        return f"{self.management_interface} {self.name}={'on' if self.enabled else 'off'}"
