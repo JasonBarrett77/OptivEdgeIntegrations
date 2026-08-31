@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
+    Interface,
     ManagementInterface,
     PermittedSource,
     AddressGroup,
@@ -72,6 +73,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     pushed_shared,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.interfaces import (
+    normalize_interfaces,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
     normalize_management_interfaces,
@@ -5709,3 +5713,175 @@ class ManagementInterfaceNormalizationTests(TestCase):
         self.assertEqual(prof - mgt, {"ping", "response-pages"})
         self.assertEqual(len(mgt & prof), 9)
 
+
+
+class InterfaceNormalizationTests(TestCase):
+    """The interface as an object, and the anomalies that must not vanish.
+
+    Containers are read from the payload rather than a fixed list: measured 2026-08-31, a
+    PA-5220 offers `vlan` and a PA-VM does not, and both offer `sdwan`, which the two
+    normalizers predating this one do not walk at all.
+    """
+
+    def _appliance(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.if")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name="grp-if", group_type=ApplianceGroup.TYPE_STANDALONE)
+        return Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="SERIAL-IF", hostname="fw-if")
+
+    def _snapshot(self, appliance, network):
+        return Snapshot.objects.create(
+            management_station=appliance.management_station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"network": network}}}})
+
+    def test_every_container_is_walked_including_ones_no_tuple_lists(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {
+            "ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {
+                "ip": {"entry": {"@name": "10.0.0.1/24"}}}}},
+            "aggregate-ethernet": {"entry": {"@name": "ae1", "layer3": {}}},
+            "vlan": {"units": {"entry": {"@name": "vlan.5"}}},
+            "loopback": {"units": {"entry": {"@name": "loopback.1"}}},
+            "tunnel": {"units": {"entry": {"@name": "tunnel.1"}}},
+            # sdwan is the one the older normalizers miss entirely
+            "sdwan": {"units": {"entry": {"@name": "sdwan.1"}}},
+        }})
+        result = normalize_interfaces(appliance)
+        self.assertEqual(
+            sorted(i.name for i in result.interfaces),
+            ["ae1", "ethernet1/1", "loopback.1", "sdwan.1", "tunnel.1", "vlan.5"])
+        self.assertEqual(result.issues, [])
+
+    def test_type_is_the_present_key_not_a_truthy_one(self):
+        """An empty type subtree serialises as null; truthiness reports it as typeless."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": [
+            {"@name": "ethernet1/1", "tap": None},
+            {"@name": "ethernet1/2", "layer2": None},
+            {"@name": "ethernet1/3", "aggregate-group": "ae1"},
+        ]}}})
+        result = normalize_interfaces(appliance)
+        by_name = {i.name: i for i in result.interfaces}
+        self.assertEqual(by_name["ethernet1/1"].interface_type, Interface.TYPE_TAP)
+        self.assertEqual(by_name["ethernet1/2"].interface_type, Interface.TYPE_LAYER2)
+        self.assertEqual(by_name["ethernet1/3"].interface_type, Interface.TYPE_AGGREGATE_MEMBER)
+        self.assertEqual(by_name["ethernet1/3"].aggregate_group, "ae1")
+        self.assertEqual(result.issues, [])
+
+    def test_an_aggregate_member_is_not_confused_with_a_unit(self):
+        """Both look like 'has a parent' and they are different relationships."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": [
+            {"@name": "ethernet1/1", "layer3": {"units": {"entry": {"@name": "ethernet1/1.10"}}}},
+            {"@name": "ethernet1/3", "aggregate-group": "ae1"},
+        ]}}})
+        result = normalize_interfaces(appliance)
+        by_name = {i.name: i for i in result.interfaces}
+        self.assertEqual(by_name["ethernet1/1.10"].parent, by_name["ethernet1/1"])
+        self.assertEqual(by_name["ethernet1/1.10"].aggregate_group, "")
+        self.assertIsNone(by_name["ethernet1/3"].parent,
+                          "a member is not a unit of its aggregate")
+
+    def test_addressing_distinguishes_dhcp_from_no_address(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": [
+            {"@name": "ethernet1/1", "layer3": {"dhcp-client": {"enable": "yes"}}},
+            {"@name": "ethernet1/2", "layer3": {}},
+            {"@name": "ethernet1/4", "layer3": {"ipv6": {"address": {"entry": {"@name": "2001:db8::1/64"}}}}},
+        ]}}})
+        by_name = {i.name: i for i in normalize_interfaces(appliance).interfaces}
+        self.assertEqual(by_name["ethernet1/1"].addressing, Interface.ADDRESSING_DHCP)
+        self.assertEqual(by_name["ethernet1/1"].ipv4_addresses, [])
+        self.assertEqual(by_name["ethernet1/2"].addressing, Interface.ADDRESSING_NONE)
+        self.assertEqual(by_name["ethernet1/4"].ipv6_addresses, ["2001:db8::1/64"])
+
+    def test_an_entry_with_no_name_is_reported_not_dropped_quietly(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": [
+            {"@name": "ethernet1/1", "layer3": {}},
+            {"layer3": {}},
+        ]}}})
+        result = normalize_interfaces(appliance)
+        self.assertEqual([i.name for i in result.interfaces], ["ethernet1/1"])
+        self.assertEqual(len(result.issues), 1)
+        self.assertEqual(result.issues[0].severity, NormalizationIssue.Severity.ERROR)
+        self.assertEqual(result.issues[0].disposition, NormalizationIssue.Disposition.SKIPPED)
+        self.assertEqual(NormalizationIssue.objects.filter(kind="interface").count(), 1)
+
+    def test_an_unknown_type_is_kept_and_reported_rather_than_assumed_broken(self):
+        """The type set is platform-dependent, so an unrecognised entry is news, not corruption."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": {
+            "@name": "ethernet1/9", "decrypt-mirror": None}}}})
+        result = normalize_interfaces(appliance)
+        self.assertEqual(result.interfaces[0].interface_type, Interface.TYPE_UNKNOWN)
+        self.assertEqual(result.issues[0].severity, NormalizationIssue.Severity.WARNING)
+        self.assertEqual(result.issues[0].disposition, NormalizationIssue.Disposition.KEPT)
+
+    def test_two_type_keys_is_an_error_and_still_yields_a_row(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": {
+            "@name": "ethernet1/1", "layer3": {}, "layer2": {}}}}})
+        result = normalize_interfaces(appliance)
+        self.assertEqual(len(result.interfaces), 1)
+        self.assertEqual(result.issues[0].severity, NormalizationIssue.Severity.ERROR)
+        self.assertIn("2 type keys", result.issues[0].reason)
+
+    def test_a_subinterface_inherits_its_parents_type(self):
+        """A unit carries no type key of its own - the parent does.
+
+        Type-discriminating a unit reported every subinterface on a real firewall as an
+        unknown type: eighteen false warnings per device, from config that is entirely
+        ordinary.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": {
+            "@name": "ethernet1/1", "layer3": {"units": {"entry": [
+                {"@name": "ethernet1/1.10", "ip": {"entry": {"@name": "10.1.1.1/24"}}},
+                {"@name": "ethernet1/1.20"},
+            ]}}}}}})
+        result = normalize_interfaces(appliance)
+        by_name = {i.name: i for i in result.interfaces}
+        self.assertEqual(by_name["ethernet1/1.10"].interface_type, Interface.TYPE_LAYER3)
+        self.assertEqual(by_name["ethernet1/1.20"].interface_type, Interface.TYPE_LAYER3)
+        self.assertEqual(by_name["ethernet1/1.10"].ipv4_addresses, ["10.1.1.1/24"])
+        self.assertEqual(result.issues, [], "an ordinary subinterface is not an anomaly")
+
+    def test_an_empty_container_element_is_not_an_error(self):
+        """`<aggregate-ethernet/>` parses to None. A device with no aggregates is normal."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {
+            "ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {}}},
+            "aggregate-ethernet": None,
+            "vlan": None,
+        }})
+        result = normalize_interfaces(appliance)
+        self.assertEqual([i.name for i in result.interfaces], ["ethernet1/1"])
+        self.assertEqual(result.issues, [])
+
+    def test_a_container_of_the_wrong_type_is_still_an_error(self):
+        """None is empty; a string is a payload we do not understand and must report."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": "unexpected"}})
+        result = normalize_interfaces(appliance)
+        self.assertEqual(len(result.issues), 1)
+        self.assertEqual(result.issues[0].severity, NormalizationIssue.Severity.ERROR)
+
+    def test_issues_are_replaced_not_accumulated(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": [{"layer3": {}}]}}})
+        normalize_interfaces(appliance)
+        normalize_interfaces(appliance)
+        self.assertEqual(NormalizationIssue.objects.filter(kind="interface").count(), 1)
+
+    def test_renormalizing_replaces_rather_than_accumulates(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": {
+            "@name": "ethernet1/1", "layer3": {}}}}})
+        normalize_interfaces(appliance)
+        normalize_interfaces(appliance)
+        self.assertEqual(Interface.objects.filter(appliance=appliance).count(), 1)

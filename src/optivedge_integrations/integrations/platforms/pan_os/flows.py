@@ -46,6 +46,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
     normalize_appliance_device_configuration,
+    normalize_appliance_interfaces,
     normalize_appliance_management_interfaces,
     normalize_collected_response,
 )
@@ -167,6 +168,22 @@ class PANOSDeviceConfigurationNormalizationFailure:
 
 
 @dataclass(slots=True)
+class PANOSInterfaceNormalizedAppliance:
+    appliance: Appliance
+    interfaces: list
+    #: Entries that could not be made sense of. Present even on success: a run that
+    #: normalized forty interfaces and could not classify one is not a clean run, and the
+    #: caller needs to be able to say so.
+    issues: list
+
+
+@dataclass(slots=True)
+class PANOSInterfaceNormalizationFailure:
+    appliance: Appliance
+    error_text: str
+
+
+@dataclass(slots=True)
 class PANOSManagementInterfaceNormalizedAppliance:
     appliance: Appliance
     management_interfaces: list
@@ -250,6 +267,10 @@ class PANOSInScopeConfigCollection:
         default_factory=list)
     management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = field(
         default_factory=list)
+    interface_normalizations: list[PANOSInterfaceNormalizedAppliance] = field(
+        default_factory=list)
+    interface_failures: list[PANOSInterfaceNormalizationFailure] = field(
+        default_factory=list)
 
 
 @dataclass(slots=True)
@@ -274,6 +295,10 @@ class PANOSInScopeRenormalizationResult:
     management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = field(
         default_factory=list)
     management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = field(
+        default_factory=list)
+    interface_normalizations: list[PANOSInterfaceNormalizedAppliance] = field(
+        default_factory=list)
+    interface_failures: list[PANOSInterfaceNormalizationFailure] = field(
         default_factory=list)
 
 
@@ -510,6 +535,28 @@ def collect_enforcement_point_pushed_shared_policy(
     return persist_enforcement_point_collected_response(enforcement_point, collected)
 
 
+def _interface_collection_appliance_ids(appliances: list[Appliance]) -> set[int]:
+    """Which appliances' interfaces to normalize: one per HA pair, the active member.
+
+    Peers can differ, but an assessment is about the device carrying traffic, and
+    `resolve_group_collection_appliance` already encodes which that is - including its
+    deterministic fallback when Panorama has not told us. An appliance with no group is
+    its own answer.
+    """
+    chosen: set[int] = set()
+    seen_groups: set[int] = set()
+    for appliance in appliances:
+        group = appliance.appliance_group
+        if group is None:
+            chosen.add(appliance.pk)
+            continue
+        if group.pk in seen_groups:
+            continue
+        seen_groups.add(group.pk)
+        chosen.add(resolve_group_collection_appliance(group).pk)
+    return chosen
+
+
 def renormalize_in_scope_configuration(
     management_station: ManagementStation,
 ) -> PANOSInScopeRenormalizationResult:
@@ -526,6 +573,8 @@ def renormalize_in_scope_configuration(
     device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance] = []
     management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = []
     management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = []
+    interface_normalizations: list[PANOSInterfaceNormalizedAppliance] = []
+    interface_failures: list[PANOSInterfaceNormalizationFailure] = []
     device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure] = []
     address_normalizations: list[PANOSAddressNormalizedPoint] = []
     address_failures: list[PANOSAddressNormalizationFailure] = []
@@ -534,6 +583,8 @@ def renormalize_in_scope_configuration(
     security_rule_item_failures: list[PANOSSecurityRuleFailure] = []
     zone_normalizations: list[PANOSZoneNormalizedPoint] = []
     zone_failures: list[PANOSZoneNormalizationFailure] = []
+
+    interface_appliance_ids = _interface_collection_appliance_ids(appliances)
 
     for appliance in appliances:
         try:
@@ -567,6 +618,28 @@ def renormalize_in_scope_configuration(
             management_interface_normalizations.append(
                 PANOSManagementInterfaceNormalizedAppliance(
                     appliance=appliance, management_interfaces=surfaces
+                )
+            )
+
+        # Interfaces are normalized for the ACTIVE member of an HA pair only, which is the
+        # convention collection already follows. Deliberately unlike management surfaces
+        # just above, where both peers get rows because each has its own reachable address.
+        # Its own try/except for the same reason: one plane of the answer failing must not
+        # silently remove another.
+        if appliance.pk not in interface_appliance_ids:
+            continue
+        try:
+            normalized_interfaces = normalize_appliance_interfaces(appliance)
+        except Exception as exc:
+            interface_failures.append(
+                PANOSInterfaceNormalizationFailure(appliance=appliance, error_text=str(exc))
+            )
+        else:
+            interface_normalizations.append(
+                PANOSInterfaceNormalizedAppliance(
+                    appliance=appliance,
+                    interfaces=normalized_interfaces.interfaces,
+                    issues=normalized_interfaces.issues,
                 )
             )
 
@@ -667,6 +740,8 @@ def renormalize_in_scope_configuration(
         device_configuration_failures=device_configuration_failures,
         management_interface_normalizations=management_interface_normalizations,
         management_interface_failures=management_interface_failures,
+        interface_normalizations=interface_normalizations,
+        interface_failures=interface_failures,
         address_normalizations=address_normalizations,
         address_failures=address_failures,
         security_rule_normalizations=security_rule_normalizations,
