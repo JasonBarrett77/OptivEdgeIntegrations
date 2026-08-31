@@ -45,6 +45,20 @@ TYPE_SUBTREE_KEYS = {
 #: type. Anything else is treated as physical and type-discriminated by key.
 LOGICAL_CONTAINERS = frozenset({"vlan", "loopback", "tunnel", "sdwan"})
 
+#: Keys that can sit beside a type key without being one. An entry carrying only these has
+#: no mode set - it is declared, not configured - which PAN-OS accepts: a bare
+#: `<entry name="ethernet1/9"/>` commits and stores exactly that, measured 2026-08-31.
+NON_TYPE_KEYS = frozenset({
+    "comment", "link-speed", "link-duplex", "link-state", "lacp", "poe", "netflow-profile",
+})
+
+#: Containers observed on the lab platforms. An unfamiliar one is still walked - the set is
+#: platform-dependent and hard-coding it is what made `sdwan` invisible - but it is reported,
+#: because a container nobody has looked at may hold a shape this code reads wrongly.
+OBSERVED_CONTAINERS = frozenset({
+    "ethernet", "aggregate-ethernet", "vlan", "loopback", "tunnel", "sdwan",
+})
+
 ISSUE_KIND = "interface"
 
 
@@ -132,10 +146,18 @@ def _classify(container: str, entry: dict, issues: list[InterfaceIssue],
         node = entry.get(present[0])
         return TYPE_SUBTREE_KEYS[present[0]], node if isinstance(node, dict) else {}, aggregate
     if not present:
+        configured = [key for key in entry
+                      if not key.startswith("@") and key not in NON_TYPE_KEYS]
+        if not configured:
+            # A declared port with no mode set. Ordinary: PAN-OS commits a bare entry and
+            # stores exactly that, so warning here would fire on every unconfigured port on
+            # the device - which is how a real firewall produced its first false warning.
+            return Interface.TYPE_UNCONFIGURED, {}, aggregate
         issues.append(InterfaceIssue(
             kind=ISSUE_KIND, name=name, severity=NormalizationIssue.Severity.WARNING,
             disposition=NormalizationIssue.Disposition.KEPT,
-            reason=("No interface type key and no aggregate-group. The type set is "
+            reason=(f"Carries configuration ({', '.join(sorted(configured))}) but no "
+                    "interface type key and no aggregate-group. The type set is "
                     "platform-dependent, so this may be a type this release does not know "
                     "rather than a malformed entry - it is kept and reported, not dropped."),
             node=f"network/interface/{container}", raw_entry=entry))
@@ -255,6 +277,17 @@ def _collect(device_entry: dict) -> tuple[list[dict], list[InterfaceIssue]]:
     for container, node in sorted(interfaces.items()):
         if container.startswith("@"):
             continue
+        if container not in OBSERVED_CONTAINERS:
+            issues.append(InterfaceIssue(
+                kind=ISSUE_KIND, name=container,
+                severity=NormalizationIssue.Severity.WARNING,
+                disposition=NormalizationIssue.Disposition.KEPT,
+                reason=("Unrecognised interface container. It is walked with the ordinary "
+                        "rules and its entries are kept, but nothing here has been measured "
+                        "against this shape - check whether its bindings, addressing and "
+                        "type discrimination are read correctly before trusting them."),
+                node=f"network/interface/{container}"))
+
         if node is None:
             # An empty element - `<aggregate-ethernet/>` - parses to None. That is a
             # container with nothing in it, not a fault; reporting it would put a

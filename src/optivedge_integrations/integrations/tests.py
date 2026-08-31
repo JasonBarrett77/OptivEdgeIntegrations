@@ -5819,11 +5819,44 @@ class InterfaceNormalizationTests(TestCase):
         self.assertEqual(result.issues[0].disposition, NormalizationIssue.Disposition.SKIPPED)
         self.assertEqual(NormalizationIssue.objects.filter(kind="interface").count(), 1)
 
+    def test_a_declared_port_with_no_mode_is_ordinary_not_an_anomaly(self):
+        """PAN-OS commits a bare `<entry name="ethernet1/9"/>` and stores exactly that.
+
+        Warning on it fired on a real firewall's unconfigured port - noise on every device
+        that declares ports it has not configured.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"ethernet": {"entry": [
+            {"@name": "ethernet1/9"},
+            {"@name": "ethernet1/8", "comment": "spare", "link-state": "auto"},
+        ]}}})
+        result = normalize_interfaces(appliance)
+        self.assertEqual({i.name: i.interface_type for i in result.interfaces},
+                         {"ethernet1/9": Interface.TYPE_UNCONFIGURED,
+                          "ethernet1/8": Interface.TYPE_UNCONFIGURED})
+        self.assertEqual(result.issues, [])
+
+    def test_an_unrecognised_container_is_walked_and_reported(self):
+        """Hard-coding the container set is what made sdwan invisible, so an unfamiliar one
+        is still walked - but nothing here has been measured against its shape."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {
+            "ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {}}},
+            "some-future-type": {"entry": {"@name": "sft.1"}},
+        }})
+        result = normalize_interfaces(appliance)
+        self.assertIn("sft.1", [i.name for i in result.interfaces],
+                      "an unfamiliar container is still normalized")
+        container_issues = [i for i in result.issues if i.name == "some-future-type"]
+        self.assertEqual(len(container_issues), 1)
+        self.assertEqual(container_issues[0].severity, NormalizationIssue.Severity.WARNING)
+        self.assertEqual(container_issues[0].disposition, NormalizationIssue.Disposition.KEPT)
+
     def test_an_unknown_type_is_kept_and_reported_rather_than_assumed_broken(self):
         """The type set is platform-dependent, so an unrecognised entry is news, not corruption."""
         appliance = self._appliance()
         self._snapshot(appliance, {"interface": {"ethernet": {"entry": {
-            "@name": "ethernet1/9", "decrypt-mirror": None}}}})
+            "@name": "ethernet1/9", "decrypt-mirror": {"target": "x"}}}}})
         result = normalize_interfaces(appliance)
         self.assertEqual(result.interfaces[0].interface_type, Interface.TYPE_UNKNOWN)
         self.assertEqual(result.issues[0].severity, NormalizationIssue.Severity.WARNING)

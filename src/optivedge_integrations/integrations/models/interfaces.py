@@ -59,6 +59,7 @@ class Interface(SyncTrackedModel):
     TYPE_HA = "ha"
     TYPE_AGGREGATE_MEMBER = "aggregate-member"
     TYPE_LOGICAL = "logical"
+    TYPE_UNCONFIGURED = "unconfigured"
     TYPE_UNKNOWN = "unknown"
     TYPE_CHOICES = [
         (TYPE_LAYER3, "Layer 3"),
@@ -68,6 +69,7 @@ class Interface(SyncTrackedModel):
         (TYPE_HA, "HA"),
         (TYPE_AGGREGATE_MEMBER, "Aggregate member"),
         (TYPE_LOGICAL, "Logical"),
+        (TYPE_UNCONFIGURED, "Unconfigured"),
         (TYPE_UNKNOWN, "Unknown"),
     ]
 
