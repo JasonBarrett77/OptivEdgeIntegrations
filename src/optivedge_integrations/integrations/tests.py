@@ -6080,6 +6080,26 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
         profile = normalize_interface_management_profiles(appliance)[0]
         self.assertEqual(profile.bound_interface_names, ["ethernet1/1"])
 
+    def test_an_aggregate_member_and_its_aggregate_are_both_typed(self):
+        """Measured on hardware 2026-08-31 with a real ae1 and member.
+
+        `aggregate-group` is a STRING where a type subtree would be, so code that finds the
+        type key and reads its children returns nothing for a member - silently, per the
+        vendor guide. The lab had no aggregates until this was built to check it.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {
+            "aggregate-ethernet": {"entry": {"@name": "ae1", "layer3": None}},
+            "ethernet": {"entry": {"@name": "ethernet1/9", "aggregate-group": "ae1"}},
+        }})
+        result = normalize_interfaces(appliance)
+        by_name = {i.name: i for i in result.interfaces}
+        self.assertEqual(by_name["ae1"].interface_type, Interface.TYPE_LAYER3)
+        self.assertEqual(by_name["ethernet1/9"].interface_type, Interface.TYPE_AGGREGATE_MEMBER)
+        self.assertEqual(by_name["ethernet1/9"].aggregate_group, "ae1")
+        self.assertIsNone(by_name["ethernet1/9"].parent, "a member is not a unit")
+        self.assertEqual(result.issues, [])
+
     def test_vlan_has_the_same_flat_shape_as_loopback(self):
         """Measured on hardware 2026-08-31, not inferred from action=complete.
 
