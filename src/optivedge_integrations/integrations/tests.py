@@ -6080,6 +6080,36 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
         profile = normalize_interface_management_profiles(appliance)[0]
         self.assertEqual(profile.bound_interface_names, ["ethernet1/1"])
 
+    def test_vlan_has_the_same_flat_shape_as_loopback(self):
+        """Measured on hardware 2026-08-31, not inferred from action=complete.
+
+        The flat shape was originally claimed from the schema, which reports what MAY be
+        set rather than what an instance looks like. A configured vlan interface returns
+        `units/entry` alongside container-level `comment` and `ip`, exactly as loopback
+        does - so the bare `vlan` is an interface in its own right and its units are
+        siblings of it, not children.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {"interface": {"vlan": {
+            "comment": "probe",
+            "ip": {"entry": [{"@name": "10.254.0.1/32"}]},
+            "units": {"entry": [
+                {"@name": "vlan.5", "ip": {"entry": [{"@name": "10.254.5.1/24"}]}},
+                {"@name": "vlan.6"},
+            ]},
+        }}})
+        result = normalize_interfaces(appliance)
+        by_name = {i.name: i for i in result.interfaces}
+        self.assertEqual(sorted(by_name), ["vlan", "vlan.5", "vlan.6"])
+        self.assertEqual(by_name["vlan"].ipv4_addresses, ["10.254.0.1/32"])
+        self.assertEqual(by_name["vlan"].comment, "probe")
+        self.assertEqual(by_name["vlan.5"].ipv4_addresses, ["10.254.5.1/24"])
+        self.assertEqual(by_name["vlan.6"].addressing, Interface.ADDRESSING_NONE)
+        # Units of a logical container have no parent row - the container is a sibling
+        # interface, not their owner.
+        self.assertIsNone(by_name["vlan.5"].parent)
+        self.assertEqual(result.issues, [])
+
     def test_a_configured_logical_container_is_itself_an_interface(self):
         """vlan, loopback and tunnel accept ip/comment/profile directly - measured.
 
