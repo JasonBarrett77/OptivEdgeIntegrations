@@ -268,6 +268,22 @@ def _collect(device_entry: dict) -> tuple[list[dict], list[InterfaceIssue]]:
                 node=f"network/interface/{container}"))
             continue
 
+        # A logical container is itself an interface when it carries configuration of its
+        # own. Measured 2026-08-31 with action=complete: vlan, loopback and tunnel all
+        # accept `ip`, `comment`, `mtu` and `interface-management-profile` directly, so a
+        # bare `loopback` with an address is a real interface and not just a folder. Only
+        # emit a row when something is actually set, so an empty container stays empty.
+        # LOGICAL_CONTAINERS only: `ethernet` is a folder of entries and is never itself
+        # an interface, and `entry` is not container content. Measured with action=complete:
+        # vlan, loopback and tunnel accept ip/comment/mtu/interface-management-profile
+        # directly; sdwan accepts only `units`.
+        if container in LOGICAL_CONTAINERS and any(
+            key for key in node
+            if key not in ("units", "entry") and not key.startswith("@")
+        ):
+            found.append({"container": container, "name": container,
+                          "entry": node, "parent": ""})
+
         # vlan, loopback, tunnel and sdwan hang their units DIRECTLY off the container -
         # there is no named entry above them, so those units have no parent row. Only
         # ethernet and aggregate-ethernet have a named entry that owns its units.
@@ -354,9 +370,13 @@ def normalize_interfaces(appliance: Appliance) -> NormalizedInterfaces:
         # A unit of a physical interface carries its own addressing directly, not under a
         # type key - the type key is on the parent.
         addressing, ipv4, ipv6 = _addressing(address_node if not item["parent"] else entry)
+        # `address_node` is already the node that carries the binding in every shape: the
+        # type subtree for a physical entry, the entry itself for a unit or a logical one.
+        profile_name = _text((address_node or {}).get("interface-management-profile"))
         rows.append({
             "name": name, "container": item["container"], "interface_type": interface_type,
             "parent_name": item["parent"], "aggregate_group": aggregate,
+            "management_profile_name": profile_name,
             "addressing": addressing, "ipv4_addresses": ipv4, "ipv6_addresses": ipv6,
             "comment": _text(entry.get("comment")),
         })

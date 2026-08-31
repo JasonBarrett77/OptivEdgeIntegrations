@@ -4,9 +4,15 @@ The "or not" is the reason this exists. `ManagementInterface` has a row only whe
 profile is bound to something, so a profile bound to nothing leaves no trace anywhere - and
 "is this profile unused" cannot be asked of a model that only records the used ones.
 
-Bindings are counted from the same payload in the same pass rather than read back from
-ManagementInterface, so the two cannot disagree and neither depends on the other having run
-first.
+Bindings are counted from `Interface` rows, which is where the binding is recorded. An
+earlier version re-walked the payload here, which meant the walk ran twice per appliance and
+left the interface model - built to BE the join that PAN-OS does not provide - out of the
+one join that needed it.
+
+That makes this normalizer depend on interfaces having run first for the same snapshot, so
+it checks rather than assumes: with no interface rows every profile would count zero
+bindings and every one of them would be reported unused, which is a page of false findings
+rather than a visible failure.
 """
 
 from __future__ import annotations
@@ -20,15 +26,13 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance,
     FieldProvenance,
+    Interface,
     InterfaceManagementProfile,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import ensure_list
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot,
     latest_merged_snapshot,
-)
-from optivedge_integrations.integrations.platforms.pan_os.normalization.interfaces import (
-    bound_management_profiles,
 )
 
 #: The entry-level provenance record, as FieldProvenance documents it: the `@ptpl` on a
@@ -69,9 +73,21 @@ def normalize_interface_management_profiles(
         raise ValueError(f"no merged config snapshot for appliance {appliance.pk}")
     device_entry = device_entry_from_snapshot(snapshot)
 
+    interface_rows = list(
+        Interface.objects.filter(appliance=appliance, source_snapshot=snapshot)
+        .values_list("name", "management_profile_name")
+    )
+    if not interface_rows:
+        raise ValueError(
+            f"appliance {appliance.pk} has no normalized interfaces for snapshot "
+            f"{snapshot.pk}, so profile bindings cannot be counted. Every profile would "
+            f"otherwise be reported unused. Normalize interfaces first."
+        )
+
     bindings: dict[str, list[str]] = {}
-    for interface_name, profile_name in bound_management_profiles(device_entry):
-        bindings.setdefault(profile_name, []).append(interface_name)
+    for interface_name, profile_name in interface_rows:
+        if profile_name:
+            bindings.setdefault(profile_name, []).append(interface_name)
 
     written: list[InterfaceManagementProfile] = []
     with transaction.atomic():

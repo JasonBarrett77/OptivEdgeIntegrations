@@ -115,6 +115,15 @@ class Interface(SyncTrackedModel):
     #: absent from a partial collection.
     aggregate_group = models.CharField(max_length=64, blank=True)
 
+    #: The interface management profile bound to this interface, by name. Empty when none
+    #: is bound, which is the ordinary case.
+    #:
+    #: A name rather than a foreign key for the same reason PAN-OS holds it as one: the
+    #: binding names a profile that may not exist. A dangling reference is representable
+    #: here - and is itself worth reporting - where a foreign key would force either
+    #: dropping the interface or inventing a profile row for one that is not configured.
+    management_profile_name = models.CharField(max_length=64, blank=True)
+
     addressing = models.CharField(
         max_length=16, choices=ADDRESSING_CHOICES, default=ADDRESSING_NONE)
     #: Configured addresses. Empty is ambiguous on its own - read `addressing` first.

@@ -5955,6 +5955,7 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
                 "@name": "ethernet1/1",
                 "layer3": {"interface-management-profile": "bound-one"}}}},
         })
+        normalize_interfaces(appliance)
         profiles = {p.name: p for p in normalize_interface_management_profiles(appliance)}
         self.assertEqual(profiles["bound-one"].bound_interface_names, ["ethernet1/1"])
         self.assertEqual(profiles["bound-one"].bound_interface_count, 1)
@@ -5973,6 +5974,7 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
             "interface": {"sdwan": {"units": {"entry": {
                 "@name": "sdwan.1", "interface-management-profile": "p"}}}},
         })
+        normalize_interfaces(appliance)
         profile = normalize_interface_management_profiles(appliance)[0]
         self.assertEqual(profile.bound_interface_names, ["sdwan.1"])
         self.assertEqual(profile.bound_interface_count, 1)
@@ -5990,6 +5992,7 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
                                                  "interface-management-profile": "p"}}},
             },
         })
+        normalize_interfaces(appliance)
         profile = normalize_interface_management_profiles(appliance)[0]
         self.assertEqual(profile.bound_interface_names,
                          ["ethernet1/1", "ethernet1/1.10", "loopback.1"])
@@ -5997,11 +6000,17 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
     def test_template_provenance_is_recorded_and_local_is_its_absence(self):
         """Measured on hardware: a pushed profile carries @ptpl, a local one carries nothing."""
         appliance = self._appliance()
-        self._snapshot(appliance, {"profiles": {"interface-management-profile": {"entry": [
-            {"@name": "from-template", "@ptpl": "ptpl_fw-core-tpa",
-             "https": {"@ptpl": "ptpl_fw-core-tpa", "#text": "yes"}},
-            {"@name": "from-local", "ssh": "yes"},
-        ]}}})
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": [
+                {"@name": "from-template", "@ptpl": "ptpl_fw-core-tpa",
+                 "https": {"@ptpl": "ptpl_fw-core-tpa", "#text": "yes"}},
+                {"@name": "from-local", "ssh": "yes"},
+            ]}},
+            # An interface must exist for bindings to be countable at all - see the guard
+            # in the profile normalizer.
+            "interface": {"ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {}}}},
+        })
+        normalize_interfaces(appliance)
         profiles = {p.name: p for p in normalize_interface_management_profiles(appliance)}
         ct = ContentType.objects.get_for_model(InterfaceManagementProfile)
 
@@ -6013,10 +6022,60 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
             content_type=ct, object_id=profiles["from-local"].pk).exists(),
             "local is the absence of a row, as FieldProvenance documents")
 
+    def test_counting_without_interfaces_raises_rather_than_reporting_all_unused(self):
+        """With no interface rows every profile counts zero bindings.
+
+        Reporting that would be a page of false findings that look exactly like real ones,
+        so the absence has to be an error rather than an answer.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {"profiles": {"interface-management-profile": {
+            "entry": {"@name": "p"}}}})
+        with self.assertRaises(ValueError) as raised:
+            normalize_interface_management_profiles(appliance)
+        self.assertIn("no normalized interfaces", str(raised.exception))
+
+    def test_the_binding_is_read_from_the_interface_row_not_a_second_walk(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": {"@name": "p"}}},
+            "interface": {"ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {
+                "interface-management-profile": "p"}}}},
+        })
+        interfaces = {i.name: i for i in normalize_interfaces(appliance).interfaces}
+        self.assertEqual(interfaces["ethernet1/1"].management_profile_name, "p")
+        profile = normalize_interface_management_profiles(appliance)[0]
+        self.assertEqual(profile.bound_interface_names, ["ethernet1/1"])
+
+    def test_a_configured_logical_container_is_itself_an_interface(self):
+        """vlan, loopback and tunnel accept ip/comment/profile directly - measured.
+
+        A bare `loopback` carrying an address and a profile is a real interface, and
+        without a row for it the binding it holds would be invisible and its profile
+        reported unused.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": {"@name": "p"}}},
+            "interface": {"loopback": {
+                "ip": {"entry": {"@name": "10.255.0.1/32"}},
+                "interface-management-profile": "p",
+                "units": {"entry": {"@name": "loopback.1"}}}},
+        })
+        interfaces = {i.name: i for i in normalize_interfaces(appliance).interfaces}
+        self.assertEqual(sorted(interfaces), ["loopback", "loopback.1"])
+        self.assertEqual(interfaces["loopback"].management_profile_name, "p")
+        self.assertEqual(interfaces["loopback"].ipv4_addresses, ["10.255.0.1/32"])
+        profile = normalize_interface_management_profiles(appliance)[0]
+        self.assertEqual(profile.bound_interface_names, ["loopback"])
+
     def test_renormalizing_replaces_profiles_and_their_provenance(self):
         appliance = self._appliance()
-        self._snapshot(appliance, {"profiles": {"interface-management-profile": {"entry": {
-            "@name": "p", "@ptpl": "tpl"}}}})
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": {"@name": "p", "@ptpl": "tpl"}}},
+            "interface": {"ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {}}}},
+        })
+        normalize_interfaces(appliance)
         normalize_interface_management_profiles(appliance)
         normalize_interface_management_profiles(appliance)
         self.assertEqual(InterfaceManagementProfile.objects.count(), 1)
