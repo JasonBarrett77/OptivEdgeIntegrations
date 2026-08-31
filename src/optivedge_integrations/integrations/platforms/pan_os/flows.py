@@ -46,6 +46,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
     normalize_appliance_device_configuration,
+    normalize_appliance_interface_management_profiles,
     normalize_appliance_interfaces,
     normalize_appliance_management_interfaces,
     normalize_collected_response,
@@ -168,6 +169,18 @@ class PANOSDeviceConfigurationNormalizationFailure:
 
 
 @dataclass(slots=True)
+class PANOSInterfaceManagementProfileNormalizedAppliance:
+    appliance: Appliance
+    profiles: list
+
+
+@dataclass(slots=True)
+class PANOSInterfaceManagementProfileNormalizationFailure:
+    appliance: Appliance
+    error_text: str
+
+
+@dataclass(slots=True)
 class PANOSInterfaceNormalizedAppliance:
     appliance: Appliance
     interfaces: list
@@ -271,6 +284,10 @@ class PANOSInScopeConfigCollection:
         default_factory=list)
     interface_failures: list[PANOSInterfaceNormalizationFailure] = field(
         default_factory=list)
+    interface_management_profile_normalizations: list[
+        PANOSInterfaceManagementProfileNormalizedAppliance] = field(default_factory=list)
+    interface_management_profile_failures: list[
+        PANOSInterfaceManagementProfileNormalizationFailure] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -300,6 +317,10 @@ class PANOSInScopeRenormalizationResult:
         default_factory=list)
     interface_failures: list[PANOSInterfaceNormalizationFailure] = field(
         default_factory=list)
+    interface_management_profile_normalizations: list[
+        PANOSInterfaceManagementProfileNormalizedAppliance] = field(default_factory=list)
+    interface_management_profile_failures: list[
+        PANOSInterfaceManagementProfileNormalizationFailure] = field(default_factory=list)
 
 
 def get_in_scope_appliances(management_station: ManagementStation) -> list[Appliance]:
@@ -553,6 +574,8 @@ def renormalize_in_scope_configuration(
     management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = []
     interface_normalizations: list[PANOSInterfaceNormalizedAppliance] = []
     interface_failures: list[PANOSInterfaceNormalizationFailure] = []
+    profile_normalizations: list[PANOSInterfaceManagementProfileNormalizedAppliance] = []
+    profile_failures: list[PANOSInterfaceManagementProfileNormalizationFailure] = []
     device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure] = []
     address_normalizations: list[PANOSAddressNormalizedPoint] = []
     address_failures: list[PANOSAddressNormalizationFailure] = []
@@ -613,6 +636,22 @@ def renormalize_in_scope_configuration(
                     interfaces=normalized_interfaces.interfaces,
                     issues=normalized_interfaces.issues,
                 )
+            )
+
+        # Profiles are separate from the surfaces they create: an unused profile produces
+        # no surface, which is the whole reason it has a model. Its own try/except for the
+        # same reason as its neighbours.
+        try:
+            profiles = normalize_appliance_interface_management_profiles(appliance)
+        except Exception as exc:
+            profile_failures.append(
+                PANOSInterfaceManagementProfileNormalizationFailure(
+                    appliance=appliance, error_text=str(exc))
+            )
+        else:
+            profile_normalizations.append(
+                PANOSInterfaceManagementProfileNormalizedAppliance(
+                    appliance=appliance, profiles=profiles)
             )
 
     # Shared scope belongs to the appliance group and must be rebuilt BEFORE any of its
@@ -714,6 +753,8 @@ def renormalize_in_scope_configuration(
         management_interface_failures=management_interface_failures,
         interface_normalizations=interface_normalizations,
         interface_failures=interface_failures,
+        interface_management_profile_normalizations=profile_normalizations,
+        interface_management_profile_failures=profile_failures,
         address_normalizations=address_normalizations,
         address_failures=address_failures,
         security_rule_normalizations=security_rule_normalizations,

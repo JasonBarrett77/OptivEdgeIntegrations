@@ -32,15 +32,13 @@ from optivedge_integrations.integrations.models import (
     parse_permitted_source,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import ensure_list
+from optivedge_integrations.integrations.platforms.pan_os.normalization.interfaces import (
+    bound_management_profiles,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot,
     latest_merged_snapshot,
 )
-
-#: Containers whose profile hangs under a `layer3` node, and those where it does not.
-#: Keeping them as data rather than a branch is what stops the second group being forgotten.
-LAYER3_NESTED = ("ethernet", "aggregate-ethernet")
-LAYER3_DIRECT = ("vlan", "loopback", "tunnel")
 
 #: The ten service keys a deviceconfig plane accepts, and the eleven a profile accepts.
 #: Measured 2026-08-31 with `action=complete` on a PA-5220 - and aux-1 carries its own
@@ -142,47 +140,14 @@ def _profile_entry(device_entry: dict, profile_name: str) -> dict:
 
 
 def _bound_interfaces(device_entry: dict) -> list[tuple[str, str]]:
-    """(interface_name, profile_name) for every layer-3 interface carrying a profile."""
-    interfaces = (device_entry.get("network") or {}).get("interface") or {}
-    if not isinstance(interfaces, dict):
-        return []
-    found: list[tuple[str, str]] = []
+    """(interface_name, profile_name) for every interface carrying a profile.
 
-    def units(node: Any, parent: str) -> None:
-        # `.get("units", {})` is not enough: an empty <units/> element parses to None, so the
-        # default never applies and the chained .get() raises. Real configs contain these;
-        # synthetic fixtures with either populated units or no units key at all do not.
-        container = (node or {}).get("units") or {}
-        for unit in ensure_list(container.get("entry")):
-            if isinstance(unit, dict):
-                name = str(unit.get("@name") or "").strip() or parent
-                profile = _text(unit.get("interface-management-profile"))
-                if profile:
-                    found.append((name, profile))
-
-    for container in LAYER3_NESTED:
-        for entry in ensure_list((interfaces.get(container) or {}).get("entry")):
-            if not isinstance(entry, dict):
-                continue
-            name = str(entry.get("@name") or "").strip()
-            layer3 = entry.get("layer3")
-            if not isinstance(layer3, dict):
-                continue
-            profile = _text(layer3.get("interface-management-profile"))
-            if profile:
-                found.append((name, profile))
-            units(layer3, name)
-
-    # vlan / loopback / tunnel: the profile hangs directly off the container, no layer3 node
-    for container in LAYER3_DIRECT:
-        node = interfaces.get(container)
-        if not isinstance(node, dict):
-            continue
-        profile = _text(node.get("interface-management-profile"))
-        if profile:
-            found.append((container, profile))
-        units(node, container)
-    return found
+    Delegates to the interface normalizer's container-agnostic walk. This used to hard-code
+    five containers and silently miss `sdwan`, which both a PA-5220 and a PA-VM offer - an
+    sdwan interface with a profile bound was not a management surface as far as this code
+    was concerned, and its profile looked unused.
+    """
+    return bound_management_profiles(device_entry)
 
 
 def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInterface]:

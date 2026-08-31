@@ -151,6 +151,64 @@ def _classify(container: str, entry: dict, issues: list[InterfaceIssue],
     return TYPE_SUBTREE_KEYS[present[0]], node if isinstance(node, dict) else {}, aggregate
 
 
+def bound_management_profiles(device_entry: dict) -> list[tuple[str, str]]:
+    """(interface name, profile name) for every interface carrying a management profile.
+
+    Container-agnostic, which is the point: the two normalizers that predate this one each
+    hard-code five containers and so cannot see a profile bound to an `sdwan` interface at
+    all. Here every container in the payload is walked, so a platform that grows a new one
+    is handled without an edit.
+
+    The binding appears at four depths, all of them real:
+
+        <container>/interface-management-profile                 vlan, loopback, tunnel
+        <container>/units/entry/interface-management-profile     their units
+        <container>/entry/<type>/interface-management-profile    ethernet, aggregate-ethernet
+        <container>/entry/<type>/units/entry/...                 their subinterfaces
+    """
+    interfaces = (device_entry.get("network") or {}).get("interface")
+    if not isinstance(interfaces, dict):
+        return []
+    found: list[tuple[str, str]] = []
+
+    def units_of(node: Any, fallback: str) -> None:
+        # `.get("units", {})` is not enough: an empty <units/> parses to None, so the
+        # default never applies and the chained .get() raises on real configs.
+        container = (node or {}).get("units") or {}
+        if not isinstance(container, dict):
+            return
+        for unit in ensure_list(container.get("entry")):
+            if not isinstance(unit, dict):
+                continue
+            profile = _text(unit.get("interface-management-profile"))
+            if profile:
+                found.append((str(unit.get("@name") or "").strip() or fallback, profile))
+
+    for container, node in sorted(interfaces.items()):
+        if container.startswith("@") or not isinstance(node, dict):
+            continue
+
+        # Logical containers carry the binding, and their units, directly.
+        profile = _text(node.get("interface-management-profile"))
+        if profile:
+            found.append((container, profile))
+        units_of(node, container)
+
+        for entry in ensure_list(node.get("entry")):
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("@name") or "").strip()
+            for type_key in TYPE_SUBTREE_KEYS:
+                subtree = entry.get(type_key)
+                if not isinstance(subtree, dict):
+                    continue
+                profile = _text(subtree.get("interface-management-profile"))
+                if profile:
+                    found.append((name, profile))
+                units_of(subtree, name)
+    return found
+
+
 def _container_units(node: dict, container: str,
                      issues: list[InterfaceIssue]) -> list[dict]:
     """Units hanging directly off a container, which is how the logical types are shaped."""

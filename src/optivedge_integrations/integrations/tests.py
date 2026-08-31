@@ -13,6 +13,8 @@ from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
     Interface,
+    FieldProvenance,
+    InterfaceManagementProfile,
     ManagementInterface,
     PermittedSource,
     AddressGroup,
@@ -74,7 +76,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     pushed_shared,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.interface_management_profiles import (
+    ENTRY_FIELD,
+    normalize_interface_management_profiles,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.interfaces import (
+    bound_management_profiles,
     normalize_interfaces,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
@@ -5916,3 +5923,103 @@ class InterfaceNormalizationTests(TestCase):
         normalize_interfaces(appliance)
         normalize_interfaces(appliance)
         self.assertEqual(Interface.objects.filter(appliance=appliance).count(), 1)
+
+
+class InterfaceManagementProfileNormalizationTests(TestCase):
+    """Profiles as objects, so that an UNUSED one has somewhere to be."""
+
+    def _appliance(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.imp")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name="grp-imp", group_type=ApplianceGroup.TYPE_STANDALONE)
+        return Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="SERIAL-IMP", hostname="fw-imp")
+
+    def _snapshot(self, appliance, network):
+        return Snapshot.objects.create(
+            management_station=appliance.management_station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"network": network}}}})
+
+    def test_an_unbound_profile_is_recorded_with_no_bindings(self):
+        """The case that cannot be seen from ManagementInterface at all."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": [
+                {"@name": "bound-one", "https": "yes"},
+                {"@name": "unused-one", "ssh": "yes"},
+            ]}},
+            "interface": {"ethernet": {"entry": {
+                "@name": "ethernet1/1",
+                "layer3": {"interface-management-profile": "bound-one"}}}},
+        })
+        profiles = {p.name: p for p in normalize_interface_management_profiles(appliance)}
+        self.assertEqual(profiles["bound-one"].bound_interface_names, ["ethernet1/1"])
+        self.assertEqual(profiles["bound-one"].bound_interface_count, 1)
+        self.assertEqual(profiles["unused-one"].bound_interface_names, [])
+        self.assertEqual(profiles["unused-one"].bound_interface_count, 0)
+
+    def test_a_profile_bound_to_an_sdwan_interface_is_not_reported_unused(self):
+        """sdwan exists on a PA-5220 and a PA-VM, and the old hard-coded walks missed it.
+
+        Getting this wrong produces a false finding: a profile that IS bound, reported as
+        unused, on a container nobody thought to list.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": {"@name": "p", "ssh": "yes"}}},
+            "interface": {"sdwan": {"units": {"entry": {
+                "@name": "sdwan.1", "interface-management-profile": "p"}}}},
+        })
+        profile = normalize_interface_management_profiles(appliance)[0]
+        self.assertEqual(profile.bound_interface_names, ["sdwan.1"])
+        self.assertEqual(profile.bound_interface_count, 1)
+
+    def test_bindings_are_found_at_every_depth(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": {"@name": "p"}}},
+            "interface": {
+                "ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {
+                    "interface-management-profile": "p",
+                    "units": {"entry": {"@name": "ethernet1/1.10",
+                                        "interface-management-profile": "p"}}}}},
+                "loopback": {"units": {"entry": {"@name": "loopback.1",
+                                                 "interface-management-profile": "p"}}},
+            },
+        })
+        profile = normalize_interface_management_profiles(appliance)[0]
+        self.assertEqual(profile.bound_interface_names,
+                         ["ethernet1/1", "ethernet1/1.10", "loopback.1"])
+
+    def test_template_provenance_is_recorded_and_local_is_its_absence(self):
+        """Measured on hardware: a pushed profile carries @ptpl, a local one carries nothing."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"profiles": {"interface-management-profile": {"entry": [
+            {"@name": "from-template", "@ptpl": "ptpl_fw-core-tpa",
+             "https": {"@ptpl": "ptpl_fw-core-tpa", "#text": "yes"}},
+            {"@name": "from-local", "ssh": "yes"},
+        ]}}})
+        profiles = {p.name: p for p in normalize_interface_management_profiles(appliance)}
+        ct = ContentType.objects.get_for_model(InterfaceManagementProfile)
+
+        row = FieldProvenance.objects.get(
+            content_type=ct, object_id=profiles["from-template"].pk, field_name=ENTRY_FIELD)
+        self.assertEqual(row.provenance_type, FieldProvenance.ProvenanceType.TEMPLATE)
+        self.assertEqual(row.raw_value, "ptpl_fw-core-tpa")
+        self.assertFalse(FieldProvenance.objects.filter(
+            content_type=ct, object_id=profiles["from-local"].pk).exists(),
+            "local is the absence of a row, as FieldProvenance documents")
+
+    def test_renormalizing_replaces_profiles_and_their_provenance(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"profiles": {"interface-management-profile": {"entry": {
+            "@name": "p", "@ptpl": "tpl"}}}})
+        normalize_interface_management_profiles(appliance)
+        normalize_interface_management_profiles(appliance)
+        self.assertEqual(InterfaceManagementProfile.objects.count(), 1)
+        ct = ContentType.objects.get_for_model(InterfaceManagementProfile)
+        self.assertEqual(FieldProvenance.objects.filter(content_type=ct).count(), 1,
+                         "orphaned provenance rows would accumulate every run")

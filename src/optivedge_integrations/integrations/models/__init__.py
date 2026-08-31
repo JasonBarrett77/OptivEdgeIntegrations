@@ -17,6 +17,7 @@ from .collected import (
 )
 from .events import IntegrationEvent, IntegrationRun
 from .device_configuration import DeviceConfigurationProfile
+from .interface_management_profile import InterfaceManagementProfile
 from .interfaces import Interface
 from .management_interface import (
     ManagementInterface,
@@ -83,6 +84,7 @@ __all__ = [
     "ManagementStation",
     "DeviceConfigurationProfile",
     "Interface",
+    "InterfaceManagementProfile",
     "ManagementInterface",
     "ManagementService",
     "SERVICE_NAMES",
