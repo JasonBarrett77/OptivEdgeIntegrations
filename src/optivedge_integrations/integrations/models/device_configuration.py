@@ -46,12 +46,11 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     ntp_primary_server = models.CharField(max_length=255, blank=True)
     ntp_secondary_server = models.CharField(max_length=255, blank=True)
 
-    http_disabled = models.BooleanField(default=True)
-    https_disabled = models.BooleanField(default=False)
-    telnet_disabled = models.BooleanField(default=True)
-    ssh_disabled = models.BooleanField(default=False)
-    icmp_disabled = models.BooleanField(default=False)
-    snmp_disabled = models.BooleanField(default=True)
+    #: Which services the MGT plane runs is NOT here. It was - six booleans reading
+    #: deviceconfig/system/service - and ManagementService superseded them: same values, plus
+    #: the four keys these omitted, on every management plane rather than only MGT. Two
+    #: representations of one fact drift, and the per-appliance one cannot answer the
+    #: question a services finding asks, which is always about a surface.
 
     #: The MGT plane's permitted-source list as collected. Whether that list is acceptable
     #: is a verdict, and verdicts belong to the consumer - see ManagementInterface /

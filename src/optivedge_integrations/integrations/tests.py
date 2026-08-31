@@ -2057,10 +2057,6 @@ class DeviceConfigurationNormalizationTests(TestCase):
         self.assertTrue(profile.ha_link_monitoring_enabled)
         self.assertEqual(profile.ntp_primary_server, "time1.example.com")
         self.assertEqual(profile.ntp_secondary_server, "time2.example.com")
-        self.assertTrue(profile.http_disabled)
-        self.assertFalse(profile.https_disabled)
-        self.assertTrue(profile.telnet_disabled)
-        self.assertFalse(profile.ssh_disabled)
         self.assertEqual(profile.permitted_ip_values, ["10.10.10.0/24"])
         self.assertEqual(profile.login_banner, "Authorized users only.")
         self.assertEqual(profile.idle_timeout_minutes, 10)
@@ -2092,13 +2088,12 @@ class DeviceConfigurationNormalizationTests(TestCase):
                         "entry": {
                             "deviceconfig": {
                                 "system": {
-                                    "service": {
-                                        "disable-http": {"#text": "no", "@ptpl": "template-a"},
-                                    },
                                     "permitted-ip": {
                                         "entry": [{"@name": "0.0.0.0/0"}],
                                     },
-                                    "login-banner": "",
+                                    # Present and template-sourced, so it records provenance;
+                                    # an absent key deliberately records none.
+                                    "login-banner": {"#text": "", "@ptpl": "template-a"},
                                 }
                             }
                         }
@@ -2121,13 +2116,9 @@ class DeviceConfigurationNormalizationTests(TestCase):
             FieldProvenance.objects.filter(
                 content_type=ct,
                 object_id=profile.pk,
-                field_name="http_disabled",
+                field_name="login_banner",
             ).exists()
         )
-        self.assertFalse(profile.http_disabled)
-        self.assertFalse(profile.https_disabled)
-        self.assertFalse(profile.ssh_disabled)
-        self.assertTrue(profile.snmp_disabled)
         self.assertEqual(profile.idle_timeout_minutes, 60)
 
     def test_normalize_enforcement_point_security_rules_persists_rules_with_edl_objects(self):

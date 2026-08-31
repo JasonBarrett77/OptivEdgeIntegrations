@@ -41,12 +41,6 @@ class NormalizedDeviceConfigurationProfile:
     ha_link_monitoring_enabled: bool
     ntp_primary_server: str
     ntp_secondary_server: str
-    http_disabled: bool
-    https_disabled: bool
-    telnet_disabled: bool
-    ssh_disabled: bool
-    icmp_disabled: bool
-    snmp_disabled: bool
     permitted_ip_values: list[str]
     permitted_ip_count: int
     login_banner: str
@@ -122,9 +116,6 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
     system = deviceconfig.get("system", {}) if isinstance(deviceconfig, dict) else {}
     if not isinstance(system, dict):
         raise ValueError(f"unexpected system config type: {type(system).__name__}")
-    service = system.get("service", {})
-    if not isinstance(service, dict):
-        service = {}
     high_availability = deviceconfig.get("high-availability", {})
     if not isinstance(high_availability, dict):
         high_availability = {}
@@ -179,30 +170,6 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         secondary_ntp.get("ntp-server-address")
     )
 
-    http_disabled, http_disabled_rk, http_disabled_rv = parse_yes_no_field(
-        service.get("disable-http"),
-        default_effective=True,
-    )
-    https_disabled, https_disabled_rk, https_disabled_rv = parse_yes_no_field(
-        service.get("disable-https"),
-        default_effective=False,
-    )
-    telnet_disabled, telnet_disabled_rk, telnet_disabled_rv = parse_yes_no_field(
-        service.get("disable-telnet"),
-        default_effective=True,
-    )
-    ssh_disabled, ssh_disabled_rk, ssh_disabled_rv = parse_yes_no_field(
-        service.get("disable-ssh"),
-        default_effective=False,
-    )
-    icmp_disabled, icmp_disabled_rk, icmp_disabled_rv = parse_yes_no_field(
-        service.get("disable-icmp"),
-        default_effective=False,
-    )
-    snmp_disabled, snmp_disabled_rk, snmp_disabled_rv = parse_yes_no_field(
-        service.get("disable-snmp"),
-        default_effective=True,
-    )
 
     permitted_ip_values = entry_names(system.get("permitted-ip"))
     permitted_ip_count = len(permitted_ip_values)
@@ -222,12 +189,6 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         ha_link_monitoring_enabled=ha_link_monitoring_enabled,
         ntp_primary_server=ntp_primary_server,
         ntp_secondary_server=ntp_secondary_server,
-        http_disabled=http_disabled,
-        https_disabled=https_disabled,
-        telnet_disabled=telnet_disabled,
-        ssh_disabled=ssh_disabled,
-        icmp_disabled=icmp_disabled,
-        snmp_disabled=snmp_disabled,
         permitted_ip_values=permitted_ip_values,
         permitted_ip_count=permitted_ip_count,
         login_banner=login_banner,
@@ -239,12 +200,6 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
             ("ha_link_monitoring_enabled", ha_link_monitoring_rk,  ha_link_monitoring_rv),
             ("ntp_primary_server",       ntp_primary_rk,           ntp_primary_rv),
             ("ntp_secondary_server",     ntp_secondary_rk,         ntp_secondary_rv),
-            ("http_disabled",            http_disabled_rk,         http_disabled_rv),
-            ("https_disabled",           https_disabled_rk,        https_disabled_rv),
-            ("telnet_disabled",          telnet_disabled_rk,       telnet_disabled_rv),
-            ("ssh_disabled",             ssh_disabled_rk,          ssh_disabled_rv),
-            ("icmp_disabled",            icmp_disabled_rk,         icmp_disabled_rv),
-            ("snmp_disabled",            snmp_disabled_rk,         snmp_disabled_rv),
             ("login_banner",             login_banner_rk,          login_banner_rv),
             ("idle_timeout_minutes",     idle_timeout_rk,          idle_timeout_rv),
         ],
@@ -264,12 +219,6 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "ha_link_monitoring_enabled": normalized.ha_link_monitoring_enabled,
                 "ntp_primary_server": normalized.ntp_primary_server,
                 "ntp_secondary_server": normalized.ntp_secondary_server,
-                "http_disabled": normalized.http_disabled,
-                "https_disabled": normalized.https_disabled,
-                "telnet_disabled": normalized.telnet_disabled,
-                "ssh_disabled": normalized.ssh_disabled,
-                "icmp_disabled": normalized.icmp_disabled,
-                "snmp_disabled": normalized.snmp_disabled,
                 "permitted_ip_values": normalized.permitted_ip_values,
                 "permitted_ip_count": normalized.permitted_ip_count,
                 "login_banner": normalized.login_banner,
