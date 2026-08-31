@@ -10,12 +10,18 @@ even though it sits in config we already collect.
 So this model IS the join. It exists so that "which interfaces does this appliance have"
 has an answer that does not depend on the interface happening to be something else.
 
-Scoped to an appliance, and normalized for the ACTIVE member of an HA pair only. Peers can
-differ, but an assessment is about the device carrying traffic, and that is the convention
-the collection flows already follow (`resolve_group_collection_appliance`). This is the
-opposite call to ManagementInterface, deliberately: there, both peers get rows because each
-has its own reachable management address, and collapsing them would hide a real difference.
-Here the config is the same on both and the active one is the one that matters.
+Scoped to an appliance, and normalized for EVERY appliance including both members of an HA
+pair - the same convention as DeviceConfigurationProfile and ManagementInterface, the two
+models this sits beside.
+
+An earlier version populated only the active member. That gave the model appliance-anchored
+identity - `unique(appliance, name)` says there is one set per appliance - with group-like
+population, and nothing in the schema recorded which appliances a row spoke for. Policy
+objects get away with one copy per pair because their identity IS the group
+(`EnforcementPoint` is unique on `appliance_group, vsys_name`) and `EnforcementNode` records
+the members. Interfaces have no such bridge, so "this peer has no interfaces" would have
+been indistinguishable from "this peer was never normalized". Choosing the active member is
+a presentation and finding-dedup decision, which is where the policy plane already makes it.
 
 Deliberately NOT modelled yet:
 

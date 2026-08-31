@@ -5871,6 +5871,37 @@ class InterfaceNormalizationTests(TestCase):
         self.assertEqual(len(result.issues), 1)
         self.assertEqual(result.issues[0].severity, NormalizationIssue.Severity.ERROR)
 
+    def test_two_appliances_in_one_group_keep_their_own_issues(self):
+        """Both HA members normalize their own interfaces, so issues cannot be group-owned.
+
+        A group-scoped replace had the second peer's run delete the first's issues with no
+        trace, which is the one thing an issue record must never do.
+        """
+        first = self._appliance()
+        second = Appliance.objects.create(
+            management_station=first.management_station,
+            appliance_group=first.appliance_group,
+            serial_number="SERIAL-IF2", hostname="fw-if2")
+        for appliance in (first, second):
+            self._snapshot(appliance, {"interface": {"ethernet": {"entry": [{"layer3": {}}]}}})
+            normalize_interfaces(appliance)
+
+        self.assertEqual(NormalizationIssue.objects.filter(kind="interface").count(), 2)
+        self.assertEqual(
+            set(NormalizationIssue.objects.filter(kind="interface")
+                .values_list("appliance__hostname", flat=True)),
+            {"fw-if", "fw-if2"})
+
+    def test_an_issue_belongs_to_exactly_one_owner(self):
+        appliance = self._appliance()
+        issue = NormalizationIssue(
+            management_station=appliance.management_station,
+            appliance=appliance, appliance_group=appliance.appliance_group,
+            kind="interface", severity=NormalizationIssue.Severity.ERROR,
+            disposition=NormalizationIssue.Disposition.SKIPPED, reason="x")
+        with self.assertRaises(ValidationError):
+            issue.clean()
+
     def test_issues_are_replaced_not_accumulated(self):
         appliance = self._appliance()
         self._snapshot(appliance, {"interface": {"ethernet": {"entry": [{"layer3": {}}]}}})

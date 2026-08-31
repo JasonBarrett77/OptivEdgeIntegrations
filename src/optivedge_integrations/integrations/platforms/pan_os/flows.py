@@ -535,28 +535,6 @@ def collect_enforcement_point_pushed_shared_policy(
     return persist_enforcement_point_collected_response(enforcement_point, collected)
 
 
-def _interface_collection_appliance_ids(appliances: list[Appliance]) -> set[int]:
-    """Which appliances' interfaces to normalize: one per HA pair, the active member.
-
-    Peers can differ, but an assessment is about the device carrying traffic, and
-    `resolve_group_collection_appliance` already encodes which that is - including its
-    deterministic fallback when Panorama has not told us. An appliance with no group is
-    its own answer.
-    """
-    chosen: set[int] = set()
-    seen_groups: set[int] = set()
-    for appliance in appliances:
-        group = appliance.appliance_group
-        if group is None:
-            chosen.add(appliance.pk)
-            continue
-        if group.pk in seen_groups:
-            continue
-        seen_groups.add(group.pk)
-        chosen.add(resolve_group_collection_appliance(group).pk)
-    return chosen
-
-
 def renormalize_in_scope_configuration(
     management_station: ManagementStation,
 ) -> PANOSInScopeRenormalizationResult:
@@ -583,8 +561,6 @@ def renormalize_in_scope_configuration(
     security_rule_item_failures: list[PANOSSecurityRuleFailure] = []
     zone_normalizations: list[PANOSZoneNormalizedPoint] = []
     zone_failures: list[PANOSZoneNormalizationFailure] = []
-
-    interface_appliance_ids = _interface_collection_appliance_ids(appliances)
 
     for appliance in appliances:
         try:
@@ -621,13 +597,9 @@ def renormalize_in_scope_configuration(
                 )
             )
 
-        # Interfaces are normalized for the ACTIVE member of an HA pair only, which is the
-        # convention collection already follows. Deliberately unlike management surfaces
-        # just above, where both peers get rows because each has its own reachable address.
-        # Its own try/except for the same reason: one plane of the answer failing must not
-        # silently remove another.
-        if appliance.pk not in interface_appliance_ids:
-            continue
+        # Every appliance, both HA members included - the same convention as the two
+        # normalizations above. Its own try/except for the same reason: one plane of the
+        # answer failing must not silently remove another.
         try:
             normalized_interfaces = normalize_appliance_interfaces(appliance)
         except Exception as exc:

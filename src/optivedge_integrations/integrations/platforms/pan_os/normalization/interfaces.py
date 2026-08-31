@@ -327,33 +327,17 @@ def normalize_interfaces(appliance: Appliance) -> NormalizedInterfaces:
 
 
 def _replace_issues(appliance: Appliance, issues: list[InterfaceIssue]) -> None:
-    """Issues are owned by the appliance group, the only owner this model offers for
-    appliance-scoped work.
+    """Replace this APPLIANCE's interface issues.
 
-    An appliance with no group cannot own one, so rather than drop the issues silently -
-    which is exactly what this module exists to avoid - the whole normalization fails and
-    the flow records it.
-
-    The delete is group-wide, which is only safe because exactly ONE appliance per group
-    normalizes interfaces: the flow picks the active HA member, and a standalone appliance
-    gets a group of its own. Calling this for two appliances in the same group would have
-    the second erase the first's issues - silently, which is the one outcome this module
-    exists to prevent. If interfaces ever need normalizing for both peers, this needs an
-    appliance-scoped owner rather than a group-scoped one.
+    Owned by the appliance, not its group, because both members of an HA pair normalize
+    their own interfaces. A group-scoped replace would have the second peer's run delete
+    the first's issues without a trace - the one failure mode an issue record cannot have.
     """
-    group = appliance.appliance_group
-    if group is None:
-        if issues:
-            raise ValueError(
-                f"appliance {appliance.pk} has no appliance group, so {len(issues)} "
-                f"normalization issue(s) cannot be recorded: "
-                f"{'; '.join(i.reason for i in issues[:3])}")
-        return
-    NormalizationIssue.objects.filter(appliance_group=group, kind=ISSUE_KIND).delete()
+    NormalizationIssue.objects.filter(appliance=appliance, kind=ISSUE_KIND).delete()
     NormalizationIssue.objects.bulk_create([
         NormalizationIssue(
             management_station=appliance.management_station,
-            appliance_group=group,
+            appliance=appliance,
             kind=issue.kind, name=issue.name, severity=issue.severity,
             disposition=issue.disposition, reason=issue.reason,
             node=issue.node, source=issue.source, raw_entry=issue.raw_entry,

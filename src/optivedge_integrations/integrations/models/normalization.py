@@ -20,16 +20,23 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 from .base import TimestampedModel
-from .collected import ApplianceGroup, EnforcementPoint, ManagementStation
+from .collected import Appliance, ApplianceGroup, EnforcementPoint, ManagementStation
 
 
 class NormalizationIssue(TimestampedModel):
     """One object that could not be normalized cleanly.
 
-    Owned the same way the objects themselves are — an enforcement point for vsys-scoped
-    work, an appliance group for shared-scoped work — so a run can replace an owner's
-    issues in the same pass that replaces its objects, and neither can go stale relative
-    to the other.
+    Owned the same way the objects themselves are, so a run can replace an owner's issues
+    in the same pass that replaces its objects and neither can go stale relative to the
+    other. That means three owners, because the objects have three scopes:
+
+        enforcement point   vsys-scoped work — rules, zones, address objects
+        appliance group     shared-scoped work
+        appliance           device-scoped work — interfaces, device configuration
+
+    `appliance` was added last, when interfaces began normalizing for both members of an HA
+    pair. Owning those issues by group would have had the second peer's run delete the
+    first's, silently — and silence is the one outcome an issue record cannot afford.
     """
 
     class Severity(models.TextChoices):
@@ -54,6 +61,13 @@ class NormalizationIssue(TimestampedModel):
     )
     appliance_group = models.ForeignKey(
         ApplianceGroup,
+        on_delete=models.CASCADE,
+        related_name="normalization_issues",
+        null=True,
+        blank=True,
+    )
+    appliance = models.ForeignKey(
+        Appliance,
         on_delete=models.CASCADE,
         related_name="normalization_issues",
         null=True,
@@ -98,6 +112,7 @@ class NormalizationIssue(TimestampedModel):
             models.Index(fields=["management_station", "severity", "is_consequent"]),
             models.Index(fields=["enforcement_point", "severity"]),
             models.Index(fields=["appliance_group", "severity"]),
+            models.Index(fields=["appliance", "severity"]),
         ]
 
     def __str__(self) -> str:
@@ -105,13 +120,17 @@ class NormalizationIssue(TimestampedModel):
 
     @property
     def owner(self):
-        return self.enforcement_point or self.appliance_group
+        return self.enforcement_point or self.appliance_group or self.appliance
 
     def clean(self) -> None:
-        owner_count = int(self.enforcement_point_id is not None) + int(self.appliance_group_id is not None)
+        owner_count = (
+            int(self.enforcement_point_id is not None)
+            + int(self.appliance_group_id is not None)
+            + int(self.appliance_id is not None)
+        )
         if owner_count != 1:
             raise ValidationError(
                 "A normalization issue belongs to exactly one owner: the enforcement point "
-                "whose vsys-scoped work produced it, or the appliance group whose "
-                "shared-scoped work did."
+                "whose vsys-scoped work produced it, the appliance group whose shared-scoped "
+                "work did, or the appliance whose device-scoped work did."
             )
