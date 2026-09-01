@@ -117,6 +117,15 @@ app-directories template loader resolves those includes by relative path across 
 `templates/` directory, so no import is needed for templates — but `optivedge` must be in `INSTALLED_APPS`
 alongside this package for any of it to resolve.
 
+### Modelling a config item for a control
+
+Most new models here exist because an OptivEdgeAssessments control needs one. **The checklist
+for that work is `OptivEdgeAssessments/src/assessments/docs/building-a-control.md`** — read it
+before adding a model or a normalizer for a control, and add to it when something is missed.
+The items that land in this repository are: enumerate the real key set from the device rather
+than a sample, measure the implicit value instead of assuming it, scope by config subtree,
+populate both HA peers, and never skip a payload you cannot parse.
+
 ### Provenance: one pattern, no alternatives
 
 **Every normalized model that can carry a pushed value uses `ProvenancedMixin` and writes
