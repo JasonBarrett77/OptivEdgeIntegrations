@@ -5648,15 +5648,21 @@ class ManagementInterfaceNormalizationTests(TestCase):
         }}})
         normalize_management_interfaces(appliance)
         aux = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_AUX2)
-        self.assertEqual(aux.provenance, "stack_fw-core-tpa")
+
+        def prov(instance):
+            row = instance.field_provenance.filter(field_name="__entry__").first()
+            return (row.provenance_type, row.raw_value) if row else None
+
+        self.assertEqual(prov(aux), ("template", "stack_fw-core-tpa"))
         by_name = {s.name: s for s in aux.services.all()}
-        self.assertEqual(by_name["https"].provenance, "stack_fw-core-tpa")
-        self.assertEqual(by_name["telnet"].provenance, "",
-                         "an overridden leaf loses its marker and must not inherit one")
-        self.assertEqual(by_name["snmp"].provenance, "",
-                         "an implicit value was pushed by nobody")
-        sources = {s.value: s.provenance for s in aux.permitted_sources.all()}
-        self.assertEqual(sources, {"10.0.0.0/8": "stack_fw-core-tpa", "192.168.1.1": ""})
+        self.assertEqual(prov(by_name["https"]), ("template", "stack_fw-core-tpa"))
+        self.assertEqual(prov(by_name["telnet"]), ("local", ""),
+                         "an overridden leaf is present-but-unmarked: local, not template")
+        self.assertIsNone(prov(by_name["snmp"]),
+                          "an absent key is a PAN-OS default, which nobody pushed or wrote")
+        sources = {s.value: prov(s) for s in aux.permitted_sources.all()}
+        self.assertEqual(sources, {"10.0.0.0/8": ("template", "stack_fw-core-tpa"),
+                                   "192.168.1.1": ("local", "")})
 
     def test_a_dataplane_surface_takes_provenance_from_its_profile(self):
         """A profile overrides at the entry, so its services share one source."""
@@ -5670,8 +5676,10 @@ class ManagementInterfaceNormalizationTests(TestCase):
         }})
         normalize_management_interfaces(appliance)
         surface = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_DATAPLANE)
-        self.assertEqual(surface.provenance, "ptpl_fw-core-tpa")
-        self.assertEqual(surface.services.get(name="https").provenance, "ptpl_fw-core-tpa")
+        row = surface.field_provenance.get(field_name="__entry__")
+        self.assertEqual((row.provenance_type, row.raw_value), ("template", "ptpl_fw-core-tpa"))
+        https = surface.services.get(name="https").field_provenance.get(field_name="__entry__")
+        self.assertEqual(https.raw_value, "ptpl_fw-core-tpa")
 
     def test_a_local_value_has_no_provenance(self):
         appliance = self._appliance()
@@ -5681,9 +5689,15 @@ class ManagementInterfaceNormalizationTests(TestCase):
         }}})
         normalize_management_interfaces(appliance)
         mgt = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_MGT)
-        self.assertEqual(mgt.provenance, "")
-        self.assertEqual({s.provenance for s in mgt.services.all()}, {""})
-        self.assertEqual(mgt.permitted_sources.get().provenance, "")
+        # The surface exists, so it has an origin: locally defined. Only an ABSENT payload
+        # key - a value PAN-OS defaulted - has no row at all.
+        self.assertEqual(mgt.field_provenance.get().provenance_type, "local")
+        # telnet was WRITTEN locally; the rest are PAN-OS defaults with no row at all.
+        telnet = mgt.services.get(name="telnet").field_provenance.get()
+        self.assertEqual((telnet.provenance_type, telnet.raw_value), ("local", ""))
+        self.assertFalse(mgt.services.get(name="snmp").field_provenance.exists())
+        self.assertEqual(mgt.permitted_sources.get().field_provenance.get().provenance_type,
+                         "local")
 
     def test_deviceconfig_polarity_is_inverted_and_defaults_applied(self):
         """`disable-telnet: yes` means OFF, and an absent key does NOT mean off.

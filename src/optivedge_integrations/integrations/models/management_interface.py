@@ -27,9 +27,10 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 from .base import SyncTrackedModel
+from .provenance import ProvenancedMixin
 
 
-class ManagementInterface(SyncTrackedModel):
+class ManagementInterface(ProvenancedMixin, SyncTrackedModel):
     PLANE_MGT = "mgt"
     PLANE_AUX1 = "aux-1"
     PLANE_AUX2 = "aux-2"
@@ -71,18 +72,6 @@ class ManagementInterface(SyncTrackedModel):
     #: this profile expose", and not before.
     profile_name = models.CharField(max_length=64, blank=True)
 
-    #: Where the SURFACE came from - the plane node for a deviceconfig plane, the profile
-    #: entry for a data-plane surface. Its services and sources carry their own, because on
-    #: a management plane they can differ from it and from each other.
-    #: Which template or stack pushed this value, from `@ptpl`. Empty means the value is
-    #: local - or was pushed and then overridden locally, which merged config cannot
-    #: distinguish from local. See `docs/palo-alto/pan-os/read-template-provenance.md`.
-    #:
-    #: A column rather than a FieldProvenance row because this model is already one row per
-    #: value: the row IS the field, so a generic field-provenance table would store one
-    #: string per row behind a join. FieldProvenance earns its place on models with many
-    #: fields on one row, like DeviceConfigurationProfile.
-    provenance = models.CharField(max_length=64, blank=True)
 
     class Meta:
         ordering = ["appliance__hostname", "plane", "interface_name"]
@@ -113,11 +102,20 @@ class ManagementInterface(SyncTrackedModel):
             raise ValidationError("Only a data-plane surface carries an interface name.")
 
 
-class PermittedSource(models.Model):
+class PermittedSource(ProvenancedMixin, models.Model):
     """One literal source restriction on a management surface.
 
     Always a literal. Address objects, groups, hostnames and ranges are all rejected by
     PAN-OS on both planes, so nothing here needs resolving - measured 2026-08-27.
+
+    Provenance is a FieldProvenance row under `field_name="__entry__"`, the same mechanism
+    SecurityRule, DeviceConfigurationProfile, the policy objects and InterfaceManagementProfile
+    use. The row IS one value here, so "__entry__" is that value's own provenance.
+
+    Absence of a row means the key was absent from the payload - PAN-OS supplied its own
+    default and nobody pushed or configured anything. A key that was written locally gets a
+    row typed `local`. That distinction is free from this mechanism and was impossible with
+    the bare name column this replaces.
     """
 
     FAMILY_V4 = 4
@@ -136,15 +134,6 @@ class PermittedSource(models.Model):
     #: Nullable because the two planes differ by exactly this one field.
     description = models.TextField(blank=True)
 
-    #: Which template or stack pushed this value, from `@ptpl`. Empty means the value is
-    #: local - or was pushed and then overridden locally, which merged config cannot
-    #: distinguish from local. See `docs/palo-alto/pan-os/read-template-provenance.md`.
-    #:
-    #: A column rather than a FieldProvenance row because this model is already one row per
-    #: value: the row IS the field, so a generic field-provenance table would store one
-    #: string per row behind a join. FieldProvenance earns its place on models with many
-    #: fields on one row, like DeviceConfigurationProfile.
-    provenance = models.CharField(max_length=64, blank=True)
 
     class Meta:
         ordering = ["management_interface", "position", "id"]
@@ -210,7 +199,7 @@ SERVICE_NAMES = (
 )
 
 
-class ManagementService(models.Model):
+class ManagementService(ProvenancedMixin, models.Model):
     """One service on one management surface, with plane polarity already resolved.
 
     The polarity difference is the whole reason this is normalized at collection. A
@@ -221,6 +210,16 @@ class ManagementService(models.Model):
     So `enabled` is always the effective answer: True means the service is on. Nothing here
     records WHICH plane spelling produced it, because no question so far is asked of the
     spelling - the surface and the effective value are what a control asserts against.
+
+    Provenance is a FieldProvenance row under `field_name="__entry__"`, the same mechanism
+    SecurityRule, DeviceConfigurationProfile, the policy objects and InterfaceManagementProfile
+    use. The row IS one value here, so "__entry__" is that value's own provenance.
+
+    Absence of a row means the key was absent from the payload - PAN-OS supplied its own
+    default and nobody pushed or configured anything. A key that was written locally gets a
+    row typed `local`. That distinction is free from this mechanism and was impossible with
+    the bare name column this replaces.
+    
 
     A row exists for every service its plane supports, whether on or off. Absence therefore
     means the service does not exist on that plane at all, which is a different fact from
@@ -234,15 +233,6 @@ class ManagementService(models.Model):
     #: this plane is either on or off, and one that is not valid has no row.
     enabled = models.BooleanField()
 
-    #: Which template or stack pushed this value, from `@ptpl`. Empty means the value is
-    #: local - or was pushed and then overridden locally, which merged config cannot
-    #: distinguish from local. See `docs/palo-alto/pan-os/read-template-provenance.md`.
-    #:
-    #: A column rather than a FieldProvenance row because this model is already one row per
-    #: value: the row IS the field, so a generic field-provenance table would store one
-    #: string per row behind a join. FieldProvenance earns its place on models with many
-    #: fields on one row, like DeviceConfigurationProfile.
-    provenance = models.CharField(max_length=64, blank=True)
 
     class Meta:
         ordering = ["management_interface", "name"]

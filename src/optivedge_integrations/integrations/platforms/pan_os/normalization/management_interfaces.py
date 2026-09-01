@@ -21,17 +21,26 @@ from __future__ import annotations
 
 from typing import Any
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
 from optivedge_integrations.integrations.models import (
     Appliance,
+    FieldProvenance,
     ManagementInterface,
     ManagementService,
     PermittedSource,
     Snapshot,
     parse_permitted_source,
 )
-from optivedge_integrations.integrations.platforms.pan_os.normalization.common import ensure_list
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ABSENT,
+    classify_prov_type,
+    ensure_list,
+    entry_provenance,
+    parse_yes_no_field,
+    scalar_value,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.interfaces import (
     bound_management_profiles,
 )
@@ -73,28 +82,6 @@ MGT_IMPLICIT_ENABLED = frozenset({"https", "ssh", "icmp"})
 PROFILE_IMPLICIT_ENABLED: frozenset[str] = frozenset()
 
 
-#: Attributes that name where a value came from. `@ptpl` may name a template OR a template
-#: stack - both push configuration and the difference does not matter to a consumer, so the
-#: name is carried through as given rather than parsed.
-PROVENANCE_ATTRIBUTES = ("@ptpl", "@src")
-
-
-def _provenance(node: Any) -> str:
-    """The source name on a node, or "" for a value that carries no marker.
-
-    "" is local OR pushed-then-overridden-locally: an override strips the marker and the
-    two are byte identical in merged config. Reporting it as local is incomplete rather
-    than wrong - see docs/palo-alto/pan-os/read-template-provenance.md.
-    """
-    if not isinstance(node, dict):
-        return ""
-    for attribute in PROVENANCE_ATTRIBUTES:
-        value = node.get(attribute)
-        if value and str(value).strip() and str(value).strip() != "tpl":
-            return str(value).strip()[:64]
-    return ""
-
-
 def _text(node: Any) -> str:
     """A leaf may be a bare string or {'#text': v, '@loc': ...} - see the payload contract."""
     if isinstance(node, dict):
@@ -102,7 +89,7 @@ def _text(node: Any) -> str:
     return str(node or "").strip()
 
 
-def _permitted_entries(node: Any) -> list[tuple[str, str, str]]:
+def _permitted_entries(node: Any) -> list[tuple[str, str, Any, str | None]]:
     """(value, description, provenance) per entry.
 
     Absent or empty means unrestricted - the caller decides. Each entry carries its own
@@ -120,15 +107,15 @@ def _permitted_entries(node: Any) -> list[tuple[str, str, str]]:
             # overridden entry its container's source and erase the override, which is the
             # one thing this field exists to show - a pushed list can contain locally added
             # entries, and each states its own origin.
-            provenance = _provenance(entry)
+            raw_key, raw_value = entry_provenance(entry)
         else:
-            name, desc, provenance = str(entry).strip(), "", ""
+            name, desc, raw_key, raw_value = str(entry).strip(), "", None, None
         if name:
-            out.append((name, desc, provenance))
+            out.append((name, desc, raw_key, raw_value))
     return out
 
 
-def _mgt_services(system_node: Any) -> dict[str, tuple[bool, str]]:
+def _mgt_services(system_node: Any) -> dict[str, tuple[bool, Any, str | None]]:
     """Effective service states for a deviceconfig plane, polarity inverted.
 
     `disable-telnet: yes` means telnet is OFF, so the stored value is the negation of the
@@ -138,40 +125,37 @@ def _mgt_services(system_node: Any) -> dict[str, tuple[bool, str]]:
     node = system_node if isinstance(system_node, dict) else {}
     service = node.get("service")
     service = service if isinstance(service, dict) else {}
-    out: dict[str, tuple[bool, str]] = {}
+    out: dict[str, tuple[bool, Any, str | None]] = {}
     for key in MGT_SERVICE_KEYS:
         name = key[len("disable-"):]
-        raw = service.get(key)
-        if raw is None:
-            # An implicit value was pushed by nobody: it is what PAN-OS does when the key
-            # is absent, so it has no source and must not inherit the container's.
-            out[name] = (name in MGT_IMPLICIT_ENABLED, "")
-        else:
-            # The leaf's own marker only - see _permitted_entries. Measured on hardware:
-            # an overridden disable-telnet is a bare string while its siblings keep theirs,
-            # and the container keeps its marker throughout.
-            out[name] = (_text(raw).lower() != "yes", _provenance(raw))
+        # `disable-X: yes` means the service is OFF, so the effective value is the negation.
+        # parse_yes_no_field carries the leaf's own provenance out with it, and returns
+        # ABSENT when the key is missing - which is PAN-OS's default rather than anyone's
+        # push, and therefore gets no provenance row at all.
+        disabled, raw_key, raw_value = parse_yes_no_field(
+            service.get(key), default_effective=name not in MGT_IMPLICIT_ENABLED)
+        out[name] = (not disabled, raw_key, raw_value)
     return out
 
 
-def _profile_services(profile_entry: dict) -> dict[str, tuple[bool, str]]:
+def _profile_services(profile_entry: dict) -> dict[str, tuple[bool, Any, str | None]]:
     """Effective service states for an interface management profile.
 
     Positive keys: present-and-yes is on, absent is off. No inversion.
     """
     node = profile_entry if isinstance(profile_entry, dict) else {}
-    entry_source = _provenance(node)
-    out: dict[str, tuple[bool, str]] = {}
+    entry_key, entry_value = entry_provenance(node)
+    out: dict[str, tuple[bool, Any, str | None]] = {}
     for key in PROFILE_SERVICE_KEYS:
-        raw = node.get(key)
-        if raw is None:
-            out[key] = (key in PROFILE_IMPLICIT_ENABLED, "")
-        else:
+        enabled, raw_key, raw_value = parse_yes_no_field(
+            node.get(key), default_effective=key in PROFILE_IMPLICIT_ENABLED)
+        if raw_key is not ABSENT and raw_key is None and entry_key is not None:
             # A profile overrides at the ENTRY: its leaves either all carry the profile's
             # source or none do, measured on hardware. So the entry's source is the honest
-            # answer for a leaf that carries none of its own - unlike a management plane,
-            # where a bare leaf means that leaf was overridden.
-            out[key] = (_text(raw).lower() == "yes", _provenance(raw) or entry_source)
+            # answer for a present leaf carrying none of its own - unlike a management
+            # plane, where a bare leaf means that leaf alone was overridden.
+            raw_key, raw_value = entry_key, entry_value
+        out[key] = (enabled, raw_key, raw_value)
     return out
 
 
@@ -195,6 +179,29 @@ def _bound_interfaces(device_entry: dict) -> list[tuple[str, str]]:
     return bound_management_profiles(device_entry)
 
 
+def _record(instance, raw_key: Any, raw_value: str | None) -> None:
+    """Write the object's own provenance, or none when the key was absent.
+
+    `field_name="__entry__"` is the established name for an object's own annotation. These
+    models are one row per value, so the row's own provenance IS that value's.
+
+    ABSENT means the key was not in the payload at all - PAN-OS supplied its default and
+    nobody pushed or wrote anything - so no row is written, and its absence is the answer.
+    A key present with no marker gets a row typed `local`, which is a different fact from
+    a default and one the previous name-only column could not hold.
+    """
+    if raw_key is ABSENT:
+        return
+    FieldProvenance.objects.create(
+        content_type=ContentType.objects.get_for_model(type(instance)),
+        object_id=instance.pk,
+        field_name="__entry__",
+        provenance_type=classify_prov_type(raw_key),
+        raw_key=(raw_key or "")[:32],
+        raw_value=(raw_value or "")[:128],
+    )
+
+
 def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInterface]:
     """Replace every management surface for one appliance. Returns what was written."""
     snapshot = latest_merged_snapshot(appliance)
@@ -204,7 +211,7 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
     system = ((device_entry.get("deviceconfig") or {}).get("system") or {})
 
     surfaces: list[tuple[str, str, str, str, list, dict]] = [
-        (ManagementInterface.PLANE_MGT, "", "", _provenance(system),
+        (ManagementInterface.PLANE_MGT, "", "", entry_provenance(system),
          _permitted_entries(system.get("permitted-ip")), _mgt_services(system)),
     ]
     for plane, key in ((ManagementInterface.PLANE_AUX1, "aux-1"),
@@ -213,20 +220,20 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
         if isinstance(aux, dict):
             # An aux plane carries its own `service` node, so its services are read from the
             # aux subtree and never from `system`.
-            surfaces.append((plane, "", "", _provenance(aux),
+            surfaces.append((plane, "", "", entry_provenance(aux),
                              _permitted_entries(aux.get("permitted-ip")), _mgt_services(aux)))
     for interface_name, profile_name in _bound_interfaces(device_entry):
         entry = _profile_entry(device_entry, profile_name)
         # A data-plane surface exists because a profile is bound, so the profile entry is
         # what the surface came from.
         surfaces.append((ManagementInterface.PLANE_DATAPLANE, interface_name, profile_name,
-                         _provenance(entry), _permitted_entries(entry.get("permitted-ip")),
+                         entry_provenance(entry), _permitted_entries(entry.get("permitted-ip")),
                          _profile_services(entry)))
 
     written: list[ManagementInterface] = []
     with transaction.atomic():
         ManagementInterface.objects.filter(appliance=appliance).delete()
-        for plane, interface_name, profile_name, provenance, entries, services in surfaces:
+        for plane, interface_name, profile_name, surface_prov, entries, services in surfaces:
             surface = ManagementInterface.objects.create(
                 management_station=appliance.management_station,
                 appliance=appliance,
@@ -234,19 +241,21 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
                 plane=plane,
                 interface_name=interface_name,
                 profile_name=profile_name,
-                provenance=provenance,
             )
-            for position, (value, description, source) in enumerate(entries):
+            _record(surface, *surface_prov)
+
+            for position, (value, description, raw_key, raw_value) in enumerate(entries):
                 family, start, end = parse_permitted_source(value)
-                PermittedSource.objects.create(
+                source = PermittedSource.objects.create(
                     management_interface=surface, position=position, value=value,
                     family=family, ipv4_start_int=start, ipv4_end_int=end,
-                    description=description, provenance=source,
+                    description=description,
                 )
-            ManagementService.objects.bulk_create([
-                ManagementService(management_interface=surface, name=name,
-                                  enabled=enabled, provenance=source)
-                for name, (enabled, source) in sorted(services.items())
-            ])
+                _record(source, raw_key, raw_value)
+
+            for name, (enabled, raw_key, raw_value) in sorted(services.items()):
+                service = ManagementService.objects.create(
+                    management_interface=surface, name=name, enabled=enabled)
+                _record(service, raw_key, raw_value)
             written.append(surface)
     return written

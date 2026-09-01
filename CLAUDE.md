@@ -117,6 +117,42 @@ app-directories template loader resolves those includes by relative path across 
 `templates/` directory, so no import is needed for templates — but `optivedge` must be in `INSTALLED_APPS`
 alongside this package for any of it to resolve.
 
+### Provenance: one pattern, no alternatives
+
+**Every normalized model that can carry a pushed value uses `ProvenancedMixin` and writes
+`FieldProvenance` rows. Do not invent a second mechanism.** `SecurityRule`,
+`DeviceConfigurationProfile`, `PolicyObjectBase` (address objects, groups, regions),
+`InterfaceManagementProfile`, `ManagementInterface`, `ManagementService` and `PermittedSource`
+all do this, and five normalizers write the rows.
+
+The helpers in `platforms/pan_os/normalization/common.py` are the only supported way to read
+it. Use them rather than inspecting `@ptpl` by hand:
+
+    scalar_value(node)          -> (value, raw_key, raw_provenance_value)
+    parse_yes_no_field(node, default_effective=)  same, for a yes/no leaf
+    parse_integer_field(node, default_effective=) same, for an integer leaf
+    entry_provenance(entry)     -> (raw_key, raw_value) for a named entry's own marker
+    classify_prov_type(raw_key) -> the FieldProvenance.ProvenanceType value
+    ABSENT                      raw_key sentinel: the key was not in the payload
+
+Three states, and the difference between the last two is the point:
+
+    raw_key is ABSENT   the key was absent. PAN-OS supplied its own default and nobody
+                        pushed or wrote anything. Write NO row - its absence is the answer.
+    raw_key is None     present with no marker. Write a row typed `local`.
+    raw_key is "@ptpl"  pushed. Write a row typed by classify_prov_type.
+
+A model whose row IS a single value - `ManagementService`, `PermittedSource` - still uses the
+mixin, with `field_name="__entry__"` for that value's own provenance. A bespoke
+`provenance = CharField` was tried here and removed: it could not hold the type, could not be
+queried by type, and could not distinguish a PAN-OS default from a locally written value.
+
+`@src` is not provenance. It appears on containers as `src="tpl"` and is a routing marker;
+`_PROVENANCE_KEYS` is the authoritative set.
+
+For how much provenance survives an override, and why an unmarked value is ambiguous, see
+`docs/palo-alto/pan-os/read-template-provenance.md`.
+
 ### Topology model hierarchy (`integrations/models/collected.py`)
 
 ```
