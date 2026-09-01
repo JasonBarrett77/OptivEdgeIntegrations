@@ -39,6 +39,9 @@ class NormalizedDeviceConfigurationProfile:
     ha_enabled: bool
     ha_state_sync_enabled: bool
     ha_link_monitoring_enabled: bool
+    ack_login_banner: bool
+    server_verification_enabled: bool
+    log_on_high_dp_load: bool
     ntp_primary_server: str
     ntp_secondary_server: str
     permitted_ip_values: list[str]
@@ -163,6 +166,15 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         default_effective=False,
     )
 
+    # Measured 2026-09-01: absent means ticked for server-verification and unticked for the
+    # other two. Neighbouring settings, opposite defaults - see the payload contract.
+    ack_login_banner, ack_banner_rk, ack_banner_rv = parse_yes_no_field(
+        system.get("ack-login-banner"), default_effective=False)
+    server_verification, server_verification_rk, server_verification_rv = parse_yes_no_field(
+        system.get("server-verification"), default_effective=True)
+    log_high_dp, log_high_dp_rk, log_high_dp_rv = parse_yes_no_field(
+        management.get("enable-log-high-dp-load"), default_effective=False)
+
     ntp_primary_server, ntp_primary_rk, ntp_primary_rv = scalar_value(
         primary_ntp.get("ntp-server-address")
     )
@@ -187,6 +199,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         ha_enabled=ha_enabled,
         ha_state_sync_enabled=ha_state_sync_enabled,
         ha_link_monitoring_enabled=ha_link_monitoring_enabled,
+        ack_login_banner=ack_login_banner,
+        server_verification_enabled=server_verification,
+        log_on_high_dp_load=log_high_dp,
         ntp_primary_server=ntp_primary_server,
         ntp_secondary_server=ntp_secondary_server,
         permitted_ip_values=permitted_ip_values,
@@ -198,6 +213,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
             ("ha_enabled",               ha_enabled_rk,            ha_enabled_rv),
             ("ha_state_sync_enabled",    ha_state_sync_rk,         ha_state_sync_rv),
             ("ha_link_monitoring_enabled", ha_link_monitoring_rk,  ha_link_monitoring_rv),
+            ("ack_login_banner",         ack_banner_rk,            ack_banner_rv),
+            ("server_verification_enabled", server_verification_rk, server_verification_rv),
+            ("log_on_high_dp_load",       log_high_dp_rk,           log_high_dp_rv),
             ("ntp_primary_server",       ntp_primary_rk,           ntp_primary_rv),
             ("ntp_secondary_server",     ntp_secondary_rk,         ntp_secondary_rv),
             ("login_banner",             login_banner_rk,          login_banner_rv),
@@ -217,6 +235,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "ha_enabled": normalized.ha_enabled,
                 "ha_state_sync_enabled": normalized.ha_state_sync_enabled,
                 "ha_link_monitoring_enabled": normalized.ha_link_monitoring_enabled,
+                "ack_login_banner": normalized.ack_login_banner,
+                "server_verification_enabled": normalized.server_verification_enabled,
+                "log_on_high_dp_load": normalized.log_on_high_dp_load,
                 "ntp_primary_server": normalized.ntp_primary_server,
                 "ntp_secondary_server": normalized.ntp_secondary_server,
                 "permitted_ip_values": normalized.permitted_ip_values,

@@ -43,6 +43,19 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     ha_state_sync_enabled = models.BooleanField(default=False)
     ha_link_monitoring_enabled = models.BooleanField(default=False)
 
+    #: Whether an administrator must acknowledge the login banner. Implicit `no` - the
+    #: checkbox reads unticked with the key absent, and is GREYED OUT until a banner exists,
+    #: so this cannot be required without one. Measured 2026-09-01.
+    ack_login_banner = models.BooleanField(default=False)
+    #: Whether the update server's TLS identity is verified. Implicit `yes` - the checkbox
+    #: reads ticked with the key absent. Measured 2026-09-01, and deliberately the opposite
+    #: default to `log_on_high_dp_load` below: these are neighbouring management settings
+    #: with opposite defaults, so one assumption for both would be wrong for one of them.
+    server_verification_enabled = models.BooleanField(default=True)
+    #: Implicit `no` - unticked with the key absent AND with the whole
+    #: deviceconfig/setting/management node absent, which is the state on both PA-5220s.
+    log_on_high_dp_load = models.BooleanField(default=False)
+
     ntp_primary_server = models.CharField(max_length=255, blank=True)
     ntp_secondary_server = models.CharField(max_length=255, blank=True)
 

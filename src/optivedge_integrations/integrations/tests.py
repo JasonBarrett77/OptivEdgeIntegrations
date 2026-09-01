@@ -2072,6 +2072,61 @@ class DeviceConfigurationNormalizationTests(TestCase):
         self.assertEqual(profile.login_banner, "Authorized users only.")
         self.assertEqual(profile.idle_timeout_minutes, 10)
 
+    def test_neighbouring_management_settings_have_opposite_defaults(self):
+        """Absent means ON for server-verification and OFF for the other two.
+
+        Measured 2026-09-01 from the UI on a device with all three keys absent. One shared
+        assumption would have flagged every device for PAN-MGT-009 and no device for
+        PAN-MGT-011, which is wrong in both directions at once.
+        """
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.defaults")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name="g-defaults",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="SERIAL-DEF", hostname="fw-def")
+        # The real shape on both PA-5220s: deviceconfig/setting absent entirely, so the
+        # `management` node a reader wants is two levels of absence away.
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"deviceconfig": {"system": {}}}}}})
+
+        normalize_appliance_device_configuration(appliance)
+        profile = DeviceConfigurationProfile.objects.get(appliance=appliance)
+        self.assertTrue(profile.server_verification_enabled,
+                        "absent means the update server IS verified")
+        self.assertFalse(profile.log_on_high_dp_load,
+                         "absent means high-DP-load logging is OFF")
+        self.assertFalse(profile.ack_login_banner)
+
+    def test_explicit_management_settings_beat_the_defaults(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.explicit")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name="g-explicit",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="SERIAL-EXP", hostname="fw-exp")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"deviceconfig": {
+                "system": {"server-verification": "no", "ack-login-banner": "yes",
+                           "login-banner": "Authorized users only."},
+                "setting": {"management": {"enable-log-high-dp-load": "yes"}},
+            }}}}})
+
+        normalize_appliance_device_configuration(appliance)
+        profile = DeviceConfigurationProfile.objects.get(appliance=appliance)
+        self.assertFalse(profile.server_verification_enabled)
+        self.assertTrue(profile.ack_login_banner)
+        self.assertTrue(profile.log_on_high_dp_load)
+        self.assertEqual(profile.login_banner, "Authorized users only.")
+
     def test_normalize_appliance_device_configuration_applies_intrinsic_defaults(self):
         station = ManagementStation.objects.create(
             station_type=ManagementStation.StationType.PAN_PANORAMA,
