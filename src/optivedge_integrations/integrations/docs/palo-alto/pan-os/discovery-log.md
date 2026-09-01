@@ -32,6 +32,38 @@ Entry shape:
 
 ---
 
+## 2026-09-01 — what an override does to provenance
+
+**Did:** Pushed an interface management profile from a template stack to an HA pair, had one
+peer overridden through the web interface and left the other alone, then compared both
+against `deviceconfig/system/aux-2` where one service leaf had been overridden and its
+siblings had not. Attempted the same override through the XML API on the untouched peer.
+
+**Found:** Override granularity differs by object. A profile loses `@ptpl` from the entire
+entry — every attribute and every leaf — while a management plane loses it from only the
+overridden leaf, its siblings keeping theirs. So a profile has one provenance and a
+management plane has one per field. `@ptpl` names whichever container defined the value,
+which was the template for `network/profiles` and the STACK for `deviceconfig/system` on the
+same push; both push configuration and the distinction does not matter to a consumer.
+
+**Landed:** `read-template-provenance.md`, at the top level rather than under a plane, since
+template values reach `deviceconfig`, `network` and the policy subtrees alike. README gains
+a row. OptivEdgeAssessments shows the source name alone on the profiles tab.
+
+**Corrected mid-flight:** the first reading of this generalised from a single override to
+"an override always strips the whole entry", which the management plane immediately
+contradicted. The write-up now marks entry-level-for-named-entries as an assumption drawn
+from two objects rather than a rule, because that is what it is.
+
+**Open:** an unmarked value is either locally defined or pushed-then-overridden-locally, and
+merged config cannot separate them — resolving it means comparing against the pushed
+template, the way `show config pushed-shared-policy` is already used for policy scope. The
+working decision is to report unmarked as local, which is what normalization already
+produces; deciding provenance at normalization time and storing it is the fix, deferred. The
+XML API path the web interface uses for an override is unmeasured: a plain `set` is refused
+("may need to override template object ... first") and `action=override` on a profile entry
+is refused ("Object cannot be overridden").
+
 ## 2026-08-27/28 — interface management profiles, from schema to connection
 
 **Did:** Enumerated interface-management-profile attachment in the CLI corpus, then probed

@@ -13,13 +13,15 @@ Established against the lab — PA-5220 ×2 (11.1.13-h3), PA-VM (11.2.3), Panora
 | `read-config-sources.md` | Which source answers which question, and what each one silently omits. |
 | `classify-an-api-failure.md` | Which layer failed, and whether the operation nevertheless took effect. |
 | `identify-a-vsys.md` | Keying, matching and re-matching a vsys across collections. |
+| `read-template-provenance.md` | Where a value came from, and how much of that an override destroys. |
 | `discovery-log.md` | How these claims were arrived at — read it to calibrate trust. |
 
 These are not a leftovers pile. The first two are about the **transport** — sources,
 parameters, payload shapes, error envelopes — and touch no configuration subtree at all.
 The third is about the **partitioning construct itself**: a vsys is how every plane below
 is scoped, so `identify-a-vsys` reaches into `deviceconfig`, `network` *and* `vsys/entry`.
-Filing any of them under a plane would hide them from the other two.
+The fourth is about **where a value came from**, which a template can answer for any subtree
+it pushes. Filing any of them under a plane would hide them from the others.
 
 ## By plane
 
