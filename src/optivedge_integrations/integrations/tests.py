@@ -5664,6 +5664,48 @@ class ManagementInterfaceNormalizationTests(TestCase):
         self.assertEqual(sources, {"10.0.0.0/8": ("template", "stack_fw-core-tpa"),
                                    "192.168.1.1": ("local", "")})
 
+    def test_the_binding_carries_its_own_provenance(self):
+        """Who attached the profile is a different fact from where the profile came from.
+
+        Measured 2026-09-01: loopback.20's binding leaf carries @ptpl while ethernet1/1's is
+        a bare string, on the same device. A locally created interface can bind a
+        template-pushed profile, and the reverse.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {"network": {
+            "profiles": {"interface-management-profile": {"entry": [
+                {"@name": "tpl-profile", "@ptpl": "ptpl_fw-core-tpa"},
+                {"@name": "local-profile"},
+            ]}},
+            "interface": {
+                # A template-pushed binding to a template-pushed profile.
+                "loopback": {"units": {"entry": {
+                    "@name": "loopback.20",
+                    "interface-management-profile": {"@ptpl": "ptpl_fw-core-tpa",
+                                                     "#text": "tpl-profile"}}}},
+                # A local binding to a local profile.
+                "ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {
+                    "interface-management-profile": "local-profile"}}},
+            },
+        }})
+        normalize_management_interfaces(appliance)
+
+        def binding(name):
+            surface = ManagementInterface.objects.get(interface_name=name)
+            row = surface.field_provenance.filter(field_name="profile_name").first()
+            return (row.provenance_type, row.raw_value) if row else None
+
+        self.assertEqual(binding("loopback.20"), ("template", "ptpl_fw-core-tpa"))
+        self.assertEqual(binding("ethernet1/1"), ("local", ""))
+
+    def test_a_management_plane_has_no_binding_row(self):
+        """MGT and aux surfaces bind no profile, so profile_name has no provenance at all."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"deviceconfig": {"system": {}}})
+        normalize_management_interfaces(appliance)
+        mgt = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_MGT)
+        self.assertFalse(mgt.field_provenance.filter(field_name="profile_name").exists())
+
     def test_a_dataplane_surface_takes_provenance_from_its_profile(self):
         """A profile overrides at the entry, so its services share one source."""
         appliance = self._appliance()

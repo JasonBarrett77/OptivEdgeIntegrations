@@ -24,7 +24,10 @@ from optivedge_integrations.integrations.models import (
     Interface,
     NormalizationIssue,
 )
-from optivedge_integrations.integrations.platforms.pan_os.normalization.common import ensure_list
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ensure_list,
+    scalar_value,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot,
     latest_merged_snapshot,
@@ -173,8 +176,14 @@ def _classify(container: str, entry: dict, issues: list[InterfaceIssue],
     return TYPE_SUBTREE_KEYS[present[0]], node if isinstance(node, dict) else {}, aggregate
 
 
-def bound_management_profiles(device_entry: dict) -> list[tuple[str, str]]:
-    """(interface name, profile name) for every interface carrying a management profile.
+def bound_management_profiles(device_entry: dict) -> list[tuple[str, str, Any, str | None]]:
+    """(interface name, profile name, raw_key, raw_value) per bound interface.
+
+    The last two are the BINDING's own provenance, which is a different fact from the
+    profile's: a locally created interface can bind a template-pushed profile, and the
+    reverse. Measured 2026-09-01 - loopback.20 carries
+    {"@ptpl": "ptpl_fw-core-tpa", "#text": "oep-tpl-bound"} while ethernet1/1's binding is a
+    bare string.
 
     Container-agnostic, which is the point: the two normalizers that predate this one each
     hard-code five containers and so cannot see a profile bound to an `sdwan` interface at
@@ -193,6 +202,10 @@ def bound_management_profiles(device_entry: dict) -> list[tuple[str, str]]:
         return []
     found: list[tuple[str, str]] = []
 
+    def binding(node: Any) -> tuple[str, Any, str | None]:
+        value, raw_key, raw_value = scalar_value(node.get("interface-management-profile"))
+        return value, raw_key, raw_value
+
     def units_of(node: Any, fallback: str) -> None:
         # `.get("units", {})` is not enough: an empty <units/> parses to None, so the
         # default never applies and the chained .get() raises on real configs.
@@ -202,18 +215,19 @@ def bound_management_profiles(device_entry: dict) -> list[tuple[str, str]]:
         for unit in ensure_list(container.get("entry")):
             if not isinstance(unit, dict):
                 continue
-            profile = _text(unit.get("interface-management-profile"))
+            profile, raw_key, raw_value = binding(unit)
             if profile:
-                found.append((str(unit.get("@name") or "").strip() or fallback, profile))
+                found.append((str(unit.get("@name") or "").strip() or fallback,
+                              profile, raw_key, raw_value))
 
     for container, node in sorted(interfaces.items()):
         if container.startswith("@") or not isinstance(node, dict):
             continue
 
         # Logical containers carry the binding, and their units, directly.
-        profile = _text(node.get("interface-management-profile"))
+        profile, raw_key, raw_value = binding(node)
         if profile:
-            found.append((container, profile))
+            found.append((container, profile, raw_key, raw_value))
         units_of(node, container)
 
         for entry in ensure_list(node.get("entry")):
@@ -224,9 +238,9 @@ def bound_management_profiles(device_entry: dict) -> list[tuple[str, str]]:
                 subtree = entry.get(type_key)
                 if not isinstance(subtree, dict):
                     continue
-                profile = _text(subtree.get("interface-management-profile"))
+                profile, raw_key, raw_value = binding(subtree)
                 if profile:
-                    found.append((name, profile))
+                    found.append((name, profile, raw_key, raw_value))
                 units_of(subtree, name)
     return found
 

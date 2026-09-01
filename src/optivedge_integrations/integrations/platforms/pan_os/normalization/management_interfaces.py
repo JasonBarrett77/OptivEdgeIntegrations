@@ -168,7 +168,7 @@ def _profile_entry(device_entry: dict, profile_name: str) -> dict:
     return {}
 
 
-def _bound_interfaces(device_entry: dict) -> list[tuple[str, str]]:
+def _bound_interfaces(device_entry: dict) -> list[tuple[str, str, Any, str | None]]:
     """(interface_name, profile_name) for every interface carrying a profile.
 
     Delegates to the interface normalizer's container-agnostic walk. This used to hard-code
@@ -179,7 +179,8 @@ def _bound_interfaces(device_entry: dict) -> list[tuple[str, str]]:
     return bound_management_profiles(device_entry)
 
 
-def _record(instance, raw_key: Any, raw_value: str | None) -> None:
+def _record(instance, raw_key: Any, raw_value: str | None, *,
+            field_name: str = "__entry__") -> None:
     """Write the object's own provenance, or none when the key was absent.
 
     `field_name="__entry__"` is the established name for an object's own annotation. These
@@ -195,7 +196,7 @@ def _record(instance, raw_key: Any, raw_value: str | None) -> None:
     FieldProvenance.objects.create(
         content_type=ContentType.objects.get_for_model(type(instance)),
         object_id=instance.pk,
-        field_name="__entry__",
+        field_name=field_name,
         provenance_type=classify_prov_type(raw_key),
         raw_key=(raw_key or "")[:32],
         raw_value=(raw_value or "")[:128],
@@ -212,7 +213,8 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
 
     surfaces: list[tuple[str, str, str, str, list, dict]] = [
         (ManagementInterface.PLANE_MGT, "", "", entry_provenance(system),
-         _permitted_entries(system.get("permitted-ip")), _mgt_services(system)),
+         _permitted_entries(system.get("permitted-ip")), _mgt_services(system),
+         (ABSENT, None)),
     ]
     for plane, key in ((ManagementInterface.PLANE_AUX1, "aux-1"),
                        (ManagementInterface.PLANE_AUX2, "aux-2")):
@@ -221,19 +223,21 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
             # An aux plane carries its own `service` node, so its services are read from the
             # aux subtree and never from `system`.
             surfaces.append((plane, "", "", entry_provenance(aux),
-                             _permitted_entries(aux.get("permitted-ip")), _mgt_services(aux)))
-    for interface_name, profile_name in _bound_interfaces(device_entry):
+                             _permitted_entries(aux.get("permitted-ip")), _mgt_services(aux),
+                             (ABSENT, None)))
+    for interface_name, profile_name, bind_key, bind_value in _bound_interfaces(device_entry):
         entry = _profile_entry(device_entry, profile_name)
         # A data-plane surface exists because a profile is bound, so the profile entry is
         # what the surface came from.
         surfaces.append((ManagementInterface.PLANE_DATAPLANE, interface_name, profile_name,
                          entry_provenance(entry), _permitted_entries(entry.get("permitted-ip")),
-                         _profile_services(entry)))
+                         _profile_services(entry), (bind_key, bind_value)))
 
     written: list[ManagementInterface] = []
     with transaction.atomic():
         ManagementInterface.objects.filter(appliance=appliance).delete()
-        for plane, interface_name, profile_name, surface_prov, entries, services in surfaces:
+        for (plane, interface_name, profile_name, surface_prov, entries, services,
+             binding_prov) in surfaces:
             surface = ManagementInterface.objects.create(
                 management_station=appliance.management_station,
                 appliance=appliance,
@@ -243,6 +247,10 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
                 profile_name=profile_name,
             )
             _record(surface, *surface_prov)
+            # The binding is a field OF the surface, so it is a named field rather than
+            # "__entry__" - which the surface's own provenance already uses. A management
+            # plane has no binding at all and gets no row.
+            _record(surface, *binding_prov, field_name="profile_name")
 
             for position, (value, description, raw_key, raw_value) in enumerate(entries):
                 family, start, end = parse_permitted_source(value)
