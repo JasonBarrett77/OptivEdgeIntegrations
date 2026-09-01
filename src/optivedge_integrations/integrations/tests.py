@@ -5623,6 +5623,68 @@ class ManagementInterfaceNormalizationTests(TestCase):
         self.assertIsNone(source.family)
         self.assertIsNone(source.ipv4_start_int)
 
+    def test_provenance_is_captured_per_value_on_a_management_plane(self):
+        """Measured on hardware: an override strips @ptpl from ONE leaf, not the entry.
+
+        aux-2 on an HA pair showed disable-https and disable-ssh keeping their marker while
+        the overridden disable-telnet lost it, so a plane's services genuinely differ from
+        each other and a single provenance for the surface would be a lie.
+        """
+        appliance = self._appliance()
+        self._snapshot(appliance, {"deviceconfig": {"system": {
+            "@ptpl": "stack_fw-core-tpa",
+            "aux-2": {
+                "@ptpl": "stack_fw-core-tpa",
+                "service": {
+                    "@ptpl": "stack_fw-core-tpa",
+                    "disable-https": {"@ptpl": "stack_fw-core-tpa", "#text": "no"},
+                    "disable-telnet": "yes",
+                },
+                "permitted-ip": {"entry": [
+                    {"@name": "10.0.0.0/8", "@ptpl": "stack_fw-core-tpa"},
+                    {"@name": "192.168.1.1"},
+                ]},
+            },
+        }}})
+        normalize_management_interfaces(appliance)
+        aux = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_AUX2)
+        self.assertEqual(aux.provenance, "stack_fw-core-tpa")
+        by_name = {s.name: s for s in aux.services.all()}
+        self.assertEqual(by_name["https"].provenance, "stack_fw-core-tpa")
+        self.assertEqual(by_name["telnet"].provenance, "",
+                         "an overridden leaf loses its marker and must not inherit one")
+        self.assertEqual(by_name["snmp"].provenance, "",
+                         "an implicit value was pushed by nobody")
+        sources = {s.value: s.provenance for s in aux.permitted_sources.all()}
+        self.assertEqual(sources, {"10.0.0.0/8": "stack_fw-core-tpa", "192.168.1.1": ""})
+
+    def test_a_dataplane_surface_takes_provenance_from_its_profile(self):
+        """A profile overrides at the entry, so its services share one source."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {"network": {
+            "profiles": {"interface-management-profile": {"entry": {
+                "@name": "p", "@ptpl": "ptpl_fw-core-tpa",
+                "https": {"@ptpl": "ptpl_fw-core-tpa", "#text": "yes"}}}},
+            "interface": {"ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {
+                "interface-management-profile": "p"}}}},
+        }})
+        normalize_management_interfaces(appliance)
+        surface = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_DATAPLANE)
+        self.assertEqual(surface.provenance, "ptpl_fw-core-tpa")
+        self.assertEqual(surface.services.get(name="https").provenance, "ptpl_fw-core-tpa")
+
+    def test_a_local_value_has_no_provenance(self):
+        appliance = self._appliance()
+        self._snapshot(appliance, {"deviceconfig": {"system": {
+            "service": {"disable-telnet": "yes"},
+            "permitted-ip": {"entry": {"@name": "10.1.1.1"}},
+        }}})
+        normalize_management_interfaces(appliance)
+        mgt = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_MGT)
+        self.assertEqual(mgt.provenance, "")
+        self.assertEqual({s.provenance for s in mgt.services.all()}, {""})
+        self.assertEqual(mgt.permitted_sources.get().provenance, "")
+
     def test_deviceconfig_polarity_is_inverted_and_defaults_applied(self):
         """`disable-telnet: yes` means OFF, and an absent key does NOT mean off.
 

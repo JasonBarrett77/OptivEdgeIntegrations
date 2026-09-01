@@ -71,6 +71,19 @@ class ManagementInterface(SyncTrackedModel):
     #: this profile expose", and not before.
     profile_name = models.CharField(max_length=64, blank=True)
 
+    #: Where the SURFACE came from - the plane node for a deviceconfig plane, the profile
+    #: entry for a data-plane surface. Its services and sources carry their own, because on
+    #: a management plane they can differ from it and from each other.
+    #: Which template or stack pushed this value, from `@ptpl`. Empty means the value is
+    #: local - or was pushed and then overridden locally, which merged config cannot
+    #: distinguish from local. See `docs/palo-alto/pan-os/read-template-provenance.md`.
+    #:
+    #: A column rather than a FieldProvenance row because this model is already one row per
+    #: value: the row IS the field, so a generic field-provenance table would store one
+    #: string per row behind a join. FieldProvenance earns its place on models with many
+    #: fields on one row, like DeviceConfigurationProfile.
+    provenance = models.CharField(max_length=64, blank=True)
+
     class Meta:
         ordering = ["appliance__hostname", "plane", "interface_name"]
         constraints = [
@@ -122,6 +135,16 @@ class PermittedSource(models.Model):
     #: Accepted under deviceconfig/system, REJECTED under an interface-management-profile.
     #: Nullable because the two planes differ by exactly this one field.
     description = models.TextField(blank=True)
+
+    #: Which template or stack pushed this value, from `@ptpl`. Empty means the value is
+    #: local - or was pushed and then overridden locally, which merged config cannot
+    #: distinguish from local. See `docs/palo-alto/pan-os/read-template-provenance.md`.
+    #:
+    #: A column rather than a FieldProvenance row because this model is already one row per
+    #: value: the row IS the field, so a generic field-provenance table would store one
+    #: string per row behind a join. FieldProvenance earns its place on models with many
+    #: fields on one row, like DeviceConfigurationProfile.
+    provenance = models.CharField(max_length=64, blank=True)
 
     class Meta:
         ordering = ["management_interface", "position", "id"]
@@ -210,6 +233,16 @@ class ManagementService(models.Model):
     #: The effective state, implicit values already applied. Never null: a service valid on
     #: this plane is either on or off, and one that is not valid has no row.
     enabled = models.BooleanField()
+
+    #: Which template or stack pushed this value, from `@ptpl`. Empty means the value is
+    #: local - or was pushed and then overridden locally, which merged config cannot
+    #: distinguish from local. See `docs/palo-alto/pan-os/read-template-provenance.md`.
+    #:
+    #: A column rather than a FieldProvenance row because this model is already one row per
+    #: value: the row IS the field, so a generic field-provenance table would store one
+    #: string per row behind a join. FieldProvenance earns its place on models with many
+    #: fields on one row, like DeviceConfigurationProfile.
+    provenance = models.CharField(max_length=64, blank=True)
 
     class Meta:
         ordering = ["management_interface", "name"]
