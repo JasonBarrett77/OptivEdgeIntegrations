@@ -198,6 +198,46 @@ tell them apart.
 polarity finding from the other side: `https` set to yes opened 443, while `ssh` left absent
 kept 22 closed throughout.
 
+## `0.0.0.0/0` is dropped on the management plane. Here, nobody has checked
+
+On the deviceconfig planes this is settled, and it is **one rule: PAN-OS drops the entry**
+from the compiled ACL. The two outcomes usually described separately both fall out of that:
+
+    0.0.0.0/0 alone           -> nothing left -> empty peers -> "any", which is what
+                                 Palo Alto documents an empty list to mean
+    0.0.0.0/0 + 10.99.99.99   -> 10.99.99.99 left -> that host and nobody else
+
+"Alone it means any" is not a special case; it is the same drop landing on an empty list.
+See `../management/read-device-configuration.md`.
+
+**Whether a profile drops it too has never been measured.** Every permitted-source behaviour
+established here — absent means any source, a non-empty list restricts whatever family its
+entries are, an IPv6-only list denies IPv4 — was measured by connection using ordinary CIDR
+entries. `0.0.0.0/0` was never one of them on this plane.
+
+| list on a profile | effect | why |
+|---|---|---|
+| `0.0.0.0/0` alone | **unrestricted** | needs no measurement. Dropped, the list is empty and permits everything; kept, it permits everything by its own terms. Same answer either way. |
+| `0.0.0.0/0` **plus** other entries | **unknown** | dropped, the other entries are the real restriction; kept, the surface is open |
+
+**What consumers do with it.** OptivEdgeAssessments' `exposure.classify()` takes the plane: a
+deviceconfig surface applies the drop rule and reports `restricted`, a profile-backed surface
+reports `undetermined`. PAN-MGT-003 matches `undetermined` as well as `unrestricted`, so the
+surface is reported rather than assumed safe — while a hardened management interface carrying
+`[0.0.0.0/0, jump host]` is **not** flagged, which the deviceconfig guide says would be wrong.
+
+**How to settle it.** The method the rest of this guide used — bind a profile to a data-plane
+interface, set each list state, commit, and attempt a connection from a source outside every
+other entry:
+
+    0.0.0.0/0 alone                       expect open
+    0.0.0.0/0 plus a NON-matching entry   the whole question: open if kept, closed if dropped
+    0.0.0.0/0 plus a matching entry       open either way — the control that proves the test
+                                          can see a positive result at all
+
+There is no shortcut: `cfg.net.*.acl` holds management-plane ports only, so a profile's
+effective list has no runtime witness and connection is the only oracle.
+
 ## There is no runtime witness for a data-plane profile
 
 For the management plane, `show system state filter cfg.net.s0.eth*.acl` reports the
@@ -262,8 +302,9 @@ Everything above was established on one PA-5220 (11.1.13-h3) and one Azure PA-VM
 via candidate-config writes that were reverted, never committed. Specifically **not**
 established:
 
-- whether `0.0.0.0/0` alongside populated entries is ignored, as it is on the management
-  plane. The absent-list and IPv6 questions are settled by connection; this variant is not
+- whether a profile **drops `0.0.0.0/0`** the way the management plane does, when other
+  entries are present. Alone it is unrestricted either way and needs no measurement; the
+  mixed case is the open one. See the section above for the method
 - the runtime results come from **one interface on one firewall**, with https and ping as
   the only enabled services. Other services were not driven
 - **no connection was ever attempted over IPv6.** The v6 rows above were measured by

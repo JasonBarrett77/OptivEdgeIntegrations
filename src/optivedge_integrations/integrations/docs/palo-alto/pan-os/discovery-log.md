@@ -32,6 +32,34 @@ Entry shape:
 
 ---
 
+## 2026-09-01 — checking provenance against raw config, and a wildcard regression
+
+**Did:** Verified every provenance value the Management Interfaces tab renders against the
+merged config it came from. Then, prompted by one of those rows, looked at how
+`0.0.0.0/0` is classified.
+
+**Found:** The provenance values are correct, including the case most likely to be wrong -
+both peers of an HA pair report telnet On on aux-2, one from the template stack and one from
+a local override, and the two are distinguished. The PAN-MGT-002 finding on the PA-VM is a
+Panorama push (`disable-http: no` carries `@ptpl`), so its remediation is in the stack rather
+than on the device.
+
+The wildcard was being classified wrongly in both directions within a day. A surface
+permitting only `0.0.0.0/0` was reported Restricted - a false clean result. Fixing that by
+treating any list containing the wildcard as undetermined then contradicted a measured
+finding already in this corpus, and would have flagged a hardened management interface
+carrying `[0.0.0.0/0, jump host]` - which `read-device-configuration.md` says in terms is
+wrong. The rule is one behaviour, not two: PAN-OS **drops** the entry, and the outcomes
+differ only in what is left over.
+
+**Landed:** `read-an-interface-management-profile.md` gains a section scoping the question to
+profiles, where it really is open, and its Limits bullet now points there. OptivEdge-
+Assessments' exposure classifier takes the plane.
+
+**Open:** whether a profile drops the wildcard the way the management plane does, when other
+entries are present. Alone is unrestricted either way and needs no measurement. There is no
+compiled-ACL shortcut on this plane, so connection is the only oracle.
+
 ## 2026-09-01 — what an override does to provenance
 
 **Did:** Pushed an interface management profile from a template stack to an HA pair, had one
