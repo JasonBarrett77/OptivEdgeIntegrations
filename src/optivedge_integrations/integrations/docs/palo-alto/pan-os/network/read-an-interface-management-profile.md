@@ -198,45 +198,63 @@ tell them apart.
 polarity finding from the other side: `https` set to yes opened 443, while `ssh` left absent
 kept 22 closed throughout.
 
-## `0.0.0.0/0` is dropped on the management plane. Here, nobody has checked
+## `0.0.0.0/0` is kept here, and dropped on the management plane
 
-On the deviceconfig planes this is settled, and it is **one rule: PAN-OS drops the entry**
-from the compiled ACL. The two outcomes usually described separately both fall out of that:
+**The two planes disagree, and this is the second thing they disagree about.** They already
+spell services with opposite polarity; they also treat the all-addresses entry differently.
+Both halves are now measured, and neither was safe to infer from the other.
 
-    0.0.0.0/0 alone           -> nothing left -> empty peers -> "any", which is what
-                                 Palo Alto documents an empty list to mean
-    0.0.0.0/0 + 10.99.99.99   -> 10.99.99.99 left -> that host and nobody else
+On the deviceconfig planes PAN-OS **drops** the entry when it compiles the ACL, so
+`[0.0.0.0/0, 10.99.99.99]` permits that one host and nobody else. See
+`../management/read-device-configuration.md`.
 
-"Alone it means any" is not a special case; it is the same drop landing on an empty list.
-See `../management/read-device-configuration.md`.
+**On a profile the entry is kept.** The same list permits everyone. Measured by connection,
+because a profile has no compiled ACL to read:
 
-**Whether a profile drops it too has never been measured.** Every permitted-source behaviour
-established here — absent means any source, a non-empty list restricts whatever family its
-entries are, an IPv6-only list denies IPv4 — was measured by connection using ordinary CIDR
-entries. `0.0.0.0/0` was never one of them on this plane.
-
-| list on a profile | effect | why |
+| permitted-ip list | port 443 | what it establishes |
 |---|---|---|
-| `0.0.0.0/0` alone | **unrestricted** | needs no measurement. Dropped, the list is empty and permits everything; kept, it permits everything by its own terms. Same answer either way. |
-| `0.0.0.0/0` **plus** other entries | **unknown** | dropped, the other entries are the real restriction; kept, the surface is open |
+| `10.99.99.99` | closed | the control — enforcement is live on this surface today |
+| `0.0.0.0/0` | **OPEN** | unrestricted either way; needs no measurement |
+| **`0.0.0.0/0` + `10.99.99.99`** | **OPEN** | **the finding — the wildcard is honoured** |
+| `0.0.0.0/0` + `192.168.250.0/24` | **OPEN** | a two-entry list that opens for a matching entry |
 
-**What consumers do with it.** OptivEdgeAssessments' `exposure.classify()` takes the plane: a
-deviceconfig surface applies the drop rule and reports `restricted`, a profile-backed surface
-reports `undetermined`. PAN-MGT-003 matches `undetermined` as well as `unrestricted`, so the
-surface is reported rather than assumed safe — while a hardened management interface carrying
-`[0.0.0.0/0, jump host]` is **not** flagged, which the deviceconfig guide says would be wrong.
+Port 22 stayed closed in every row. The profile enabled `https` and `ping` only, so each row
+carries its own evidence that the profile was what governed the surface rather than something
+else on the device.
 
-**How to settle it.** The method the rest of this guide used — bind a profile to a data-plane
-interface, set each list state, commit, and attempt a connection from a source outside every
-other entry:
+**The first row is what makes the third readable.** If the wildcard is honoured then every
+wildcard state is OPEN, so nothing in that group can come back closed and a harness that had
+stopped working would read exactly like the finding. The control has to be a state with no
+wildcard in it, and it has to actually close.
 
-    0.0.0.0/0 alone                       expect open
-    0.0.0.0/0 plus a NON-matching entry   the whole question: open if kept, closed if dropped
-    0.0.0.0/0 plus a matching entry       open either way — the control that proves the test
-                                          can see a positive result at all
+**The third row was run twice, the second time from a freshly closed baseline.** On the first
+pass it followed the wildcard-alone state, so OPEN followed OPEN and the surface was never
+observed to *change* into it — which is weaker evidence than it looks, since a surface that
+never re-closed reads the same way. Re-running the control first gives closed → OPEN across
+the single change of adding `0.0.0.0/0`.
 
-There is no shortcut: `cfg.net.*.acl` holds management-plane ports only, so a profile's
-effective list has no runtime witness and connection is the only oracle.
+**Which entries match is a property of the prober, not of PAN-OS.** `10.99.99.99` is
+non-matching and `192.168.250.0/24` is matching *for the probe host*, which reaches the lab
+through NAT and does not arrive as its own address. Both are established by the rows above
+rather than assumed. Repeating this anywhere else means re-establishing them.
+
+**What this changes for a consumer.** `exposure.classify()` takes the plane, and both branches
+are now measured facts:
+
+    deviceconfig plane   wildcard dropped   [0.0.0.0/0, jump host] -> restricted
+    profile              wildcard kept      [0.0.0.0/0, jump host] -> unrestricted
+
+`undetermined` is no longer produced for this combination. It now means only what it was
+introduced to mean: an entry nothing can parse. PAN-MGT-003 matches `unrestricted` and
+`undetermined` both, so the same surfaces are reported — but the verdict behind the report is
+measured rather than a hedge, and a hardened management interface carrying
+`[0.0.0.0/0, jump host]` is still correctly not flagged.
+
+**The general shape, worth carrying to the next plane-spanning question:** one rule with an
+unmeasured half is an assumption wearing a measurement's clothes. The wildcard was documented
+as a single PAN-OS behaviour with one side unchecked; the unchecked side turned out to be the
+opposite. The cost of finding out was four commits.
+
 
 ## There is no runtime witness for a data-plane profile
 
@@ -270,6 +288,23 @@ profile presence.** A collector testing "does this node exist" concludes a
 template-managed device has profiles when it has none, and a reader expecting `entry` to
 be present will hit a `KeyError` rather than an empty list.
 
+A **populated** pushed profile carries the markers at every level, not only on the
+container. Read from `ptpl_fw-core-tpa` on both PA-5220s:
+
+```json
+{"@name": "oep-tpl-bound", "@ptpl": "ptpl_fw-core-tpa", "@src": "tpl",
+ "https": {"@ptpl": "ptpl_fw-core-tpa", "@src": "tpl", "#text": "yes"},
+ "permitted-ip": {"@ptpl": "ptpl_fw-core-tpa", "@src": "tpl",
+                  "entry": [{"@name": "10.9.9.0/24", "@ptpl": "ptpl_fw-core-tpa",
+                             "@src": "tpl"}]}}
+```
+
+Four levels: the `entry`, each service leaf, the `permitted-ip` container, and each
+`permitted-ip` entry. So a service leaf arrives as a dict with `#text` rather than the bare
+string a locally-set profile gives — the same normalisation trap the interface reference
+has, one level deeper. A reader comparing `entry["https"] == "yes"` succeeds on a local
+profile and fails on a pushed one.
+
 ## Reading it
 
 The reference is a plain scalar on the interface:
@@ -292,9 +327,15 @@ Every table above is regenerated by one subcommand; none of it rests on a one-of
     python -m probe.investigations.interface_management_profiles ifdefaults  # field inventory + defaults
     python -m probe.investigations.interface_management_profiles compare     # the permitted-ip table
     python -m probe.investigations.interface_management_profiles measure     # profile storage shapes
+    python -m probe.investigations.interface_management_runtime wrongonly    # the controls and
+    python -m probe.investigations.interface_management_runtime anywrong     # the wildcard result
 
 `compare` and `measure` write to the candidate config. Both refuse to start if the candidate
 is already dirty, never commit, and revert when done.
+
+The `interface_management_runtime` phases are the exception to that: runtime behaviour does
+not exist until a commit, so they commit for real. Each refuses to start on a dirty
+candidate, and `cleanup` restores the binding the scaffolding displaced.
 
 ## Limits
 
@@ -302,9 +343,12 @@ Everything above was established on one PA-5220 (11.1.13-h3) and one Azure PA-VM
 via candidate-config writes that were reverted, never committed. Specifically **not**
 established:
 
-- whether a profile **drops `0.0.0.0/0`** the way the management plane does, when other
-  entries are present. Alone it is unrestricted either way and needs no measurement; the
-  mixed case is the open one. See the section above for the method
+- the IPv6 wildcard `::/0` alongside other entries. Only `0.0.0.0/0` was driven; `::/0`
+  is treated identically by `exposure.classify()`, which tests prefix length rather than
+  family, and that is an **inference** from the v4 result. It is a smaller gap than the
+  one it replaces — the families are already known to be evaluated independently — but
+  it is the same class of assumption that made the v4 case worth measuring, and no
+  connection has ever been attempted over IPv6 on this plane at all
 - the runtime results come from **one interface on one firewall**, with https and ping as
   the only enabled services. Other services were not driven
 - **no connection was ever attempted over IPv6.** The v6 rows above were measured by
@@ -318,6 +362,7 @@ established:
   stores what it is sent, and the UI was not driven
 - `cellular` and `cluster-ethernet` attachment, absent from both lab platforms
 - the documented 31-character name limit, taken from Palo Alto's docs and not tested
-- Panorama template provenance beyond the empty-container case above: no profile with
-  actual entries was pushed from a template, so `@src`/`@ptpl` on an `entry` — and whether
-  a local profile can override a pushed one of the same name — is unconfirmed
+- whether a **local profile can override a template-pushed one of the same name**. Both
+  forms exist in the lab, but never under one name, so precedence between them is untested
+  here. The override refusals recorded in the discovery log are about the XML API path, not
+  about which value wins

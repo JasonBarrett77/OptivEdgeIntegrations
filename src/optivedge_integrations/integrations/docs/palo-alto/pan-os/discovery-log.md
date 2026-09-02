@@ -32,6 +32,113 @@ Entry shape:
 
 ---
 
+## 2026-09-02 — does a profile drop 0.0.0.0/0 too?
+
+**Did:** Four permitted-ip states on a scratch profile bound to ethernet1/1 on fw-core-tpa-a,
+each committed and then probed by TCP: one non-matching entry, the wildcard alone, the
+wildcard beside a non-matching entry, the wildcard beside a matching one. Re-ran the third
+from a re-closed baseline. Restored oep-lab-mgmt and deleted the scratch profile afterwards.
+
+**Found:** The profile KEEPS the wildcard — closed with `[10.99.99.99]`, OPEN the moment
+`0.0.0.0/0` joined it. The opposite of the deviceconfig planes, which drop it. Port 22 stayed
+closed throughout, the profile carrying https and ping only.
+
+**Landed:** `network/read-an-interface-management-profile.md`; `exposure.classify()` in
+OptivEdgeAssessments now returns `unrestricted` rather than `undetermined` for that
+combination, with the two tests that encoded the hedge rewritten to assert the two planes
+disagree. The open question is out of `in-flight.json`. Also OptivEdgeProbe's
+`reference/panos-payload-contract.json`, whose `mgt-permitted-ip` node claimed the
+deviceconfig list has "same semantics as the interface-profile list" - false as of today in
+exactly the field that matters, and now stated in both directions.
+
+**Where to look for it:** that payload-contract edit is in OptivEdgeProbe commit `7faf84f`,
+whose message is about SSL/TLS profile name shadowing and does not mention the wildcard at
+all. Two sessions were working the same tree and a broad `git add` swept it into an
+unrelated commit. Nothing was lost or altered, but `git log` on that node points at the
+wrong investigation, so this entry is the archaeology instead.
+
+**Worth keeping:** the first pass ran the decisive state straight after the wildcard-alone
+state, so OPEN followed OPEN and the surface was never seen to change into it. That is not
+the same evidence as a surface that opened, and it was only visible because the sequence was
+written down. A state that must come back different is what makes the others readable — the
+same instrument problem as the negatives taken from action=complete on 2026-08-27.
+
+**Also:** loopback.20, the lab's other profile-bound interface and the obvious subject, is
+10.253.20.1/32 and is not routable from the probe host. Every state on it would have read
+closed. On a plane whose only oracle is a connection, "can this host reach the interface at
+all" is the first thing to measure, not an assumption.
+
+---
+
+## 2026-09-02 — a refused DELETE, and whether walking up the tree helps
+
+**Did:** Tried to delete a shared `ssl-tls-service-profile` while `deviceconfig/system` still
+referenced it, during ordinary scaffolding cleanup rather than as an experiment.
+
+**Found:** It errors, loudly and usefully: `status=error code=10`, "oep-tls-control cannot be
+deleted because of references from: deviceconfig -> system -> ssl-tls-service-profile". It
+names the referring path. Walking UP the tree does **not** help — the refusal is *referential*,
+not structural, so the parent container is held by the same reference and every level refuses
+identically. Clearing the REFERENCE is what works, and integrity is evaluated against the
+CANDIDATE, so re-pointing the referrer earlier in the same commit is enough.
+
+**Landed:** the DELETE item in OptivEdgeAssessments' `building-a-control.md`, which until now
+told the reader to walk up.
+
+**Open:** whether a *structurally* undeletable leaf exists at all, and whether walking up
+helps for that case. Nothing here covers it.
+
+## 2026-09-02 — `show config merged` does not carry `/config/predefined`
+
+**Did:** Looked for the predefined `ssl-tls-service-profile` in the payload everything else
+normalizes from, then tried `show predefined` as the alternative.
+
+**Found:** The merged config's top level is `devices`, `mgt-config`, `shared` — no
+`predefined` node, though a commit's own summary describes the merged size as "(local,
+panorama pushed, predefined)". That describes what PAN-OS merges internally, not what the
+command returns. `show predefined` does not fill the gap: it addresses a different namespace
+with a similar name — the content/App-ID catalog — and returns "No data found. Verify xpath
+and retry". Only a direct `type=config&action=get` on `/config/predefined/...` reaches it.
+Two adjacent facts: an xpath matching nothing returns `<result/>`, which parses to `None` and
+hits persistence as a null payload (the PA-VM genuinely has no predefined SSL/TLS profile);
+and `show predefined ip-block-list-v2` raises on both PA-5220s while succeeding on the PA-VM,
+which had been discarding every predefined catalog for those two appliances on the strength of
+one unrelated failure.
+
+**Landed:** OptivEdgeIntegrations gains its first `type=config` collector; the payload
+contract in OptivEdgeProbe.
+
+## 2026-09-02 — can a custom object shadow a predefined one of the same name?
+
+**Did:** Wrote a custom `ssl-tls-service-profile` to `/config/shared` under the shipped name
+`TLSv1.3_Default`, deliberately weaker and with its own certificate, bound it, committed, and
+read the result off the wire by TLS negotiation. Then bound a second profile with a UNIQUE
+name and the same custom certificate, as the state that had to come back different.
+
+**Found:** The predefined definition wins outright. The custom entry was discarded whole —
+protocol settings *and* certificate:
+
+    nothing bound                              1.1, 1.2, 1.3 (1.0 refused), factory cert
+    shared TLSv1.3_Default, min tls1-0 max 1-2 1.3 ONLY, factory cert
+    shared oep-tls-control, unique name        1.2 only, CN=oep-tls-test.lab
+
+The third row is what makes the second admissible: it proves a custom profile IS honoured on
+that device, so "nothing changed" is a real null rather than a binding never wired up. The
+predefined entry reads `min tls1-3 / max tls1-3`, so config and wire agree independently.
+
+**Landed:** `read-template-provenance.md` is untouched; the resolution rule lives in
+OptivEdgeIntegrations' device-configuration normalizer and the payload contract, and
+PAN-MGT-010/014 in OptivEdgeAssessments.
+
+**Open:** the policy-object ladder. `models/policy/base.py` encodes `PREDEFINED = 95`, the
+weakest rank, and says outright the position was never measured. Two object types are now
+measured and **neither** matches it — a custom `region` *extends* its predefined namesake
+(`policy/resolve-object-name.md`), and this one is *beaten* by it. So name-collision behaviour
+is per object type, and the ladder's value remains an unmeasured guess for policy objects
+proper. Deliberately not changed on the strength of a measurement of something else.
+
+---
+
 ## 2026-09-01 — defaults behind the management settings controls
 
 **Did:** Enumerated `deviceconfig/system` and `deviceconfig/setting/management` with

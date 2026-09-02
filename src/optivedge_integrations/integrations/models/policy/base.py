@@ -46,8 +46,33 @@ class PolicyObjectScope:
     definition, and two candidates in one scope means our collection is wrong - not that
     a tie needs breaking.
 
-    VENDOR covers builtin/predefined objects. Its position below user configuration is
-    an assumption: whether a user object can shadow a predefined one was never measured.
+    VENDOR covers builtin/predefined objects. Its position below user configuration remains
+    an assumption FOR POLICY OBJECTS, and it is now an assumption known to be wrong for other
+    object types rather than merely unmeasured. Two have been measured, 2026-09-02, and
+    neither behaves the way this rung describes:
+
+        region                    a custom definition EXTENDS its predefined namesake -
+                                  both sets of ranges apply. See resolve-object-name.md.
+        ssl-tls-service-profile   the PREDEFINED definition WINS. A custom entry written to
+                                  /config/shared under the shipped name TLSv1.3_Default was
+                                  accepted, committed, and then discarded whole - protocol
+                                  settings and certificate alike.
+
+    Neither is "the user object shadows the predefined one", which is what VENDOR below user
+    configuration encodes. So name-collision behaviour is PER OBJECT TYPE and cannot be
+    carried between types in either direction.
+
+    The rank is deliberately NOT changed. Both measurements are on objects that do not
+    resolve through this ladder, and altering address-object resolution on the strength of
+    them would repeat the error recorded above about the four-level ladder - reproducing
+    observations that could not distinguish it, which is underdetermined rather than
+    supported. What is measured for policy objects proper is still nothing.
+
+    The technique, which is the reusable part: a name-collision question is answerable only
+    by BEHAVIOUR - configuration reads report every definition as-is and never name a winner -
+    and it needs a uniquely-named control state alongside the colliding one. Without a state
+    that must come back different, "the custom definition was ignored" and "the binding was
+    never wired up" are the same reading.
 
     A four-level ladder (local-vsys > local-shared > pushed-vsys > pushed-shared) was
     believed and is wrong. It reproduced every observation available at the time because
