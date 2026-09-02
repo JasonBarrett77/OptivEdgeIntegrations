@@ -101,6 +101,45 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     #: organisation-trusted is not a configuration fact and is deliberately not decided here.
     ssl_tls_certificate_name = models.CharField(max_length=255, blank=True)
 
+    #: The certificate's own properties, resolved from the certificate object the profile
+    #: names. PAN-MGT-014's subject, kept separate from PAN-MGT-010's protocol floor because
+    #: the two are independent: the SHIPPED TLSv1.3_Default profile satisfies the floor and
+    #: still serves the device's self-signed factory certificate, so one control passing tells
+    #: you nothing about the other.
+    #:
+    #: Self-signed is decided by `subject-hash == issuer-hash`, which PAN-OS computes and
+    #: exposes on the certificate entry - not by parsing the DN strings, which are formatted
+    #: differently between scopes ("/CN=x" in shared, bare "x" in predefined) and would make
+    #: a string comparison scope-dependent.
+    #:
+    #: Classified rather than stored as a raw boolean, following the same shape as
+    #: `exposure.classify` on the management-interface side: the third state is a real answer
+    #: and a nullable boolean invites a query that treats NULL as false. UNDETERMINED covers
+    #: nothing bound, a profile that did not resolve, a certificate name that resolved
+    #: nowhere, and a certificate present but carrying no hashes - all of which mean "an
+    #: engineer must look", never "satisfied".
+    TRUST_SELF_SIGNED = "self_signed"
+    TRUST_CA_ISSUED = "ca_issued"
+    TRUST_UNDETERMINED = "undetermined"
+    TRUST_CHOICES = [
+        (TRUST_SELF_SIGNED, "Self-signed"),
+        (TRUST_CA_ISSUED, "CA-issued"),
+        (TRUST_UNDETERMINED, "Undetermined"),
+    ]
+    #: CA_ISSUED means only that something other than the certificate itself signed it. It
+    #: does NOT mean the signer is the organisation's own CA - that is not decidable from
+    #: configuration, and PAN-MGT-014 says so rather than pretending otherwise.
+    ssl_tls_certificate_trust = models.CharField(
+        max_length=16, blank=True, choices=TRUST_CHOICES)
+    #: The issuing authority as PAN-OS reports it. Recorded so an engineer can see WHICH CA
+    #: signed it; whether that CA is the organisation's own is not decidable from config and
+    #: is deliberately not decided here.
+    ssl_tls_certificate_issuer = models.CharField(max_length=255, blank=True)
+    #: Which scope the certificate object was found in - the profile and its certificate can
+    #: come from different scopes, so this is not a duplicate of ssl_tls_profile_scope.
+    ssl_tls_certificate_scope = models.CharField(
+        max_length=16, blank=True, choices=SSL_TLS_SCOPE_CHOICES)
+
     ntp_primary_server = models.CharField(max_length=255, blank=True)
     ntp_secondary_server = models.CharField(max_length=255, blank=True)
 

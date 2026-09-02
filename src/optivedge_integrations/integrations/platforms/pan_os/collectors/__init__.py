@@ -30,6 +30,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
 from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
     SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND,
     SHOW_PREDEFINED_URL_LISTS_COMMAND,
+    collect_predefined_certificates,
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
     collect_show_predefined_url_lists,
@@ -58,6 +59,7 @@ __all__ = [
     "collect_show_external_list",
     "collect_show_merged_config",
     "collect_show_managed_devices",
+    "collect_predefined_certificates",
     "collect_predefined_ssl_tls_service_profiles",
     "collect_show_predefined_ip_block_lists",
     "collect_show_predefined_url_lists",

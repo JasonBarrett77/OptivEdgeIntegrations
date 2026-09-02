@@ -53,6 +53,9 @@ class NormalizedDeviceConfigurationProfile:
     ssl_tls_min_version: str
     ssl_tls_max_version: str
     ssl_tls_certificate_name: str
+    ssl_tls_certificate_trust: str
+    ssl_tls_certificate_issuer: str
+    ssl_tls_certificate_scope: str
     permitted_ip_values: list[str]
     permitted_ip_count: int
     login_banner: str
@@ -194,6 +197,87 @@ def resolve_ssl_tls_profile(
     return DeviceConfigurationProfile.SSL_TLS_SCOPE_UNRESOLVED, {}
 
 
+def latest_predefined_certificate_snapshot(appliance: Appliance) -> Snapshot | None:
+    return (
+        Snapshot.objects.filter(
+            appliance=appliance, source_type="config_predefined_certificates")
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+
+
+def _certificates_by_name(node: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(node, dict):
+        return {}
+    certificates: dict[str, dict[str, Any]] = {}
+    for entry in ensure_list(node.get("entry")):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("@name") or "").strip()
+        if name:
+            certificates[name] = entry
+    return certificates
+
+
+def shared_certificates(snapshot: Snapshot) -> dict[str, dict[str, Any]]:
+    payload = snapshot.payload or {}
+    config = payload.get("config", {})
+    if not isinstance(config, dict):
+        return {}
+    shared = config.get("shared", {})
+    if not isinstance(shared, dict):
+        return {}
+    return _certificates_by_name(shared.get("certificate"))
+
+
+def predefined_certificates(snapshot: Snapshot | None) -> dict[str, dict[str, Any]]:
+    if snapshot is None:
+        return {}
+    payload = snapshot.payload or {}
+    if not isinstance(payload, dict):
+        return {}
+    return _certificates_by_name(payload.get("certificate"))
+
+
+def resolve_certificate(
+    name: str,
+    *,
+    predefined: dict[str, dict[str, Any]],
+    shared: dict[str, dict[str, Any]],
+) -> tuple[str, str, str]:
+    """Resolve a certificate name to (scope, trust, issuer).
+
+    Predefined first, matching the profile's own resolution order. The certificate and the
+    profile that names it are resolved SEPARATELY, because they need not come from the same
+    scope: a shared profile may name a certificate that only exists predefined.
+
+    Self-signed is `subject-hash == issuer-hash`, which PAN-OS computes for us. The DN strings
+    are NOT usable for this - measured 2026-09-02, shared certificates report "/CN=name" while
+    predefined ones report a bare "name", so comparing subject to issuer as text would be
+    scope-dependent and would silently stop working when a certificate moved scope.
+
+    Returns UNDETERMINED when the name resolves nowhere, or resolves to an entry with no
+    hashes. That is a real answer meaning "an engineer must look", never "satisfied".
+    """
+    entry = predefined.get(name)
+    scope = DeviceConfigurationProfile.SSL_TLS_SCOPE_PREDEFINED
+    if entry is None:
+        entry = shared.get(name)
+        scope = DeviceConfigurationProfile.SSL_TLS_SCOPE_SHARED
+    if entry is None:
+        return (DeviceConfigurationProfile.SSL_TLS_SCOPE_UNRESOLVED,
+                DeviceConfigurationProfile.TRUST_UNDETERMINED, "")
+    subject_hash, _, _ = scalar_value(entry.get("subject-hash"))
+    issuer_hash, _, _ = scalar_value(entry.get("issuer-hash"))
+    issuer, _, _ = scalar_value(entry.get("issuer"))
+    if not subject_hash or not issuer_hash:
+        # Present but unhashed. Not determinable rather than assumed either way.
+        return scope, DeviceConfigurationProfile.TRUST_UNDETERMINED, issuer
+    trust = (DeviceConfigurationProfile.TRUST_SELF_SIGNED if subject_hash == issuer_hash
+             else DeviceConfigurationProfile.TRUST_CA_ISSUED)
+    return scope, trust, issuer
+
+
 def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormalizedCollection:
     snapshot = latest_merged_snapshot(appliance)
     if snapshot is None:
@@ -287,6 +371,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
     ssl_tls_min_version = ""
     ssl_tls_max_version = ""
     ssl_tls_certificate = ""
+    ssl_tls_certificate_scope = ""
+    ssl_tls_certificate_trust = ""
+    ssl_tls_certificate_issuer = ""
     if ssl_tls_name:
         ssl_tls_scope, resolved = resolve_ssl_tls_profile(
             ssl_tls_name,
@@ -300,6 +387,15 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         ssl_tls_max_version, _, _ = scalar_value(protocol_settings.get("max-version"))
         ssl_tls_certificate, _, _ = scalar_value(resolved.get("certificate")
                                                  if isinstance(resolved, dict) else None)
+        if ssl_tls_certificate:
+            (ssl_tls_certificate_scope,
+             ssl_tls_certificate_trust,
+             ssl_tls_certificate_issuer) = resolve_certificate(
+                ssl_tls_certificate,
+                predefined=predefined_certificates(
+                    latest_predefined_certificate_snapshot(appliance)),
+                shared=shared_certificates(snapshot),
+            )
 
     permitted_ip_values = entry_names(system.get("permitted-ip"))
     permitted_ip_count = len(permitted_ip_values)
@@ -327,6 +423,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         ssl_tls_min_version=ssl_tls_min_version,
         ssl_tls_max_version=ssl_tls_max_version,
         ssl_tls_certificate_name=ssl_tls_certificate,
+        ssl_tls_certificate_trust=ssl_tls_certificate_trust,
+        ssl_tls_certificate_issuer=ssl_tls_certificate_issuer,
+        ssl_tls_certificate_scope=ssl_tls_certificate_scope,
         permitted_ip_values=permitted_ip_values,
         permitted_ip_count=permitted_ip_count,
         login_banner=login_banner,
@@ -369,6 +468,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "ssl_tls_min_version": normalized.ssl_tls_min_version,
                 "ssl_tls_max_version": normalized.ssl_tls_max_version,
                 "ssl_tls_certificate_name": normalized.ssl_tls_certificate_name,
+                "ssl_tls_certificate_trust": normalized.ssl_tls_certificate_trust,
+                "ssl_tls_certificate_issuer": normalized.ssl_tls_certificate_issuer,
+                "ssl_tls_certificate_scope": normalized.ssl_tls_certificate_scope,
                 "permitted_ip_values": normalized.permitted_ip_values,
                 "permitted_ip_count": normalized.permitted_ip_count,
                 "login_banner": normalized.login_banner,

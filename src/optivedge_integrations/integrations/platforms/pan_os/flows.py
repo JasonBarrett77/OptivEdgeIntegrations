@@ -31,6 +31,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_external_list,
     collect_show_managed_devices,
     collect_show_merged_config,
+    collect_predefined_certificates,
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
     collect_show_predefined_url_lists,
@@ -528,6 +529,7 @@ def collect_appliance_predefined_catalogs(
         collect_show_predefined_ip_block_lists,
         collect_show_predefined_url_lists,
         collect_predefined_ssl_tls_service_profiles,
+        collect_predefined_certificates,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))

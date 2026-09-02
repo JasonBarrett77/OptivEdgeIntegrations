@@ -37,6 +37,13 @@ SHOW_PREDEFINED_URL_LISTS_COMMAND = (
 #: `show config merged` also omits. A direct config read is the only route.
 PREDEFINED_SSL_TLS_SERVICE_PROFILE_XPATH = "/config/predefined/ssl-tls-service-profile"
 
+#: The certificate a predefined profile points at, needed for the same reason as the profile.
+#: Measured 2026-09-02 and not what the name suggests: /config/predefined/certificate's
+#: TLSv1.3_Default entry is the DEVICE'S OWN factory certificate, common-name equal to the
+#: chassis serial and self-signed. So it is "predefined" as a namespace, not as vendor-shared
+#: content - it differs per appliance and must be collected per appliance.
+PREDEFINED_CERTIFICATE_XPATH = "/config/predefined/certificate"
+
 
 def collect_show_predefined_ip_block_lists(session: PANSession) -> PANOSCollectedResponse:
     request = PANOSOperationRequest(
@@ -82,5 +89,25 @@ def collect_predefined_ssl_tls_service_profiles(session: PANSession) -> PANOSCol
     return collect_config_response(
         session,
         source_type="config_predefined_ssl_tls_service_profiles",
+        request=request,
+    )
+
+
+def collect_predefined_certificates(session: PANSession) -> PANOSCollectedResponse:
+    """Collect the vendor-namespace certificates for one appliance.
+
+    Needed by the certificate-trust control. A device bound to the shipped TLSv1.3_Default
+    profile is served TLSv1.3_Default's certificate, which lives here and nowhere else -
+    `show config merged` carries shared/certificate but not this. Without it, the profile that
+    satisfies the protocol floor is the one whose certificate cannot be assessed.
+    """
+    request = PANOSConfigRequest(
+        xpath=PREDEFINED_CERTIFICATE_XPATH,
+        target=session.target,
+        metadata={"command_name": "config get predefined certificate"},
+    )
+    return collect_config_response(
+        session,
+        source_type="config_predefined_certificates",
         request=request,
     )
