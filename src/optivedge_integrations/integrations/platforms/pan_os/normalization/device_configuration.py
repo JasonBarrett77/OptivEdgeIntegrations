@@ -13,6 +13,7 @@ from optivedge_integrations.integrations.models import (
     ApplianceGroup,
     DeviceConfigurationProfile,
     FieldProvenance,
+    NormalizationIssue,
     SecurityRule,
     Snapshot,
 )
@@ -30,6 +31,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.types im
 
 DEFAULT_IDLE_TIMEOUT_MINUTES = 60
 
+#: Raised when deviceconfig/system names an SSL/TLS profile no collected scope defines.
+SSL_TLS_ISSUE_KIND = "ssl_tls_service_profile_unresolved"
+
 
 @dataclass(slots=True)
 class NormalizedDeviceConfigurationProfile:
@@ -44,6 +48,11 @@ class NormalizedDeviceConfigurationProfile:
     log_on_high_dp_load: bool
     ntp_primary_server: str
     ntp_secondary_server: str
+    ssl_tls_service_profile_name: str
+    ssl_tls_profile_scope: str
+    ssl_tls_min_version: str
+    ssl_tls_max_version: str
+    ssl_tls_certificate_name: str
     permitted_ip_values: list[str]
     permitted_ip_count: int
     login_banner: str
@@ -96,6 +105,93 @@ def entry_names(node: Any) -> list[str]:
         return [str(value).strip() for value in node if str(value).strip()]
     text = str(node).strip()
     return [text] if text else []
+
+
+def latest_predefined_ssl_tls_snapshot(appliance: Appliance) -> Snapshot | None:
+    """The vendor-shipped SSL/TLS profiles, collected separately from the merged config.
+
+    Separate because `show config merged` does not carry /config/predefined at all - measured
+    2026-09-02, its top level is devices, mgt-config and shared. Absent entirely on any
+    appliance collected before that collector existed, which is why a missing snapshot is
+    treated as "predefined unknown" rather than "no predefined profiles exist".
+    """
+    return (
+        Snapshot.objects.filter(
+            appliance=appliance,
+            source_type="config_predefined_ssl_tls_service_profiles",
+        )
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+
+
+def _profiles_by_name(node: Any) -> dict[str, dict[str, Any]]:
+    """Index an ssl-tls-service-profile container by entry name."""
+    if not isinstance(node, dict):
+        return {}
+    profiles: dict[str, dict[str, Any]] = {}
+    for entry in ensure_list(node.get("entry")):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("@name") or "").strip()
+        if name:
+            profiles[name] = entry
+    return profiles
+
+
+def shared_ssl_tls_profiles(snapshot: Snapshot) -> dict[str, dict[str, Any]]:
+    """Shared-scope profiles, which DO travel in the merged config."""
+    payload = snapshot.payload or {}
+    config = payload.get("config", {})
+    if not isinstance(config, dict):
+        return {}
+    shared = config.get("shared", {})
+    if not isinstance(shared, dict):
+        return {}
+    return _profiles_by_name(shared.get("ssl-tls-service-profile"))
+
+
+def predefined_ssl_tls_profiles(snapshot: Snapshot | None) -> dict[str, dict[str, Any]]:
+    """Predefined-scope profiles from their own snapshot."""
+    if snapshot is None:
+        return {}
+    # Snapshots store `response.result` itself, so the payload IS the subtree the xpath
+    # named - here `{"ssl-tls-service-profile": {"entry": [...]}}`.
+    payload = snapshot.payload or {}
+    if not isinstance(payload, dict):
+        return {}
+    return _profiles_by_name(payload.get("ssl-tls-service-profile"))
+
+
+def resolve_ssl_tls_profile(
+    name: str,
+    *,
+    predefined: dict[str, dict[str, Any]],
+    shared: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Which definition of `name` is actually in force, and where it came from.
+
+    PREDEFINED FIRST. Measured 2026-09-02: a custom entry written to /config/shared under the
+    predefined name `TLSv1.3_Default` was accepted, committed, and then ignored completely -
+    the device kept negotiating TLS 1.3 and kept serving the predefined certificate, while a
+    second profile with a UNIQUE name and the same custom certificate took effect immediately.
+    So the custom entry was not merely outranked on protocol settings, it was discarded whole.
+
+    This is the OPPOSITE of `region`, where a custom definition extends its predefined
+    namesake, and the opposite of the assumed ordering in policy/base.py, where PREDEFINED is
+    the weakest rank. Neither of those governs this object, and this measurement does not
+    govern them - name-collision behaviour is per object type, and all three have to be
+    measured separately.
+
+    The vsys scope is deliberately absent: `deviceconfig/system` cannot reference a vsys
+    profile at all. Measured the same day with `action=complete` on the binding field, which
+    lists valid target names - writing a vsys profile to the candidate did not add it.
+    """
+    if name in predefined:
+        return DeviceConfigurationProfile.SSL_TLS_SCOPE_PREDEFINED, predefined[name]
+    if name in shared:
+        return DeviceConfigurationProfile.SSL_TLS_SCOPE_SHARED, shared[name]
+    return DeviceConfigurationProfile.SSL_TLS_SCOPE_UNRESOLVED, {}
 
 
 def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormalizedCollection:
@@ -183,6 +279,28 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
     )
 
 
+    # The binding is a NAME. Resolving it needs both scopes, and they arrive from different
+    # collections - shared travels in the merged config, predefined does not travel at all
+    # and has its own snapshot.
+    ssl_tls_name, ssl_tls_rk, ssl_tls_rv = scalar_value(system.get("ssl-tls-service-profile"))
+    ssl_tls_scope = ""
+    ssl_tls_min_version = ""
+    ssl_tls_max_version = ""
+    ssl_tls_certificate = ""
+    if ssl_tls_name:
+        ssl_tls_scope, resolved = resolve_ssl_tls_profile(
+            ssl_tls_name,
+            predefined=predefined_ssl_tls_profiles(latest_predefined_ssl_tls_snapshot(appliance)),
+            shared=shared_ssl_tls_profiles(snapshot),
+        )
+        protocol_settings = resolved.get("protocol-settings") if isinstance(resolved, dict) else None
+        if not isinstance(protocol_settings, dict):
+            protocol_settings = {}
+        ssl_tls_min_version, _, _ = scalar_value(protocol_settings.get("min-version"))
+        ssl_tls_max_version, _, _ = scalar_value(protocol_settings.get("max-version"))
+        ssl_tls_certificate, _, _ = scalar_value(resolved.get("certificate")
+                                                 if isinstance(resolved, dict) else None)
+
     permitted_ip_values = entry_names(system.get("permitted-ip"))
     permitted_ip_count = len(permitted_ip_values)
 
@@ -204,6 +322,11 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         log_on_high_dp_load=log_high_dp,
         ntp_primary_server=ntp_primary_server,
         ntp_secondary_server=ntp_secondary_server,
+        ssl_tls_service_profile_name=ssl_tls_name,
+        ssl_tls_profile_scope=ssl_tls_scope,
+        ssl_tls_min_version=ssl_tls_min_version,
+        ssl_tls_max_version=ssl_tls_max_version,
+        ssl_tls_certificate_name=ssl_tls_certificate,
         permitted_ip_values=permitted_ip_values,
         permitted_ip_count=permitted_ip_count,
         login_banner=login_banner,
@@ -219,6 +342,7 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
             ("ntp_primary_server",       ntp_primary_rk,           ntp_primary_rv),
             ("ntp_secondary_server",     ntp_secondary_rk,         ntp_secondary_rv),
             ("login_banner",             login_banner_rk,          login_banner_rv),
+            ("ssl_tls_service_profile_name", ssl_tls_rk,            ssl_tls_rv),
             ("idle_timeout_minutes",     idle_timeout_rk,          idle_timeout_rv),
         ],
     )
@@ -240,6 +364,11 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "log_on_high_dp_load": normalized.log_on_high_dp_load,
                 "ntp_primary_server": normalized.ntp_primary_server,
                 "ntp_secondary_server": normalized.ntp_secondary_server,
+                "ssl_tls_service_profile_name": normalized.ssl_tls_service_profile_name,
+                "ssl_tls_profile_scope": normalized.ssl_tls_profile_scope,
+                "ssl_tls_min_version": normalized.ssl_tls_min_version,
+                "ssl_tls_max_version": normalized.ssl_tls_max_version,
+                "ssl_tls_certificate_name": normalized.ssl_tls_certificate_name,
                 "permitted_ip_values": normalized.permitted_ip_values,
                 "permitted_ip_count": normalized.permitted_ip_count,
                 "login_banner": normalized.login_banner,
@@ -247,6 +376,34 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "raw_profile": normalized.raw_profile,
             },
         )
+
+        # A binding naming a profile no collected scope defines. Reported rather than left as
+        # a bare "unresolved" scope, because the two causes need different responses and the
+        # row alone cannot tell them apart: either the predefined snapshot was never collected
+        # for this appliance - true of everything collected before that collector existed -
+        # or the device really does reference a profile that is not there. Silence here would
+        # make a control report "cannot determine" with nothing pointing at why.
+        NormalizationIssue.objects.filter(appliance=appliance, kind=SSL_TLS_ISSUE_KIND).delete()
+        if normalized.ssl_tls_profile_scope == DeviceConfigurationProfile.SSL_TLS_SCOPE_UNRESOLVED:
+            NormalizationIssue.objects.create(
+                management_station=appliance.management_station,
+                appliance=appliance,
+                appliance_group=appliance.appliance_group,
+                kind=SSL_TLS_ISSUE_KIND,
+                name=normalized.ssl_tls_service_profile_name,
+                severity=NormalizationIssue.Severity.WARNING,
+                disposition=NormalizationIssue.Disposition.KEPT,
+                reason=(
+                    f"deviceconfig/system binds SSL/TLS service profile "
+                    f"{normalized.ssl_tls_service_profile_name!r}, which is defined in neither "
+                    "the shared scope of the merged config nor the collected predefined "
+                    "profiles. Most often this means the predefined catalog has not been "
+                    "collected for this appliance - it does NOT travel in `show config "
+                    "merged` and needs its own read - rather than that the reference is "
+                    "genuinely dangling. The binding is kept as recorded; its protocol floor "
+                    "is left blank rather than guessed."),
+                node="deviceconfig/system/ssl-tls-service-profile",
+            )
 
         ct = ContentType.objects.get_for_model(DeviceConfigurationProfile)
         FieldProvenance.objects.filter(content_type=ct, object_id=profile.pk).delete()

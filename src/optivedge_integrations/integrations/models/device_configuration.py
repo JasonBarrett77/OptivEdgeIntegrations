@@ -56,6 +56,51 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     #: deviceconfig/setting/management node absent, which is the state on both PA-5220s.
     log_on_high_dp_load = models.BooleanField(default=False)
 
+    #: The SSL/TLS service profile bound to the management interface, and the definition it
+    #: resolves to. PAN-MGT-010's subject.
+    #:
+    #: Stored as resolved scalars rather than a foreign key to a profile model, because the
+    #: only question asked of an SSL/TLS profile so far is asked of the SURFACE - what does
+    #: this appliance's management interface enforce - and that is answerable without the
+    #: profile ever becoming a row. `InterfaceManagementProfile` records the opposite case
+    #: and the reason it is opposite: an UNUSED profile leaves no surface, so it could only
+    #: be found by modelling the object. When a control asks something of SSL/TLS profiles as
+    #: objects, the model is additive and these fields become its denormalization.
+    #:
+    #: Empty name means NOTHING is bound, which is not benign: measured 2026-09-02, an unbound
+    #: management interface accepts TLS 1.1, so absence fails the control rather than passing
+    #: it by default.
+    ssl_tls_service_profile_name = models.CharField(max_length=64, blank=True)
+
+    #: Which definition won. PAN-OS resolves this name over the predefined and shared scopes
+    #: only - a vsys profile never becomes referenceable here, measured 2026-09-02 via
+    #: `action=complete` on the binding field - and PREDEFINED BEATS SHARED. That order is
+    #: measured, not assumed, and it is the opposite of `region`, where a custom definition
+    #: extends its predefined namesake. Recorded per row because a name alone cannot say which
+    #: settings are in force when both scopes define it.
+    SSL_TLS_SCOPE_PREDEFINED = "predefined"
+    SSL_TLS_SCOPE_SHARED = "shared"
+    #: Bound to a name with no definition in either scope. Distinct from blank, which means
+    #: nothing is bound at all: one is a dangling reference, the other a deliberate absence,
+    #: and a control must not report them the same way.
+    SSL_TLS_SCOPE_UNRESOLVED = "unresolved"
+    SSL_TLS_SCOPE_CHOICES = [
+        (SSL_TLS_SCOPE_PREDEFINED, "Predefined"),
+        (SSL_TLS_SCOPE_SHARED, "Shared"),
+        (SSL_TLS_SCOPE_UNRESOLVED, "Unresolved"),
+    ]
+    ssl_tls_profile_scope = models.CharField(
+        max_length=16, blank=True, choices=SSL_TLS_SCOPE_CHOICES)
+
+    #: The resolved profile's protocol floor and ceiling. Blank when nothing is bound or the
+    #: name does not resolve. `protocol-settings` absent on a profile that DOES exist has not
+    #: been measured, so blank must not be read as "PAN-OS defaulted it".
+    ssl_tls_min_version = models.CharField(max_length=16, blank=True)
+    ssl_tls_max_version = models.CharField(max_length=16, blank=True)
+    #: The certificate the resolved profile presents. A name only. Whether the CA behind it is
+    #: organisation-trusted is not a configuration fact and is deliberately not decided here.
+    ssl_tls_certificate_name = models.CharField(max_length=255, blank=True)
+
     ntp_primary_server = models.CharField(max_length=255, blank=True)
     ntp_secondary_server = models.CharField(max_length=255, blank=True)
 

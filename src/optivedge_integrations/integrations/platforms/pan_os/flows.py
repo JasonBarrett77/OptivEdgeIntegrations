@@ -31,6 +31,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_external_list,
     collect_show_managed_devices,
     collect_show_merged_config,
+    collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
     collect_show_predefined_url_lists,
     collect_show_pushed_shared_policy,
@@ -493,15 +494,20 @@ def collect_appliance_merged_config(
     )
 
 
-def collect_appliance_predefined_address_lists(
+def collect_appliance_predefined_catalogs(
     appliance: Appliance,
     *,
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
     user_agent: str = DEFAULT_USER_AGENT,
 ) -> list[PANOSPersistedCollection]:
-    """Collect PAN-OS's predefined (vendor-shipped) IP block list and URL list catalogs for
-    one appliance. Appliance-wide, not vsys-scoped, so one session covers both calls."""
+    """Collect PAN-OS's predefined (vendor-shipped) catalogs for one appliance.
+
+    Appliance-wide, not vsys-scoped, so one session covers every call. Two of the three are
+    `show predefined` op commands; the SSL/TLS service profiles are a direct config read,
+    because they live in the config tree's predefined branch rather than the content catalog
+    `show predefined` addresses, and `show config merged` does not carry that branch either.
+    """
     session = open_session(
         appliance.management_station,
         credentials_provider=credentials_provider,
@@ -512,6 +518,8 @@ def collect_appliance_predefined_address_lists(
     return [
         persist_appliance_collected_response(appliance, collect_show_predefined_ip_block_lists(session)),
         persist_appliance_collected_response(appliance, collect_show_predefined_url_lists(session)),
+        persist_appliance_collected_response(
+            appliance, collect_predefined_ssl_tls_service_profiles(session)),
     ]
 
 
@@ -809,7 +817,7 @@ def collect_in_scope_configuration_snapshots(
 
     for appliance in appliances:
         try:
-            persisted_list = collect_appliance_predefined_address_lists(
+            persisted_list = collect_appliance_predefined_catalogs(
                 appliance,
                 credentials_provider=credentials_provider,
                 timeout=timeout,
