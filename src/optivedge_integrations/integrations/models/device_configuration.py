@@ -102,7 +102,7 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     ssl_tls_certificate_name = models.CharField(max_length=255, blank=True)
 
     #: The certificate's own properties, resolved from the certificate object the profile
-    #: names. PAN-MGT-014's subject, kept separate from PAN-MGT-010's protocol floor because
+    #: names. PAN-CRT-006's subject, kept separate from PAN-MGT-010's protocol floor because
     #: the two are independent: the SHIPPED TLSv1.3_Default profile satisfies the floor and
     #: still serves the device's self-signed factory certificate, so one control passing tells
     #: you nothing about the other.
@@ -128,7 +128,7 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     ]
     #: CA_ISSUED means only that something other than the certificate itself signed it. It
     #: does NOT mean the signer is the organisation's own CA - that is not decidable from
-    #: configuration, and PAN-MGT-014 says so rather than pretending otherwise.
+    #: configuration, and PAN-CRT-006 says so rather than pretending otherwise.
     ssl_tls_certificate_trust = models.CharField(
         max_length=16, blank=True, choices=TRUST_CHOICES)
     #: The issuing authority as PAN-OS reports it. Recorded so an engineer can see WHICH CA
