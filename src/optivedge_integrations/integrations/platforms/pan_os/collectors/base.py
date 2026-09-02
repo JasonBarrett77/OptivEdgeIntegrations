@@ -52,6 +52,15 @@ def collect_config_response(
         {"type": request.request_type, "action": request.action, "xpath": request.xpath},
         target=request.target,
     )
+    # An xpath that matches nothing returns `<result/>`, which parses to None. That is a
+    # real answer - "this appliance defines none of these" - and differs from an op command,
+    # where an empty result means the command told us nothing. Left as None it reaches
+    # persistence as a null payload and trips the snapshot's NOT NULL constraint, turning a
+    # legitimate reading into a crash. Measured 2026-09-02: the PA-VM has no predefined
+    # ssl-tls-service-profile at all, while both PA-5220s do.
+    response_root = response.get("response")
+    if isinstance(response_root, dict) and response_root.get("result", "missing") is None:
+        response_root["result"] = {}
     return PANOSCollectedResponse(
         source_type=source_type,
         request=request,

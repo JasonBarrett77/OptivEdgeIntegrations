@@ -500,7 +500,7 @@ def collect_appliance_predefined_catalogs(
     credentials_provider: Callable[[], tuple[str, str]] | None = None,
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
     user_agent: str = DEFAULT_USER_AGENT,
-) -> list[PANOSPersistedCollection]:
+) -> tuple[list[PANOSPersistedCollection], list[str]]:
     """Collect PAN-OS's predefined (vendor-shipped) catalogs for one appliance.
 
     Appliance-wide, not vsys-scoped, so one session covers every call. Two of the three are
@@ -515,12 +515,25 @@ def collect_appliance_predefined_catalogs(
         timeout=timeout,
         user_agent=user_agent,
     )
-    return [
-        persist_appliance_collected_response(appliance, collect_show_predefined_ip_block_lists(session)),
-        persist_appliance_collected_response(appliance, collect_show_predefined_url_lists(session)),
-        persist_appliance_collected_response(
-            appliance, collect_predefined_ssl_tls_service_profiles(session)),
-    ]
+    # Collected INDEPENDENTLY. These are three unrelated reads, and letting one exception
+    # abandon the other two is not hypothetical: `show predefined ip-block-list-v2` raises
+    # "No data found. Verify xpath and retry" on both PA-5220s (11.1.13-h3) while succeeding
+    # on the PA-VM (11.2.3), so every predefined catalog was being discarded for those
+    # appliances on the strength of one unrelated failure. Failures are returned rather than
+    # swallowed - the caller records them per appliance - so a partial collection is visible
+    # as partial instead of passing for complete.
+    persisted: list[PANOSPersistedCollection] = []
+    failures: list[str] = []
+    for collect in (
+        collect_show_predefined_ip_block_lists,
+        collect_show_predefined_url_lists,
+        collect_predefined_ssl_tls_service_profiles,
+    ):
+        try:
+            persisted.append(persist_appliance_collected_response(appliance, collect(session)))
+        except Exception as exc:  # noqa: BLE001 - recorded and reported, not suppressed
+            failures.append(f"{collect.__name__}: {exc}")
+    return persisted, failures
 
 
 def collect_appliance_group_pushed_shared_policy(
@@ -817,7 +830,7 @@ def collect_in_scope_configuration_snapshots(
 
     for appliance in appliances:
         try:
-            persisted_list = collect_appliance_predefined_catalogs(
+            persisted_list, catalog_failures = collect_appliance_predefined_catalogs(
                 appliance,
                 credentials_provider=credentials_provider,
                 timeout=timeout,
@@ -831,6 +844,12 @@ def collect_in_scope_configuration_snapshots(
                 )
             )
             continue
+        # Per-catalog failures are reported individually, so one unavailable catalog reads as
+        # one missing catalog rather than as a lost appliance.
+        for error_text in catalog_failures:
+            predefined_lists_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=error_text)
+            )
         for persisted in persisted_list:
             predefined_lists_collections.append(
                 PANOSApplianceCollectedSnapshot(
