@@ -32,6 +32,27 @@ Entry shape:
 
 ---
 
+## 2026-09-01 — defaults behind the management settings controls
+
+**Did:** Enumerated `deviceconfig/system` and `deviceconfig/setting/management` with
+`action=complete` on a PA-5220 and a PA-VM. Wrote `yes` then `no` to `server-verification`,
+`ack-login-banner` and `enable-log-high-dp-load`, committing and reading back each time, then
+deleted all three. Read the corresponding checkboxes in the web interface on a device with all
+three absent.
+
+**Found:** These keys persist whatever is written, so the omit-on-default technique that
+settled the service defaults does not work here and absence only means "never written". The
+interface answered it instead: `server-verification` absent is ENABLED, the other two DISABLED.
+Two neighbouring settings with opposite defaults. `deviceconfig/setting/management` is absent
+as a whole node on both PA-5220s, and `ack-login-banner` is greyed out until a banner exists.
+
+**Landed:** `read-device-configuration.md`; the payload contract in OptivEdgeProbe;
+PAN-MGT-007/008/009/011 in OptivEdgeAssessments.
+
+**Open:** the template-pushed form of all four keys. Every instance observed is locally set,
+so nothing is known about how they arrive from a stack or whether an override strips the
+marker as it does for profiles and service leaves.
+
 ## 2026-09-01 — checking provenance against raw config, and a wildcard regression
 
 **Did:** Verified every provenance value the Management Interfaces tab renders against the

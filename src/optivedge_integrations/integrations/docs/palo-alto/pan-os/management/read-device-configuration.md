@@ -123,7 +123,10 @@ interface, deleting `aux-1/service` resets only its services. Prefer this to wri
 back by hand, which requires knowing them and re-introduces the empty-versus-absent problem.
 
 **The reset is not always toward "closed".** Because MGT and aux default in opposite
-directions, the same delete has opposite security effects:
+directions, the same delete has opposite security effects — and that is not confined to the
+service nodes: `server-verification` defaults ON while its neighbour
+`enable-log-high-dp-load` defaults OFF, so "reset it" widens one and narrows the other. See
+"Management-setting defaults are per key" below.
 
     delete aux-1/service   -> NO admin services      (closes)
     delete MGT service     -> ssh, https, icmp ON    (OPENS)
@@ -157,6 +160,60 @@ aux interface with SSH or HTTPS reachable — precisely the exposure it exists t
 `aux-1`/`aux-2` do not exist on every platform (the PA-VM has neither), so their absence does
 not distinguish "not configured" from "not supported". Use `action=complete` on
 `deviceconfig/system` to tell those apart.
+
+## Management-setting defaults are per key, and two of them are opposite
+
+*Measured 2026-09-01 against a PA-5220 (11.1.13-h3) with all three keys absent.*
+
+| key | absent means | node |
+|---|---|---|
+| `server-verification` | **enabled** | `deviceconfig/system` |
+| `ack-login-banner` | disabled | `deviceconfig/system` |
+| `enable-log-high-dp-load` | disabled | `deviceconfig/setting/management` |
+
+`server-verification` and `enable-log-high-dp-load` are neighbouring management settings with
+**opposite** defaults. A reader that assumes one default for a subtree gets one of them
+backwards, and for a control that inverts the finding set: absence satisfies the first and
+violates the second.
+
+## These keys do not vanish when written to their default
+
+The `disable-*` service keys under `deviceconfig/system/service` are omitted when they match
+the default, which is what makes "write it and see if it disappears" a way to discover the
+default. **These keys are not.** Writing `yes`, committing and reading back leaves `yes`
+stored; writing `no` leaves `no` stored. Absence therefore means "never written" and nothing
+more, and the default has to come from somewhere else — the web interface checkbox on a device
+with the key absent settled all three at once.
+
+Do not assume the omit-on-default behaviour generalises across `deviceconfig`.
+
+To get one of these keys back to its implicit state, **delete it** — see "To reset a field,
+DELETE the right branch" above. Writing the default value back leaves the key present and set,
+which is a different config from never having written it, and the two are distinguishable:
+`FieldProvenance` gives an absent key no row and a present-but-unmarked key a `local` one.
+
+## `deviceconfig/setting/management` can be absent entirely
+
+Not merely missing a key — the whole node. That is the state on both PA-5220s, which have
+never had one of its settings written. A read has to survive two levels of absence
+(`setting` then `management`), and a device where the node exists proves nothing about a
+device where it does not.
+
+## `ack-login-banner` is gated on the banner in the interface
+
+The checkbox is greyed out until `login-banner` is non-empty, so acknowledgement cannot be
+required without a banner to acknowledge. This shapes remediation ordering rather than the
+read: set the banner first. Whether the API accepts `ack-login-banner: yes` on a device with
+no banner is **unmeasured** — only the interface behaviour was observed.
+
+## Limits
+
+- The template-pushed form was measured 2026-09-02 and is no longer a limit: pushed values
+  arrive as `{'@ptpl': ..., '#text': ...}`, an override strips the marker from that leaf alone,
+  and a value already set locally survives a push of a different value. See
+  `../read-template-provenance.md`.
+- One PAN-OS version for the defaults. The PA-VM was enumerated for key sets but its checkbox
+  states were not read.
 
 ## permitted-ip: absent and empty mean "any" — but `0.0.0.0/0` alongside anything does not
 

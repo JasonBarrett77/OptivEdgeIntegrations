@@ -39,20 +39,33 @@ So a profile has **one** provenance and a management plane has **one per field**
 reads provenance at a fixed depth is right for one of them and wrong for the other, and the
 depth has to be decided per object rather than once.
 
-## An unmarked value is ambiguous
+## An unmarked value means the device is authoritative
 
-Absent `@ptpl` means *either* locally defined *or* pushed-then-overridden-locally. The two
-are byte identical in merged config, so this source cannot separate them.
+Provenance answers **where do I go to change this**, not what a value's history is.
 
-Reporting an overridden value as locally defined is therefore **incomplete rather than
-wrong** — it is true that the value is now local, and it omits that a template says something
-different.
+    marked with @ptpl   the named template or stack decides it. Change it there, and the
+                        change reaches every device that container serves.
+    unmarked            the device decides it. Change it there.
 
-**Working decision:** report an unmarked value as local, which is what normalization already
-produces. Resolving it properly belongs in normalization — decide provenance there, against
-the pushed template, and store the result — rather than in each consumer. Comparing against
-the pushed template is the established technique for this; `show config pushed-shared-policy`
-is already used that way for policy scope. Not attempted, and not urgent.
+An unmarked value may be locally configured, or pushed and then overridden, or actively
+overriding a different value the template is pushing right now — measured 2026-09-02, a device
+holding `server-verification: no` kept it when a template pushed `yes`, and the value stayed
+unmarked. **All three are the same instruction:** go to the device. Merged config reports the
+value in force, which is the value being assessed.
+
+So there is nothing to resolve here, and comparing against the pushed template to separate
+the three cases is not planned. It would produce a distinction with no action attached to it.
+
+### What IS worth separating, and already is
+
+**A key that was never written** is a different fact from one set locally to the same value:
+one is the platform's default and the other is a decision. `FieldProvenance` already carries
+it — an absent key gets no row at all, a present-but-unmarked key gets a row typed `local` —
+because the remediation differs. Telling an engineer to change a setting nobody has ever
+touched is different from telling them to change one somebody chose.
+
+That distinction is stored today and not yet surfaced. It is the one worth surfacing; the
+local-versus-overridden one is not.
 
 ## `@ptpl` names a template **or** a stack, and the difference does not matter
 
