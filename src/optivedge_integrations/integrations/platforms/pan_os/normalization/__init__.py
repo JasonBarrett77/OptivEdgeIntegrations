@@ -31,6 +31,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     normalize_security_rules,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
+from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
+    normalize_certificate_objects,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.interface_management_profiles import (
     normalize_interface_management_profiles,
 )
@@ -86,6 +89,11 @@ def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> li
     return normalize_zones(enforcement_point)
 
 
+def normalize_appliance_certificate_objects(appliance: Appliance) -> dict:
+    """Every SSL/TLS service profile and certificate profile on one appliance, in every scope."""
+    return normalize_certificate_objects(appliance)
+
+
 def normalize_appliance_interface_management_profiles(appliance: Appliance) -> list:
     """Every interface management profile on one appliance, bound or not."""
     return normalize_interface_management_profiles(appliance)
@@ -108,6 +116,7 @@ __all__ = [
     "normalize_addresses",
     "normalize_appliance_device_configuration",
     "normalize_appliance_group_shared_scope",
+    "normalize_appliance_certificate_objects",
     "normalize_appliance_interface_management_profiles",
     "normalize_appliance_interfaces",
     "normalize_appliance_management_interfaces",

@@ -17,6 +17,7 @@ from .collected import (
 )
 from .events import IntegrationEvent, IntegrationRun
 from .device_configuration import DeviceConfigurationProfile
+from .certificates import CertificateProfile, SslTlsServiceProfile
 from .interface_management_profile import InterfaceManagementProfile
 from .interfaces import Interface
 from .management_interface import (
@@ -84,7 +85,9 @@ __all__ = [
     "ManagementStation",
     "DeviceConfigurationProfile",
     "Interface",
+    "CertificateProfile",
     "InterfaceManagementProfile",
+    "SslTlsServiceProfile",
     "ManagementInterface",
     "ManagementService",
     "SERVICE_NAMES",
