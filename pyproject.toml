@@ -11,6 +11,13 @@ dependencies = [
     "Django>=6.0,<6.1",
     "requests>=2.31",
     "xmltodict>=0.13",
+    # PAN-OS exposes a certificate's key SIZE and SIGNATURE algorithm in no configuration
+    # field - `algorithm` reports RSA or EC, the key algorithm - and no operational command
+    # carries them either. The only source is the X.509 blob PAN-OS stores under the
+    # misleadingly named `public-key`, so PAN-CRT-002 and PAN-CRT-003 cannot be answered
+    # without decoding it. This is the first dependency added to interpret a payload rather
+    # than transport or parse one.
+    "cryptography>=42",
     "optivedge @ git+https://github.com/JasonBarrett77/OptivEdge.git@main",
 ]
 
