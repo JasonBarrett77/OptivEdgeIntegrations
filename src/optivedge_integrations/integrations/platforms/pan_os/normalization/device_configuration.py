@@ -60,6 +60,7 @@ class NormalizedDeviceConfigurationProfile:
     master_key_expires_at: str
     master_key_auto_renew_hours: int
     master_key_on_hsm: bool
+    password_complexity: dict[str, Any]
     permitted_ip_values: list[str]
     permitted_ip_count: int
     login_banner: str
@@ -199,6 +200,67 @@ def resolve_ssl_tls_profile(
     if name in shared:
         return DeviceConfigurationProfile.SSL_TLS_SCOPE_SHARED, shared[name]
     return DeviceConfigurationProfile.SSL_TLS_SCOPE_UNRESOLVED, {}
+
+
+#: (model field, config key, kind). The four password-change keys are nested one level down.
+PASSWORD_COMPLEXITY_FIELDS = (
+    ("password_complexity_enabled", "enabled", "bool", None),
+    ("password_minimum_length", "minimum-length", "int", None),
+    ("password_minimum_uppercase", "minimum-uppercase-letters", "int", None),
+    ("password_minimum_lowercase", "minimum-lowercase-letters", "int", None),
+    ("password_minimum_numeric", "minimum-numeric-letters", "int", None),
+    ("password_minimum_special", "minimum-special-characters", "int", None),
+    ("password_block_username_inclusion", "block-username-inclusion", "bool", None),
+    ("password_new_differs_by_characters", "new-password-differs-by-characters", "int", None),
+    ("password_history_count", "password-history-count", "int", None),
+    ("password_block_repeated_characters", "block-repeated-characters", "int", None),
+    ("password_change_on_first_login", "password-change-on-first-login", "bool", None),
+    ("password_change_period_block", "password-change-period-block", "int", None),
+    ("password_expiration_period", "expiration-period", "int", "password-change"),
+    ("password_expiration_warning_period", "expiration-warning-period", "int", "password-change"),
+    ("password_post_expiration_admin_login_count",
+     "post-expiration-admin-login-count", "int", "password-change"),
+    ("password_post_expiration_grace_period",
+     "post-expiration-grace-period", "int", "password-change"),
+)
+
+
+def password_complexity_from_snapshot(snapshot: Snapshot) -> dict[str, Any]:
+    """mgt-config/password-complexity, with every absent key resolved to its measured default.
+
+    `mgt-config` sits at the TOP of the merged config beside `devices` and `shared`, not under
+    a device entry, so it needs its own accessor rather than reusing device_entry_from_snapshot.
+
+    Every default is the insecure one - flag off, every number 0 - measured from the
+    unconfigured form. Absent is expanded rather than left null because PAN-OS never writes
+    these values: the UI stores only the flag when an administrator enables complexity, and a
+    commit does not materialise the rest. So there is no state where a null would mean
+    something a 0 does not.
+    """
+    values = {field: (False if kind == "bool" else 0)
+              for field, _, kind, _ in PASSWORD_COMPLEXITY_FIELDS}
+    payload = snapshot.payload or {}
+    config = payload.get("config") if isinstance(payload, dict) else None
+    if not isinstance(config, dict):
+        return values
+    node = config.get("mgt-config")
+    if not isinstance(node, dict):
+        return values
+    complexity = node.get("password-complexity")
+    if not isinstance(complexity, dict):
+        return values
+    change = complexity.get("password-change")
+    if not isinstance(change, dict):
+        change = {}
+
+    for field, key, kind, parent in PASSWORD_COMPLEXITY_FIELDS:
+        source = change if parent else complexity
+        raw = source.get(key)
+        if kind == "bool":
+            values[field], _, _ = parse_yes_no_field(raw, default_effective=False)
+        else:
+            values[field], _, _ = parse_integer_field(raw, default_effective=0)
+    return values
 
 
 def latest_masterkey_snapshot(appliance: Appliance) -> Snapshot | None:
@@ -434,6 +496,8 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 shared=shared_certificates(snapshot),
             )
 
+    password_complexity = password_complexity_from_snapshot(snapshot)
+
     (master_key_state, master_key_expires_at,
      master_key_auto_renew, master_key_on_hsm) = read_master_key(
         latest_masterkey_snapshot(appliance))
@@ -471,6 +535,7 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         master_key_expires_at=master_key_expires_at,
         master_key_auto_renew_hours=master_key_auto_renew,
         master_key_on_hsm=master_key_on_hsm,
+        password_complexity=password_complexity,
         permitted_ip_values=permitted_ip_values,
         permitted_ip_count=permitted_ip_count,
         login_banner=login_banner,
@@ -520,6 +585,7 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "master_key_expires_at": normalized.master_key_expires_at,
                 "master_key_auto_renew_hours": normalized.master_key_auto_renew_hours,
                 "master_key_on_hsm": normalized.master_key_on_hsm,
+                **normalized.password_complexity,
                 "permitted_ip_values": normalized.permitted_ip_values,
                 "permitted_ip_count": normalized.permitted_ip_count,
                 "login_banner": normalized.login_banner,

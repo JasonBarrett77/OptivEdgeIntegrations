@@ -172,6 +172,51 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     master_key_auto_renew_hours = models.PositiveIntegerField(default=0)
     master_key_on_hsm = models.BooleanField(default=False)
 
+    #: mgt-config/password-complexity. PAN-AUTH-001 through 013 - thirteen keys, thirteen
+    #: controls, near one-to-one.
+    #:
+    #: Fields here rather than a model of their own because the scoping and the control type
+    #: are identical to everything else on this row: one per appliance, control_type
+    #: device_configuration. A separate model would add a control type, a finding model, a
+    #: compiler and a generator to express a 1:1 relationship this row already has.
+    #:
+    #: EVERY DEFAULT IS THE INSECURE ONE except the last two. Measured 2026-09-03 from the
+    #: unconfigured form: the flag is off and every number is 0. The two exceptions are marked
+    #: below, and they are the reason this block is not a loop over identical fields.
+    #:
+    #: `enabled` off makes every other value INERT - the device enforces none of them. That
+    #: fact belongs in each control's remediation and deliberately does NOT condition the
+    #: assessment: a setting below its floor is below its floor either way, and gating would
+    #: make the finding set change shape the moment the engine is switched on.
+    password_complexity_enabled = models.BooleanField(default=False)
+
+    #: Range 6-16, so 0 is reachable only by ABSENCE - a deliberate zero cannot be written.
+    #: For this key alone, a stored 0 always means never configured.
+    password_minimum_length = models.PositiveIntegerField(default=0)
+    password_minimum_uppercase = models.PositiveIntegerField(default=0)
+    password_minimum_lowercase = models.PositiveIntegerField(default=0)
+    password_minimum_numeric = models.PositiveIntegerField(default=0)
+    password_minimum_special = models.PositiveIntegerField(default=0)
+    password_block_username_inclusion = models.BooleanField(default=False)
+    password_new_differs_by_characters = models.PositiveIntegerField(default=0)
+    password_history_count = models.PositiveIntegerField(default=0)
+    password_expiration_period = models.PositiveIntegerField(default=0)
+    password_expiration_warning_period = models.PositiveIntegerField(default=0)
+
+    #: THE TWO INVERTED ONES. Both controls are named "Disallow...", so the secure state is
+    #: the ABSENCE of a permission: 0 means no logins are allowed after expiry and no grace
+    #: window exists. The corpus minimum for both is 0. A finding is a value ABOVE zero, and
+    #: treating them like the eleven above would report every default device as failing
+    #: something it already satisfies.
+    password_post_expiration_admin_login_count = models.PositiveIntegerField(default=0)
+    password_post_expiration_grace_period = models.PositiveIntegerField(default=0)
+
+    #: In the schema and read by no corpus control. Collected because modelling half an object
+    #: is worse than modelling all of it, and the cost here is three columns.
+    password_block_repeated_characters = models.PositiveIntegerField(default=0)
+    password_change_on_first_login = models.BooleanField(default=False)
+    password_change_period_block = models.PositiveIntegerField(default=0)
+
     ntp_primary_server = models.CharField(max_length=255, blank=True)
     ntp_secondary_server = models.CharField(max_length=255, blank=True)
 
