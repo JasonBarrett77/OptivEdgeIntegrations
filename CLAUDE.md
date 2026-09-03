@@ -1063,3 +1063,36 @@ these hooks: github.com does not support server-side hooks, and by decision this
 not run GitHub Actions. The hooks are therefore the ONLY enforcement, and bypassing one is not
 deferring a check, it is removing it. If a hook fails, fix what it found or say why it is wrong
 — do not step around it.
+
+## Every new model is checked against the certificate reference list
+
+`OptivEdgeProbe/scratch/certificate-reference-locations.csv` lists all 67 places PAN-OS lets a
+certificate be referenced, derived from the device command schema. Two controls depend on it -
+"expired AND in use" and "used nowhere" - and both are deferred until enough of those locations
+are backed by real models. A location the reference map misses becomes a certificate reported
+unused while it is in use, which breaks the thing it was protecting.
+
+**When you add a normalized model, do three things before calling it done:**
+
+1. Open the CSV and look for reference points whose config subtree your model now covers. Set
+   `covered_by` to your model's name on those rows. That is how the deferred controls stop
+   being deferred - incrementally, as domains land, rather than in one push at the end.
+2. If your subtree contains a certificate reference the CSV does NOT list, the CSV is wrong.
+   Add the row and record in `notes` how you found it. The derivation has been incomplete
+   before: filtering on leaf key missed `ike gateway ... local-certificate name <value>`,
+   where the leaf is `name` and only the parent says it holds a certificate.
+3. Regenerate with `python -m scratch.build_certificate_reference_matrix`. Tracking columns are
+   merged by path, so nothing you wrote is lost.
+
+**Do NOT build a model because it appears on that list.** The list is a coverage checklist, not
+a work queue - a model still waits until a control asks for it. Most of these locations will
+acquire models as their own domains are built. The ones that never do are the exotics, and the
+technique for those is a decision to be taken with the evidence in hand rather than now.
+
+Note the scope split before assuming a row applies: twelve of the direct points are
+`log-collector`, `wildfire-appliance` and `wildfire-appliance-cluster`, which are Panorama's
+configuration of managed appliances rather than firewall configuration.
+
+The scan is also worth keeping AFTER the models exist, as a coverage check on them: a reference
+found at a path no model owns is a normalization gap, and should surface as a
+`NormalizationIssue` rather than being silently invisible.
