@@ -92,6 +92,72 @@ class CertificateScopedModel(ProvenancedMixin, SyncTrackedModel):
             raise ValidationError("Only a vsys-scoped object may name a vsys.")
 
 
+class Certificate(CertificateScopedModel):
+    """One certificate as an object. PAN-CRT-001, 002, 003 and 008's subject.
+
+    Three fields here exist in NO PAN-OS configuration field and are decoded from the X.509
+    blob PAN-OS stores under the misleadingly named `public-key`, which holds the whole
+    certificate. Four oracles were tried before concluding this: the config `algorithm` field
+    reports RSA or EC - the KEY algorithm, not its size - `request certificate show` returns
+    FEWER fields than the config and no algorithm at all, `request certificate bulk-certs-show`
+    does not exist on a PA-5220, and `show system state` returns NO_MATCHES for *cert*.
+    """
+
+    #: As PAN-OS reports them. `subject` and `issuer` are stored because an engineer reads
+    #: them, and are NEVER compared: they are formatted three ways depending on where they are
+    #: read - "/CN=x" in shared, a bare "x" in predefined, and "CN = x" in subject-int and from
+    #: the op command. Self-signed is decided by hash equality instead.
+    common_name = models.CharField(max_length=255, blank=True)
+    subject = models.CharField(max_length=512, blank=True)
+    issuer = models.CharField(max_length=512, blank=True)
+    subject_hash = models.CharField(max_length=64, blank=True)
+    issuer_hash = models.CharField(max_length=64, blank=True)
+
+    #: Equality of the two hashes, computed once here rather than at every call site. WITHIN a
+    #: surface the hashes also chain - a certificate's issuer_hash equals its issuer's
+    #: subject_hash - which is how a chain is built without parsing anything. Across surfaces
+    #: the literal values differ and only the relationships hold.
+    is_self_signed = models.BooleanField(default=False)
+    is_ca = models.BooleanField(default=False)
+
+    not_valid_before = models.DateTimeField(null=True, blank=True)
+    not_valid_after = models.DateTimeField(null=True, blank=True)
+
+    #: DECODED from the certificate, not read from a field.
+    #:
+    #: key_size_bits must always be read WITH key_algorithm. 256-bit EC is strong and 256-bit
+    #: RSA is broken, so a bare minimum-bits comparison would pass the broken one and fail the
+    #: good one - which is why PAN-CRT-002's query cannot be a single numeric threshold.
+    key_algorithm = models.CharField(max_length=32, blank=True)
+    key_size_bits = models.PositiveIntegerField(null=True, blank=True)
+    signature_algorithm = models.CharField(max_length=64, blank=True)
+    #: Set when the blob could not be decoded. The three fields above are then blank, and a
+    #: control must report rather than pass - an unreadable certificate is not a compliant one.
+    parse_error = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["appliance__hostname", "scope", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["appliance", "scope", "vsys_name", "name"],
+                name="integrations_unique_certificate_per_scope"),
+        ]
+        indexes = [
+            models.Index(fields=["appliance", "not_valid_after"]),
+            models.Index(fields=["appliance", "key_algorithm", "key_size_bits"]),
+            models.Index(fields=["appliance", "signature_algorithm"]),
+            models.Index(fields=["management_station"]),
+        ]
+
+    def clean(self) -> None:
+        super().clean()
+        if self.subject_hash and self.issuer_hash:
+            expected = self.subject_hash == self.issuer_hash
+            if expected != self.is_self_signed:
+                raise ValidationError(
+                    "is_self_signed must match subject_hash == issuer_hash.")
+
+
 class SslTlsServiceProfile(CertificateScopedModel):
     """One SSL/TLS service profile as an object. PAN-CRT-005's subject."""
 

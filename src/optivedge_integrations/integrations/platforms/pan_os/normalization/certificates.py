@@ -17,8 +17,12 @@ from typing import Any
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519, rsa
+
 from optivedge_integrations.integrations.models import (
     Appliance,
+    Certificate,
     CertificateProfile,
     FieldProvenance,
     Snapshot,
@@ -36,6 +40,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot,
     latest_merged_snapshot,
+    latest_predefined_certificate_snapshot,
     latest_predefined_ssl_tls_snapshot,
 )
 
@@ -55,6 +60,54 @@ ALGORITHM_KEYS = (
     "auth-algo-sha1", "auth-algo-sha256", "auth-algo-sha384",
 )
 UNMEASURED_ALGORITHM_KEYS = ("enc-algo-camellia128", "enc-algo-camellia256", "enc-algo-seed")
+
+def decode_certificate(pem: str) -> dict[str, Any]:
+    """Key algorithm, key size and signature algorithm - none of which PAN-OS exposes.
+
+    They exist only inside the X.509 blob stored under `public-key`, which despite its name
+    holds the whole certificate. Decoding is the only way to answer PAN-CRT-002 and
+    PAN-CRT-003.
+
+    A failure is RECORDED, not raised. One unreadable certificate must not stop the other
+    fifty from normalizing, and a control seeing a blank algorithm with a parse_error reports
+    it - an unreadable certificate is not a compliant one.
+    """
+    if not pem or not pem.strip():
+        return {"parse_error": "no certificate data"}
+    try:
+        certificate = x509.load_pem_x509_certificate(pem.encode("utf-8"))
+    except Exception as exc:  # noqa: BLE001 - any decode failure is the same outcome here
+        return {"parse_error": f"{type(exc).__name__}: {exc}"[:255]}
+
+    key = certificate.public_key()
+    if isinstance(key, rsa.RSAPublicKey):
+        algorithm, bits = "RSA", key.key_size
+    elif isinstance(key, ec.EllipticCurvePublicKey):
+        # The curve name travels with the size, because 256-bit EC and 256-bit RSA are not
+        # comparable and a reader seeing "256" alone would draw the wrong conclusion.
+        algorithm, bits = f"EC ({key.curve.name})", key.curve.key_size
+    elif isinstance(key, dsa.DSAPublicKey):
+        algorithm, bits = "DSA", key.key_size
+    elif isinstance(key, (ed25519.Ed25519PublicKey, ed448.Ed448PublicKey)):
+        # Fixed-strength curves with no size parameter. Left as None rather than invented.
+        algorithm, bits = type(key).__name__.replace("PublicKey", ""), None
+    else:
+        algorithm, bits = type(key).__name__.replace("PublicKey", ""), None
+
+    try:
+        signature = certificate.signature_algorithm_oid._name
+    except AttributeError:
+        signature = ""
+
+    return {
+        "key_algorithm": algorithm,
+        "key_size_bits": bits,
+        "signature_algorithm": signature,
+        "not_valid_before": certificate.not_valid_before_utc,
+        "not_valid_after": certificate.not_valid_after_utc,
+        "parse_error": "",
+    }
+
 
 CERTIFICATE_PROFILE_BOOLEANS = (
     ("use_crl", "use-crl"),
@@ -217,7 +270,42 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
         defaults["ca_certificate_names"] = [e["@name"] for e in _entries(ca)]
         cert_rows.append((scoped, defaults))
 
+    certificate_rows = []
+    for scoped in scoped_entries(snapshot, "certificate",
+                                 latest_predefined_certificate_snapshot(appliance)):
+        entry = scoped.entry
+        subject_hash, _, _ = scalar_value(entry.get("subject-hash"))
+        issuer_hash, _, _ = scalar_value(entry.get("issuer-hash"))
+        common_name, _, _ = scalar_value(entry.get("common-name"))
+        subject, _, _ = scalar_value(entry.get("subject"))
+        issuer, _, _ = scalar_value(entry.get("issuer"))
+        is_ca, _, _ = parse_yes_no_field(entry.get("ca"), default_effective=False)
+        public_key, _, _ = scalar_value(entry.get("public-key"))
+        decoded = decode_certificate(public_key)
+        certificate_rows.append((scoped, {
+            "common_name": common_name,
+            "subject": subject,
+            "issuer": issuer,
+            "subject_hash": subject_hash,
+            "issuer_hash": issuer_hash,
+            # Only claim self-signed when BOTH hashes are present. Two blanks compare equal
+            # and would mark every unhashed certificate self-signed.
+            "is_self_signed": bool(subject_hash and issuer_hash
+                                   and subject_hash == issuer_hash),
+            "is_ca": is_ca,
+            "key_algorithm": decoded.get("key_algorithm", ""),
+            "key_size_bits": decoded.get("key_size_bits"),
+            "signature_algorithm": decoded.get("signature_algorithm", ""),
+            "parse_error": decoded.get("parse_error", ""),
+            # Prefer the DECODED validity dates. PAN-OS reports its own, but the certificate
+            # is the authority on itself, and `request certificate show` was already caught
+            # returning today's date as every certificate's expiry.
+            "not_valid_before": decoded.get("not_valid_before"),
+            "not_valid_after": decoded.get("not_valid_after"),
+        }))
+
     return {
+        "certificates": _write(Certificate, appliance, snapshot, certificate_rows),
         "ssl_tls_service_profiles": _write(SslTlsServiceProfile, appliance, snapshot, tls_rows),
         "certificate_profiles": _write(CertificateProfile, appliance, snapshot, cert_rows),
     }
