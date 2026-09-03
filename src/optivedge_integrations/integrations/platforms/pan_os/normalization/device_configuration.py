@@ -225,7 +225,7 @@ PASSWORD_COMPLEXITY_FIELDS = (
 )
 
 
-def password_complexity_from_snapshot(snapshot: Snapshot) -> dict[str, Any]:
+def password_complexity_from_snapshot(snapshot: Snapshot) -> tuple[dict[str, Any], list]:
     """mgt-config/password-complexity, with every absent key resolved to its measured default.
 
     `mgt-config` sits at the TOP of the merged config beside `devices` and `shared`, not under
@@ -239,16 +239,17 @@ def password_complexity_from_snapshot(snapshot: Snapshot) -> dict[str, Any]:
     """
     values = {field: (False if kind == "bool" else 0)
               for field, _, kind, _ in PASSWORD_COMPLEXITY_FIELDS}
+    provenance: list[tuple[str, Any, str | None]] = []
     payload = snapshot.payload or {}
     config = payload.get("config") if isinstance(payload, dict) else None
     if not isinstance(config, dict):
-        return values
+        return values, provenance
     node = config.get("mgt-config")
     if not isinstance(node, dict):
-        return values
+        return values, provenance
     complexity = node.get("password-complexity")
     if not isinstance(complexity, dict):
-        return values
+        return values, provenance
     change = complexity.get("password-change")
     if not isinstance(change, dict):
         change = {}
@@ -257,10 +258,17 @@ def password_complexity_from_snapshot(snapshot: Snapshot) -> dict[str, Any]:
         source = change if parent else complexity
         raw = source.get(key)
         if kind == "bool":
-            values[field], _, _ = parse_yes_no_field(raw, default_effective=False)
+            values[field], raw_key, raw_value = parse_yes_no_field(
+                raw, default_effective=False)
         else:
-            values[field], _, _ = parse_integer_field(raw, default_effective=0)
-    return values
+            values[field], raw_key, raw_value = parse_integer_field(
+                raw, default_effective=0)
+        # mgt-config is template-managed - the users node on tpa-a arrives carrying @ptpl - so
+        # these values can be pushed and the provenance has to be captured like any other.
+        # Absent keys produce no row, which is what makes "local" and "defaulted" different
+        # facts rather than the same blank.
+        provenance.append((field, raw_key, raw_value))
+    return values, provenance
 
 
 def latest_masterkey_snapshot(appliance: Appliance) -> Snapshot | None:
@@ -496,7 +504,8 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 shared=shared_certificates(snapshot),
             )
 
-    password_complexity = password_complexity_from_snapshot(snapshot)
+    password_complexity, password_complexity_provenance = password_complexity_from_snapshot(
+        snapshot)
 
     (master_key_state, master_key_expires_at,
      master_key_auto_renew, master_key_on_hsm) = read_master_key(
@@ -553,6 +562,7 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
             ("login_banner",             login_banner_rk,          login_banner_rv),
             ("ssl_tls_service_profile_name", ssl_tls_rk,            ssl_tls_rv),
             ("idle_timeout_minutes",     idle_timeout_rk,          idle_timeout_rv),
+            *password_complexity_provenance,
         ],
     )
 
