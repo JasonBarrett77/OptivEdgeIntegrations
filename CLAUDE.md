@@ -1047,3 +1047,19 @@ fix it. `OPTIVEDGE_PYTHON` overrides the interpreter.
 
 A reminder, not a gate: `--no-verify` skips them, and github.com does not support server-side
 hooks.
+
+## Git hooks: enable them, never bypass them
+
+**First thing in a fresh clone, before any other work:**
+
+    git config core.hooksPath .githooks
+
+Hooks live outside the tree by default, so the committed `.githooks/` directory does NOTHING
+until git is pointed at it. Git cannot automate this. A clone without it looks identical to a
+clone with it and enforces nothing — that silence is the whole risk.
+
+**Never use `git commit --no-verify` or `git push --no-verify`.** There is no CI gate behind
+these hooks: github.com does not support server-side hooks, and by decision this project does
+not run GitHub Actions. The hooks are therefore the ONLY enforcement, and bypassing one is not
+deferring a check, it is removing it. If a hook fails, fix what it found or say why it is wrong
+— do not step around it.
