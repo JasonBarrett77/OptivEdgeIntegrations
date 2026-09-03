@@ -1027,3 +1027,23 @@ tab-based (`TAB_DETAILS` / `TAB_APPLIANCE_GROUPS` / `TAB_ENFORCEMENT_POINTS` / `
 context is built lazily in `build_management_station_detail_context` so unrelated tabs don't issue queries.
 `presentation.py` holds shared row/label-shaping helpers so multiple views/templates don't duplicate
 `config_source` → label logic or address/security-rule row shaping.
+
+## Git hooks
+
+`.githooks/` is committed and enabled per clone with:
+
+    git config core.hooksPath .githooks
+
+**Each clone must run that once** - a committed hook directory does nothing until git is
+pointed at it, and git cannot make that automatic.
+
+`pre-commit` checks only for MODEL CHANGES WITH NO MIGRATION. That is worth its own hook
+because nothing else notices: the tests pass, the app runs, and the break surfaces later in
+someone else's environment as an unexplained schema mismatch. `pre-push` repeats it and runs
+the full suite.
+
+Both fail rather than skip when they cannot find a Python that imports django, and say how to
+fix it. `OPTIVEDGE_PYTHON` overrides the interpreter.
+
+A reminder, not a gate: `--no-verify` skips them, and github.com does not support server-side
+hooks.
