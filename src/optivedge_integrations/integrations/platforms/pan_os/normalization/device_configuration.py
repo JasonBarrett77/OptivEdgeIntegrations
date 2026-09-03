@@ -56,6 +56,10 @@ class NormalizedDeviceConfigurationProfile:
     ssl_tls_certificate_trust: str
     ssl_tls_certificate_issuer: str
     ssl_tls_certificate_scope: str
+    master_key_state: str
+    master_key_expires_at: str
+    master_key_auto_renew_hours: int
+    master_key_on_hsm: bool
     permitted_ip_values: list[str]
     permitted_ip_count: int
     login_banner: str
@@ -195,6 +199,39 @@ def resolve_ssl_tls_profile(
     if name in shared:
         return DeviceConfigurationProfile.SSL_TLS_SCOPE_SHARED, shared[name]
     return DeviceConfigurationProfile.SSL_TLS_SCOPE_UNRESOLVED, {}
+
+
+def latest_masterkey_snapshot(appliance: Appliance) -> Snapshot | None:
+    return (
+        Snapshot.objects.filter(appliance=appliance, source_type="show_masterkey_properties")
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+
+
+def read_master_key(snapshot: Snapshot | None) -> tuple[str, str, int, bool]:
+    """(state, expires_at, auto_renew_hours, on_hsm) from a masterkey-properties snapshot.
+
+    A MISSING snapshot is UNDETERMINED, not default. The device is almost certainly using the
+    factory key - every device observed is - but "we never asked" and "we asked and it was
+    default" are different facts, and only one of them is a finding this control can stand
+    behind.
+    """
+    if snapshot is None:
+        return DeviceConfigurationProfile.MASTER_KEY_UNDETERMINED, "", 0, False
+    payload = snapshot.payload or {}
+    if not isinstance(payload, dict):
+        return DeviceConfigurationProfile.MASTER_KEY_UNDETERMINED, "", 0, False
+    expires_at, _, _ = scalar_value(payload.get("expire-at"))
+    auto_renew, _, _ = parse_integer_field(payload.get("auto-renew-mkey"), default_effective=0)
+    on_hsm, _, _ = parse_yes_no_field(payload.get("on-hsm"), default_effective=False)
+    if not expires_at:
+        # The key is absent from the reply entirely - a shape nobody has seen. Not read as
+        # default: that verdict rests on expire-at being present and zero.
+        return DeviceConfigurationProfile.MASTER_KEY_UNDETERMINED, "", auto_renew, on_hsm
+    state = (DeviceConfigurationProfile.MASTER_KEY_DEFAULT if expires_at.strip() == "0"
+             else DeviceConfigurationProfile.MASTER_KEY_SET)
+    return state, expires_at, auto_renew, on_hsm
 
 
 def latest_predefined_certificate_snapshot(appliance: Appliance) -> Snapshot | None:
@@ -397,6 +434,10 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 shared=shared_certificates(snapshot),
             )
 
+    (master_key_state, master_key_expires_at,
+     master_key_auto_renew, master_key_on_hsm) = read_master_key(
+        latest_masterkey_snapshot(appliance))
+
     permitted_ip_values = entry_names(system.get("permitted-ip"))
     permitted_ip_count = len(permitted_ip_values)
 
@@ -426,6 +467,10 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         ssl_tls_certificate_trust=ssl_tls_certificate_trust,
         ssl_tls_certificate_issuer=ssl_tls_certificate_issuer,
         ssl_tls_certificate_scope=ssl_tls_certificate_scope,
+        master_key_state=master_key_state,
+        master_key_expires_at=master_key_expires_at,
+        master_key_auto_renew_hours=master_key_auto_renew,
+        master_key_on_hsm=master_key_on_hsm,
         permitted_ip_values=permitted_ip_values,
         permitted_ip_count=permitted_ip_count,
         login_banner=login_banner,
@@ -471,6 +516,10 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "ssl_tls_certificate_trust": normalized.ssl_tls_certificate_trust,
                 "ssl_tls_certificate_issuer": normalized.ssl_tls_certificate_issuer,
                 "ssl_tls_certificate_scope": normalized.ssl_tls_certificate_scope,
+                "master_key_state": normalized.master_key_state,
+                "master_key_expires_at": normalized.master_key_expires_at,
+                "master_key_auto_renew_hours": normalized.master_key_auto_renew_hours,
+                "master_key_on_hsm": normalized.master_key_on_hsm,
                 "permitted_ip_values": normalized.permitted_ip_values,
                 "permitted_ip_count": normalized.permitted_ip_count,
                 "login_banner": normalized.login_banner,

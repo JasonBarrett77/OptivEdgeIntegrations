@@ -140,6 +140,38 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     ssl_tls_certificate_scope = models.CharField(
         max_length=16, blank=True, choices=SSL_TLS_SCOPE_CHOICES)
 
+    #: PAN-CRT-007. The master key encrypts every private key and secret on the device, and
+    #: the factory default is a PUBLICLY KNOWN value - so a device that never set one is
+    #: protecting its key material with a shared secret anybody can look up.
+    #:
+    #: Classified, like ssl_tls_certificate_trust, because the third state is a real answer:
+    #: UNDETERMINED means the properties were never collected, which is different from
+    #: "collected and found to be default" and must not be read as either a pass or a fail.
+    MASTER_KEY_DEFAULT = "default"
+    MASTER_KEY_SET = "set"
+    MASTER_KEY_UNDETERMINED = "undetermined"
+    MASTER_KEY_CHOICES = [
+        (MASTER_KEY_DEFAULT, "Factory default"),
+        (MASTER_KEY_SET, "Set"),
+        (MASTER_KEY_UNDETERMINED, "Undetermined"),
+    ]
+    #: DEFAULT is derived from `expire-at` being 0 - what the CLI renders as "unspecified".
+    #: The inference is that a lifetime is MANDATORY when setting a key, in both the CLI and
+    #: the GUI, so a key that has been set always carries a concrete expiry and an absent one
+    #: cannot mean "set without a lifetime". That is vendor-documented, not measured here:
+    #: nobody has set a master key on a lab device and watched these fields change. The
+    #: payload contract's master-key node records it as an inference and says what would
+    #: close it.
+    master_key_state = models.CharField(
+        max_length=16, blank=True, choices=MASTER_KEY_CHOICES)
+    #: Raw, as reported. Kept because the derivation above rests on it and a reader checking
+    #: the control should be able to see the value it was derived from.
+    master_key_expires_at = models.CharField(max_length=32, blank=True)
+    #: Non-zero moves the expiry WITHOUT the key value changing, which is why "when was it
+    #: changed" cannot be computed as expire-at minus lifetime.
+    master_key_auto_renew_hours = models.PositiveIntegerField(default=0)
+    master_key_on_hsm = models.BooleanField(default=False)
+
     ntp_primary_server = models.CharField(max_length=255, blank=True)
     ntp_secondary_server = models.CharField(max_length=255, blank=True)
 

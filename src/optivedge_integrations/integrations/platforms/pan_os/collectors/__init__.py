@@ -27,6 +27,9 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
     collect_show_external_list,
     set_target_vsys,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.system import (
+    collect_show_masterkey_properties,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
     SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND,
     SHOW_PREDEFINED_URL_LISTS_COMMAND,
@@ -60,6 +63,7 @@ __all__ = [
     "collect_show_merged_config",
     "collect_show_managed_devices",
     "collect_predefined_certificates",
+    "collect_show_masterkey_properties",
     "collect_predefined_ssl_tls_service_profiles",
     "collect_show_predefined_ip_block_lists",
     "collect_show_predefined_url_lists",

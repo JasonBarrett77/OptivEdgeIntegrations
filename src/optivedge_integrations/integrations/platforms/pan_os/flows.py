@@ -32,6 +32,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_managed_devices,
     collect_show_merged_config,
     collect_predefined_certificates,
+    collect_show_masterkey_properties,
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
     collect_show_predefined_url_lists,
@@ -489,6 +490,23 @@ def collect_appliance_merged_config(
     return collect_appliance_and_persist(
         appliance,
         collector=collect_show_merged_config,
+        credentials_provider=credentials_provider,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+
+
+def collect_appliance_masterkey_properties(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> PANOSPersistedCollection:
+    """PAN-CRT-007's only source. The key is not in the config, so nothing else can see it."""
+    return collect_appliance_and_persist(
+        appliance,
+        collector=collect_show_masterkey_properties,
         credentials_provider=credentials_provider,
         timeout=timeout,
         user_agent=user_agent,
