@@ -198,6 +198,9 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
             "max_version": max_version,
             "protocol_algorithms": effective,
             "explicit_algorithms": explicit,
+            # Promoted to a column so a control can rest on it. Derived here, in the one place
+            # that already knows absent means enabled.
+            "allows_sha1": effective.get("auth-algo-sha1", True),
         }))
 
     cert_rows = []

@@ -126,7 +126,28 @@ The items that land in this repository are: enumerate the real key set from the 
 than a sample, measure the implicit value instead of assuming it, scope by config subtree,
 populate both HA peers, and never skip a payload you cannot parse.
 
-### Provenance: one pattern, no alternatives
+### A control queries columns, never JSON
+
+A JSONField here is for **display and inspection**, never for a finding to rest on. If a
+control needs a value that currently lives inside one, promote it to a real column in
+normalization and let the control query that.
+
+    permitted_ip_values   JSON, not searchable    permitted_ip_count    column, searchable
+    bound_interface_names JSON, not searchable    bound_interface_count column, searchable
+    protocol_algorithms   JSON, not searchable    allows_sha1           column, searchable
+
+Two of the four reasons fail silently, which is why this is a rule rather than a preference: a
+JSON lookup is unindexed, and it matches nothing when the vendor renames a key — so the control
+stops finding anything instead of breaking. It also puts a vendor payload's shape inside a
+control definition, where no schema protects it and no migration catches it. And a raw payload
+(`raw_rule`, `raw_profile`) is not normalized data at all: a control reading one has its own
+private interpretation of the config, which is what normalization exists to prevent. Those are
+never registered as searchable.
+
+Where a column is derived from a JSON field, give the model a `clean()` that asserts the two
+agree — `bound_interface_count` and `SslTlsServiceProfile.allows_sha1` both do.
+
+## Provenance: one pattern, no alternatives
 
 **Every normalized model that can carry a pushed value uses `ProvenancedMixin` and writes
 `FieldProvenance` rows. Do not invent a second mechanism.** `SecurityRule`,

@@ -107,6 +107,20 @@ class SslTlsServiceProfile(CertificateScopedModel):
     #: contains would make such a profile look restrictive when it is the most permissive
     #: state available.
     protocol_algorithms = models.JSONField(default=dict, blank=True)
+    #: The one algorithm a control asserts, promoted to a real column.
+    #:
+    #: PAN-CRT-009 originally queried into `protocol_algorithms` with a JSON lookup, which was
+    #: wrong for the reason `bound_interface_count` exists on InterfaceManagementProfile: a
+    #: finding must rest on a column, not on a key inside a blob. A JSON lookup is unindexed,
+    #: silently returns nothing when the key is renamed, and puts the shape of a vendor payload
+    #: into a control definition where no schema protects it.
+    #:
+    #: Default True because ABSENT MEANS ENABLED - a profile that writes no algorithm key
+    #: permits SHA-1. Only this one is promoted: it is the only algorithm any control asserts,
+    #: and a column per key would be eleven migrations ahead of a requirement. The rest stay
+    #: readable in `protocol_algorithms` for display and inspection.
+    allows_sha1 = models.BooleanField(default=True)
+
     #: Which of those keys the configuration actually WROTE. The difference matters and is not
     #: recoverable from the effective values: tpa-b's profile omits every algorithm key and
     #: pan-fw-111's writes all of them as `yes`, and the two are identical once expanded.
@@ -122,8 +136,18 @@ class SslTlsServiceProfile(CertificateScopedModel):
         ]
         indexes = [
             models.Index(fields=["appliance", "min_version"]),
+            models.Index(fields=["appliance", "allows_sha1"]),
             models.Index(fields=["management_station"]),
         ]
+
+    def clean(self) -> None:
+        super().clean()
+        # The column is derived from the JSON, so they cannot be allowed to disagree - the
+        # same guard bound_interface_count carries against its name list.
+        effective = (self.protocol_algorithms or {}).get("auth-algo-sha1")
+        if effective is not None and bool(effective) != self.allows_sha1:
+            raise ValidationError(
+                "allows_sha1 must match protocol_algorithms['auth-algo-sha1'].")
 
 
 class CertificateProfile(CertificateScopedModel):
