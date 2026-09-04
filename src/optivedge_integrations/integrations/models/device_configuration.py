@@ -233,7 +233,18 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     permitted_ip_count = models.PositiveIntegerField(default=0)
 
     login_banner = models.TextField(blank=True)
+    #: 60 is MEASURED, not the vendor's documented figure: the unconfigured Authentication
+    #: Settings form labels the field "60 (default)" - 2026-09-04, PA-5220. It had been a bare
+    #: constant with nothing behind it, and PAN-AUTH-016's verdict turns on it: 60 means the
+    #: session is merely long, 0 would mean it never expires at all.
     idle_timeout_minutes = models.PositiveIntegerField(default=60)
+
+    #: Device > Setup > Management > Authentication Settings. All three implicit values read
+    #: off the unconfigured form on 2026-09-04, and all three are ZERO WITH A MEANING rather
+    #: than an absence: no lockout, no lockout duration, no key expiry. See PAN-AUTH-014/015/017.
+    admin_lockout_failed_attempts = models.PositiveIntegerField(default=0)
+    admin_lockout_time_minutes = models.PositiveIntegerField(default=0)
+    api_key_lifetime_minutes = models.PositiveIntegerField(default=0)
 
     raw_profile = models.JSONField(default=dict, blank=True)
 

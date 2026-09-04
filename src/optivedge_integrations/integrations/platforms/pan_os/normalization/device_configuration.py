@@ -65,6 +65,9 @@ class NormalizedDeviceConfigurationProfile:
     permitted_ip_count: int
     login_banner: str
     idle_timeout_minutes: int
+    admin_lockout_failed_attempts: int
+    admin_lockout_time_minutes: int
+    api_key_lifetime_minutes: int
     raw_profile: dict[str, Any]
     # Each tuple: (field_name, raw_key_orABSENT, raw_provenance_value)
     field_provenance_data: list[tuple[str, Any, str | None]] = field(default_factory=list)
@@ -519,6 +522,23 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         management.get("idle-timeout"),
         default_effective=DEFAULT_IDLE_TIMEOUT_MINUTES,
     )
+    # admin-lockout is a CONTAINER, and the whole setting/management node is absent on a
+    # device that has never had one of its keys set - measured on both PA-5220s - so this
+    # tolerates the parent missing, not just the key.
+    admin_lockout = management.get("admin-lockout")
+    if not isinstance(admin_lockout, dict):
+        admin_lockout = {}
+    api_node = management.get("api")
+    api_key = api_node.get("key") if isinstance(api_node, dict) else None
+    if not isinstance(api_key, dict):
+        api_key = {}
+
+    failed_attempts, failed_rk, failed_rv = parse_integer_field(
+        admin_lockout.get("failed-attempts"), default_effective=0)
+    lockout_time, lockout_rk, lockout_rv = parse_integer_field(
+        admin_lockout.get("lockout-time"), default_effective=0)
+    api_key_lifetime, api_life_rk, api_life_rv = parse_integer_field(
+        api_key.get("lifetime"), default_effective=0)
 
     normalized = NormalizedDeviceConfigurationProfile(
         source_snapshot=snapshot,
@@ -549,6 +569,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
         permitted_ip_count=permitted_ip_count,
         login_banner=login_banner,
         idle_timeout_minutes=idle_timeout_minutes,
+        admin_lockout_failed_attempts=failed_attempts,
+        admin_lockout_time_minutes=lockout_time,
+        api_key_lifetime_minutes=api_key_lifetime,
         raw_profile=deviceconfig,
         field_provenance_data=[
             ("ha_enabled",               ha_enabled_rk,            ha_enabled_rv),
@@ -562,6 +585,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
             ("login_banner",             login_banner_rk,          login_banner_rv),
             ("ssl_tls_service_profile_name", ssl_tls_rk,            ssl_tls_rv),
             ("idle_timeout_minutes",     idle_timeout_rk,          idle_timeout_rv),
+            ("admin_lockout_failed_attempts", failed_rk,            failed_rv),
+            ("admin_lockout_time_minutes",    lockout_rk,           lockout_rv),
+            ("api_key_lifetime_minutes",      api_life_rk,          api_life_rv),
             *password_complexity_provenance,
         ],
     )
@@ -600,6 +626,9 @@ def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormali
                 "permitted_ip_count": normalized.permitted_ip_count,
                 "login_banner": normalized.login_banner,
                 "idle_timeout_minutes": normalized.idle_timeout_minutes,
+                "admin_lockout_failed_attempts": normalized.admin_lockout_failed_attempts,
+                "admin_lockout_time_minutes": normalized.admin_lockout_time_minutes,
+                "api_key_lifetime_minutes": normalized.api_key_lifetime_minutes,
                 "raw_profile": normalized.raw_profile,
             },
         )
