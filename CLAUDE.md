@@ -1072,6 +1072,13 @@ certificate be referenced, derived from the device command schema. Two controls 
 are backed by real models. A location the reference map misses becomes a certificate reported
 unused while it is in use, which breaks the thing it was protecting.
 
+Confirm a row with one `action=complete` call on its xpath: a typed reference field answers with
+`@vxpath`, the full xpath of the referenced definition, which proves the edge outright. **An
+empty result is not disproof** - completions are eligibility-filtered, so they describe what is
+valid on THAT device rather than what the schema allows, and a real reference field on a device
+holding no qualifying certificate returns nothing. The full method is in the generator's
+docstring, `OptivEdgeProbe/scratch/build_certificate_reference_matrix.py`.
+
 **When you add a normalized model, do three things before calling it done:**
 
 1. Open the CSV and look for reference points whose config subtree your model now covers. Set
