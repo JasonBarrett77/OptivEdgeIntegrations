@@ -139,7 +139,13 @@ def _entries(node: Any) -> list[dict[str, Any]]:
 
 def scoped_entries(snapshot: Snapshot, object_key: str,
                    predefined: Snapshot | None = None) -> list[ScopedEntry]:
-    """Every definition of `object_key`, from every scope it can occupy."""
+    """Every definition of `object_key`, from every scope it can occupy.
+
+    Object-type agnostic, as are `ScopedEntry` and `write_scoped_objects` below. They live in a
+    certificate-named module because certificates needed them first; authentication profiles
+    import them from here. Worth moving to their own module the next time this file is opened
+    for another reason - not worth a risky move on its own.
+    """
     found: list[ScopedEntry] = []
     payload = snapshot.payload or {}
     config = payload.get("config") if isinstance(payload, dict) else None
@@ -196,7 +202,7 @@ def _algorithms(protocol_settings: dict[str, Any]) -> tuple[dict[str, bool], lis
     return effective, sorted(explicit)
 
 
-def _write(model, appliance: Appliance, snapshot: Snapshot,
+def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
            rows: list[tuple[ScopedEntry, dict[str, Any]]]):
     content_type = ContentType.objects.get_for_model(model)
     with transaction.atomic():
@@ -305,7 +311,7 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
         }))
 
     return {
-        "certificates": _write(Certificate, appliance, snapshot, certificate_rows),
-        "ssl_tls_service_profiles": _write(SslTlsServiceProfile, appliance, snapshot, tls_rows),
-        "certificate_profiles": _write(CertificateProfile, appliance, snapshot, cert_rows),
+        "certificates": write_scoped_objects(Certificate, appliance, snapshot, certificate_rows),
+        "ssl_tls_service_profiles": write_scoped_objects(SslTlsServiceProfile, appliance, snapshot, tls_rows),
+        "certificate_profiles": write_scoped_objects(CertificateProfile, appliance, snapshot, cert_rows),
     }

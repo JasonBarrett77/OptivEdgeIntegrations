@@ -40,59 +40,11 @@ from __future__ import annotations
 from django.core.exceptions import ValidationError
 from django.db import models
 
-from .base import SyncTrackedModel
+from .base import ApplianceScopedObject
 from .provenance import ProvenancedMixin
 
 
-class CertificateScopedModel(ProvenancedMixin, SyncTrackedModel):
-    """Shared anchoring for the two certificate-domain object types."""
-
-    #: Where the definition was found. `predefined` is vendor-shipped and read-only; it beats
-    #: a same-named shared entry, measured 2026-09-02 — the opposite of the assumption encoded
-    #: in policy/base.py, which governs a different object type and is left alone.
-    SCOPE_SHARED = "shared"
-    SCOPE_VSYS = "vsys"
-    SCOPE_PREDEFINED = "predefined"
-    SCOPE_CHOICES = [
-        (SCOPE_SHARED, "Shared"),
-        (SCOPE_VSYS, "Vsys"),
-        (SCOPE_PREDEFINED, "Predefined"),
-    ]
-
-    management_station = models.ForeignKey(
-        "integrations.ManagementStation", on_delete=models.CASCADE,
-        related_name="%(class)ss")
-    appliance = models.ForeignKey(
-        "integrations.Appliance", on_delete=models.CASCADE, related_name="%(class)ss")
-    appliance_group = models.ForeignKey(
-        "integrations.ApplianceGroup", on_delete=models.CASCADE,
-        related_name="%(class)ss", null=True, blank=True)
-    source_snapshot = models.ForeignKey(
-        "integrations.Snapshot", on_delete=models.CASCADE, related_name="%(class)ss")
-
-    name = models.CharField(max_length=64)
-    scope = models.CharField(max_length=16, choices=SCOPE_CHOICES, default=SCOPE_SHARED)
-    #: Blank unless scope is vsys. Not a foreign key: the object is anchored to the appliance,
-    #: and the vsys is a property of where the definition sits rather than a second owner.
-    vsys_name = models.CharField(max_length=64, blank=True)
-
-    class Meta:
-        abstract = True
-
-    def __str__(self) -> str:
-        where = f"{self.scope}:{self.vsys_name}" if self.vsys_name else self.scope
-        return f"{self.appliance} / {where} / {self.name}"
-
-    def clean(self) -> None:
-        if self.appliance.management_station_id != self.management_station_id:
-            raise ValidationError("Object appliance must belong to the same station.")
-        if self.scope == self.SCOPE_VSYS and not self.vsys_name:
-            raise ValidationError("A vsys-scoped object must name its vsys.")
-        if self.scope != self.SCOPE_VSYS and self.vsys_name:
-            raise ValidationError("Only a vsys-scoped object may name a vsys.")
-
-
-class Certificate(CertificateScopedModel):
+class Certificate(ApplianceScopedObject):
     """One certificate as an object. PAN-CRT-001, 002, 003 and 008's subject.
 
     Three fields here exist in NO PAN-OS configuration field and are decoded from the X.509
@@ -158,7 +110,7 @@ class Certificate(CertificateScopedModel):
                     "is_self_signed must match subject_hash == issuer_hash.")
 
 
-class SslTlsServiceProfile(CertificateScopedModel):
+class SslTlsServiceProfile(ApplianceScopedObject):
     """One SSL/TLS service profile as an object. PAN-CRT-005's subject."""
 
     certificate_name = models.CharField(max_length=255, blank=True)
@@ -216,7 +168,7 @@ class SslTlsServiceProfile(CertificateScopedModel):
                 "allows_sha1 must match protocol_algorithms['auth-algo-sha1'].")
 
 
-class CertificateProfile(CertificateScopedModel):
+class CertificateProfile(ApplianceScopedObject):
     """One certificate profile as an object. PAN-CRT-004's subject.
 
     Every boolean defaults False, measured 2026-09-02 from the blank Add Certificate Profile
