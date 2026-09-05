@@ -29,6 +29,7 @@ from .management_interface import (
     parse_permitted_source,
 )
 from .normalization import NormalizationIssue
+from .password_profile import PasswordProfile, expiration_weakens
 from .notes import Note
 from .zones import Zone, ZoneInterface
 from .policy import (
@@ -87,6 +88,8 @@ __all__ = [
     "DeviceConfigurationProfile",
     "Interface",
     "AuthenticationProfile",
+    "PasswordProfile",
+    "expiration_weakens",
     "Certificate",
     "CertificateProfile",
     "InterfaceManagementProfile",

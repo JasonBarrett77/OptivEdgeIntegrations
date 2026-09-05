@@ -31,6 +31,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     normalize_security_rules,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
+from optivedge_integrations.integrations.platforms.pan_os.normalization.password_profiles import (
+    normalize_password_profiles,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.authentication import (
     normalize_authentication_profiles,
 )
@@ -92,6 +95,11 @@ def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> li
     return normalize_zones(enforcement_point)
 
 
+def normalize_appliance_password_profiles(appliance: Appliance) -> dict:
+    """Password profiles, with the global policy each one would override."""
+    return normalize_password_profiles(appliance)
+
+
 def normalize_appliance_authentication_profiles(appliance: Appliance) -> dict:
     """Authentication profiles, in every scope they occupy."""
     return normalize_authentication_profiles(appliance)
@@ -125,6 +133,7 @@ __all__ = [
     "normalize_appliance_device_configuration",
     "normalize_appliance_group_shared_scope",
     "normalize_appliance_authentication_profiles",
+    "normalize_appliance_password_profiles",
     "normalize_appliance_certificate_objects",
     "normalize_appliance_interface_management_profiles",
     "normalize_appliance_interfaces",
