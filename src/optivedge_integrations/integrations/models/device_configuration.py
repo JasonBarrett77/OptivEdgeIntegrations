@@ -119,16 +119,26 @@ class DeviceConfigurationProfile(ProvenancedMixin, SyncTrackedModel):
     #: nowhere, and a certificate present but carrying no hashes - all of which mean "an
     #: engineer must look", never "satisfied".
     TRUST_SELF_SIGNED = "self_signed"
+    TRUST_PRIVATE_CA = "private_ca"
     TRUST_CA_ISSUED = "ca_issued"
     TRUST_UNDETERMINED = "undetermined"
     TRUST_CHOICES = [
         (TRUST_SELF_SIGNED, "Self-signed"),
+        (TRUST_PRIVATE_CA, "Issued by a private CA on this device"),
         (TRUST_CA_ISSUED, "CA-issued"),
         (TRUST_UNDETERMINED, "Undetermined"),
     ]
-    #: CA_ISSUED means only that something other than the certificate itself signed it. It
-    #: does NOT mean the signer is the organisation's own CA - that is not decidable from
-    #: configuration, and PAN-CRT-006 says so rather than pretending otherwise.
+    #: PRIVATE_CA means the issuer chain terminates at a SELF-SIGNED CA that is itself present
+    #: on this device. No client trusts that by default, so a browser refuses it exactly as it
+    #: refuses a self-signed certificate - measured, Chrome answers NET::ERR_CERT_AUTHORITY_
+    #: INVALID for both. It is a weaker statement than "untrusted", because an organisation's
+    #: own internal CA is also private and may be trusted throughout its estate; what it says
+    #: is that trust does not come from the public roots and must have been distributed.
+    #:
+    #: CA_ISSUED means the chain LEAVES this device, so the signer may be a public CA. It still
+    #: does not prove trust - that needs a trust store this has no access to - but it is the
+    #: distinction that matters, and it was previously collapsed with the private case. That
+    #: collapse silently passed a certificate signed by a lab CA created minutes earlier.
     ssl_tls_certificate_trust = models.CharField(
         max_length=16, blank=True, choices=TRUST_CHOICES)
     #: The issuing authority as PAN-OS reports it. Recorded so an engineer can see WHICH CA

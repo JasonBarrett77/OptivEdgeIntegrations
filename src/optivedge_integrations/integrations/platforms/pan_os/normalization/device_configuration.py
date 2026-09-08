@@ -383,9 +383,50 @@ def resolve_certificate(
     if not subject_hash or not issuer_hash:
         # Present but unhashed. Not determinable rather than assumed either way.
         return scope, DeviceConfigurationProfile.TRUST_UNDETERMINED, issuer
-    trust = (DeviceConfigurationProfile.TRUST_SELF_SIGNED if subject_hash == issuer_hash
-             else DeviceConfigurationProfile.TRUST_CA_ISSUED)
+    if subject_hash == issuer_hash:
+        return scope, DeviceConfigurationProfile.TRUST_SELF_SIGNED, issuer
+    trust = _issuer_chain_trust(issuer_hash, predefined=predefined, shared=shared)
     return scope, trust, issuer
+
+
+def _issuer_chain_trust(issuer_hash: str, *, predefined: dict, shared: dict) -> str:
+    """Walk the issuer chain through the certificates PRESENT ON THIS DEVICE.
+
+    A chain that terminates at a self-signed CA which is itself on the device is a PRIVATE
+    root: nothing trusts it by default, and a browser rejects it exactly as it rejects a
+    self-signed leaf. A chain that leaves the device may reach a public root, which this cannot
+    confirm and does not claim - it only records that the distinction exists.
+
+    Hashes are compared WITHIN one merged-config surface, where the equality relation holds.
+    They are not portable across surfaces, which is why nothing here compares them to anything
+    collected separately.
+    """
+    by_subject: dict[str, dict] = {}
+    for source in (shared, predefined):
+        for entry in source.values():
+            subject, _, _ = scalar_value(entry.get("subject-hash"))
+            if subject:
+                by_subject.setdefault(subject, entry)
+
+    seen: set[str] = set()
+    current = issuer_hash
+    while current and current not in seen:
+        seen.add(current)
+        entry = by_subject.get(current)
+        if entry is None:
+            # The chain left this device. It may reach a public root; that is not decidable
+            # here, and claiming either way would be the error this function exists to avoid.
+            return DeviceConfigurationProfile.TRUST_CA_ISSUED
+        subject, _, _ = scalar_value(entry.get("subject-hash"))
+        parent, _, _ = scalar_value(entry.get("issuer-hash"))
+        if not parent or not subject:
+            return DeviceConfigurationProfile.TRUST_UNDETERMINED
+        if parent == subject:
+            # A self-signed CA on this device: a private root.
+            return DeviceConfigurationProfile.TRUST_PRIVATE_CA
+        current = parent
+    # A loop, which a valid chain cannot contain.
+    return DeviceConfigurationProfile.TRUST_UNDETERMINED
 
 
 def normalize_device_configuration_profile(appliance: Appliance) -> PANOSNormalizedCollection:
