@@ -35,6 +35,20 @@ Entry shape:
 
 
 
+
+## 2026-09-11 — is an empty SSH KEX list different from an absent one?
+
+**Did:** Wrote `<kex/>` with no members into tpa-a's bound SSH profile, read it back, committed,
+restarted SSH and read the offer; then deleted it and repeated.
+
+**Found:** Accepted, stored as an empty node, committed — and the device then offered its whole
+default KEX set, exactly as with the list absent. So "KEX missing" is one state, however it is
+written, and PAN-MCR-002 fires on it.
+
+**Landed:** PAN-MCR-002 (fires on an unrestricted KEX list; a configured list keeping
+group14-sha1 reports low) and PAN-MCR-003's converted low band.
+
+---
 ## 2026-09-11 — the SSH default on 11.2, and PAN-MCR-001/003 against the wire
 
 **Did:** Read pan-fw-111's SSH offer at its public address (11.2.3, PA-VM). Built
