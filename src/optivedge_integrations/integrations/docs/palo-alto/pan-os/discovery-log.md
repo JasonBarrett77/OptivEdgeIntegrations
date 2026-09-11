@@ -33,6 +33,45 @@ Entry shape:
 ---
 
 
+
+
+## 2026-09-11 — the SSH default on 11.2, and PAN-MCR-001/003 against the wire
+
+**Did:** Read pan-fw-111's SSH offer at its public address (11.2.3, PA-VM). Built
+`ManagementSshSettings` and generated PAN-MCR-001 and 003, printing the model's offer beside a
+client's reading of every server. Added `aes128-cbc` to tpa-a's profile so 001 had a subject.
+
+**Found:** pan-fw-111's default is identical to the PA-5220s' on every list — two releases, two
+platforms, one offer — and it is the full OpenSSH 8.0 set, not the four KEX values a profile can
+choose. Model and wire agreed on all three devices. tpa-a fails both controls on one row, for two
+reasons: a CBC cipher from its profile, and weak MACs from the default its unset MAC list falls
+back to.
+
+**Landed:** OEI 0055, OEA 0024; payload contract `ssh-service-profile`. No guide yet.
+
+**Open:** PAN-MCR-002/004/005 — preferred-state only at the corpus minimum; Jason's ruling pending.
+
+---
+## 2026-09-11 — what does a firewall's SSH server offer, and when does a profile change it?
+
+**Did:** Completed the SSH service-profile schema on 11.1 and 11.2. Read each PA-5220's KEXINIT
+proposal with an SSH client that never authenticates. Bound a strict profile on tpa-b and a
+ciphers-only one on tpa-a, committed, read the offer, ran `set ssh service-restart mgmt` over the
+API, read it again. Then changed one cipher on tpa-b and repeated.
+
+**Found:** No device had a profile, so all of them offer the built-in default — which includes
+`diffie-hellman-group14-sha1`, `hmac-sha1`, `umac-64` and `ssh-rsa`, and several algorithms a
+profile cannot even select (chacha20, curve25519, every `-etm` MAC). A commit changes NOTHING
+until the SSH service restarts; the restart works over the API. A profile that sets only ciphers
+leaves KEX and MACs at the default offer, so an unset list is the default, not empty.
+
+**Landed:** payload contract, new `ssh-service-profile` node. No guide yet.
+
+**Open:** The 11.2 / PA-VM default offer — pan-fw-111 is not reachable over SSH from the probe
+host. Whether any operational command reports the ACTIVE profile, which is the only way an
+assessment could tell configured from in force.
+
+---
 ## 2026-09-11 — authentication sequences, and what they broke in controls already built
 
 **Did:** Three sequences committed on fw-core-tpa-b — RADIUS then local-database bound to an

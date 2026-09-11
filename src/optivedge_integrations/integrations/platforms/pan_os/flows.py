@@ -55,6 +55,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_authentication_settings,
     normalize_appliance_login_banner,
     normalize_appliance_management_tls,
+    normalize_appliance_management_ssh,
     normalize_appliance_master_key,
     normalize_appliance_services_settings,
     normalize_appliance_password_complexity,
@@ -646,6 +647,7 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # SslTlsServiceProfile rows that normalizer writes. Run first, it would find last run's
     # rows - or none - and record a binding against a profile that no longer matches.
     ("management TLS", normalize_appliance_management_tls),
+    ("management SSH", normalize_appliance_management_ssh),
 )
 
 

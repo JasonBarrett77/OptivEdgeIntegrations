@@ -6736,3 +6736,101 @@ class AuthenticationSequenceNormalizationTests(TestCase):
         self.assertFalse(a.authentication_is_external)
         self.assertFalse(a.centrally_authenticated)
 
+
+from optivedge_integrations.integrations.models import ManagementSshSettings as _ManagementSshSettings  # noqa: E402
+from optivedge_integrations.integrations.platforms.pan_os.normalization.management_ssh import (  # noqa: E402
+    DEFAULT_OFFER as _SSH_DEFAULT, normalize_management_ssh as _normalize_ssh)
+
+
+class ManagementSshNormalizationTests(TestCase):
+    """PAN-MCR-001 and 003's subject: the management SSH server's EFFECTIVE offer.
+
+    Three measured rules (2026-09-11, 11.1 PA-5220 and 11.2 PA-VM): with nothing bound the device
+    offers a built-in default that includes hmac-sha1 and group14-sha1; a profile that sets only
+    some lists leaves the others at that default; a dangling binding is the default too.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.ssh")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-ssh", group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-SSH", hostname="fw-ssh", software_version="11.1.13-h3")
+
+    def _normalize(self, ssh=None):
+        system = {"ssh": ssh} if ssh is not None else {}
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [{"@name": "localhost.localdomain",
+                                                         "deviceconfig": {"system": system}}]}}})
+        _normalize_ssh(self.appliance)
+        return _ManagementSshSettings.objects.get(appliance=self.appliance)
+
+    @staticmethod
+    def _bound(name, **profile):
+        return {"mgmt": {"server-profile": name},
+                "profiles": {"mgmt-profiles": {"server-profiles": {"entry": [
+                    {"@name": name, **profile}]}}}}
+
+    def test_nothing_bound_offers_the_measured_default(self):
+        row = self._normalize()
+        self.assertEqual(row.profile_name, "")
+        self.assertEqual(row.macs, _SSH_DEFAULT["11.1"]["macs"])
+        self.assertTrue(row.ciphers_default and row.kex_default and row.macs_default)
+        self.assertTrue(row.defaults_measured)
+        self.assertTrue(row.offers_weak_mac)
+        self.assertIn("hmac-sha1", row.weak_macs)
+        self.assertTrue(row.offers_sha1_kex)
+        self.assertFalse(row.offers_cbc_cipher)
+        self.assertFalse(row.offers_weak_kex)
+        self.assertEqual((row.host_key_type, row.host_key_bits), ("RSA", 2048))
+
+    def test_an_unset_list_in_a_bound_profile_is_the_default_not_empty(self):
+        """tpa-a's ciphers-only profile narrowed the ciphers and left MACs at the default."""
+        row = self._normalize(self._bound("p", ciphers={"member": ["aes256-gcm"]}))
+        self.assertTrue(row.profile_found)
+        self.assertEqual(row.ciphers, ["aes256-gcm"])
+        self.assertFalse(row.ciphers_default)
+        self.assertTrue(row.macs_default)
+        self.assertTrue(row.offers_weak_mac)
+
+    def test_a_strict_profile_clears_both_flags(self):
+        row = self._normalize(self._bound(
+            "strict", ciphers={"member": ["aes256-ctr", "aes256-gcm"]},
+            kex={"member": ["ecdh-sha2-nistp256"]},
+            mac={"member": ["hmac-sha2-256", "hmac-sha2-512"]},
+            **{"default-hostkey": {"key-type": {"ECDSA": "256"}},
+               "session-rekey": {"interval": "3600"}}))
+        self.assertFalse(row.offers_weak_mac)
+        self.assertFalse(row.offers_cbc_cipher)
+        self.assertFalse(row.offers_sha1_kex)
+        self.assertTrue(row.offers_sha2_256_mac)
+        self.assertEqual((row.host_key_type, row.host_key_bits), ("ECDSA", 256))
+        self.assertEqual(row.rekey_interval_seconds, 3600)
+
+    def test_a_cbc_cipher_in_the_profile_is_flagged(self):
+        row = self._normalize(self._bound("cbc", ciphers={"member": ["aes128-cbc", "aes256-gcm"]}))
+        self.assertTrue(row.offers_cbc_cipher)
+
+    def test_a_dangling_binding_offers_the_default(self):
+        row = self._normalize({"mgmt": {"server-profile": "ghost"}})
+        self.assertEqual(row.profile_name, "ghost")
+        self.assertFalse(row.profile_found)
+        self.assertTrue(row.macs_default)
+        self.assertTrue(row.offers_weak_mac)
+
+    def test_an_unmeasured_release_says_so(self):
+        self.appliance.software_version = "12.1.0"
+        self.appliance.save()
+        row = self._normalize()
+        self.assertFalse(row.defaults_measured)
+        self.assertEqual(row.macs, _SSH_DEFAULT["11.1"]["macs"])
+
+    def test_11_2_uses_its_own_measured_default(self):
+        self.appliance.software_version = "11.2.3"
+        self.appliance.save()
+        self.assertTrue(self._normalize().defaults_measured)
+

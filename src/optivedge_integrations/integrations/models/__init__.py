@@ -34,6 +34,7 @@ from .server_profile import ServerProfile
 from .authentication_settings import AuthenticationSettings
 from .login_banner import LoginBanner
 from .management_tls import ManagementTlsBinding
+from .management_ssh import ManagementSshSettings
 from .master_key import MasterKey
 from .services_settings import LoggingSettings, UpdateServerSettings
 from .password_complexity import PasswordComplexityPolicy
@@ -103,6 +104,7 @@ __all__ = [
     "LoggingSettings",
     "LoginBanner",
     "ManagementTlsBinding",
+    "ManagementSshSettings",
     "MasterKey",
     "UpdateServerSettings",
     "PasswordComplexityPolicy",

@@ -34,6 +34,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.authenti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.login_banner import (
     normalize_login_banner,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.management_ssh import (
+    normalize_management_ssh,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_tls import (
     normalize_management_tls,
 )
@@ -122,6 +125,11 @@ def normalize_appliance_management_tls(appliance: Appliance) -> dict:
     return normalize_management_tls(appliance)
 
 
+def normalize_appliance_management_ssh(appliance: Appliance) -> dict:
+    """The management SSH server's configured offer. PAN-MCR-001 and 003."""
+    return normalize_management_ssh(appliance)
+
+
 def normalize_appliance_master_key(appliance: Appliance) -> dict:
     """The master key state. PAN-CRT-007."""
     return normalize_master_key(appliance)
@@ -205,6 +213,7 @@ __all__ = [
     "normalize_appliance_authentication_settings",
     "normalize_appliance_login_banner",
     "normalize_appliance_management_tls",
+    "normalize_appliance_management_ssh",
     "normalize_appliance_master_key",
     "normalize_appliance_services_settings",
     "normalize_appliance_password_complexity",
