@@ -217,6 +217,17 @@ So whoever the device-wide binding covers is authenticated by an external server
 cannot cover the CLI or API. `ldap`, `kerberos` and `cloud` are unmeasured — no lab device has
 such a profile.
 
+**Either binding can name an authentication SEQUENCE instead of a profile** — measured
+2026-09-11: completion offers a sequence at the per-account binding, both device-wide leaves and
+captive portal. The device-wide leaves refuse a `local-database` profile and accept a sequence
+containing one, so a sequence is how the device-wide binding can end in a local check.
+
+`AdminUser` resolves a sequence the way it resolves a profile, shared first. An account bound to
+one counts as external only when EVERY member resolves and is external: a local member is a way in
+with a password the device stores. `authentication_sequence` says which kind the binding named.
+Before this, an account bound to a sequence read as "profile not found" — and PAN-AUTH-019 fired on
+one whose sequence was RADIUS then TACACS+.
+
 **The other edge:** if the AAA server is down, nobody bound to it per-account can log in. Worth
 saying in a report — it is the case *for* a documented break-glass account.
 

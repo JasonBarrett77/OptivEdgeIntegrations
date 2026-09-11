@@ -32,6 +32,25 @@ Entry shape:
 
 ---
 
+
+## 2026-09-11 — authentication sequences, and what they broke in controls already built
+
+**Did:** Three sequences committed on fw-core-tpa-b — RADIUS then local-database bound to an
+administrator, RADIUS then TACACS+ bound to another, and the first one's members again behind an
+authentication object. Jason read the flags off the form. Built `AuthenticationSequence`, then ran
+the flow's normalizers and generated PAN-AAA-012, 019, 021 and 022.
+
+**Found:** The device stores none of the three flags unless the form sets them: exit-on-failure
+renders NO, use-domain YES, User-ID-domain NO. Before the model, the administrator bound to
+RADIUS-then-TACACS+ read as "profile not found" and fired PAN-AUTH-019, and every profile used
+through a sequence was missing that reference — `authentication-profiles/member` is a member list
+under a key the walk did not visit, the second such key after `multi-factor-auth/factors`.
+
+**Landed:** OEI 0054, OEA 0023. PAN-AAA-012 fires on the administrator's local fallback only;
+019 is clear on the all-external sequence; `oep-auth-radius-lab` counts 5 referrers, 3 of them
+sequences. `management/read-an-administrator-account.md` gained the sequence-binding paragraphs.
+
+---
 ## 2026-09-11 — deleting the aggregate
 
 **Did:** Deleted `DeviceConfigurationProfile` and `DeviceConfigurationFinding` (integrations 0053;
