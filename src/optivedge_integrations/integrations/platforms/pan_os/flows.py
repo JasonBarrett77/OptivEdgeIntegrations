@@ -31,6 +31,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_managed_devices,
     collect_show_merged_config,
     collect_predefined_certificates,
+    collect_predefined_security_profiles,
     collect_show_masterkey_properties,
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
@@ -47,6 +48,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_zones,
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
+    normalize_appliance_group_security_profiles,
+    normalize_security_profiles,
     normalize_appliance_admin_users,
     normalize_appliance_authentication_profiles,
     normalize_appliance_authentication_sequences,
@@ -199,6 +202,25 @@ class PANOSApplianceObjectNormalizationFailure:
 
 
 @dataclass(slots=True)
+class PANOSPolicyObjectNormalized:
+    """A vsys- or group-scoped object normalizer's result - security profiles today. Exactly one
+    of the two owners is set: the group for its shared-scope pass, the point for its own."""
+
+    kind: str
+    counts: dict
+    appliance_group: ApplianceGroup | None = None
+    enforcement_point: EnforcementPoint | None = None
+
+
+@dataclass(slots=True)
+class PANOSPolicyObjectNormalizationFailure:
+    kind: str
+    error_text: str
+    appliance_group: ApplianceGroup | None = None
+    enforcement_point: EnforcementPoint | None = None
+
+
+@dataclass(slots=True)
 class PANOSInterfaceNormalizedAppliance:
     appliance: Appliance
     interfaces: list
@@ -308,6 +330,8 @@ class PANOSInScopeConfigCollection:
         PANOSApplianceObjectNormalizedAppliance] = field(default_factory=list)
     appliance_object_failures: list[
         PANOSApplianceObjectNormalizationFailure] = field(default_factory=list)
+    policy_object_normalizations: list[PANOSPolicyObjectNormalized] = field(default_factory=list)
+    policy_object_failures: list[PANOSPolicyObjectNormalizationFailure] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -343,6 +367,8 @@ class PANOSInScopeRenormalizationResult:
         PANOSApplianceObjectNormalizedAppliance] = field(default_factory=list)
     appliance_object_failures: list[
         PANOSApplianceObjectNormalizationFailure] = field(default_factory=list)
+    policy_object_normalizations: list[PANOSPolicyObjectNormalized] = field(default_factory=list)
+    policy_object_failures: list[PANOSPolicyObjectNormalizationFailure] = field(default_factory=list)
 
 
 def get_in_scope_appliances(management_station: ManagementStation) -> list[Appliance]:
@@ -567,6 +593,7 @@ def collect_appliance_predefined_catalogs(
         collect_show_predefined_url_lists,
         collect_predefined_ssl_tls_service_profiles,
         collect_predefined_certificates,
+        collect_predefined_security_profiles,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))
@@ -679,6 +706,8 @@ def renormalize_in_scope_configuration(
     zone_failures: list[PANOSZoneNormalizationFailure] = []
     appliance_object_normalizations: list[PANOSApplianceObjectNormalizedAppliance] = []
     appliance_object_failures: list[PANOSApplianceObjectNormalizationFailure] = []
+    policy_object_normalizations: list[PANOSPolicyObjectNormalized] = []
+    policy_object_failures: list[PANOSPolicyObjectNormalizationFailure] = []
 
     for appliance in appliances:
         # Management surfaces read the same merged snapshot but are a separate model and a
@@ -838,6 +867,30 @@ def renormalize_in_scope_configuration(
             )
         )
 
+    # Security profiles and profile groups (Objects > Security Profiles). Shared scope is the
+    # group's and is unioned across its points, as the address pass is; nothing FKs to these
+    # rows, so the order against rules does not matter, but group-then-point keeps the two
+    # passes reading alike. Each gets its own try/except, like every pass above.
+    for appliance_group in get_in_scope_appliance_groups(management_station):
+        try:
+            counts = normalize_appliance_group_security_profiles(appliance_group)
+        except Exception as exc:
+            policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                kind="security profiles", appliance_group=appliance_group, error_text=str(exc)))
+        else:
+            policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                kind="security profiles", appliance_group=appliance_group, counts=dict(counts or {})))
+
+    for enforcement_point in enforcement_points:
+        try:
+            counts = normalize_security_profiles(enforcement_point)
+        except Exception as exc:
+            policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                kind="security profiles", enforcement_point=enforcement_point, error_text=str(exc)))
+        else:
+            policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                kind="security profiles", enforcement_point=enforcement_point, counts=dict(counts or {})))
+
     return PANOSInScopeRenormalizationResult(
         appliances=appliances,
         enforcement_points=enforcement_points,
@@ -856,6 +909,8 @@ def renormalize_in_scope_configuration(
         zone_failures=zone_failures,
         appliance_object_normalizations=appliance_object_normalizations,
         appliance_object_failures=appliance_object_failures,
+        policy_object_normalizations=policy_object_normalizations,
+        policy_object_failures=policy_object_failures,
     )
 
 
@@ -1002,6 +1057,8 @@ def collect_in_scope_configuration_snapshots(
         zone_failures=renormalized.zone_failures,
         appliance_object_normalizations=renormalized.appliance_object_normalizations,
         appliance_object_failures=renormalized.appliance_object_failures,
+        policy_object_normalizations=renormalized.policy_object_normalizations,
+        policy_object_failures=renormalized.policy_object_failures,
     )
 
 

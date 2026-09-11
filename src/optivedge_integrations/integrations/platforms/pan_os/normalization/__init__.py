@@ -27,6 +27,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     normalize_security_rules,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (
+    normalize_appliance_group_security_profiles,
+    normalize_security_profiles,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
 from optivedge_integrations.integrations.platforms.pan_os.normalization.authentication_settings import (
     normalize_authentication_settings,
@@ -205,6 +209,7 @@ __all__ = [
     "NormalizedInterfaces",
     "PANOSNormalizedCollection",
     "normalize_addresses",
+    "normalize_appliance_group_security_profiles",
     "normalize_appliance_group_shared_scope",
     "normalize_appliance_admin_users",
     "normalize_appliance_server_profiles",
@@ -227,6 +232,7 @@ __all__ = [
     "normalize_enforcement_point_security_rules",
     "normalize_enforcement_point_zones",
     "normalize_collected_response",
+    "normalize_security_profiles",
     "normalize_security_rules",
     "normalize_show_managed_devices",
     "normalize_zones",

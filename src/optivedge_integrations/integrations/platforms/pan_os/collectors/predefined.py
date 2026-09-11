@@ -111,3 +111,28 @@ def collect_predefined_certificates(session: PANSession) -> PANOSCollectedRespon
         source_type="config_predefined_certificates",
         request=request,
     )
+
+
+#: Every predefined profile type in one read - anti-spyware and vulnerability for PAN-SPY-001 and
+#: PAN-VLN-001, and antivirus, URL filtering, file blocking and WildFire for the controls after
+#: them. About 16 KB on both lab platforms. Like the SSL/TLS profile this is the config tree's
+#: predefined branch, which `show config merged` omits.
+PREDEFINED_SECURITY_PROFILES_XPATH = "/config/predefined/profiles"
+
+
+def collect_predefined_security_profiles(session: PANSession) -> PANOSCollectedResponse:
+    """Collect the vendor-shipped security profiles - `default` and `strict` - for one appliance.
+
+    Needed because a rule protected only by the shipped `default` profile is the commonest weak
+    configuration there is, and that profile exists nowhere in the merged config.
+    """
+    request = PANOSConfigRequest(
+        xpath=PREDEFINED_SECURITY_PROFILES_XPATH,
+        target=session.target,
+        metadata={"command_name": "config get predefined profiles"},
+    )
+    return collect_config_response(
+        session,
+        source_type="config_predefined_security_profiles",
+        request=request,
+    )

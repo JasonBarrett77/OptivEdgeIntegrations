@@ -34,6 +34,7 @@ it pushes. Filing any of them under a plane would hide them from the others.
 | `enumerate-object-definitions.md` | Every definition of a name, in every scope that carries one. |
 | `verify-object-reached-device.md` | Confirming an object or rule actually arrived on a device. |
 | `assess-object-deletion-safety.md` | Whether an object can be removed, when reference counting cannot say. |
+| `read-a-security-profile.md` | Anti-spyware and vulnerability profiles: whether a severity is really blocked, and which profiles anything uses. |
 
 `network/` — interfaces, zones and what binds them
 

@@ -49,6 +49,26 @@ written, and PAN-MCR-002 fires on it.
 group14-sha1 reports low) and PAN-MCR-003's converted low band.
 
 ---
+## 2026-09-11 — anti-spyware and vulnerability profiles: what blocks, and what Panorama pushes where
+
+**Did:** Completed the profile, rule and exception nodes on fw-core-tpa-b and pan-fw-111; read
+`/config/predefined/profiles`; wrote twelve profiles and a profile group across tpa-b vsys1,
+pan-fw-111 shared and Panorama shared, pushed, and read every pushed view back.
+
+**Found:** A rule's `action` is a choice element, and `host` exists on vulnerability rules only.
+Predefined profiles are not in the merged config; `/config/predefined/profiles` holds `default` and
+`strict` for every type, and vulnerability `strict` stores reset-both where Help p.289 says
+"block". A Panorama-shared profile nothing references reached pan-fw-111 and tpa's vsys3 view, not
+tpa's device-wide or vsys1 view - first written up from vsys1 alone as "not pushed at all".
+Panorama's OutBound-Block group puts the predefined vulnerability `default` in use on 8 of 9 vsys.
+
+**Landed:** payload contract `security-profile`. Guide staged.
+
+**Open:** implicit action, host and category when absent; whether profile rules are first-match
+(the verdict does not depend on it); a custom profile named like a predefined one.
+
+---
+
 ## 2026-09-11 — the SSH default on 11.2, and PAN-MCR-001/003 against the wire
 
 **Did:** Read pan-fw-111's SSH offer at its public address (11.2.3, PA-VM). Built
