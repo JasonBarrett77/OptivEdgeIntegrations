@@ -32,6 +32,286 @@ Entry shape:
 
 ---
 
+## 2026-09-11 — deleting the aggregate
+
+**Did:** Deleted `DeviceConfigurationProfile` and `DeviceConfigurationFinding` (integrations 0053;
+assessments 0022 runs first, since the finding held a key to the profile). On the probe DB, pressed
+the configuration button and rendered every page the explorer and device tabs serve.
+
+**Found:** The button's generator list had never held the administrator or AAA-server generators,
+nor any of the seven split models, and no test noticed. Now all sixteen write: 49 controls, 161
+findings. 104 pages render; the two report downloads need an ApplicationEnvironment the probe DB
+has never had.
+
+**Landed:** the two docs that called the aggregate "being retired" are staged. Closes the Open
+above.
+
+**Open:** HA, NTP, hostname and time zone are stored nowhere now. No completed control reads them.
+
+---
+
+## 2026-09-11 — what does a stored RADIUS secret give away, and can an administrator bind a sequence?
+
+**Did:** Wrote RADIUS secrets of 1 to 64 characters into fw-core-tpa-b's candidate, read them back
+and deleted them; read every committed RADIUS/TACACS+ secret on all three devices. Wrote one
+authentication sequence into the candidate and asked each administrator binding's completion
+whether it was offered.
+
+**Found:** A stored secret is `-AQ==`, an unsalted SHA-1 of the plaintext, then the ciphertext.
+The stored length steps every 16 characters, so "shorter than 16" reads as length 57; identical
+secrets store identically, and the hash matches across devices. A sequence is offered at every
+administrative binding, including both device-wide ones — which refuse a local-database profile
+but accept a sequence containing one. Found on the way: fw-core-tpa-a still carried the
+device-wide RADIUS test from 2026-09-10; a push made while the template was live had reached it,
+and the revert had been scoped to tpa-b. Pushed the reverted stack to tpa-a and re-read it.
+
+**Landed:** payload contract (`aaa-server-profile`, `admin-user`). No guide yet — both feed
+PAN-AAA-005 and 012, which are not built.
+
+**Open:** Whether other `-AQ==` fields — the LDAP bind password, the MFA vendor secrets — use the
+same form. Not read.
+
+---
+
+## 2026-09-11 — the device-configuration aggregate, split, and the copies that had drifted
+
+**Did:** Split `DeviceConfigurationProfile` into seven models along the CONTROL line - password
+complexity, authentication settings, login banner, master key, update server, logging, management
+TLS - after reading screenshots of all four Setup sub-tabs: Device > Setup is ten tabs and
+Management alone has thirteen sections, so a model per screen would have been nearly as coarse.
+Re-collected all three appliances and compared every moved field against the aggregate.
+
+**Found:** Six clusters moved with no disagreement, because each new model calls the SAME parser
+the aggregate calls - three readers were extracted to make that true. The seventh had already
+drifted: on 2026-09-10 the aggregate said the bound management profile's certificate was
+`oep-tls-test` while the SslTlsServiceProfile row for the same profile said `oep-mgmt-server`.
+Both normalizers were right at the moment they ran. The copies were the defect.
+
+**Landed:** `ManagementTlsBinding` keeps only what the device owns - the bound name and the
+scope it resolved to - and a foreign key to the profile row; the floor and certificate name are
+read through it. Resolution (predefined beats shared, never a vsys) now runs over rows, so it
+must follow the certificate-objects normalizer. Predefined certificates are not rows, so the
+certificate is a stored trust verdict rather than a key. Guides not yet updated - staged.
+
+**Open:** Deleting the aggregate itself. It still carries HA, NTP, the mgt-plane permitted-IP
+count and the general settings, none read by a completed control, and its finding model is one
+of the two the client report enumerates.
+
+## 2026-09-10 — RADIUS for administrators, against a live server
+
+**Did:** FreeRADIUS 3.2.5 on 192.168.250.5 (built in a separate session: `fwadmin`, `fwmfa` with an
+Access-Challenge OTP, `fwreader` returning `superreader`, `fwnorole` returning no role). On
+fw-core-tpa-b: `fwadmin` and `fwmfa` created locally, both bound per-account to one RADIUS profile.
+Then both device-wide leaves pushed from template `ptpl_fw-core-tpa` at the same server, for
+`fwreader` and `fwnorole`, which do not exist on the device. Web logins by Jason; `type=keygen` by
+instrument; system log read direct to the device.
+
+**Found:** Identically configured `fwadmin` and `fwmfa` — only `fwmfa` got the OTP prompt. `fwmfa`
+cannot mint an API key (refused in 0.3s). With the device-wide binding live, `fwreader` got in as
+`superreader`, a role set nowhere on the firewall; before the push it was refused with
+*"Authentication profile not found for the user"*. `fwnorole` was refused after an `auth-success` —
+the matching *"Authorization failed ... Invalid user"* is in the `general` subtype. Every PAP login
+also logs the device's own advice to migrate to PEAP or EAP-TTLS. `test authentication` is not an
+API command.
+
+**Landed:** `management/read-an-administrator-account.md` — the absent-account row measured, the
+RADIUS-MFA and authorization-failure sections, a Limits line on `test authentication`.
+
+---
+
+## 2026-09-10 — what does overriding one field do to a template-pushed administrator?
+
+**Did:** Jason added `authentication-profile aegis_auth_prof` to `jb` on pan-fw-111 — pushed by
+`creds_tpl` with a role and a phash — through the web interface, and committed. Read jb from
+merged config, running config and the pushed-template layer; re-normalized.
+
+**Found:** Entry granularity, like an interface management profile. No `@ptpl` survives anywhere
+on jb in merged config, and running config holds the whole entry. The pushed-template layer still
+carries jb with `@ptpl` and a phash; the merged entry has no phash — an untouched child is
+dropped, not inherited. The normalizer records jb as device-authoritative, `has_password` false.
+
+**Landed:** `read-template-provenance.md` — a third row in the override-granularity table, and the
+Limits entry now counts three objects. Handling unchanged.
+
+---
+
+## 2026-09-10 — is an administrator actually challenged by an MFA server profile factor?
+
+**Did:** Jason logged in to fw-core-tpa-b's web interface as `oep-mfa-admin`, bound to
+`oep-auth-hardened` (local-database, one factor `oep-mfa-duo`, whose Duo host does not resolve).
+Then read the system log and `show admins`.
+
+**Found:** Instant success, no second prompt — the factor was never invoked, as Guide p.221,
+Help p.941 and Help p.839 (*"Although you can configure additional factors, they will not be
+enforced for these use cases"*) all say. The device log has `auth-success` through
+`oep-auth-hardened` and the Web login in the same second, nothing between; `show admins` held the
+session. A first log read found nothing — it went through Panorama with `target=`, which the
+precedence section of the same guide already says Panorama ignores. Read direct, it was all there.
+
+**Landed:** `management/read-an-administrator-account.md` — the MFA section's Unmeasured marker
+became a measurement.
+
+---
+
+## 2026-09-09 — does an MFA server profile challenge an administrator, and who references one?
+
+**Did:** Read Help p.941 and Guide p.221/230 for the MFA server profile. Enumerated
+`mfa-server-profile/entry[@name='x']` on all three devices. Wrote an MFA profile with no
+`mfa-cert-profile`, and an authentication profile with `factors` and no `mfa-enable`; committed
+both. Then searched every device's merged payload for the 22 known server-profile NAMES and
+listed every path whose value was one.
+
+**Found:** Three children — `mfa-cert-profile`, `mfa-config`, `mfa-vendor-type` — on all three
+devices. Both writes were refused at commit, one per key: *"Invalid MFA vendor config"* and
+*"multi-factor-auth is missing 'mfa-enable'"*. So both keys are REQUIRED, and the second means
+`mfa-enable` has no implicit value to measure. The name search found ONE reference shape the
+reference walk did not know: `multi-factor-auth/factors/member`, a member list rather than the
+scalar `server-profile` leaf every authentication method uses. The walk matched the key and
+extracted nothing, silently, so the lab's one in-use MFA profile reported as an orphan.
+
+**Landed:** `management/read-an-administrator-account.md` — the pairing rule in both directions,
+and a new section on vendor-API MFA not applying to administrator login. `find_references` reads
+member lists; the server-profile walk adds `factors`; two regression tests, both confirmed to
+fail when reverted.
+
+**Cost note:** `mfa-cert-profile` being required was already in the payload contract from
+2026-09-08. It was re-measured from scratch, for two commits and one failure, because the contract
+entry for the object was not read first.
+
+---
+
+## 2026-09-08 — what does an administrator account look like, and how is its role shaped?
+
+**Did:** `action=complete` across `mgt-config/users/entry[@name='zzz']` and every child of
+`permissions/role-based` on fw-core-tpa-a, plus a merged-config read of all three devices.
+Then created three subjects and committed them: `shared/admin-role/oep-role-readonly` and an
+account pointing at it on pan-fw-111, and an account with `vsysadmin` plus
+`client-certificate-only` on fw-core-tpa-a.
+
+**Found:** Eight children. The ROLE has three wire shapes, not one — `superuser`/`superreader`
+are yes/no leaves, `deviceadmin`/`devicereader` are member lists of device names, and
+`vsysadmin`/`vsysreader` are an entry per device carrying a vsys member list. The member-list
+pair returns nothing on the leaf, which had previously been recorded as "takes no text"; it is
+`<leaf>/member` that answers. `custom/profile` returned `auditadmin`, `securityadmin`,
+`cryptoadmin` on a device where `shared/admin-role` is NULL — those are `predefined/admin-role`
+entries, so the field takes a predefined role too. `phash` comes back redacted and `public-key`
+does not. `client-certificate-only` is the first leaf seen to answer `code=2 "complete for this
+type not implemented yet"`.
+
+**The trap worth the entry:** both PA-5220s report a `@ptpl` on the users CONTAINER over entries
+that carry no marker at all. Reading provenance there would have labelled six device-local
+accounts as template-managed. The container marker names A template that contributes to the
+container - an empty `users` node is enough - and partitions nothing inside it. pan-fw-111 shows
+the other shape: container marked `creds_tpl`, and exactly two of nine entries marked. Both
+readings fail the same way, so read the ENTRY. This is a template-provenance rule and belongs in
+`read-template-provenance.md`, which covers entry-level and leaf-level granularity and not this.
+
+**Landed:** draft `management/read-an-administrator-account.md`. OptivEdgeProbe's payload
+contract gained the `admin-user` node. OptivEdgeIntegrations gained `AdminUser` and its
+normalizer; OptivEdgeAssessments gained the Administrators tab and PAN-AUTH-019/020/021/022,
+which report 52 findings across the lab.
+
+**Also found, unrelated to the question:** `renormalize_in_scope_configuration` called none of
+the certificate-object, authentication-profile or password-profile normalizers. All three
+shipped with controls, tabs and passing tests; the only thing that ever ran them was a test.
+Now wired, with admin users, through one `APPLIANCE_OBJECT_NORMALIZERS` loop.
+
+**Then, on Jason's ruling the same day:** PAN-AUTH-020 moved off AuthenticationProfile onto
+AdminUser — "we generate findings per user, not per profile", which he scoped the next day to
+that control and 019 only, with everything asserting a property OF a profile staying where it is.
+And PAN-AUTH-021's severity was restored to the corpus `critical` after being lowered to `high`:
+the assessor downgrades with context we do not have, and an understated finding is the one nobody
+re-reads.
+
+Building a PASSING subject for 020 cost three failed commits on fw-core-tpa-b: an `mfa-server-profile` is accepted at write and refused at commit as
+"Invalid MFA vendor config" for both okta-adaptive-v1 and duo-security-v2, with every key
+`action=complete` offers populated. `mfa-cert-profile` completed to nothing, which was read as
+"no eligible certificate profile" and written up as an unclosable gap; that was wrong. The
+device had six certificates and ZERO certificate profiles. Creating one made the identical MFA
+profile commit first try, and `oep-mfa-admin` is now the estate's only MFA-protected
+administrator. An empty completion set meant the object type was absent, not that the reference
+was unsatisfiable — which an item three phases up the checklist already said.
+
+**Every support object built for this was INOPERATIVE on purpose** - Jason, 2026-09-08: "We can
+build fake server and authentication profiles that are inoperative just for config validation."
+The Duo tenant does not exist, the RADIUS and TACACS+ servers are TEST-NET addresses that never
+answer. These controls read configuration, so a working back end would have proved nothing extra
+and would have put a real credential in the lab. The device-wide binding was pushed from PANORAMA
+and reverted from Panorama, because it applies to every account and nobody could have logged in to
+remove it.
+
+**Worth keeping from the failure:** `mfa-config` completes DIFFERENTLY depending on the sibling
+`mfa-vendor-type`, and setting the vendor makes the device write that vendor's defaults for you.
+A `set` on a member list APPENDS rather than replaces, so re-pointing the MFA factor left both
+members and the delete of the first was correctly refused. And validation names one invalid
+object at a time: with two bad profiles the commit named only the first, which read as the
+second having passed.
+
+**Answered, withdrawn, and answered again the same day:** `oep-fallback-test` on fw-core-tpa-b
+held a local password AND a profile pointing at RADIUS on 192.0.2.1. Jason's login failed and
+the log read "Reason: Authentication request is timed out. auth profile 'oep-auth-deadend' ...",
+which was written up as proof the profile takes precedence. Jason then found his console copy
+procedure had been appending a trailing period to the password, so what had been sent was
+unknown - and that log line does not discriminate anyway, because a wrong password goes to
+RADIUS and times out identically.
+
+Retaken over `type=keygen` with the instrument setting the passwords - and that was still not
+enough. Its controls were two OTHER accounts, so it rested on an absent second log entry meaning
+"no fallback was attempted". Jason again: "If I pasted the correct password, it might have tried
+local authentication after radius timed out." Right, and no evidence about other accounts
+answers it. Settled by an A/B on the account itself: profile unbound -> authenticated in 0.32s; same
+account, same password, profile bound back a minute later -> refused after 6.89s, logging the
+profile and its dead server. The CLOCK is what rules out a fallback - a local check answers in
+0.2-0.4s, so the device waited out RADIUS and declined rather than trying the password it had
+just been shown to hold. Repeated by hand on the web UI, both accounts sharing one password so a
+bad paste would fail the control: control in, bound account out after ~8s. Both access paths
+agree. Conclusion unchanged across four attempts; the evidence was inadmissible three times, once
+because this script's own cleanup retired the credential twenty minutes before the person used
+it - the device's "Password changed for user ..." event is what found that.
+
+**The ordering, settled on both paths:** per-account profile > local password > device-wide
+profile.
+
+**And the device-wide binding is a different mechanism - though the first attempt at showing
+that proved nothing.** It pushed only the UI leaf, tested it over the API, and had no
+credential-less account, so its one observation - a web login with a stored password succeeding -
+was equally consistent with the binding being INERT. Jason asked whether the difference had been
+tested directly. It had not.
+
+Retested with both leaves pushed and an account holding NO credential as the live-binding
+control: that account was sent to the profile and timed out, naming it, two seconds before an
+account with a stored password authenticated locally with no profile named. The device-wide
+binding covers exactly the accounts that have no local credential. `non-ui-authentication-
+profile` governs the API path; it is documented nowhere in the Help's 1,230 pages.
+
+**Found by Jason reading the control description, not by a test:** PAN-AUTH-019 asserted
+external authentication and only ever checked whether a profile was BOUND. Three of the four
+lab accounts passing it authenticate against the firewall's own local user database through a
+profile - `local-database` and `none` are methods too. The control now resolves the reference
+and reads the method, and also reports a stored credential on an externally-authenticated
+account, which was Jason's second half: "mfa/external=yes and local phash=no". Nothing in the
+estate passed afterwards, so `oep-external-admin` was built on a TACACS+ profile as the one
+passing row.
+
+**Small things worth keeping:** `protocol` on a radius server profile stores `{"PAP": null}` and
+`protocol` on the tacplus profile beside it stores the string `"PAP"`. Both complete to the same
+value list; the radius form is refused outright in tacplus. And `action=complete` answers for the
+schema of whatever `target` names, so a Panorama-side path asked of a FIREWALL returns `code=6
+Invalid sequence` - which reads as "this path is not real" and means "not on the device you
+asked". That is the fourth way a negative from this oracle has misled.
+
+**Not built, and why:** PAN-AUTH-023 asks for "least-privilege custom admin roles". The roles and
+their assignments are readable; the fit between a role and its holder is not, and that is the
+assertion. Even the narrow reading fails - a role entry records only the features explicitly set,
+so judging breadth needs the implicit value of every webui, restapi and xmlapi feature. Deferred,
+with the decidable neighbour named: whether a defined custom role is assigned to nobody.
+PAN-AUTH-024 is deferred for the reason under Open below.
+
+**Open:** last login appears in no configuration field and in no operational command on these
+devices, so PAN-AUTH-024 still has no oracle. Whether a template push of `mgt-config/users`
+overrides an account that already exists locally is untested — the template case was only ever
+read, never written from this side.
+
 ## 2026-09-02 — does a profile drop 0.0.0.0/0 too?
 
 **Did:** Four permitted-ip states on a scratch profile bound to ethernet1/1 on fw-core-tpa-a,

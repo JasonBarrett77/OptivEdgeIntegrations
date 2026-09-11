@@ -81,7 +81,7 @@ class IntegrationsConfig(AppConfig):
 ```
 
 This preserves model labels such as `integrations.SecurityRule`, `integrations.ManagementStation` and
-`integrations.DeviceConfigurationProfile`. Do not rename it casually — it would break migrations, content
+`integrations.ManagementInterface`. Do not rename it casually — it would break migrations, content
 types, foreign keys, and the canonical query references OptivEdgeAssessments stores in the database.
 
 ## Packaging rules

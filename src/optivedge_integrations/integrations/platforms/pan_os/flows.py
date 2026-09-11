@@ -18,7 +18,6 @@ from optivedge_integrations.integrations.models import (
     Appliance,
     ApplianceGroup,
     EnforcementPoint,
-    DeviceConfigurationProfile,
     ManagementStation,
     SecurityRule,
     SecurityRuleDestinationAddressRef,
@@ -48,8 +47,19 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_zones,
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
-    normalize_appliance_device_configuration,
+    normalize_appliance_admin_users,
+    normalize_appliance_authentication_profiles,
+    normalize_appliance_authentication_sequences,
+    normalize_appliance_certificate_objects,
     normalize_appliance_interface_management_profiles,
+    normalize_appliance_authentication_settings,
+    normalize_appliance_login_banner,
+    normalize_appliance_management_tls,
+    normalize_appliance_master_key,
+    normalize_appliance_services_settings,
+    normalize_appliance_password_complexity,
+    normalize_appliance_password_profiles,
+    normalize_appliance_server_profiles,
     normalize_appliance_interfaces,
     normalize_appliance_management_interfaces,
     normalize_collected_response,
@@ -160,18 +170,6 @@ class PANOSAddressNormalizedPoint:
 
 
 @dataclass(slots=True)
-class PANOSDeviceConfigurationNormalizedAppliance:
-    appliance: Appliance
-    device_configuration_profiles: list[DeviceConfigurationProfile]
-
-
-@dataclass(slots=True)
-class PANOSDeviceConfigurationNormalizationFailure:
-    appliance: Appliance
-    error_text: str
-
-
-@dataclass(slots=True)
 class PANOSInterfaceManagementProfileNormalizedAppliance:
     appliance: Appliance
     profiles: list
@@ -180,6 +178,22 @@ class PANOSInterfaceManagementProfileNormalizedAppliance:
 @dataclass(slots=True)
 class PANOSInterfaceManagementProfileNormalizationFailure:
     appliance: Appliance
+    error_text: str
+
+
+@dataclass(slots=True)
+class PANOSApplianceObjectNormalizedAppliance:
+    appliance: Appliance
+    #: Which normalizer ran - "admin users", "certificate objects", and so on.
+    kind: str
+    #: Whatever the normalizer counted, as it named it.
+    counts: dict
+
+
+@dataclass(slots=True)
+class PANOSApplianceObjectNormalizationFailure:
+    appliance: Appliance
+    kind: str
     error_text: str
 
 
@@ -270,8 +284,6 @@ class PANOSInScopeConfigCollection:
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure]
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot]
     vsys_policy_failures: list[PANOSEnforcementPointCollectionFailure]
-    device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance]
-    device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure]
     address_normalizations: list[PANOSAddressNormalizedPoint]
     address_failures: list[PANOSAddressNormalizationFailure]
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint]
@@ -291,6 +303,10 @@ class PANOSInScopeConfigCollection:
         PANOSInterfaceManagementProfileNormalizedAppliance] = field(default_factory=list)
     interface_management_profile_failures: list[
         PANOSInterfaceManagementProfileNormalizationFailure] = field(default_factory=list)
+    appliance_object_normalizations: list[
+        PANOSApplianceObjectNormalizedAppliance] = field(default_factory=list)
+    appliance_object_failures: list[
+        PANOSApplianceObjectNormalizationFailure] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -303,8 +319,6 @@ class PANOSInScopeRefreshCollection:
 class PANOSInScopeRenormalizationResult:
     appliances: list[Appliance]
     enforcement_points: list[EnforcementPoint]
-    device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance]
-    device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure]
     address_normalizations: list[PANOSAddressNormalizedPoint]
     address_failures: list[PANOSAddressNormalizationFailure]
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint]
@@ -324,6 +338,10 @@ class PANOSInScopeRenormalizationResult:
         PANOSInterfaceManagementProfileNormalizedAppliance] = field(default_factory=list)
     interface_management_profile_failures: list[
         PANOSInterfaceManagementProfileNormalizationFailure] = field(default_factory=list)
+    appliance_object_normalizations: list[
+        PANOSApplianceObjectNormalizedAppliance] = field(default_factory=list)
+    appliance_object_failures: list[
+        PANOSApplianceObjectNormalizationFailure] = field(default_factory=list)
 
 
 def get_in_scope_appliances(management_station: ManagementStation) -> list[Appliance]:
@@ -597,6 +615,40 @@ def collect_enforcement_point_pushed_shared_policy(
     return persist_enforcement_point_collected_response(enforcement_point, collected)
 
 
+#: Appliance-anchored object normalizers that return a plain count dict. Each one reads the
+#: same merged snapshot and owns a different subtree, so they share one loop and one failure
+#: type instead of a dataclass pair each.
+#:
+#: They were built and NOT wired here - certificate objects, authentication profiles and
+#: password profiles all landed with their own controls and tabs, and the only thing that ever
+#: called them was a test. The renormalize button left four model families stale and said
+#: nothing, because a normalizer nobody calls fails exactly like a device with nothing to
+#: report. Anything appliance-anchored belongs in this tuple.
+#: ORDER MATTERS for the first two. `normalize_admin_users` resolves each administrator's
+#: authentication profile to decide whether MFA governs that account (PAN-AUTH-020), so the
+#: profiles have to exist first - otherwise every administrator normalizes as unresolved, which
+#: renders as "MFA not confirmed" on a device that is fine.
+APPLIANCE_OBJECT_NORMALIZERS = (
+    ("authentication profiles", normalize_appliance_authentication_profiles),
+    # Between the two: members resolve over the profile rows, and an administrator bound to a
+    # sequence resolves over the rows this writes.
+    ("authentication sequences", normalize_appliance_authentication_sequences),
+    ("admin users", normalize_appliance_admin_users),
+    ("server profiles", normalize_appliance_server_profiles),
+    ("password profiles", normalize_appliance_password_profiles),
+    ("password complexity", normalize_appliance_password_complexity),
+    ("authentication settings", normalize_appliance_authentication_settings),
+    ("login banner", normalize_appliance_login_banner),
+    ("master key", normalize_appliance_master_key),
+    ("services settings", normalize_appliance_services_settings),
+    ("certificate objects", normalize_appliance_certificate_objects),
+    # AFTER certificate objects, and it must stay after: the binding resolves over the
+    # SslTlsServiceProfile rows that normalizer writes. Run first, it would find last run's
+    # rows - or none - and record a binding against a profile that no longer matches.
+    ("management TLS", normalize_appliance_management_tls),
+)
+
+
 def renormalize_in_scope_configuration(
     management_station: ManagementStation,
 ) -> PANOSInScopeRenormalizationResult:
@@ -610,14 +662,12 @@ def renormalize_in_scope_configuration(
     """
     appliances = get_in_scope_appliances(management_station)
     enforcement_points = get_in_scope_enforcement_points(management_station)
-    device_configuration_normalizations: list[PANOSDeviceConfigurationNormalizedAppliance] = []
     management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = []
     management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = []
     interface_normalizations: list[PANOSInterfaceNormalizedAppliance] = []
     interface_failures: list[PANOSInterfaceNormalizationFailure] = []
     profile_normalizations: list[PANOSInterfaceManagementProfileNormalizedAppliance] = []
     profile_failures: list[PANOSInterfaceManagementProfileNormalizationFailure] = []
-    device_configuration_failures: list[PANOSDeviceConfigurationNormalizationFailure] = []
     address_normalizations: list[PANOSAddressNormalizedPoint] = []
     address_failures: list[PANOSAddressNormalizationFailure] = []
     security_rule_normalizations: list[PANOSSecurityRuleNormalizedPoint] = []
@@ -625,25 +675,10 @@ def renormalize_in_scope_configuration(
     security_rule_item_failures: list[PANOSSecurityRuleFailure] = []
     zone_normalizations: list[PANOSZoneNormalizedPoint] = []
     zone_failures: list[PANOSZoneNormalizationFailure] = []
+    appliance_object_normalizations: list[PANOSApplianceObjectNormalizedAppliance] = []
+    appliance_object_failures: list[PANOSApplianceObjectNormalizationFailure] = []
 
     for appliance in appliances:
-        try:
-            normalized = normalize_appliance_device_configuration(appliance)
-        except Exception as exc:
-            device_configuration_failures.append(
-                PANOSDeviceConfigurationNormalizationFailure(
-                    appliance=appliance,
-                    error_text=str(exc),
-                )
-            )
-        else:
-            device_configuration_normalizations.append(
-                PANOSDeviceConfigurationNormalizedAppliance(
-                    appliance=appliance,
-                    device_configuration_profiles=normalized.device_configuration_profiles,
-                )
-            )
-
         # Management surfaces read the same merged snapshot but are a separate model and a
         # separate failure. Deliberately NOT gated on the device-configuration result: they
         # answer a different question - which doors are open, and to whom - and one failing
@@ -694,6 +729,22 @@ def renormalize_in_scope_configuration(
                 PANOSInterfaceManagementProfileNormalizedAppliance(
                     appliance=appliance, profiles=profiles)
             )
+
+        # Each object normalizer gets its OWN try/except, for the reason its neighbours
+        # above do: one subtree failing must not silently remove another's rows.
+        for kind, normalize in APPLIANCE_OBJECT_NORMALIZERS:
+            try:
+                counts = normalize(appliance)
+            except Exception as exc:
+                appliance_object_failures.append(
+                    PANOSApplianceObjectNormalizationFailure(
+                        appliance=appliance, kind=kind, error_text=str(exc))
+                )
+            else:
+                appliance_object_normalizations.append(
+                    PANOSApplianceObjectNormalizedAppliance(
+                        appliance=appliance, kind=kind, counts=dict(counts or {}))
+                )
 
     # Shared scope belongs to the appliance group and must be rebuilt BEFORE any of its
     # enforcement points: replace_addresses() is a delete-and-recreate, and security rule
@@ -788,8 +839,6 @@ def renormalize_in_scope_configuration(
     return PANOSInScopeRenormalizationResult(
         appliances=appliances,
         enforcement_points=enforcement_points,
-        device_configuration_normalizations=device_configuration_normalizations,
-        device_configuration_failures=device_configuration_failures,
         management_interface_normalizations=management_interface_normalizations,
         management_interface_failures=management_interface_failures,
         interface_normalizations=interface_normalizations,
@@ -803,6 +852,8 @@ def renormalize_in_scope_configuration(
         security_rule_item_failures=security_rule_item_failures,
         zone_normalizations=zone_normalizations,
         zone_failures=zone_failures,
+        appliance_object_normalizations=appliance_object_normalizations,
+        appliance_object_failures=appliance_object_failures,
     )
 
 
@@ -938,10 +989,8 @@ def collect_in_scope_configuration_snapshots(
         shared_policy_failures=shared_policy_failures,
         vsys_policy_collections=vsys_policy_collections,
         vsys_policy_failures=vsys_policy_failures,
-        device_configuration_normalizations=renormalized.device_configuration_normalizations,
         management_interface_normalizations=renormalized.management_interface_normalizations,
         management_interface_failures=renormalized.management_interface_failures,
-        device_configuration_failures=renormalized.device_configuration_failures,
         address_normalizations=renormalized.address_normalizations,
         address_failures=renormalized.address_failures,
         security_rule_normalizations=renormalized.security_rule_normalizations,
@@ -949,6 +998,8 @@ def collect_in_scope_configuration_snapshots(
         security_rule_item_failures=renormalized.security_rule_item_failures,
         zone_normalizations=renormalized.zone_normalizations,
         zone_failures=renormalized.zone_failures,
+        appliance_object_normalizations=renormalized.appliance_object_normalizations,
+        appliance_object_failures=renormalized.appliance_object_failures,
     )
 
 

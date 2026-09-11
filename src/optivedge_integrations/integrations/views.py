@@ -687,21 +687,6 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             reason="VsysPolicyCollected", message="Collected pushed VSYS policy snapshot.",
             enforcement_point=item.enforcement_point,
         ))
-    for f in batch.device_configuration_failures:
-        events.append(IntegrationEvent(
-            management_station=management_station, run=run,
-            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
-            reason="DeviceConfigurationNormalizationFailed", message=f.error_text,
-            appliance=f.appliance,
-        ))
-    for item in batch.device_configuration_normalizations:
-        events.append(IntegrationEvent(
-            management_station=management_station, run=run,
-            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
-            reason="DeviceConfigurationNormalized",
-            message=f"Normalized {len(item.device_configuration_profiles)} device configuration profile(s).",
-            appliance=item.appliance,
-        ))
     for f in batch.address_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
@@ -883,21 +868,6 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
     renormalized = renormalize_in_scope_configuration(management_station)
 
     events = []
-    for f in renormalized.device_configuration_failures:
-        events.append(IntegrationEvent(
-            management_station=management_station, run=run,
-            level=IntegrationEvent.LEVEL_ERROR, stage=IntegrationEvent.STAGE_NORMALIZE,
-            reason="DeviceConfigurationNormalizationFailed", message=f.error_text,
-            appliance=f.appliance,
-        ))
-    for item in renormalized.device_configuration_normalizations:
-        events.append(IntegrationEvent(
-            management_station=management_station, run=run,
-            level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
-            reason="DeviceConfigurationNormalized",
-            message=f"Normalized {len(item.device_configuration_profiles)} device configuration profile(s).",
-            appliance=item.appliance,
-        ))
     for f in renormalized.address_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,

@@ -74,7 +74,41 @@ class AuthenticationProfile(ApplianceScopedObject):
 
     #: Who may authenticate through this profile. `all` is the common value and is not itself a
     #: finding; recorded because a profile is not fully described without it.
+    #: Every place on this appliance that names this profile - PAN-AUTH-025's subject.
+    #:
+    #: THE LIST IS BUILT BY WALKING THE WHOLE MERGED PAYLOAD, not by visiting the eight paths
+    #: the CLI grammar lists. A hygiene control that says "nobody references this" is only as
+    #: good as its list of hiding places, and a path the grammar missed would make the control
+    #: report an in-use profile as unused - the worst direction for it to fail in. Walking
+    #: everything cannot miss a path; the grammar list is kept as a cross-check on the walk.
+    #:
+    #: Four of the eight paths have been seen carrying a real reference and are readable from
+    #: merged config: `mgt-config/users/<name>`, `deviceconfig/system/authentication-profile`,
+    #: a vsys leaf (`captive-portal`) and a leaf nested in a vsys ENTRY
+    #: (`authentication-object/<name>`). Those are all four structural shapes, and the four
+    #: unseen paths - GlobalProtect portal and gateway, secure-web-gateway - reuse them.
+    referrer_paths = models.JSONField(default=list, blank=True)
+    #: Zero is the whole point of this pair. Stored rather than derived so "unused" is a scalar
+    #: a control query can filter on without a join - the same shape as
+    #: `InterfaceManagementProfile.bound_interface_count`.
+    referrer_count = models.PositiveIntegerField(default=0)
+
     allow_list_members = models.JSONField(default=list, blank=True)
+    #: PAN-AAA-010's first half. `all` means every user the method can reach may authenticate
+    #: through this profile, so a directory-wide phishing success reaches whatever the profile
+    #: is bound to. A column rather than a JSON lookup into the members list, for the reason
+    #: `allows_sha1` is one: a JSON lookup is unindexed and matches NOTHING the day the vendor
+    #: renames a key, so the control quietly stops finding anything rather than failing.
+    allow_list_is_all = models.BooleanField(default=False)
+    #: PAN-AAA-010's second half. The corpus scopes the assertion to profiles used for
+    #: ADMINISTRATIVE access - Jason, 2026-09-04, on the same question for PAN-AUTH-020:
+    #: "GlobalProtect, Captive Portal, and even unused authentication profiles are very much
+    #: separate controls."
+    #:
+    #: Derived from `referrer_paths`, which PAN-AUTH-025 already collects: a profile is
+    #: administrative when something under `mgt-config/users` or `deviceconfig/system` names it.
+    #: That is the question PAN-AUTH-020 was blocked on for days, now a column.
+    is_administrative = models.BooleanField(default=False)
     allow_list_count = models.PositiveIntegerField(default=0)
 
     user_domain = models.CharField(max_length=64, blank=True)
@@ -86,6 +120,8 @@ class AuthenticationProfile(ApplianceScopedObject):
         indexes = [
             models.Index(fields=["appliance", "scope"]),
             models.Index(fields=["name"]),
+            models.Index(fields=["referrer_count"]),
+            models.Index(fields=["is_administrative"]),
             models.Index(fields=["method"]),
         ]
         constraints = [

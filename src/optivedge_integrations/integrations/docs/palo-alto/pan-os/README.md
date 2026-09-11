@@ -49,6 +49,7 @@ it pushes. Filing any of them under a plane would hide them from the others.
 | guide | what it is for |
 |---|---|
 | `read-device-configuration.md` | Management-plane configuration, without reporting a device clean when it is not. |
+| `read-an-administrator-account.md` | Who can log in, with what privilege, and against what credential. |
 
 ## Where a new guide goes
 

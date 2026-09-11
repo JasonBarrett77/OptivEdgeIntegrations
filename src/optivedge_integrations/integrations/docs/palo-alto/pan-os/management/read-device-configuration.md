@@ -298,23 +298,35 @@ But do **not** assume the peers agree: the two lab firewalls differ in
 what it covers, and the management-plane subtree is evidently not all of it.
 
 
-## What OptivEdgeIntegrations already gives you, and where it misleads
+## What OptivEdgeIntegrations gives you — one model per control cluster
 
-`DeviceConfigurationProfile` is the normalized model, and it is **correct on the six service
-booleans** — `parse_yes_no_field(default_effective=...)` encodes the absent-key defaults and
-all six match measurement. Do not re-derive them; read the model.
+**`DeviceConfigurationProfile` was deleted on 2026-09-11.** It held one row per appliance spanning
+three PAN-OS screens — Setup > Management, Setup > Services and High Availability — and it was
+split along the CONTROL line rather than the screen, because Device > Setup is ten sub-tabs and
+Management alone has thirteen sections:
 
-Two places it will mislead:
+| model | what it holds | screen |
+|---|---|---|
+| `PasswordComplexityPolicy` | the global minimum password complexity, 16 fields | Setup > Management > Minimum Password Complexity |
+| `AuthenticationSettings` | idle timeout, admin lockout pair, API key lifetime | Setup > Management > Authentication Settings |
+| `LoginBanner` | the banner text and whether it must be acknowledged | Setup > Management > General Settings |
+| `ManagementTlsBinding` | the bound SSL/TLS profile, as a key to its row, and the certificate trust verdict | Setup > Management > General Settings |
+| `MasterKey` | master key state, from `show masterkey properties` | Master Key and Diagnostics |
+| `UpdateServerSettings` | whether the update server's identity is verified | Setup > Services |
+| `LoggingSettings` | whether logging continues under high data-plane load | Setup > Management > Logging and Reporting |
 
-- **`has_unrestricted_permitted_ips` inverts on a hardened device.** It treats `0.0.0.0/0` as
-  a wildcard, but PAN-OS strips it at compile time, so `[0.0.0.0/0, <jump host>]` is
-  *restricted* and reports as open. Compute it yourself:
+Each reads the same parser the aggregate read, and each was compared with it field by field on the
+lab before it was deleted — with one exception that is the reason the split was worth doing. The aggregate stored the bound TLS
+profile's floor and certificate as RESOLVED COPIES, and they drifted from the profile rows they
+were copied from. `ManagementTlsBinding` reads them through a foreign key instead; see the
+discovery log, 2026-09-11.
 
-      effective = [e for e in permitted_ip if e != "0.0.0.0/0"]
-      unrestricted = (absent) or (empty) or (effective == [])
+**Management surfaces are not here.** The management planes — MGT, aux-1, aux-2 — and the data-plane
+interfaces that carry a management profile are `ManagementInterface` rows, with their services and
+permitted sources as rows of their own. The aggregate's `permitted_ip_count` counted the **MGT plane
+only**: measured 2026-09-10, it read 0 on a firewall whose aux and data-plane surfaces held eight
+permitted sources between them. Ask the surfaces.
 
-- **`aux-1` and `aux-2` are not collected at all**, so a profile says nothing about two
-  management planes — and their defaults are the *opposite* of MGT's.
-
-The model also carries six of the ten service keys; the missing four are `disable-http-ocsp`,
-`disable-userid-service` and the two User-ID syslog listeners.
+**What went with it** — HA, NTP, hostname, time zone and that count — was read by no completed
+control, so no model was cut for it and nothing stores it now. The values are still in the
+merged-config snapshot; a control that needs one cuts its own model, as the seven above were.

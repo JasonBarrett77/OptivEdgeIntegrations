@@ -7,11 +7,12 @@ from unittest.mock import patch
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
+    ServerProfile,
     Interface,
     FieldProvenance,
     InterfaceManagementProfile,
@@ -24,7 +25,14 @@ from optivedge_integrations.integrations.models import (
     ApplianceGroup,
     EnforcementNode,
     EnforcementPoint,
-    DeviceConfigurationProfile,
+    AuthenticationSettings,
+    LoggingSettings,
+    LoginBanner,
+    ManagementTlsBinding,
+    SslTlsServiceProfile,
+    MasterKey,
+    UpdateServerSettings,
+    PasswordComplexityPolicy,
     IntegrationEvent,
     IntegrationRun,
     ManagementStation,
@@ -73,6 +81,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     NormalizedSecurityRuleMember,
     resolve_rule_address_refs,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.admin_users import (
+    resolve_role,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     pushed_shared,
 )
@@ -109,7 +120,14 @@ from optivedge_integrations.integrations.diagnostics import (
     write_census,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
-    normalize_appliance_device_configuration,
+    normalize_appliance_server_profiles,
+    normalize_appliance_authentication_settings,
+    normalize_appliance_login_banner,
+    normalize_appliance_management_tls,
+    normalize_appliance_certificate_objects,
+    normalize_appliance_master_key,
+    normalize_appliance_services_settings,
+    normalize_appliance_password_complexity,
     normalize_appliance_group_shared_scope,
     normalize_enforcement_point_addresses,
     normalize_enforcement_point_dynamic_address_content,
@@ -262,8 +280,6 @@ def _empty_in_scope_refresh_collection():
             shared_policy_failures=[],
             vsys_policy_collections=[],
             vsys_policy_failures=[],
-            device_configuration_normalizations=[],
-            device_configuration_failures=[],
             address_normalizations=[],
             address_failures=[],
             security_rule_normalizations=[],
@@ -279,8 +295,6 @@ def _empty_renormalization_result():
     return PANOSInScopeRenormalizationResult(
         appliances=[],
         enforcement_points=[],
-        device_configuration_normalizations=[],
-        device_configuration_failures=[],
         address_normalizations=[],
         address_failures=[],
         security_rule_normalizations=[],
@@ -1986,372 +2000,6 @@ class ManagementStationBulkInScopeSyncViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Refresh All In Scope")
-
-
-class DeviceConfigurationNormalizationTests(TestCase):
-    def test_normalize_appliance_device_configuration_populates_effective_fields(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance_group = ApplianceGroup.objects.create(
-            management_station=station,
-            name="ha-pair-a",
-            group_type=ApplianceGroup.TYPE_HA_PAIR,
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
-            appliance_group=appliance_group,
-            serial_number="SERIAL-010",
-            hostname="fw-10",
-        )
-        Snapshot.objects.create(
-            management_station=station,
-            appliance=appliance,
-            source_type="show_merged_config",
-            collected_at=timezone.now(),
-            payload={
-                "config": {
-                    "devices": {
-                        "entry": {
-                            "deviceconfig": {
-                                "high-availability": {
-                                    "enabled": "yes",
-                                    "group": {
-                                        "state-synchronization": {"enabled": "no"},
-                                        "monitoring": {
-                                            "link-monitoring": {
-                                                "enabled": "yes",
-                                            }
-                                        },
-                                    },
-                                },
-                                "system": {
-                                    "ntp-servers": {
-                                        "primary-ntp-server": {
-                                            "ntp-server-address": "time1.example.com",
-                                        },
-                                        "secondary-ntp-server": {
-                                            "ntp-server-address": "time2.example.com",
-                                        },
-                                    },
-                                    "service": {
-                                        "disable-http": "yes",
-                                        "disable-telnet": "yes",
-                                    },
-                                    "permitted-ip": {
-                                        "entry": [
-                                            {"@name": "10.10.10.0/24"},
-                                        ]
-                                    },
-                                    "login-banner": "Authorized users only.",
-                                },
-                                "setting": {
-                                    "management": {
-                                        "idle-timeout": "10",
-                                    }
-                                },
-                            }
-                        }
-                    }
-                }
-            },
-        )
-
-        normalized = normalize_appliance_device_configuration(appliance)
-
-        self.assertEqual(len(normalized.device_configuration_profiles), 1)
-        profile = normalized.device_configuration_profiles[0]
-        self.assertTrue(profile.ha_required)
-        self.assertTrue(profile.ha_enabled)
-        self.assertFalse(profile.ha_state_sync_enabled)
-        self.assertTrue(profile.ha_link_monitoring_enabled)
-        self.assertEqual(profile.ntp_primary_server, "time1.example.com")
-        self.assertEqual(profile.ntp_secondary_server, "time2.example.com")
-        self.assertEqual(profile.permitted_ip_values, ["10.10.10.0/24"])
-        self.assertEqual(profile.login_banner, "Authorized users only.")
-        self.assertEqual(profile.idle_timeout_minutes, 10)
-
-    def test_neighbouring_management_settings_have_opposite_defaults(self):
-        """Absent means ON for server-verification and OFF for the other two.
-
-        Measured 2026-09-01 from the UI on a device with all three keys absent. One shared
-        assumption would have flagged every device for PAN-MGT-009 and no device for
-        PAN-MGT-011, which is wrong in both directions at once.
-        """
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.defaults")
-        group = ApplianceGroup.objects.create(
-            management_station=station, name="g-defaults",
-            group_type=ApplianceGroup.TYPE_STANDALONE)
-        appliance = Appliance.objects.create(
-            management_station=station, appliance_group=group,
-            serial_number="SERIAL-DEF", hostname="fw-def")
-        # The real shape on both PA-5220s: deviceconfig/setting absent entirely, so the
-        # `management` node a reader wants is two levels of absence away.
-        Snapshot.objects.create(
-            management_station=station, appliance=appliance,
-            source_type="show_merged_config", collected_at=timezone.now(),
-            payload={"config": {"devices": {"entry": {"deviceconfig": {"system": {}}}}}})
-
-        normalize_appliance_device_configuration(appliance)
-        profile = DeviceConfigurationProfile.objects.get(appliance=appliance)
-        self.assertTrue(profile.server_verification_enabled,
-                        "absent means the update server IS verified")
-        self.assertFalse(profile.log_on_high_dp_load,
-                         "absent means high-DP-load logging is OFF")
-        self.assertFalse(profile.ack_login_banner)
-
-    def test_explicit_management_settings_beat_the_defaults(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.explicit")
-        group = ApplianceGroup.objects.create(
-            management_station=station, name="g-explicit",
-            group_type=ApplianceGroup.TYPE_STANDALONE)
-        appliance = Appliance.objects.create(
-            management_station=station, appliance_group=group,
-            serial_number="SERIAL-EXP", hostname="fw-exp")
-        Snapshot.objects.create(
-            management_station=station, appliance=appliance,
-            source_type="show_merged_config", collected_at=timezone.now(),
-            payload={"config": {"devices": {"entry": {"deviceconfig": {
-                "system": {"server-verification": "no", "ack-login-banner": "yes",
-                           "login-banner": "Authorized users only."},
-                "setting": {"management": {"enable-log-high-dp-load": "yes"}},
-            }}}}})
-
-        normalize_appliance_device_configuration(appliance)
-        profile = DeviceConfigurationProfile.objects.get(appliance=appliance)
-        self.assertFalse(profile.server_verification_enabled)
-        self.assertTrue(profile.ack_login_banner)
-        self.assertTrue(profile.log_on_high_dp_load)
-        self.assertEqual(profile.login_banner, "Authorized users only.")
-
-    def test_normalize_appliance_device_configuration_applies_intrinsic_defaults(self):
-        station = ManagementStation.objects.create(
-            station_type=ManagementStation.StationType.PAN_PANORAMA,
-            hostname="panorama.local",
-        )
-        appliance_group = ApplianceGroup.objects.create(
-            management_station=station,
-            name="standalone-a",
-            group_type=ApplianceGroup.TYPE_STANDALONE,
-        )
-        appliance = Appliance.objects.create(
-            management_station=station,
-            appliance_group=appliance_group,
-            serial_number="SERIAL-011",
-            hostname="fw-11",
-        )
-        Snapshot.objects.create(
-            management_station=station,
-            appliance=appliance,
-            source_type="show_merged_config",
-            collected_at=timezone.now(),
-            payload={
-                "config": {
-                    "devices": {
-                        "entry": {
-                            "deviceconfig": {
-                                "system": {
-                                    "permitted-ip": {
-                                        "entry": [{"@name": "0.0.0.0/0"}],
-                                    },
-                                    # Present and template-sourced, so it records provenance;
-                                    # an absent key deliberately records none.
-                                    "login-banner": {"#text": "", "@ptpl": "template-a"},
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-        )
-
-        normalize_appliance_device_configuration(appliance)
-        profile = DeviceConfigurationProfile.objects.get(appliance=appliance)
-
-        self.assertFalse(profile.ha_required)
-        self.assertFalse(profile.ha_enabled)
-        self.assertFalse(profile.ha_state_sync_enabled)
-        self.assertFalse(profile.ha_link_monitoring_enabled)
-        from django.contrib.contenttypes.models import ContentType
-        from optivedge_integrations.integrations.models import FieldProvenance
-        ct = ContentType.objects.get_for_model(DeviceConfigurationProfile)
-        self.assertTrue(
-            FieldProvenance.objects.filter(
-                content_type=ct,
-                object_id=profile.pk,
-                field_name="login_banner",
-            ).exists()
-        )
-        self.assertEqual(profile.idle_timeout_minutes, 60)
-
-    def test_normalize_enforcement_point_security_rules_persists_rules_with_edl_objects(self):
-        station, appliance, enforcement_point = _create_panorama_enforcement_point(
-            serial_number="SERIAL-004",
-            appliance_hostname="fw-04",
-        )
-
-        Snapshot.objects.create(
-            management_station=station,
-            appliance=appliance,
-            source_type="show_merged_config",
-            collected_at=timezone.now(),
-            payload={
-                "config": {
-                    "devices": {
-                        "entry": {
-                            "vsys": {
-                                "entry": {
-                                    "@name": "vsys1",
-                                    "rulebase": {
-                                        "security": {
-                                            "rules": {
-                                                "entry": [
-                                                    {
-                                                        "@name": "rule-plain",
-                                                        "from": {"member": ["trust"]},
-                                                        "to": {"member": ["untrust"]},
-                                                        "source": {"member": ["any"]},
-                                                        "destination": {"member": ["any"]},
-                                                        "application": {"member": ["ssl"]},
-                                                        "service": {"member": ["application-default"]},
-                                                        "action": "allow",
-                                                    }
-                                                ]
-                                            }
-                                        },
-                                        "default-security-rules": {"rules": {"entry": []}},
-                                    },
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-        )
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload={
-                "policy": {
-                    "panorama": {
-                        "external-list": {
-                            "entry": [
-                                {
-                                    "@name": "prod_west_edl",
-                                    # Every pushed entry on both lab devices carries @loc
-                                    # (398 checked, none missing); scope is derived from it.
-                                    "@loc": "prod-west",
-                                    "type": {"ip": {"url": "http://192.0.2.10/edl.txt"}},
-                                }
-                            ]
-                        },
-                        "pre-rulebase": {
-                            "security": {
-                                "rules": {
-                                    "entry": [
-                                        {
-                                            "@name": "rule-edl",
-                                            "from": {"member": ["trust"]},
-                                            "to": {"member": ["untrust"]},
-                                            "source": {"member": ["prod_west_edl"]},
-                                            "destination": {"member": ["prod_west_edl"]},
-                                            "application": {"member": ["ssl"]},
-                                            "service": {"member": ["application-default"]},
-                                            "action": "allow",
-                                        }
-                                    ]
-                                }
-                            }
-                        },
-                        "post-rulebase": {
-                            "security": {"rules": {"entry": []}},
-                            "default-security-rules": {"rules": {"entry": []}},
-                        },
-                    }
-                }
-            },
-        )
-
-        normalize_enforcement_point_addresses(enforcement_point)
-        normalized = normalize_enforcement_point_security_rules(enforcement_point)
-
-        edl_object = enforcement_point.address_objects.get(name="prod_west_edl")
-        self.assertTrue(edl_object.is_edl)
-        self.assertEqual(edl_object.address_type, edl_object.TYPE_EDL)
-        self.assertEqual(edl_object.namespace_type, "pushed_vsys_effective")
-
-        # Rules referencing an EDL must still be persisted, not silently dropped - only IP
-        # semantic matching is unsupported for EDL address objects (same as FQDNs), not
-        # existence in the list/search/findings/export pipeline.
-        self.assertEqual(
-            {rule.name for rule in normalized.security_rules},
-            {"rule-plain", "rule-edl"},
-        )
-
-        edl_rule = SecurityRule.objects.get(enforcement_point=enforcement_point, name="rule-edl")
-        source_ref = edl_rule.source_address_refs.get()
-        destination_ref = edl_rule.destination_address_refs.get()
-        self.assertEqual(source_ref.ref_type, SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT)
-        self.assertEqual(source_ref.address_object, edl_object)
-        self.assertEqual(destination_ref.ref_type, SecurityRuleDestinationAddressRef.RefType.ADDRESS_OBJECT)
-        self.assertEqual(destination_ref.address_object, edl_object)
-
-    def test_normalization_tolerates_string_pushed_policy_payload(self):
-        station, appliance, enforcement_point = _create_panorama_enforcement_point(
-            serial_number="SERIAL-003",
-            appliance_hostname="fw-03",
-            vsys_name="vsys6",
-            vsys_display_name="vsys1",
-        )
-
-        Snapshot.objects.create(
-            management_station=station,
-            appliance=appliance,
-            source_type="show_merged_config",
-            collected_at=timezone.now(),
-            payload={
-                "config": {
-                    "devices": {
-                        "entry": {
-                            "vsys": {
-                                "entry": {
-                                    "@name": "vsys6",
-                                    "address": {"entry": []},
-                                    "address-group": {"entry": []},
-                                    "rulebase": {
-                                        "security": {"rules": {"entry": []}},
-                                        "default-security-rules": {"rules": {"entry": []}},
-                                    },
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-        )
-        Snapshot.objects.create(
-            management_station=station,
-            enforcement_point=enforcement_point,
-            source_type="show_pushed_shared_policy_vsys",
-            collected_at=timezone.now(),
-            payload="No shared policy pushed to device",
-            metadata={"vsys_name": "vsys6"},
-        )
-
-        address_normalized = normalize_enforcement_point_addresses(enforcement_point)
-        rule_normalized = normalize_enforcement_point_security_rules(enforcement_point)
-
-        self.assertEqual(len(address_normalized.address_groups), 0)
-        self.assertEqual(len(rule_normalized.security_rules), 0)
-        self.assertEqual(
-            [address.name for address in address_normalized.address_objects],
-            ["any"],
-        )
 
 
 class ManagementStationCrudViewTests(TestCase):
@@ -5894,7 +5542,6 @@ class ManagementInterfaceNormalizationTests(TestCase):
         self.assertEqual(len(mgt & prof), 9)
 
 
-
 class InterfaceNormalizationTests(TestCase):
     """The interface as an object, and the anomalies that must not vanish.
 
@@ -6338,3 +5985,754 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
         ct = ContentType.objects.get_for_model(InterfaceManagementProfile)
         self.assertEqual(FieldProvenance.objects.filter(content_type=ct).count(), 1,
                          "orphaned provenance rows would accumulate every run")
+
+
+class AdminUserRoleShapeTests(SimpleTestCase):
+    """`permissions/role-based` has THREE wire shapes and one enum column cannot hold them.
+
+    Measured on fw-core-tpa-a with `action=complete`, 2026-09-08: `superuser`/`superreader`
+    take yes/no; `deviceadmin`/`devicereader` take a member list of device names; and
+    `vsysadmin`/`vsysreader` take an entry per device carrying a vsys member list. All three
+    were present on the lab at once, and a parser written for any one of them reports the
+    other two as "no role" - which reads as an account with no privilege at all.
+    """
+
+    def test_a_yes_no_leaf_resolves(self):
+        self.assertEqual(
+            resolve_role({"superuser": "yes"}),
+            ("superuser", "", ""))
+
+    def test_a_template_pushed_leaf_resolves_through_its_marker(self):
+        # A pushed leaf arrives as a dict, not a string. A reader checking `== "yes"` sees
+        # a dict and calls the account roleless.
+        self.assertEqual(
+            resolve_role({"superuser": {"@ptpl": "creds_tpl", "#text": "yes"}}),
+            ("superuser", "", ""))
+
+    def test_an_explicit_no_is_not_the_role(self):
+        self.assertEqual(resolve_role({"superuser": "no"}), ("none", "", ""))
+
+    def test_a_member_list_role_keeps_the_device_names(self):
+        self.assertEqual(
+            resolve_role({"deviceadmin": {"member": ["localhost.localdomain"]}}),
+            ("deviceadmin", "localhost.localdomain", ""))
+
+    def test_a_bare_member_list_role_is_still_the_role(self):
+        # `<devicereader/>` parses to None. oep-authtest carries exactly this.
+        self.assertEqual(resolve_role({"devicereader": None}), ("devicereader", "", ""))
+
+    def test_a_vsys_role_keeps_the_device_and_its_vsys_list(self):
+        self.assertEqual(
+            resolve_role({"vsysadmin": {"entry": [
+                {"@name": "localhost.localdomain", "vsys": {"member": ["vsys1", "vsys3"]}}]}}),
+            ("vsysadmin", "localhost.localdomain: vsys1, vsys3", ""))
+
+    def test_a_custom_role_keeps_its_profile_and_scope(self):
+        self.assertEqual(
+            resolve_role({"custom": {"vsys": {"member": ["vsys1"]}, "profile": "auditadmin"}}),
+            ("custom", "vsys1", "auditadmin"))
+
+    def test_two_roles_resolve_to_the_more_privileged(self):
+        # Not expected from the UI, which offers one. A parser bug here must over-report
+        # privilege rather than under-report it.
+        role, _, _ = resolve_role({"devicereader": None, "superuser": "yes"})
+        self.assertEqual(role, "superuser")
+
+    def test_an_absent_permissions_node_is_no_role(self):
+        self.assertEqual(resolve_role(None), ("none", "", ""))
+
+
+class ManagementTlsBindingNormalizationTests(TestCase):
+    """The last cluster out of the aggregate, and the one that had actually drifted.
+
+    The binding now points at the `SslTlsServiceProfile` ROW and reads its floor and certificate
+    through the key, so the thing to pin is the resolution rule applied to rows - predefined
+    beats shared, vsys never - and that nothing is copied.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.mt")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-mt",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-MT", hostname="fw-mt")
+
+    def _normalize(self, *, bound=None, shared=None, predefined=None, vsys=None,
+                   shared_certs=None):
+        system = {}
+        if bound is not None:
+            system["ssl-tls-service-profile"] = bound
+        device = {"@name": "localhost.localdomain", "deviceconfig": {"system": system}}
+        if vsys is not None:
+            device["vsys"] = {"entry": [{"@name": "vsys1",
+                                         "ssl-tls-service-profile": {"entry": vsys}}]}
+        config = {"devices": {"entry": [device]}}
+        if shared is not None:
+            config.setdefault("shared", {})["ssl-tls-service-profile"] = {"entry": shared}
+        if shared_certs is not None:
+            config.setdefault("shared", {})["certificate"] = {"entry": shared_certs}
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": config})
+        if predefined is not None:
+            Snapshot.objects.create(
+                management_station=self.station, appliance=self.appliance,
+                source_type="config_predefined_ssl_tls_service_profiles",
+                collected_at=timezone.now(),
+                payload={"ssl-tls-service-profile": {"entry": predefined}})
+        # The order APPLIANCE_OBJECT_NORMALIZERS enforces: rows first, then the binding.
+        normalize_appliance_certificate_objects(self.appliance)
+        normalize_appliance_management_tls(self.appliance)
+        return ManagementTlsBinding.objects.get(appliance=self.appliance)
+
+    @staticmethod
+    def _profile(name, minimum, certificate="cert"):
+        return [{"@name": name, "certificate": certificate,
+                 "protocol-settings": {"min-version": minimum, "max-version": "tls1-3"}}]
+
+    def test_the_binding_points_at_the_row_and_copies_nothing(self):
+        binding = self._normalize(bound="hard", shared=self._profile("hard", "tls1-2"))
+        row = SslTlsServiceProfile.objects.get(appliance=self.appliance, name="hard")
+        self.assertEqual(binding.ssl_tls_service_profile, row)
+        self.assertEqual(binding.min_version, "tls1-2")
+        self.assertEqual(binding.certificate_name, "cert")
+        # A change to the ROW is a change to what the binding reports - there is no second copy
+        # to fall out of step, which is the defect this model exists to remove.
+        row.min_version = "tls1-0"
+        row.save()
+        binding.refresh_from_db()
+        self.assertEqual(binding.min_version, "tls1-0")
+
+    def test_the_predefined_row_beats_a_same_named_shared_one(self):
+        binding = self._normalize(
+            bound="TLSv1.3_Default",
+            shared=self._profile("TLSv1.3_Default", "tls1-2", certificate="mine"),
+            predefined=self._profile("TLSv1.3_Default", "tls1-3",
+                                     certificate="TLSv1.3_Default"))
+        self.assertEqual(binding.profile_scope, ManagementTlsBinding.SCOPE_PREDEFINED)
+        self.assertEqual(binding.ssl_tls_service_profile.scope, "predefined")
+        self.assertEqual(binding.certificate_name, "TLSv1.3_Default")
+
+    def test_a_vsys_profile_is_never_bound(self):
+        """`deviceconfig/system` cannot reference a vsys profile at all - measured with
+        `action=complete` on the binding field. A same-named vsys row must not satisfy it."""
+        binding = self._normalize(bound="only-in-vsys", vsys=self._profile("only-in-vsys", "tls1-2"))
+        self.assertEqual(binding.profile_scope, ManagementTlsBinding.SCOPE_UNRESOLVED)
+        self.assertIsNone(binding.ssl_tls_service_profile)
+        self.assertTrue(NormalizationIssue.objects.filter(
+            appliance=self.appliance, kind="ssl_tls_service_profile_unresolved").exists())
+
+    def test_nothing_bound_is_blank_not_unresolved(self):
+        binding = self._normalize()
+        self.assertEqual((binding.profile_name, binding.profile_scope), ("", ""))
+        self.assertEqual(binding.certificate_trust, "")
+        self.assertFalse(NormalizationIssue.objects.filter(
+            appliance=self.appliance, kind="ssl_tls_service_profile_unresolved").exists())
+
+    def test_the_trust_verdict_is_about_the_certificate_the_row_names(self):
+        binding = self._normalize(
+            bound="p", shared=self._profile("p", "tls1-2", certificate="corp"),
+            shared_certs=[{"@name": "corp", "subject-hash": "1111", "issuer-hash": "2222",
+                           "issuer": "/CN=Corp CA"}])
+        self.assertEqual(binding.certificate_trust, ManagementTlsBinding.TRUST_CA_ISSUED)
+        self.assertEqual(binding.certificate_issuer, "/CN=Corp CA")
+
+
+class MasterKeyNormalizationTests(TestCase):
+    """PAN-CRT-007's subject, and the only cluster whose values are not in the merged config."""
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.mk")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-mk",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-MK", hostname="fw-mk")
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [{"@name": "localhost.localdomain"}]}}})
+
+    def _normalize(self, properties=None):
+        if properties is not None:
+            Snapshot.objects.create(
+                management_station=self.station, appliance=self.appliance,
+                source_type="show_masterkey_properties", collected_at=timezone.now(),
+                payload=properties)
+        normalize_appliance_master_key(self.appliance)
+        return MasterKey.objects.get(appliance=self.appliance)
+
+    def test_a_row_exists_even_with_no_masterkey_snapshot(self):
+        """No row would make PAN-CRT-007 report nothing for a device nobody asked, and "we
+        never asked" must not look like "we asked and it was fine". The control fires on
+        anything that is not `set`, so undetermined fires."""
+        key = self._normalize()
+        self.assertEqual(key.state, MasterKey.STATE_UNDETERMINED)
+
+    def test_expire_at_zero_is_the_factory_key(self):
+        key = self._normalize({"expire-at": "0"})
+        self.assertEqual(key.state, MasterKey.STATE_DEFAULT)
+        self.assertEqual(key.expires_at, "0")
+
+    def test_a_real_expiry_is_a_configured_key(self):
+        key = self._normalize({"expire-at": "2027/01/01 00:00:00", "auto-renew-mkey": "720",
+                               "on-hsm": "yes"})
+        self.assertEqual(key.state, MasterKey.STATE_SET)
+        self.assertEqual(key.auto_renew_hours, 720)
+        self.assertTrue(key.on_hsm)
+
+
+class ServicesSettingsNormalizationTests(TestCase):
+    """PAN-MGT-009 and 011 - two one-field clusters whose defaults are OPPOSITE.
+
+    Absent `server-verification` is ENABLED and absent `enable-log-high-dp-load` is DISABLED, so
+    an untouched device satisfies one control and fires the other. One shared assumption would
+    have been wrong in both directions at once.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.ss")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-ss",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-SS", hostname="fw-ss")
+
+    def _normalize(self, deviceconfig=None):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [
+                {"@name": "localhost.localdomain",
+                 "deviceconfig": deviceconfig if deviceconfig is not None else {}}]}}})
+        normalize_appliance_services_settings(self.appliance)
+        return (UpdateServerSettings.objects.get(appliance=self.appliance),
+                LoggingSettings.objects.get(appliance=self.appliance))
+
+    def test_the_two_defaults_point_opposite_ways(self):
+        update, logging = self._normalize()
+        self.assertTrue(update.verify_identity)
+        self.assertFalse(logging.log_on_high_dp_load)
+
+    def test_an_explicit_no_turns_verification_off(self):
+        update, _ = self._normalize({"system": {"server-verification": "no"}})
+        self.assertFalse(update.verify_identity)
+
+    def test_the_logging_setting_lives_under_setting_management(self):
+        _, logging = self._normalize(
+            {"setting": {"management": {"enable-log-high-dp-load": "yes"}}})
+        self.assertTrue(logging.log_on_high_dp_load)
+
+
+class LoginBannerNormalizationTests(TestCase):
+    """The third cluster out of the aggregate. PAN-MGT-007 and 008.
+
+    Two fields that are one object: the acknowledgement checkbox is greyed out until a banner
+    exists, so the pair has to be read together to be interpreted at all.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.lb")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-lb",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-LB", hostname="fw-lb")
+
+    def _normalize(self, system=None):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [
+                {"@name": "localhost.localdomain",
+                 "deviceconfig": {"system": system if system is not None else {}}}]}}})
+        normalize_appliance_login_banner(self.appliance)
+        return LoginBanner.objects.get(appliance=self.appliance)
+
+    def test_no_banner_is_empty_text_and_no_acknowledgement(self):
+        """Empty is the FINDING, not missing data - PAN-MGT-007 asks whether there is one."""
+        banner = self._normalize()
+        self.assertEqual(banner.text, "")
+        self.assertFalse(banner.acknowledgement_required)
+
+    def test_the_banner_is_stored_whole(self):
+        """A length or a boolean would answer PAN-MGT-007 and destroy the evidence: an assessor
+        reading the finding needs to see what the banner actually says."""
+        text = "Authorized use only.\nAll activity is monitored and recorded."
+        banner = self._normalize({"login-banner": text, "ack-login-banner": "yes"})
+        self.assertEqual(banner.text, text)
+        self.assertTrue(banner.acknowledgement_required)
+
+    def test_a_pushed_banner_is_read_through_its_marker(self):
+        banner = self._normalize({"login-banner": {"@ptpl": "tpl-base", "#text": "Notice"}})
+        self.assertEqual(banner.text, "Notice")
+        rows = {p.field_name: p.raw_value for p in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(LoginBanner), object_id=banner.pk)}
+        self.assertEqual(rows.get("text"), "tpl-base")
+        self.assertNotIn("acknowledgement_required", rows)
+
+
+class AuthenticationSettingsNormalizationTests(TestCase):
+    """The second cluster out of the aggregate. PAN-AUTH-014 to 017.
+
+    The zeros are the whole subject: three of these four fields default to 0 and 0 means
+    something different on each - unlimited attempts, locked until released, and a key that
+    never expires. Idle timeout is the odd one, defaulting to the vendor's 60.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.as")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-as",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-AS", hostname="fw-as")
+
+    def _normalize(self, management=None):
+        entry = {"@name": "localhost.localdomain", "deviceconfig": {"system": {}}}
+        if management is not None:
+            entry["deviceconfig"]["setting"] = {"management": management}
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [entry]}}})
+        normalize_appliance_authentication_settings(self.appliance)
+        return AuthenticationSettings.objects.get(appliance=self.appliance)
+
+    def test_the_whole_management_node_can_be_absent(self):
+        """Its normal state on a device nobody has configured - measured on both PA-5220s. The
+        parser has to tolerate the PARENT missing, not just the key."""
+        settings = self._normalize()
+        self.assertEqual(settings.idle_timeout_minutes, 60)
+        self.assertEqual(settings.lockout_failed_attempts, 0)
+        self.assertEqual(settings.lockout_time_minutes, 0)
+        self.assertEqual(settings.api_key_lifetime_minutes, 0)
+
+    def test_admin_lockout_is_a_container(self):
+        settings = self._normalize({
+            "admin-lockout": {"failed-attempts": "3", "lockout-time": "30"},
+            "idle-timeout": "10",
+            "api": {"key": {"lifetime": "525600"}},
+        })
+        self.assertEqual(
+            (settings.idle_timeout_minutes, settings.lockout_failed_attempts,
+             settings.lockout_time_minutes, settings.api_key_lifetime_minutes),
+            (10, 3, 30, 525600))
+
+    def test_one_row_per_appliance_and_re_normalizing_updates_it(self):
+        self._normalize({"idle-timeout": "10"})
+        settings = self._normalize({"idle-timeout": "5"})
+        self.assertEqual(
+            AuthenticationSettings.objects.filter(appliance=self.appliance).count(), 1)
+        self.assertEqual(settings.idle_timeout_minutes, 5)
+
+
+class PasswordComplexityNormalizationTests(TestCase):
+    """The first cluster cut out of `DeviceConfigurationProfile`. PAN-AUTH-001 to 013.
+
+    Two things need guarding while both models exist: that the new row carries the SAME numbers
+    the aggregate does - they share one parser precisely so they cannot drift - and that every
+    absent key still resolves to the insecure default rather than to null.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.pc")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-pc",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-PC", hostname="fw-pc")
+
+    def _normalize(self, complexity=None):
+        config = {"devices": {"entry": [{"@name": "localhost.localdomain"}]}}
+        if complexity is not None:
+            config["mgt-config"] = {"password-complexity": complexity}
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": config})
+        normalize_appliance_password_complexity(self.appliance)
+        return PasswordComplexityPolicy.objects.get(appliance=self.appliance)
+
+    def test_an_absent_node_is_the_insecure_default_not_null(self):
+        """PAN-OS never writes these keys - the UI stores only the flag when complexity is
+        enabled - so absent is the normal state and every default is the weak one."""
+        policy = self._normalize()
+        self.assertFalse(policy.enabled)
+        self.assertEqual(policy.minimum_length, 0)
+        self.assertEqual(policy.expiration_period, 0)
+
+    def test_the_prefix_comes_off_and_the_values_do_not_change(self):
+        """The shared parser names everything `password_*` because it was written for a model
+        with 34 other fields. Renaming is a mapping, not a re-read: a typo in it would put a
+        number on the wrong column and nothing else would notice."""
+        policy = self._normalize({
+            "enabled": "yes",
+            "minimum-length": "12",
+            "minimum-uppercase-letters": "1",
+            "minimum-lowercase-letters": "2",
+            "minimum-numeric-letters": "3",
+            "minimum-special-characters": "4",
+            "block-username-inclusion": "yes",
+            "new-password-differs-by-characters": "5",
+            "password-history-count": "6",
+            "block-repeated-characters": "7",
+            "password-change-on-first-login": "yes",
+            "password-change-period-block": "8",
+            "password-change": {
+                "expiration-period": "90",
+                "expiration-warning-period": "14",
+                "post-expiration-admin-login-count": "2",
+                "post-expiration-grace-period": "3",
+            },
+        })
+        self.assertTrue(policy.enabled)
+        self.assertEqual(
+            (policy.minimum_length, policy.minimum_uppercase, policy.minimum_lowercase,
+             policy.minimum_numeric, policy.minimum_special),
+            (12, 1, 2, 3, 4))
+        self.assertTrue(policy.block_username_inclusion)
+        self.assertEqual((policy.new_differs_by_characters, policy.history_count), (5, 6))
+        self.assertEqual((policy.block_repeated_characters, policy.change_period_block), (7, 8))
+        self.assertTrue(policy.change_on_first_login)
+        self.assertEqual(
+            (policy.expiration_period, policy.expiration_warning_period,
+             policy.post_expiration_admin_login_count, policy.post_expiration_grace_period),
+            (90, 14, 2, 3))
+
+    def test_one_row_per_appliance_and_re_normalizing_updates_it(self):
+        self._normalize({"minimum-length": "8"})
+        policy = self._normalize({"minimum-length": "16"})
+        self.assertEqual(PasswordComplexityPolicy.objects.filter(
+            appliance=self.appliance).count(), 1)
+        self.assertEqual(policy.minimum_length, 16)
+
+    def test_a_pushed_value_records_its_provenance(self):
+        """mgt-config is template-managed; these values really can be pushed."""
+        policy = self._normalize({"minimum-length": {"@ptpl": "tpl-base", "#text": "12"}})
+        self.assertEqual(policy.minimum_length, 12)
+        rows = {p.field_name: p for p in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(PasswordComplexityPolicy),
+            object_id=policy.pk)}
+        self.assertIn("minimum_length", rows)
+        self.assertEqual(rows["minimum_length"].raw_value, "tpl-base")
+        # An absent key produces NO row - that is what keeps "defaulted" and "written locally"
+        # apart.
+        self.assertNotIn("minimum_special", rows)
+
+
+class ServerProfileNormalizationTests(TestCase):
+    """AAA server profiles - the shapes that would bite a normalizer written from one kind.
+
+    Six kinds sit in six sibling containers and differ in ways `action=complete` cannot show:
+    the server address key has three names, `protocol` has two wire forms, and two of the three
+    measured implicit values invert what a checkbox suggests.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.sp")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-sp",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-SP", hostname="fw-sp")
+
+    def _normalize(self, shared=None, vsys=None, extra_device=None):
+        config = {"shared": {"server-profile": shared or {}},
+                  "devices": {"entry": [{"@name": "localhost.localdomain",
+                                         "vsys": {"entry": [
+                                             {"@name": "vsys1",
+                                              "server-profile": vsys or {}}]}}]}}
+        if extra_device:
+            config["devices"]["entry"][0].update(extra_device)
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": config})
+        normalize_appliance_server_profiles(self.appliance)
+        return {(p.kind, p.name): p
+                for p in ServerProfile.objects.filter(appliance=self.appliance)}
+
+    def test_the_address_key_has_three_names(self):
+        """`address` on ldap and tacplus, `ip-address` on radius, `host` on kerberos. Reading
+        one name records no servers for the other two, silently."""
+        rows = self._normalize(shared={
+            "ldap": {"entry": [{"@name": "l", "server": {"entry": [
+                {"@name": "s", "address": "10.0.0.1"}]}}]},
+            "radius": {"entry": [{"@name": "r", "protocol": {"PAP": None},
+                                  "server": {"entry": [{"@name": "s", "ip-address": "10.0.0.2"}]}}]},
+            "kerberos": {"entry": [{"@name": "k", "server": {"entry": [
+                {"@name": "s", "host": "10.0.0.3"}]}}]},
+        })
+        self.assertEqual(rows[("ldap", "l")].server_addresses, ["10.0.0.1"])
+        self.assertEqual(rows[("radius", "r")].server_addresses, ["10.0.0.2"])
+        self.assertEqual(rows[("kerberos", "k")].server_addresses, ["10.0.0.3"])
+
+    def test_protocol_has_two_wire_forms(self):
+        """radius stores `{"PAP": null}` and tacplus stores `"PAP"`. Both complete to the same
+        value list, so the schema oracle cannot tell them apart."""
+        rows = self._normalize(shared={
+            "radius": {"entry": [{"@name": "r", "protocol": {"PAP": None}}]},
+            "tacplus": {"entry": [{"@name": "t", "protocol": "PAP"}]},
+        })
+        self.assertEqual(rows[("radius", "r")].protocol, "PAP")
+        self.assertEqual(rows[("tacplus", "t")].protocol, "PAP")
+
+    def test_the_implicit_values_that_invert(self):
+        """Measured by writing key-less profiles and opening them in the UI. `ssl` and both SAML
+        flags are implicit YES; only `verify-server-certificate` is implicit NO. Reading them as
+        "absent means off" reports every unconfigured SAML profile as unvalidated and unsigned."""
+        rows = self._normalize(shared={
+            "ldap": {"entry": [{"@name": "bare"}]},
+            "saml-idp": {"entry": [{"@name": "bare"}]},
+        })
+        self.assertTrue(rows[("ldap", "bare")].ldap_ssl)
+        self.assertFalse(rows[("ldap", "bare")].ldap_verify_server_certificate)
+        self.assertTrue(rows[("saml-idp", "bare")].saml_validate_idp_certificate)
+        self.assertTrue(rows[("saml-idp", "bare")].saml_want_auth_requests_signed)
+
+    def test_an_explicit_no_overrides_each_implicit_yes(self):
+        rows = self._normalize(shared={
+            "ldap": {"entry": [{"@name": "off", "ssl": "no"}]},
+            "saml-idp": {"entry": [{"@name": "off", "validate-idp-certificate": "no",
+                                    "want-auth-requests-signed": "no"}]},
+        })
+        self.assertFalse(rows[("ldap", "off")].ldap_ssl)
+        self.assertFalse(rows[("saml-idp", "off")].saml_validate_idp_certificate)
+        self.assertFalse(rows[("saml-idp", "off")].saml_want_auth_requests_signed)
+
+    def test_a_pushed_value_is_read_through_its_marker(self):
+        """A template-pushed leaf arrives as a dict. Both lab profiles that say `ssl: no` are
+        pushed, so a reader comparing to the bare string would call them compliant."""
+        rows = self._normalize(shared={"ldap": {"entry": [
+            {"@name": "pushed", "ssl": {"@ptpl": "tpl", "#text": "no"}}]}})
+        self.assertFalse(rows[("ldap", "pushed")].ldap_ssl)
+
+    def test_one_name_can_exist_in_two_kinds(self):
+        """`shared` is a saml-idp on the lab. Keying rows on the name alone would let a radius
+        of the same name overwrite it and the count come out short."""
+        rows = self._normalize(shared={
+            "saml-idp": {"entry": [{"@name": "shared"}]},
+            "radius": {"entry": [{"@name": "shared", "protocol": {"CHAP": None}}]},
+        })
+        self.assertEqual(ServerProfile.objects.filter(name="shared").count(), 2)
+        self.assertEqual(rows[("radius", "shared")].protocol, "CHAP")
+
+    def test_an_unrecognised_kind_is_kept_and_reported(self):
+        """Hard-coding the container set is what made `sdwan` invisible on the interface side."""
+        rows = self._normalize(shared={"quantum-auth": {"entry": [{"@name": "future"}]}})
+        row = rows[("unknown", "future")]
+        self.assertEqual(row.raw_kind, "quantum-auth")
+        self.assertTrue(NormalizationIssue.objects.filter(
+            appliance=self.appliance, kind="server profile").exists())
+
+    def test_a_vsys_profile_is_scoped_to_its_vsys(self):
+        rows = self._normalize(vsys={"ldap": {"entry": [{"@name": "in-vsys"}]}})
+        self.assertEqual(rows[("ldap", "in-vsys")].scope, "vsys")
+        self.assertEqual(rows[("ldap", "in-vsys")].vsys_name, "vsys1")
+
+    def test_a_referenced_profile_counts_its_referrers(self):
+        """PAN-AAA-013, the same walk PAN-AUTH-025 uses."""
+        rows = self._normalize(
+            shared={"ldap": {"entry": [{"@name": "used"}, {"@name": "orphan"}]}},
+            extra_device={"vsys": {"entry": [{"@name": "vsys1", "authentication-profile": {
+                "entry": [{"@name": "ap", "method": {"ldap": {"server-profile": "used"}}}]}}]}})
+        self.assertEqual(rows[("ldap", "used")].referrer_count, 1)
+        self.assertEqual(rows[("ldap", "orphan")].referrer_count, 0)
+
+    def test_an_mfa_factor_counts_as_a_reference(self):
+        """An authentication profile names its MFA server profiles as a member LIST under
+        `multi-factor-auth/factors`, not as a `server-profile` leaf. The walk matched the key
+        and `scalar_value` returned "" for the dict, so the reference vanished silently and
+        PAN-AAA-013 reported the lab's one in-use MFA profile as an orphan to delete."""
+        rows = self._normalize(
+            shared={"mfa-server-profile": {"entry": [{"@name": "duo"}, {"@name": "unused"}]}},
+            extra_device={"vsys": {"entry": [{"@name": "vsys1", "authentication-profile": {
+                "entry": [{"@name": "ap", "multi-factor-auth": {
+                    "mfa-enable": "yes",
+                    "factors": {"member": ["duo"]}}}]}}]}})
+        self.assertEqual(rows[("mfa-server-profile", "duo")].referrer_count, 1)
+        self.assertTrue(rows[("mfa-server-profile", "duo")].referrer_paths[0].endswith(
+            "/multi-factor-auth/factors/member"))
+        self.assertEqual(rows[("mfa-server-profile", "unused")].referrer_count, 0)
+
+    def test_every_member_of_a_factor_list_is_a_reference(self):
+        """Up to three additional factors, says the guide. Taking only the first would leave the
+        second and third profiles reporting unused while the firewall invokes them."""
+        rows = self._normalize(
+            shared={"mfa-server-profile": {"entry": [{"@name": "one"}, {"@name": "two"}]}},
+            extra_device={"vsys": {"entry": [{"@name": "vsys1", "authentication-profile": {
+                "entry": [{"@name": "ap", "multi-factor-auth": {
+                    "factors": {"member": ["one", "two"]}}}]}}]}})
+        self.assertEqual(rows[("mfa-server-profile", "one")].referrer_count, 1)
+        self.assertEqual(rows[("mfa-server-profile", "two")].referrer_count, 1)
+
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    AdminUser as _AdminUser, AuthenticationProfile as _AuthenticationProfile,
+    AuthenticationSequence as _AuthenticationSequence)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.authentication import (  # noqa: E402
+    normalize_authentication_profiles as _normalize_profiles)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.authentication_sequences import (  # noqa: E402
+    normalize_authentication_sequences as _normalize_sequences)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.admin_users import (  # noqa: E402
+    normalize_admin_users as _normalize_admins)
+
+
+class AuthenticationSequenceNormalizationTests(TestCase):
+    """PAN-AAA-012's subject, and the two defects sequences exposed in built controls.
+
+    A sequence names its members as `authentication-profiles/member` - a member list under a
+    key the profile referrer walk did not visit - and every administrative binding accepts a
+    sequence, which the administrator resolution did not know. Measured 2026-09-11 on
+    fw-core-tpa-b: an administrator bound to RADIUS-then-TACACS+ read as unresolved and not
+    external, so PAN-AUTH-019 fired on it.
+    """
+
+    PROFILES = [
+        {"@name": "radius-p", "method": {"radius": {"server-profile": "r"}}},
+        {"@name": "tacacs-p", "method": {"tacplus": {"server-profile": "t"}}},
+        {"@name": "local-p", "method": {"local-database": None}},
+    ]
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.seq")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-seq",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-SEQ", hostname="fw-seq")
+
+    def _normalize(self, sequences, users=(), device=None, vsys=None):
+        config = {
+            "shared": {"authentication-profile": {"entry": list(self.PROFILES)},
+                       "authentication-sequence": {"entry": list(sequences)}},
+            "devices": {"entry": [{"@name": "localhost.localdomain", **(device or {})}]},
+        }
+        if vsys:
+            config["devices"]["entry"][0]["vsys"] = {"entry": [vsys]}
+        if users:
+            config["mgt-config"] = {"users": {"entry": list(users)}}
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": config})
+        _normalize_profiles(self.appliance)
+        _normalize_sequences(self.appliance)
+        _normalize_admins(self.appliance)
+
+    def _seq(self, name, *members, **flags):
+        entry = {"@name": name, "authentication-profiles": {"member": list(members)}}
+        entry.update(flags)
+        return entry
+
+    def _sequence(self, name):
+        return _AuthenticationSequence.objects.get(appliance=self.appliance, name=name)
+
+    def test_members_keep_their_order_and_resolve_their_methods(self):
+        self._normalize([self._seq("s", "radius-p", "local-p")])
+        s = self._sequence("s")
+        self.assertEqual(s.member_names, ["radius-p", "local-p"])
+        self.assertEqual(s.member_methods, ["radius", "local-database"])
+        self.assertTrue(s.has_local_member)
+        self.assertEqual(s.local_member_names, ["local-p"])
+        self.assertFalse(s.all_members_external)
+
+    def test_the_three_flags_take_their_measured_implicit_values(self):
+        """None of the three is stored unless the form sets it; the form renders exit NO,
+        domain YES, User-ID domain NO."""
+        self._normalize([self._seq("s", "radius-p")])
+        s = self._sequence("s")
+        self.assertFalse(s.exit_sequence_on_failure)
+        self.assertTrue(s.use_domain_find_profile)
+        self.assertFalse(s.use_userid_domain)
+
+    def test_explicit_flags_override_the_implicit_ones(self):
+        self._normalize([self._seq("s", "radius-p", **{
+            "exit-sequence-on-failure": "yes", "use-domain-find-profile": "no"})])
+        s = self._sequence("s")
+        self.assertTrue(s.exit_sequence_on_failure)
+        self.assertFalse(s.use_domain_find_profile)
+
+    def test_an_unresolvable_member_is_not_assumed_external(self):
+        self._normalize([self._seq("s", "radius-p", "ghost")])
+        s = self._sequence("s")
+        self.assertEqual(s.unresolved_member_count, 1)
+        self.assertEqual(s.member_methods, ["radius", ""])
+        self.assertFalse(s.all_members_external)
+
+    def test_a_sequence_an_administrator_names_is_administrative(self):
+        self._normalize([self._seq("s", "radius-p", "local-p")],
+                        users=[{"@name": "a", "authentication-profile": "s"}])
+        self.assertTrue(self._sequence("s").is_administrative)
+        self.assertEqual(self._sequence("s").referrer_count, 1)
+
+    def test_the_device_wide_binding_also_makes_it_administrative(self):
+        self._normalize([self._seq("s", "radius-p")], device={"deviceconfig": {"system": {
+            "authentication-profile": "s"}}})
+        self.assertTrue(self._sequence("s").is_administrative)
+
+    def test_a_captive_portal_sequence_is_referenced_and_not_administrative(self):
+        self._normalize([self._seq("s", "radius-p", "local-p")], vsys={
+            "@name": "vsys1", "captive-portal": {"authentication-profile": "s"}})
+        s = self._sequence("s")
+        self.assertEqual(s.referrer_count, 1)
+        self.assertFalse(s.is_administrative)
+
+    def test_sequence_membership_counts_as_a_reference_to_the_profile(self):
+        """PAN-AUTH-025's defect: `authentication-profiles/member` was not visited, so a
+        profile used only through a sequence reported unused."""
+        self._normalize([self._seq("s", "tacacs-p")])
+        p = _AuthenticationProfile.objects.get(appliance=self.appliance, name="tacacs-p")
+        self.assertEqual(p.referrer_count, 1)
+        self.assertTrue(p.referrer_paths[0].endswith(
+            "/authentication-sequence/entry[s]/authentication-profiles/member"))
+
+    def test_a_profile_reached_through_an_administrative_sequence_is_administrative(self):
+        self._normalize([self._seq("s", "tacacs-p")],
+                        users=[{"@name": "a", "authentication-profile": "s"}])
+        self.assertTrue(_AuthenticationProfile.objects.get(
+            appliance=self.appliance, name="tacacs-p").is_administrative)
+
+    def test_a_profile_in_a_non_administrative_sequence_is_not(self):
+        self._normalize([self._seq("s", "tacacs-p")], vsys={
+            "@name": "vsys1", "captive-portal": {"authentication-profile": "s"}})
+        self.assertFalse(_AuthenticationProfile.objects.get(
+            appliance=self.appliance, name="tacacs-p").is_administrative)
+
+    def test_an_administrator_bound_to_an_all_external_sequence_is_external(self):
+        """The PAN-AUTH-019 false positive: oep-seq-admin2, RADIUS then TACACS+."""
+        self._normalize([self._seq("s", "radius-p", "tacacs-p")],
+                        users=[{"@name": "a", "authentication-profile": "s"}])
+        a = _AdminUser.objects.get(appliance=self.appliance, name="a")
+        self.assertTrue(a.authentication_sequence)
+        self.assertFalse(a.authentication_profile_unresolved)
+        self.assertTrue(a.authentication_is_external)
+        self.assertTrue(a.centrally_authenticated)
+
+    def test_an_administrator_bound_to_a_sequence_with_a_local_member_is_not(self):
+        self._normalize([self._seq("s", "radius-p", "local-p")],
+                        users=[{"@name": "a", "authentication-profile": "s"}])
+        a = _AdminUser.objects.get(appliance=self.appliance, name="a")
+        self.assertTrue(a.authentication_sequence)
+        self.assertFalse(a.authentication_is_external)
+        self.assertFalse(a.centrally_authenticated)
+

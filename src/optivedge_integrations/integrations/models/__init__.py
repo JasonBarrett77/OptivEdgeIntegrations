@@ -16,8 +16,8 @@ from .collected import (
     Snapshot,
 )
 from .events import IntegrationEvent, IntegrationRun
-from .device_configuration import DeviceConfigurationProfile
 from .authentication import AuthenticationProfile
+from .authentication_sequence import AuthenticationSequence
 from .certificates import Certificate, CertificateProfile, SslTlsServiceProfile
 from .interface_management_profile import InterfaceManagementProfile
 from .interfaces import Interface
@@ -29,6 +29,14 @@ from .management_interface import (
     parse_permitted_source,
 )
 from .normalization import NormalizationIssue
+from .admin_user import AdminUser, ROLE_KEYS
+from .server_profile import ServerProfile
+from .authentication_settings import AuthenticationSettings
+from .login_banner import LoginBanner
+from .management_tls import ManagementTlsBinding
+from .master_key import MasterKey
+from .services_settings import LoggingSettings, UpdateServerSettings
+from .password_complexity import PasswordComplexityPolicy
 from .password_profile import PasswordProfile, expiration_weakens
 from .notes import Note
 from .zones import Zone, ZoneInterface
@@ -85,9 +93,19 @@ __all__ = [
     "IntegrationEvent",
     "IntegrationRun",
     "ManagementStation",
-    "DeviceConfigurationProfile",
     "Interface",
     "AuthenticationProfile",
+    "AuthenticationSequence",
+    "AdminUser",
+    "ServerProfile",
+    "ROLE_KEYS",
+    "AuthenticationSettings",
+    "LoggingSettings",
+    "LoginBanner",
+    "ManagementTlsBinding",
+    "MasterKey",
+    "UpdateServerSettings",
+    "PasswordComplexityPolicy",
     "PasswordProfile",
     "expiration_weakens",
     "Certificate",

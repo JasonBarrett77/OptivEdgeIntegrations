@@ -1402,7 +1402,6 @@ def normalize_security_rules(enforcement_point: EnforcementPoint) -> PANOSNormal
         appliance_groups=[],
         enforcement_points=[],
         enforcement_nodes=[],
-        device_configuration_profiles=[],
         security_rules=created_rules,
         security_rule_failures=failures,
     )

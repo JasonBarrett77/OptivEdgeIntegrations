@@ -137,23 +137,23 @@ def _entries(node: Any) -> list[dict[str, Any]]:
     return [e for e in ensure_list(node.get("entry")) if isinstance(e, dict) and e.get("@name")]
 
 
-def scoped_entries(snapshot: Snapshot, object_key: str,
-                   predefined: Snapshot | None = None) -> list[ScopedEntry]:
-    """Every definition of `object_key`, from every scope it can occupy.
+def scoped_nodes(snapshot: Snapshot, object_key: str,
+                 predefined: Snapshot | None = None) -> list[tuple[str, str, Any]]:
+    """(scope, vsys name, the raw node) for `object_key` in every scope it occupies.
 
-    Object-type agnostic, as are `ScopedEntry` and `write_scoped_objects` below. They live in a
-    certificate-named module because certificates needed them first; authentication profiles
-    import them from here. Worth moving to their own module the next time this file is opened
-    for another reason - not worth a risky move on its own.
+    `scoped_entries` below is this plus "and pull the `entry` children out", which is what almost
+    every object needs. Server profiles are the exception: `server-profile` holds six SIBLING
+    CONTAINERS - ldap, radius, tacplus, kerberos, saml-idp, mfa-server-profile - and the entries
+    are one level further down, so that caller needs the node itself. Splitting the scope walk
+    out means it is written once rather than copied for the exception.
     """
-    found: list[ScopedEntry] = []
+    found: list[tuple[str, str, Any]] = []
     payload = snapshot.payload or {}
     config = payload.get("config") if isinstance(payload, dict) else None
     if isinstance(config, dict):
         shared = config.get("shared")
-        if isinstance(shared, dict):
-            found += [ScopedEntry(CertificateProfile.SCOPE_SHARED, "", e)
-                      for e in _entries(shared.get(object_key))]
+        if isinstance(shared, dict) and shared.get(object_key) is not None:
+            found.append((CertificateProfile.SCOPE_SHARED, "", shared.get(object_key)))
 
     # Every vsys, not just vsys1. A multi-vsys device can define an object in one vsys and not
     # another, and that difference is the whole point of recording the scope.
@@ -163,17 +163,28 @@ def scoped_entries(snapshot: Snapshot, object_key: str,
         if not isinstance(vsys, dict):
             continue
         name = str(vsys.get("@name") or "").strip()
-        if not name:
-            continue
-        found += [ScopedEntry(CertificateProfile.SCOPE_VSYS, name, e)
-                  for e in _entries(vsys.get(object_key))]
+        if name and vsys.get(object_key) is not None:
+            found.append((CertificateProfile.SCOPE_VSYS, name, vsys.get(object_key)))
 
     if predefined is not None:
         pre = predefined.payload or {}
-        if isinstance(pre, dict):
-            found += [ScopedEntry(CertificateProfile.SCOPE_PREDEFINED, "", e)
-                      for e in _entries(pre.get(object_key))]
+        if isinstance(pre, dict) and pre.get(object_key) is not None:
+            found.append((CertificateProfile.SCOPE_PREDEFINED, "", pre.get(object_key)))
     return found
+
+
+def scoped_entries(snapshot: Snapshot, object_key: str,
+                   predefined: Snapshot | None = None) -> list[ScopedEntry]:
+    """Every definition of `object_key`, from every scope it can occupy.
+
+    Object-type agnostic, as are `ScopedEntry` and `write_scoped_objects` below. They live in a
+    certificate-named module because certificates needed them first; authentication profiles
+    import them from here. Worth moving to their own module the next time this file is opened
+    for another reason - not worth a risky move on its own.
+    """
+    return [ScopedEntry(scope, vsys, entry)
+            for scope, vsys, node in scoped_nodes(snapshot, object_key, predefined)
+            for entry in _entries(node)]
 
 
 def _algorithms(protocol_settings: dict[str, Any]) -> tuple[dict[str, bool], list[str]]:
@@ -203,16 +214,24 @@ def _algorithms(protocol_settings: dict[str, Any]) -> tuple[dict[str, bool], lis
 
 
 def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
-           rows: list[tuple[ScopedEntry, dict[str, Any]]]):
+           rows: list[tuple[ScopedEntry, dict[str, Any]]], extra_key: str | None = None):
+    """Write one row per scoped entry, replacing whatever the appliance held before.
+
+    `extra_key` names a field that is part of the object's identity ALONGSIDE the scope and the
+    name. Server profiles need it: six kinds live in six sibling containers, so one appliance can
+    hold a `shared` saml-idp and a `shared` radius, and keying on the name alone would make the
+    second overwrite the first and the count come out short.
+    """
     content_type = ContentType.objects.get_for_model(model)
     with transaction.atomic():
         seen = []
         for scoped, defaults in rows:
+            lookup = {"appliance": appliance, "scope": scoped.scope,
+                      "vsys_name": scoped.vsys_name, "name": scoped.entry["@name"]}
+            if extra_key:
+                lookup[extra_key] = defaults[extra_key]
             obj, _ = model.objects.update_or_create(
-                appliance=appliance,
-                scope=scoped.scope,
-                vsys_name=scoped.vsys_name,
-                name=scoped.entry["@name"],
+                **lookup,
                 defaults={
                     "management_station": appliance.management_station,
                     "appliance_group": appliance.appliance_group,

@@ -298,6 +298,5 @@ def normalize_show_managed_devices(
         appliance_groups=list(groups_by_id.values()),
         enforcement_points=list(enforcement_points_by_id.values()),
         enforcement_nodes=list(enforcement_nodes_by_id.values()),
-        device_configuration_profiles=[],
         security_rules=[],
     )

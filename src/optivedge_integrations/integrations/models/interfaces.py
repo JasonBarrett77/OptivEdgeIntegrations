@@ -11,7 +11,7 @@ So this model IS the join. It exists so that "which interfaces does this applian
 has an answer that does not depend on the interface happening to be something else.
 
 Scoped to an appliance, and normalized for EVERY appliance including both members of an HA
-pair - the same convention as DeviceConfigurationProfile and ManagementInterface, the two
+pair - the same convention as ManagementInterface and the device-wide settings models, the
 models this sits beside.
 
 An earlier version populated only the active member. That gave the model appliance-anchored

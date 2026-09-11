@@ -20,9 +20,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.addresse
     normalize_addresses,
     normalize_appliance_group_shared_objects,
 )
-from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
-    normalize_device_configuration_profile,
-)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
     NormalizedDynamicAddressContent,
     normalize_enforcement_point_dynamic_address_content,
@@ -31,11 +28,38 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     normalize_security_rules,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import PANOSNormalizedCollection
+from optivedge_integrations.integrations.platforms.pan_os.normalization.authentication_settings import (
+    normalize_authentication_settings,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.login_banner import (
+    normalize_login_banner,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.management_tls import (
+    normalize_management_tls,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.master_key import (
+    normalize_master_key,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.services_settings import (
+    normalize_services_settings,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.password_complexity import (
+    normalize_password_complexity,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.password_profiles import (
     normalize_password_profiles,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.authentication import (
     normalize_authentication_profiles,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.admin_users import (
+    normalize_admin_users,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.authentication_sequences import (
+    normalize_authentication_sequences,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.server_profiles import (
+    normalize_server_profiles,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     normalize_certificate_objects,
@@ -69,13 +93,8 @@ def normalize_collected_response(
         appliance_groups=[],
         enforcement_points=[],
         enforcement_nodes=[],
-        device_configuration_profiles=[],
         security_rules=[],
     )
-
-
-def normalize_appliance_device_configuration(appliance: Appliance) -> PANOSNormalizedCollection:
-    return normalize_device_configuration_profile(appliance)
 
 
 def normalize_enforcement_point_security_rules(enforcement_point: EnforcementPoint) -> PANOSNormalizedCollection:
@@ -95,14 +114,62 @@ def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> li
     return normalize_zones(enforcement_point)
 
 
+def normalize_appliance_management_tls(appliance: Appliance) -> dict:
+    """The management interface's SSL/TLS binding. PAN-MGT-010 and PAN-CRT-006.
+
+    Must run after `normalize_appliance_certificate_objects`: it resolves over the profile ROWS.
+    """
+    return normalize_management_tls(appliance)
+
+
+def normalize_appliance_master_key(appliance: Appliance) -> dict:
+    """The master key state. PAN-CRT-007."""
+    return normalize_master_key(appliance)
+
+
+def normalize_appliance_services_settings(appliance: Appliance) -> dict:
+    """Update server verification and the high-DP-load logging setting. PAN-MGT-009 and 011."""
+    return normalize_services_settings(appliance)
+
+
+def normalize_appliance_login_banner(appliance: Appliance) -> dict:
+    """The management login banner and its acknowledgement. PAN-MGT-007 and 008."""
+    return normalize_login_banner(appliance)
+
+
+def normalize_appliance_authentication_settings(appliance: Appliance) -> dict:
+    """Device-wide administrator authentication settings. PAN-AUTH-014 to 017."""
+    return normalize_authentication_settings(appliance)
+
+
+def normalize_appliance_password_complexity(appliance: Appliance) -> dict:
+    """The global minimum password complexity. PAN-AUTH-001 to 013."""
+    return normalize_password_complexity(appliance)
+
+
 def normalize_appliance_password_profiles(appliance: Appliance) -> dict:
     """Password profiles, with the global policy each one would override."""
     return normalize_password_profiles(appliance)
 
 
+def normalize_appliance_server_profiles(appliance: Appliance) -> dict:
+    """Every AAA server profile on one appliance, in every scope, with its referrer count."""
+    return normalize_server_profiles(appliance)
+
+
+def normalize_appliance_admin_users(appliance: Appliance) -> dict:
+    """Every administrator account under mgt-config/users, with the superuser total."""
+    return normalize_admin_users(appliance)
+
+
 def normalize_appliance_authentication_profiles(appliance: Appliance) -> dict:
     """Authentication profiles, in every scope they occupy."""
     return normalize_authentication_profiles(appliance)
+
+
+def normalize_appliance_authentication_sequences(appliance: Appliance) -> dict:
+    """Authentication sequences, in every scope - after profiles, before admin users."""
+    return normalize_authentication_sequences(appliance)
 
 
 def normalize_appliance_certificate_objects(appliance: Appliance) -> dict:
@@ -130,9 +197,17 @@ __all__ = [
     "NormalizedInterfaces",
     "PANOSNormalizedCollection",
     "normalize_addresses",
-    "normalize_appliance_device_configuration",
     "normalize_appliance_group_shared_scope",
+    "normalize_appliance_admin_users",
+    "normalize_appliance_server_profiles",
     "normalize_appliance_authentication_profiles",
+    "normalize_appliance_authentication_sequences",
+    "normalize_appliance_authentication_settings",
+    "normalize_appliance_login_banner",
+    "normalize_appliance_management_tls",
+    "normalize_appliance_master_key",
+    "normalize_appliance_services_settings",
+    "normalize_appliance_password_complexity",
     "normalize_appliance_password_profiles",
     "normalize_appliance_certificate_objects",
     "normalize_appliance_interface_management_profiles",
@@ -142,7 +217,6 @@ __all__ = [
     "normalize_enforcement_point_dynamic_address_content",
     "normalize_enforcement_point_security_rules",
     "normalize_enforcement_point_zones",
-    "normalize_device_configuration_profile",
     "normalize_collected_response",
     "normalize_security_rules",
     "normalize_show_managed_devices",

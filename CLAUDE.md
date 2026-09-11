@@ -151,9 +151,11 @@ agree — `bound_interface_count` and `SslTlsServiceProfile.allows_sha1` both do
 
 **Every normalized model that can carry a pushed value uses `ProvenancedMixin` and writes
 `FieldProvenance` rows. Do not invent a second mechanism.** `SecurityRule`,
-`DeviceConfigurationProfile`, `PolicyObjectBase` (address objects, groups, regions),
+`PolicyObjectBase` (address objects, groups, regions), the seven device-wide settings models
+(`PasswordComplexityPolicy`, `AuthenticationSettings`, `LoginBanner`, `ManagementTlsBinding`,
+`MasterKey`, `UpdateServerSettings`, `LoggingSettings`), `AdminUser`, `PasswordProfile`,
 `InterfaceManagementProfile`, `ManagementInterface`, `ManagementService` and `PermittedSource`
-all do this, and five normalizers write the rows.
+all do this, and fourteen normalizer modules write the rows.
 
 The helpers in `platforms/pan_os/normalization/common.py` are the only supported way to read
 it. Use them rather than inspecting `@ptpl` by hand:
@@ -259,7 +261,7 @@ is already read per appliance; keep it that way.
 
 `Snapshot` (raw collected JSON payload + metadata) attaches to **exactly one** scope target
 (management_station / appliance_group / appliance / enforcement_point / enforcement_node) — `clean()`
-enforces this. Everything downstream (normalization, `DeviceConfigurationProfile`, policy objects) traces
+enforces this. Everything downstream (normalization, the device-wide settings models, policy objects) traces
 back to a source `Snapshot`.
 
 ### Scoped policy objects are owned by their SCOPE, not by the collection that found them
@@ -992,8 +994,8 @@ and it silently disables the pushed-shared path.
 
 ### Management surfaces are a second model, not more fields
 
-`DeviceConfigurationProfile` models one appliance's management-plane settings — services,
-banner, idle timeout — and is one row per appliance. It does **not** model administrative
+The device-wide settings models — `LoginBanner`, `AuthenticationSettings`, `UpdateServerSettings`
+and the rest — are one row per appliance. None of them models administrative
 *surfaces*: three exist on the management side alone (MGT, aux-1, aux-2), and a fourth axis
 lives entirely outside `deviceconfig`, since any layer-3 data-plane interface may carry an
 `interface-management-profile`.

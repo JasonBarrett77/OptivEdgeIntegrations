@@ -916,7 +916,7 @@ def normalize_appliance_group_shared_objects(appliance_group: ApplianceGroup) ->
         return PANOSNormalizedCollection(
             address_objects=[], address_groups=[], regions=[], appliances=[],
             appliance_groups=[], enforcement_points=[], enforcement_nodes=[],
-            device_configuration_profiles=[], security_rules=[],
+            security_rules=[],
         )
 
     def union(collected: dict, normalized_items, kind: str) -> None:
@@ -971,7 +971,6 @@ def normalize_appliance_group_shared_objects(appliance_group: ApplianceGroup) ->
         appliance_groups=[],
         enforcement_points=[],
         enforcement_nodes=[],
-        device_configuration_profiles=[],
         security_rules=[],
         policy_object_issues=issues,
     )
@@ -998,7 +997,6 @@ def normalize_addresses(enforcement_point: EnforcementPoint) -> PANOSNormalizedC
         appliance_groups=[],
         enforcement_points=[],
         enforcement_nodes=[],
-        device_configuration_profiles=[],
         security_rules=[],
         policy_object_issues=issues,
     )
