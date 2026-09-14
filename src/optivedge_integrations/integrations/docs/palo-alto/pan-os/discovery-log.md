@@ -36,6 +36,32 @@ Entry shape:
 
 
 
+
+## 2026-09-14 — the SSH host key option nobody had measured, and the keys it leaves behind
+
+**Did:** Jason sent screenshots of every SSH service-profile dropdown for due diligence. Ciphers
+(8), MAC (3) and KEX (4) matched what was already recorded; Hostkey showed a third option, ALL,
+which had never been measured. Wrote `<all/>` into tpa-a's bound profile, committed, restarted SSH
+and read the offer; then deleted the node, then set RSA 2048 explicitly, reading the offer each
+time.
+
+**Found:** `all` takes no key size and serves every type at once - RSA plus ecdsa-sha2-nistp256/384
+/521. It also GENERATES those keys, and deleting the setting does not withdraw them: tpa-a still
+offers all four after the delete and a restart. Naming a type explicitly suppresses the others, so
+`key-type RSA 2048` returned it to RSA alone, but removing the setting again restored the full
+list. On a device that has ever been set to `all`, an absent default-hostkey no longer means "RSA
+2048 only".
+
+**Landed:** payload contract, and PAN-MCR-004, which now fires on `all` - it had been passing such
+a device silently while an RSA 2048 key was still being presented. tpa-a was then set explicitly to
+`key-type RSA 2048`, a state the UI can produce, so the device is a PAN-MCR-004 subject again and
+the wire agrees with the model.
+
+**Open:** Whether `regenerate-hostkeys` (a config node with mgmt and ha children) withdraws the
+extra keys. The ECDSA keys `all` generated are still on tpa-a; naming RSA explicitly stops them
+being served, but nothing measured so far removes them.
+
+---
 ## 2026-09-11 — is an empty SSH KEX list different from an absent one?
 
 **Did:** Wrote `<kex/>` with no members into tpa-a's bound SSH profile, read it back, committed,

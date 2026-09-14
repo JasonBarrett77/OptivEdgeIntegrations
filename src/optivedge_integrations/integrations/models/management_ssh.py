@@ -1,6 +1,6 @@
 """Device > Setup > Management > SSH Management Profiles - what the management SSH server offers.
 
-PAN-MCR-001 and 003's subject. One row per appliance, like `ManagementTlsBinding`: the SSH
+PAN-MCR-001 to 005's subject. One row per appliance, like `ManagementTlsBinding`: the SSH
 server is the device's, and a profile only narrows it.
 
 THE ROW STORES THE EFFECTIVE OFFER, not the profile, because the two differ in measured ways
@@ -61,24 +61,49 @@ class ManagementSshSettings(ProvenancedMixin, SyncTrackedModel):
     #: default is not in the configuration; for an unmeasured release the 11.1 offer stands in.
     defaults_measured = models.BooleanField(default=False)
 
-    #: PAN-MCR-001: a CBC cipher is offered. None is in the 11.1 default; only a profile adds one.
+    #: WHAT THE CONTROLS ASSERT, one flag per list: the offer holds the corpus PREFERRED
+    #: algorithm and nothing outside the set that value's description allows.
+    #:
+    #: The corpus parentheticals are not decoration, and they differ in kind. Two of them ADD a
+    #: compatibility algorithm to the preferred one - "AES-256-GCM (add aes256-ctr for older
+    #: clients)", "hmac-sha2-512 (keep 256 for compatibility)" - so the allowed set is wider
+    #: than the preferred name, while a list missing that name still fires. PAN-MCR-002's names
+    #: ALTERNATES - "ECDH over NIST P-256 (or P-384/curve25519 where supported)" - so any member
+    #: of its set satisfies it.
+    #:
+    #: `non_preferred_*` carries the members that put the list outside the set, and is EMPTY
+    #: when the only fault is a missing preferred algorithm. A finding needs to tell those
+    #: apart: one says remove something, the other says add something.
+    ciphers_below_preferred = models.BooleanField(default=False)
+    non_preferred_ciphers = models.JSONField(default=list, blank=True)
+    kex_below_preferred = models.BooleanField(default=False)
+    non_preferred_kex = models.JSONField(default=list, blank=True)
+    macs_below_preferred = models.BooleanField(default=False)
+    non_preferred_macs = models.JSONField(default=list, blank=True)
+
+    #: The flags below are the corpus MINIMUMS. No control asserts them any more - the preferred
+    #: value replaced the minimum on 2026-09-14 - and they are kept because a finding that names
+    #: the worst thing in a list reads better than one naming the whole list: "CBC ciphers
+    #: aes128-cbc" is a sharper sentence than "ciphers outside the preferred set".
+    #: A CBC cipher is offered. None is in the 11.1 default; only a profile adds one.
     offers_cbc_cipher = models.BooleanField(default=False)
-    #: PAN-MCR-003: a MAC other than HMAC-SHA2 is offered - `hmac-sha1`, and the default's
-    #: `umac-*` and `hmac-sha1-etm`. The corpus minimum restricts integrity to SHA-2.
+    #: A MAC other than HMAC-SHA2 is offered - `hmac-sha1`, and the default's `umac-*` and
+    #: `hmac-sha1-etm`.
     offers_weak_mac = models.BooleanField(default=False)
     weak_macs = models.JSONField(default=list, blank=True)
-    #: `diffie-hellman-group14-sha1` is offered. It is the corpus MINIMUM for PAN-MCR-002, so
-    #: recorded, not asserted on.
+    #: `diffie-hellman-group14-sha1` is offered.
     offers_sha1_kex = models.BooleanField(default=False)
     #: A KEX BELOW the corpus minimum - group1-sha1 or group-exchange-sha1. Neither is selectable
     #: in a profile nor in the measured 11.1/11.2 default, so this is false everywhere measured;
     #: it exists so a release that offers one reports rather than passing silently.
     offers_weak_kex = models.BooleanField(default=False)
-    #: `hmac-sha2-256` (or its -etm form) is offered - the corpus band for PAN-MCR-003 grades a
-    #: profile whose weakest MAC is SHA2-256 as a preferred-state gap.
+    #: `hmac-sha2-256` (or its -etm form) is offered.
     offers_sha2_256_mac = models.BooleanField(default=False)
 
-    #: Effective host key. Help p.904: default RSA 2048.
+    #: Effective host key. Help p.904: default RSA 2048. `all` is a type in its own right,
+    #: measured 2026-09-14: it takes no size (so `host_key_bits` is 0) and serves RSA AND all
+    #: three ECDSA curves at once, which is why PAN-MCR-004 fires on it - an RSA 2048 key is
+    #: still presented.
     host_key_type = models.CharField(max_length=8, blank=True, default="RSA")
     host_key_bits = models.PositiveIntegerField(default=2048)
     #: Session rekey triggers. 0 is the default for each: no time-based rekey, the cipher's own

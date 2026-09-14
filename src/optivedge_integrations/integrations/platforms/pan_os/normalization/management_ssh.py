@@ -1,4 +1,4 @@
-"""The management SSH server's configured offer - PAN-MCR-001 and 003.
+"""The management SSH server's configured offer - PAN-MCR-001 to 005.
 
 Reads `deviceconfig/system/ssh`: the `mgmt/server-profile` binding, and the bound entry under
 `profiles/mgmt-profiles/server-profiles`. Each algorithm list is the profile's when it sets one
@@ -45,9 +45,43 @@ FALLBACK_RELEASE = "11.1"
 #: Below PAN-MCR-002's corpus minimum. RFC 9142: group1 is "too weak to be retained" and
 #: group-exchange-sha1 "SHOULD NOT be used".
 WEAK_KEX = frozenset({"diffie-hellman-group1-sha1", "diffie-hellman-group-exchange-sha1"})
-#: The corpus minimum for PAN-MCR-003 restricts session integrity to SHA-2.
+#: The corpus minimum for PAN-MCR-003 restricts session integrity to SHA-2. No control asserts
+#: this any more; it colours the finding sentence. See the model for why it was kept.
 STRONG_MACS = frozenset({"hmac-sha2-256", "hmac-sha2-512",
                          "hmac-sha2-256-etm@openssh.com", "hmac-sha2-512-etm@openssh.com"})
+
+#: WHAT PAN-MCR-001, 002 and 003 ASSERT, since 2026-09-14: the corpus PREFERRED value, with the
+#: set that value's description explicitly allows alongside it. Two of the three ADD a
+#: compatibility algorithm to the preferred one and one names ALTERNATES to it - see the model
+#: for the wording. Where PREFERRED holds a single name, a list lacking it fires even when
+#: everything in the list is allowed; where it holds several, any one of them satisfies it.
+#:
+#: Compared on the BARE name: the device's wire names carry `@openssh.com` or `@libssh.org` and
+#: a profile's do not, and `aes256-gcm@openssh.com` is `aes256-gcm`.
+PREFERRED_CIPHERS = frozenset({"aes256-gcm"})
+ALLOWED_CIPHERS = PREFERRED_CIPHERS | {"aes256-ctr"}
+PREFERRED_KEX = frozenset({"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha2-nistp521",
+                           "curve25519-sha256"})
+ALLOWED_KEX = PREFERRED_KEX
+PREFERRED_MACS = frozenset({"hmac-sha2-512", "hmac-sha2-512-etm"})
+ALLOWED_MACS = PREFERRED_MACS | {"hmac-sha2-256", "hmac-sha2-256-etm"}
+
+
+def _bare(algorithm: str) -> str:
+    """`aes256-gcm@openssh.com` -> `aes256-gcm`; the suffix names a source, not an algorithm."""
+    return str(algorithm).split("@", 1)[0]
+
+
+def _preferred_state(offer: list[str], preferred: frozenset[str],
+                     allowed: frozenset[str]) -> tuple[bool, list[str]]:
+    """(the control fires, the offered members outside `allowed`).
+
+    Either fault fires it: something outside the allowed set is offered, or nothing from the
+    preferred set is. The list is empty in the second case, which is how the finding tells
+    "remove this" apart from "add that".
+    """
+    beyond = [a for a in offer if _bare(a) not in allowed]
+    return bool(beyond) or not any(_bare(a) in preferred for a in offer), beyond
 
 
 def _release(appliance: Appliance) -> str:
@@ -101,6 +135,10 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
     key_type, key_bits = _host_key(profile) if profile else ("RSA", 2048)
     rekey = (profile or {}).get("session-rekey") or {}
     weak = [m for m in offer["macs"] if m not in STRONG_MACS]
+    ciphers_below, beyond_ciphers = _preferred_state(
+        offer["ciphers"], PREFERRED_CIPHERS, ALLOWED_CIPHERS)
+    kex_below, beyond_kex = _preferred_state(offer["kex"], PREFERRED_KEX, ALLOWED_KEX)
+    macs_below, beyond_macs = _preferred_state(offer["macs"], PREFERRED_MACS, ALLOWED_MACS)
 
     content_type = ContentType.objects.get_for_model(ManagementSshSettings)
     with transaction.atomic():
@@ -119,6 +157,12 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
                 "kex_default": from_default["kex"],
                 "macs_default": from_default["macs"],
                 "defaults_measured": release in DEFAULT_OFFER,
+                "ciphers_below_preferred": ciphers_below,
+                "non_preferred_ciphers": beyond_ciphers,
+                "kex_below_preferred": kex_below,
+                "non_preferred_kex": beyond_kex,
+                "macs_below_preferred": macs_below,
+                "non_preferred_macs": beyond_macs,
                 "offers_cbc_cipher": any(c.endswith("-cbc") for c in offer["ciphers"]),
                 "offers_weak_mac": bool(weak),
                 "weak_macs": weak,
