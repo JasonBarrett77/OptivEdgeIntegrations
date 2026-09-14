@@ -74,11 +74,25 @@ class ManagementSshSettings(ProvenancedMixin, SyncTrackedModel):
     #: `non_preferred_*` carries the members that put the list outside the set, and is EMPTY
     #: when the only fault is a missing preferred algorithm. A finding needs to tell those
     #: apart: one says remove something, the other says add something.
-    ciphers_below_preferred = models.BooleanField(default=False)
+    #:
+    #: THEY DEFAULT TO THE FIRING VALUE, and that is the whole point of the default rather than
+    #: an accident of which way the boolean runs. These columns were ADDED to rows that already
+    #: existed (migration 0057), and a migration does not compute them - so on a database that
+    #: was migrated and reseeded but not RE-NORMALIZED they sit at their default on every row.
+    #: Had that default been False, PAN-MCR-001, 002 and 003 would have reported a clean estate:
+    #: not an error, not an empty page, three controls quietly passing every device, which is
+    #: indistinguishable from a hardened environment. Found by a peer session 2026-09-14 on a
+    #: copy of the lab database, one day after the columns shipped.
+    #:
+    #: The rule this follows is already in the codebase: `MasterKey` records a key nobody asked
+    #: about as UNDETERMINED, which FIRES, because "we never asked" must not look like "we asked
+    #: and it was fine". A derived column has the same obligation - never computed must not read
+    #: as compliant. Re-normalizing sets all six honestly and contacts no device.
+    ciphers_below_preferred = models.BooleanField(default=True)
     non_preferred_ciphers = models.JSONField(default=list, blank=True)
-    kex_below_preferred = models.BooleanField(default=False)
+    kex_below_preferred = models.BooleanField(default=True)
     non_preferred_kex = models.JSONField(default=list, blank=True)
-    macs_below_preferred = models.BooleanField(default=False)
+    macs_below_preferred = models.BooleanField(default=True)
     non_preferred_macs = models.JSONField(default=list, blank=True)
 
     #: The flags below are the corpus MINIMUMS. No control asserts them any more - the preferred

@@ -37,6 +37,7 @@ from .management_tls import ManagementTlsBinding
 from .management_ssh import ManagementSshSettings
 from .master_key import MasterKey
 from .services_settings import LoggingSettings, UpdateServerSettings
+from .device_services import NtpSettings, SnmpSettings, SystemIdentity
 from .password_complexity import PasswordComplexityPolicy
 from .password_profile import PasswordProfile, expiration_weakens
 from .notes import Note
@@ -108,6 +109,9 @@ __all__ = [
     "ManagementTlsBinding",
     "ManagementSshSettings",
     "MasterKey",
+    "NtpSettings",
+    "SnmpSettings",
+    "SystemIdentity",
     "UpdateServerSettings",
     "PasswordComplexityPolicy",
     "PasswordProfile",

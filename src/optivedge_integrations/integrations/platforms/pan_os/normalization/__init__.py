@@ -50,6 +50,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.master_k
 from optivedge_integrations.integrations.platforms.pan_os.normalization.services_settings import (
     normalize_services_settings,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.device_services import (
+    normalize_device_services,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.password_complexity import (
     normalize_password_complexity,
 )
@@ -144,6 +147,15 @@ def normalize_appliance_services_settings(appliance: Appliance) -> dict:
     return normalize_services_settings(appliance)
 
 
+def normalize_appliance_device_services(appliance: Appliance) -> dict:
+    """NTP, SNMP and system identity. PAN-SVC-001, 002, 004, 005, 007 and 009.
+
+    MUST run after `normalize_appliance_management_interfaces`: whether SNMP is reachable is a
+    property of the surfaces that normalizer writes, not of the `snmp-setting` subtree.
+    """
+    return normalize_device_services(appliance)
+
+
 def normalize_appliance_login_banner(appliance: Appliance) -> dict:
     """The management login banner and its acknowledgement. PAN-MGT-007 and 008."""
     return normalize_login_banner(appliance)
@@ -221,6 +233,7 @@ __all__ = [
     "normalize_appliance_management_ssh",
     "normalize_appliance_master_key",
     "normalize_appliance_services_settings",
+    "normalize_appliance_device_services",
     "normalize_appliance_password_complexity",
     "normalize_appliance_password_profiles",
     "normalize_appliance_certificate_objects",

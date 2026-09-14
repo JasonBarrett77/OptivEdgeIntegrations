@@ -37,6 +37,46 @@ Entry shape:
 
 
 
+## 2026-09-14 — device services: what a completion list does not tell you
+
+**Did:** Enumerated `ntp-servers`, `snmp-setting` and the `deviceconfig/system` identity leaves on
+a PA-5220 and a PA-VM for PAN-SVC-001, 002, 004, 005, 007 and 009, then built the missing lab
+subjects on the two PA-5220s.
+
+**Found:** Four things, three of them from refusals rather than from reading.
+
+*A completion list does not say whether its values are TEXT or ELEMENTS.* `option` under an SNMP
+v3 view completes to `['include','exclude']`, and writing `<option><include/></option>` is refused
+— "option is invalid". Completing one level DEEPER is the discriminator: `option/include` returns
+`code=6 Invalid sequence`, which is what a text value looks like. `authproto` and `privproto` are
+the same, and their spellings are hyphenated — `SHA-256`, `AES-256`.
+
+*An NTP symmetric key must be exactly 40 characters*, because it is a SHA-1 digest rather than a
+passphrase. Help p.752 calls it only "the authentication key for the authentication algorithm" and
+gives no length; the device rejects a shorter one at the WRITE. It then stores it encrypted, so it
+reads back as a blob — a control can see that a key exists and never what it is.
+
+*An absent `deviceconfig/system/type` node is STATIC*, which is the unusual direction: absence is
+the safe state. fw-core-tpa-b carries no such node and compiles to `'ip-type': static` with
+`'disable-dhcp': True`, while `show system info` reports `is-dhcp: no`. Addressing mode is also
+MGT-only — completing `aux-1/type` returns Invalid sequence — so it is an appliance fact rather
+than a per-surface one.
+
+*PAN-OS 11.1 and 11.2 cannot express SNMP v1.* The version node completes to exactly `v2c` and
+`v3`, so PAN-SVC-004's title names a state no measured release can be in. And SNMP was exposed
+NOWHERE in the lab: `disable-snmp` is implicit yes and no compiled ACL on any surface carried it,
+so a device can hold a v2c community string that nothing can reach.
+
+**Landed:** payload contract (`ntp-servers`, `snmp-setting`, `system-identity`), three OEI models,
+and six controls. Subjects built on the PA-5220s only — SNMP v2c/`public` and NTP symmetric-key on
+tpa-b, SNMP v3 and UTC on tpa-a — because a device commit carries everything staged on that
+device, so work is split between sessions by DEVICE rather than by xpath.
+
+**Open:** whether an MD5 NTP key is 32 characters by the same rule. The write was taken twice
+before it succeeded, and both partial runs left staged changes that had to be reverted — a `set`
+that fails mid-script leaves the earlier ones in the candidate.
+
+---
 ## 2026-09-14 — the SSH host key option nobody had measured, and the keys it leaves behind
 
 **Did:** Jason sent screenshots of every SSH service-profile dropdown for due diligence. Ciphers

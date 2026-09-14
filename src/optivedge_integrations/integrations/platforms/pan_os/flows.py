@@ -61,6 +61,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_management_ssh,
     normalize_appliance_master_key,
     normalize_appliance_services_settings,
+    normalize_appliance_device_services,
     normalize_appliance_password_complexity,
     normalize_appliance_password_profiles,
     normalize_appliance_server_profiles,
@@ -669,6 +670,11 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     ("login banner", normalize_appliance_login_banner),
     ("master key", normalize_appliance_master_key),
     ("services settings", normalize_appliance_services_settings),
+    # Reads the same device entry as its neighbour above, and additionally resolves whether SNMP
+    # is REACHABLE over the ManagementService rows. Those are written before this loop starts,
+    # by normalize_appliance_management_interfaces - so the dependency is on the surrounding
+    # function's order rather than on this tuple's, and moving it within the tuple is safe.
+    ("device services", normalize_appliance_device_services),
     ("certificate objects", normalize_appliance_certificate_objects),
     # AFTER certificate objects, and it must stay after: the binding resolves over the
     # SslTlsServiceProfile rows that normalizer writes. Run first, it would find last run's
