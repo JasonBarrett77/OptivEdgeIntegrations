@@ -51,6 +51,7 @@ it pushes. Filing any of them under a plane would hide them from the others.
 |---|---|
 | `read-device-configuration.md` | Management-plane configuration, without reporting a device clean when it is not. |
 | `read-an-administrator-account.md` | Who can log in, with what privilege, and against what credential. |
+| `read-management-ssh.md` | What the CLI SSH server offers, the default it falls back to, and why configured is not in force. |
 
 ## Where a new guide goes
 
