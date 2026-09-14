@@ -285,7 +285,8 @@ fw-core-tpa-b, `fwadmin` and `fwmfa`, each bound per-account to the SAME authent
 and the SAME RADIUS server profile, neither with a local password: identical configuration but for
 the name. At the web interface `fwmfa` was prompted for an OTP after its password and `fwadmin`
 was not. The difference is a policy on the RADIUS server, which is why no control reading the
-firewall can say whether an administrator has MFA (PAN-AUTH-020, deferred). Over the XML API,
+firewall can say whether an administrator has MFA (PAN-AUTH-020, which is complete as an
+INTERVIEW question rather than a config check - Jason, 2026-09-14). Over the XML API,
 `type=keygen` as `fwmfa` was refused in 0.3s — the API cannot answer a RADIUS challenge, so an
 administrator whose MFA is a challenge cannot mint a key with a password.
 
