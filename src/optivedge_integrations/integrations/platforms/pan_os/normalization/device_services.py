@@ -12,6 +12,8 @@ reaches the object-normalizer tuple, which is what makes the ordering hold.
 
 from __future__ import annotations
 
+import re
+
 from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
@@ -191,12 +193,16 @@ def _identity(appliance, snapshot, system) -> None:
         mode_body.get("accept-dhcp-domain"), default_effective=False)
 
     # Help p.700: with no hostname written, PAN-OS uses the model - "for example, PA-5220_2".
-    # So the default name is the model, optionally suffixed; an absent hostname is the same
-    # state spelled differently.
+    # So the default name is the model, optionally suffixed with an index; an absent hostname is
+    # the same state spelled differently.
+    #
+    # The suffix is matched as DIGITS, not as any suffix. `startswith(f"{model}_")` also matched
+    # deliberately chosen names that lead with the model - `PA-5220_EDGE-01`, `PA-5220_DC1` - which
+    # is a real naming convention, and on such an estate every device reported as unnamed.
     model_name = (appliance.model or "").strip().lower()
     stored = hostname.strip().lower()
     factory = (not stored) or (bool(model_name) and (
-        stored == model_name or stored.startswith(f"{model_name}_")))
+        stored == model_name or re.fullmatch(rf"{re.escape(model_name)}_\d+", stored) is not None))
 
     row, _ = SystemIdentity.objects.update_or_create(
         appliance=appliance,

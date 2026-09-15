@@ -202,14 +202,19 @@ class SystemIdentity(ProvenancedMixin, SyncTrackedModel):
         "integrations.Snapshot", on_delete=models.CASCADE, related_name="system_identities")
 
     hostname = models.CharField(max_length=64, blank=True)
-    #: PAN-SVC-009's first half. Help p.700: with no value written, PAN-OS uses the firewall
-    #: MODEL, "for example, PA-5220_2" - so this compares the stored name with `Appliance.model`
-    #: rather than pattern-matching a name. Also true when the key is absent, which is the same
-    #: state by a different spelling.
-    hostname_is_factory_default = models.BooleanField(default=False)
+    #: PAN-SVC-010. Help p.700: with no value written, PAN-OS uses the firewall MODEL, "for
+    #: example, PA-5220_2" - so this compares the stored name with `Appliance.model` plus an
+    #: optional numeric suffix, rather than pattern-matching a name. Also true when the key is
+    #: absent, which is the same state by a different spelling.
+    #:
+    #: DEFAULT TRUE, deliberately: the default is the value that FIRES. A migration creates the
+    #: column and only normalization fills it, so a migrate-and-reseed without a re-normalize must
+    #: be loud rather than reporting a clean estate. Its sibling `timezone_is_utc` defaults False
+    #: for the same reason.
+    hostname_is_factory_default = models.BooleanField(default=True)
 
     timezone = models.CharField(max_length=64, blank=True)
-    #: PAN-SVC-009's second half, and the corpus preferred value. `timezone` is a 566-value enum
+    #: PAN-SVC-009, and the corpus preferred value. `timezone` is a 566-value enum
     #: on both platforms; only one of them needs no offset arithmetic during log correlation.
     timezone_is_utc = models.BooleanField(default=False)
 
