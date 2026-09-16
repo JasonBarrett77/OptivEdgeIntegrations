@@ -37,6 +37,36 @@ Entry shape:
 
 
 
+## 2026-09-16 — what `service` on a security rule may hold, and when each half is enforced
+
+**Did:** Wrote five rule shapes to the vsys6 scratch rulebase on fw-core-tpa-a and committed
+each — no service element, `any`, `application-default`, an explicit object, and
+application-default beside an explicit object — plus `action=complete` on the service node and
+its member node. `scratch/lab_rule_service_probe.py` in OptivEdgeProbe.
+
+**Found:** The two halves are validated at different times, which is why one probe found both
+and a narrower one would have found neither. `service` is REQUIRED and enforced at the COMMIT:
+the service-less rule wrote cleanly and failed validation with "svc-probe-absent is missing
+'service'". `application-default` is EXCLUSIVE and enforced at the WRITE: code=12,
+"'application-default' should not be used with another service". Completing the member node
+returns the service objects and groups in scope plus exactly two specials, `any` and
+`application-default`; completing `service` itself returns nothing at all, so the member node is
+where the schema lives. `show running security-policy` resolves all three states on its
+application/service line — `0:any/any/any/any`, `0:any/any/any/app-default`, and
+`0:any/tcp/any/443` for an object.
+
+**Landed:** `reference/panos-payload-contract.json` gained a `security-rule-service` node.
+PAN-POL-004 is built on both facts: a rule with no service rows is excluded rather than
+reported, because absence cannot be an author's choice, and "has an application-default member"
+is one clause because it cannot share a list. A draft section for
+`policy/read-a-security-rule.md` is staged at
+`OptivEdgeProbe/scratch/doc-drafts/security-rule-service/`.
+
+**Open:** Whether a service GROUP containing only the ports an application uses is
+distinguishable from application-default in effective policy — the lab has no service group, so
+the group case is unmeasured in both the config and the resolved view. It changes nothing for
+the control, which reports any member that is not the literal.
+
 ## 2026-09-14 — device services: what a completion list does not tell you
 
 **Did:** Enumerated `ntp-servers`, `snmp-setting` and the `deviceconfig/system` identity leaves on
