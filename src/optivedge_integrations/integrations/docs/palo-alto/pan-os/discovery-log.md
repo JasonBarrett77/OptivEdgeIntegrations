@@ -37,6 +37,39 @@ Entry shape:
 
 
 
+## 2026-09-18 — is there an `action=complete` for operational commands?
+
+**Did:** Asked whether the XML API can complete an op command the way the CLI completes
+`show config pushed-shared-policy vsys <TAB>`. Ran `type=op&action=complete` in four shapes
+against fw-core-tpa-a, `type=config&action=complete` against an op path, and then compared how
+each config source answers the same question. `scratch/op_completion_probe.py` in OptivEdgeProbe.
+
+**Found:** No. `type=op&action=complete` returns `status=error code=17`, "No completions
+available", for every shape **including with no `cmd` at all** — which is what makes it an
+unimplemented action rather than a rejected command. `type=config&action=complete` on an op path
+is `code=6 Invalid sequence`. The API guide agrees: `action=complete` is listed only under
+configuration actions (p.22, p.25), and the documented way to explore op commands is the API
+Browser (p.36), a UI rather than an endpoint.
+
+The substitute is not the obvious one. The CLI's list matched the CANDIDATE, not the running
+config: `action=get` on the vsys container returns nine vsys including `vsys8`, with `vsys3` and
+`vsys8` display-names carrying `@src="tpl"`; `action=show` (running) returns eight and no
+display-name for vsys3; and `action=complete` on that container also returns eight. vsys8 is
+template-supplied and real — it appears in `merged`, `pushed-template` and `effective-running`,
+and `show config pushed-shared-policy vsys vsys8` is accepted (it returns an empty policy). So a
+collector enumerating vsys from `running`, or from `action=complete`, silently skips a live vsys.
+
+**Landed:** Corrections to two staged drafts in OptivEdgeProbe, both of which said `@src` does
+not exist on this hardware. It does: `action=get` over `/config` carries 29,859 of them, while
+`running`, `merged`, `pushed-template` and `effective-running` carry none and use `@ptpl`
+instead. `identify-a-vsys.md` has said `@src="tpl"` since it was written and was right; the
+2026-09-15 claim generalised four measurements into a statement about all reads.
+
+**Open:** Whether `action=complete` follows the running config in general or only here. It
+returned the eight vsys of `running` rather than the nine of the candidate, which is the
+opposite of what "completes what you may type into the candidate" would predict, and one node is
+not a rule.
+
 ## 2026-09-16 — what `service` on a security rule may hold, and when each half is enforced
 
 **Did:** Wrote five rule shapes to the vsys6 scratch rulebase on fw-core-tpa-a and committed
