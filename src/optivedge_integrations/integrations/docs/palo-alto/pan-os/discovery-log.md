@@ -37,6 +37,32 @@ Entry shape:
 
 
 
+## 2026-09-18 — what `action=complete` lists, which answers the question the entry below left open
+
+**Did:** That entry found `action=complete` on the vsys container returning eight vsys where the
+candidate holds nine, and left open whether that generalises. Compared `complete` against
+`action=show` (running) and `action=get` (candidate) on two containers that hold a
+template-supplied entry, plus one that holds none.
+
+**Found:** `complete` equals RUNNING membership exactly, on both.
+
+    vsys                     complete = the 8 in running; candidate adds vsys8 (template-only)
+    interface-mgmt profiles  complete = the 3 in running; candidate adds oep-tpl-bound
+    mgt-config users         no template-only entry, so complete = candidate = running (4)
+
+Template MARKING is not what decides it - five of the nine vsys carry template markers on their
+children and complete lists them. What is omitted is the entry that exists only in the pushed
+template and not in the device's own running config, which is also the entry a local edit cannot
+touch. So completion answers "what is on this device" rather than "what may you type", which is
+the opposite of the reading its name invites.
+
+**Landed:** A note in the staged `read-config-sources.md` draft, next to the running-membership
+rule it reinforces: `complete` is a second, much cheaper way to read that membership - one
+request returning names, against a full config read.
+
+**Open:** Two containers on one device. It is a rule about entry containers and says nothing
+about completing a leaf, where the returned values are an enum rather than a membership list.
+
 ## 2026-09-18 — is there an `action=complete` for operational commands?
 
 **Did:** Asked whether the XML API can complete an op command the way the CLI completes
