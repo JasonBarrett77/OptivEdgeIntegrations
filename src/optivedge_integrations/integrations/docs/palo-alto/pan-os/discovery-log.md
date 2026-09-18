@@ -37,6 +37,35 @@ Entry shape:
 
 
 
+## 2026-09-18 — `action=complete` lists the LOCAL config, not what the device is running
+
+**Did:** Jason asked which of the two the completion set actually is. The entry below says
+completion answers "what is on this device", which is loose enough to be wrong, so the four
+sources were parsed for their top-level vsys entries rather than substring-searched, and the
+device was asked whether it considers the missing vsys real.
+
+**Found:** It is the LOCAL set.
+
+    show config running          8   no vsys8
+    action=complete              8   no vsys8      <- matches running exactly
+    action=get (candidate)       9   vsys8
+    show config merged           9   vsys8
+    show config effective-running 9  vsys8
+
+And vsys8 is operating, not a staged artifact: `show config pushed-shared-policy vsys vsys8`
+returns success, while `vsys99` on the same command is refused - "vsys99 is invalid vsys" - so
+the device validates the name and accepts this one. `check pending-changes` says no.
+
+**So the phrasing in the entry below is wrong** and is corrected here: completion answers "what
+does this device define LOCALLY", not "what is on this device". vsys8 is on the device, it is in
+the effective running configuration, and completion does not list it.
+
+**Landed:** The `read-config-sources.md` draft now states it as local-only and names the
+consequence: enumerate vsys from `merged` or `effective-running` when the question is what the
+device is running, and from `running` or `complete` only when the question is what it defines
+itself. A collector that asks the second question while meaning the first drops a whole vsys of
+pushed policy - silently, because every other vsys still answers.
+
 ## 2026-09-18 — what `action=complete` lists, which answers the question the entry below left open
 
 **Did:** That entry found `action=complete` on the vsys container returning eight vsys where the
