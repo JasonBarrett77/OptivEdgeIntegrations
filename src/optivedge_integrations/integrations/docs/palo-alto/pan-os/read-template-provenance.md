@@ -4,7 +4,8 @@
 > does not tell you.
 
 *Established against the lab — PA-5220 HA pair on 11.1.13-h3, pushed from template stack
-`stack_fw-core-tpa`. Re-verify after a PAN-OS upgrade.*
+`stack_fw-core-tpa`, and extended 2026-09-14/18 on fw-core-tpa-a and the PA-VM pan-fw-111, where
+the override rule and the detection signal were measured. Re-verify after a PAN-OS upgrade.*
 
 ## A pushed value carries `@ptpl`; an override removes it
 
@@ -15,13 +16,54 @@
 A locally defined value carries nothing and is a bare string. Overriding a pushed value on
 the device makes it look locally defined — which is the whole difficulty below.
 
-## Override granularity differs by object
+## An override replaces the object with what was submitted
 
-| object | override granularity | what loses `@ptpl` |
-|---|---|---|
-| interface management profile | the whole **entry** | every attribute on the profile, and every leaf inside it |
-| `deviceconfig/system` planes | the individual **leaf** | only the overridden leaf; its siblings keep theirs |
-| administrator account (`mgt-config/users/entry`) | the whole **entry** | every child — and a child the override did not touch is DROPPED, not inherited |
+`[CORRECTED 2026-09-14]` This section used to give a table of override *granularities* per object
+type, and said that on an entry-level object "a child the override did not touch is DROPPED, not
+inherited". That is not a property of the object type, and a measurement on
+`interface-management-profile/entry[oep-tpl-unused]` shows the opposite outcome on an object the
+table put in the dropping column:
+
+    child      effective   running   merged   pushed-template
+    /http      yes         yes       yes      -                 <- local-only, added by the override
+    /https     yes         yes       yes      yes               <- template child SURVIVED
+    /ping      yes         yes       yes      yes               <- template child SURVIVED
+
+The rule that explains every case, measured:
+
+> **The element submitted with `action=override` BECOMES the object. Anything absent from that
+> element is gone from the effective configuration** — even though the template still supplies
+> it and still reports it in `pushed-template`.
+
+Nothing is dropped because of what KIND of object it is. Things are missing because the element
+that replaced the object did not carry them:
+
+- `mgt-config/users/entry[jb]` lost its `phash` — the web-UI override submitted an account form
+  that did not carry the hash.
+- `interface-management-profile/entry[oep-tpl-unused]` kept `https` and `ping` — whatever
+  produced that override included them.
+- Three controlled experiments — syslog under `/shared`, an LDAP server profile under `/shared`,
+  syslog under a vsys — each dropped exactly the optional children omitted from the element, on
+  two platforms.
+
+What DOES differ by object is the depth the `@ptpl` marker is lost at, which is a different
+question and the one the table below answers:
+
+| object | what loses `@ptpl` |
+|---|---|
+| interface management profile | every attribute on the profile, and every leaf inside it |
+| `deviceconfig/system` planes | only the overridden leaf; its siblings keep theirs |
+| administrator account (`mgt-config/users/entry`) | every child of the entry |
+
+### `action=override` mechanics, measured
+
+- `xpath` names the **parent container**; the element carries `<entry name=…>`. Passing the entry
+  as the xpath yields `Bad xpath …/entry[@name='X']/entry[@name='X']`.
+- The element is **schema-validated in full**. A fragment naming only the field to change is
+  refused (`code=12 … is missing 'server'`), so mandatory children must be restated — which is
+  also why an override so easily drops what nobody thought to restate.
+- Fully reversible: deleting the local entry and committing restored every artifact to baseline,
+  drift 0, on both platforms.
 
 Measured side by side on one HA pair, same template stack, one peer overridden and one not:
 
@@ -51,6 +93,28 @@ replaces the entry with whatever the device-side form saved.
 So a profile has **one** provenance and a management plane has **one per field**. Code that
 reads provenance at a fixed depth is right for one of them and wrong for the other, and the
 depth has to be decided per object rather than once.
+
+## `pushed-template` is not evidence of the effective value
+
+After an override, the template still reports **every** value it supplies for that object, and
+the device uses none of them. The override replaced the object, so anything it did not restate
+is simply absent — and credentials get no special treatment:
+
+- `aegis_ldap_prof_2`: the override omitted `ssl`, `bind-dn` and `bind-password`, and all three
+  dropped. The password went for exactly the same reason `ssl` did.
+- Two syslog overrides omitted `facility`, `format` and `transport`; all three dropped each time,
+  and none of those is a credential.
+- `jb` holds exactly what its override submitted — `authentication-profile` and `permissions`.
+  There is no `phash`, because the override carried none.
+
+The effective configuration matches what was submitted, so this is not a device defect. It is a
+**collector trap**: a reader of `pushed-template` alone reports values that are not in force,
+`jb`'s password hash among them, and a reader of `merged` alone cannot see that the template ever
+supplied them.
+
+**Unmeasured:** whether the web UI's Override action pre-fills the form with the template's
+values. A hash cannot be shown in a form, so an administrator may not notice that a password is
+not carried over. That would be a usability trap and it has not been tested.
 
 ## A marker on a CONTAINER partitions nothing inside it
 
@@ -140,6 +204,38 @@ service is ON while `enable-log-high-dp-load` absent means it is OFF.
 It is surfaced now — `OptivEdgeProbe/scratch/provenance-for-artifacts.md` is the consumer
 contract. The local-versus-overridden distinction still is not, and still should not be.
 
+## Detecting an override, when something does need to
+
+The section above is about assessment, where the three cases collapse into one instruction. A
+consumer RECONSTRUCTING the configuration — working out which template values a device is
+actually using — does need to tell them apart, and the obvious signals do not work.
+
+**`@src` is a dead end for this.** The API Usage Guide (p.30) shows `action=override` elements
+decorated with `src="tpl"` on every node, and submitting an element so decorated changed nothing
+about the result. No `@src` appears in any of the four operational reads — `running`, `merged`,
+`pushed-template` or `effective-running`. It does exist on this hardware, in
+`type=config&action=get`: the candidate carries 29,859 of them over `/config` on fw-core-tpa-a,
+measured 2026-09-18. That is the wrong side of a commit to build detection on.
+
+**The marker is no use either**, because it is lost exactly where it cannot be read safely:
+
+    jb        pushed-template   attrs={'@name':'jb', '@ptpl':'creds_tpl'}
+              running           attrs={'@name':'jb'}                        <- marker GONE
+              merged            attrs={'@name':'jb'}
+              effective-running attrs={'@name':'jb'}
+
+    Private   every view        attrs={'@name':'Private', '@ptpl':'creds_tpl'}  <- never overridden
+
+`merged` follows the CANDIDATE, so a staged, uncommitted override already reads as lost there —
+measured, with five in-effect template values wrongly discarded — and `effective-running` needs
+superuser.
+
+**Detect from committed membership instead.** `running` holds no template content, so a
+template-supplied named entry that ALSO exists in `running` has a local copy, and that is an
+override. Exclude the structural containers `entry[localhost.localdomain]` and `entry[vsysN]`,
+which appear in both and merge normally. Measured on pan-fw-111: 100% with a clean candidate,
+100% with an override staged, and 100% through a committed override and its revert.
+
 ## `@ptpl` names a template **or** a stack, and the difference does not matter
 
 It names whichever container defined the value. On one device and one push,
@@ -151,12 +247,14 @@ parse it, and do not join it to the template list expecting a hit — a stack na
 
 ## Limits
 
-- Both override cases were produced through the web interface. The XML API refused a plain
-  `set` on a template-pushed profile entry ("may need to override template object ... first")
-  and refused `action=override` on it ("Object cannot be overridden"), so the API path the
-  web interface uses is **unmeasured**.
-- Only `@ptpl` was exercised. `@src` was seen on a container (`src="tpl"`) but never on an
-  overridden value, and device-group provenance for policy objects is untested here.
+- The first two override cases were produced through the web interface, and the XML API refused
+  both a plain `set` on a template-pushed profile entry ("may need to override template
+  object ... first") and `action=override` on that object ("Object cannot be overridden"). The
+  API path IS measured now, on other objects — see the mechanics above — so the refusal is a
+  fact about those objects rather than about the API.
+- `@src` is measured and is not usable for detection here: absent from all four operational
+  reads, present in the candidate only. See "Detecting an override" above. Device-group
+  provenance for policy objects is still untested here.
 - Three objects were compared. Whether any other object overrides at some third granularity is
   **unmeasured** — the working assumption is entry-level for named entries and leaf-level for
   everything else. The administrator account fits it, which is one more instance and still an
