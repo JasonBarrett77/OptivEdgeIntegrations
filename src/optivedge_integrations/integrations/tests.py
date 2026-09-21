@@ -6987,3 +6987,91 @@ class SecurityRuleLogFlagProvenanceTests(TestCase):
         rules = self._rules(self._entry("quiet"))
         row = self._provenance(rules["quiet"], "disabled")
         self.assertEqual((row.provenance_type, row.raw_value), ("pan_os_default", "no"))
+
+
+class DerivedFieldDeclarationTests(TestCase):
+    """`DERIVED_FIELDS` says which columns normalization WORKED OUT rather than read.
+
+    It replaces a list the xlsx prototype kept per SHEET, a repository away from the fields it
+    described. Declared on the model rather than written as rows because derived-ness belongs to
+    the field and never varies by object - 885 security rules would otherwise carry 885 identical
+    copies of a static fact.
+
+    The danger is a wrong declaration: marking a field the device actually wrote would tell a
+    reader "we computed this" about a value the firewall holds. `ca` on a certificate is the
+    near-miss - it looks like a verdict, reads a real key, and has a provenance row.
+    """
+
+    def _models(self):
+        from django.apps import apps
+        from optivedge_integrations.integrations.models.provenance import ProvenancedMixin
+        return [m for m in apps.get_models()
+                if issubclass(m, ProvenancedMixin) and not m._meta.abstract]
+
+    def test_every_declared_field_exists_on_its_model(self):
+        """A typo would silently declare nothing, and the field would read as untracked."""
+        for model in self._models():
+            names = {f.name for f in model._meta.get_fields()}
+            for field in model.DERIVED_FIELDS:
+                with self.subTest(f"{model.__name__}.{field}"):
+                    self.assertIn(field, names)
+
+    def test_no_declared_field_is_one_normalization_records_provenance_for(self):
+        """The contradiction that matters. If a normalizer writes a row for a field, that field
+        came from the payload and is not derived - whichever way round the mistake was made.
+
+        It can only catch what the database in front of it holds, so the authoritative run is
+        against a normalized lab. That run found the one real clash:
+        `SnmpSettings.community_is_default`, a verdict whose row is written deliberately because
+        the community string's value is never stored and the row is the only record of who set
+        it. The model says so where the declaration would have been.
+        """
+        from optivedge_integrations.integrations.models import FieldProvenance
+        from django.contrib.contenttypes.models import ContentType
+        clashes = []
+        for model in self._models():
+            if not model.DERIVED_FIELDS:
+                continue
+            recorded = set(FieldProvenance.objects.filter(
+                content_type=ContentType.objects.get_for_model(model),
+                field_name__in=model.DERIVED_FIELDS).values_list("field_name", flat=True))
+            clashes += [f"{model.__name__}.{name}" for name in sorted(recorded)]
+        self.assertEqual(clashes, [], "declared derived, but a row exists for it")
+
+    def test_provenance_for_answers_all_three_ways(self):
+        from optivedge_integrations.integrations.models import SystemIdentity
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.derived")
+        appliance = Appliance.objects.create(
+            management_station=station, serial_number="S-DERIVED", hostname="fw-derived")
+        snapshot = Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(), payload={})
+        identity = SystemIdentity.objects.create(
+            management_station=station, appliance=appliance, source_snapshot=snapshot,
+            hostname="fw-derived", timezone="UTC")
+        FieldProvenance.objects.create(
+            content_type=ContentType.objects.get_for_model(SystemIdentity),
+            object_id=identity.pk, field_name="timezone", provenance_type="local")
+
+        self.assertEqual(identity.provenance_for("timezone").provenance_type, "local")
+        self.assertEqual(identity.provenance_for("timezone_is_utc").provenance_type, "derived",
+                         "a computed column answers, rather than reading as untracked")
+        self.assertIsNone(identity.provenance_for("no_such_field"),
+                          "and None now means only that nothing tracks it")
+
+    def test_a_derived_answer_is_not_saved(self):
+        """It is a description of the field, not a fact about this row - persisting one would put
+        a static claim in as many copies as there are objects."""
+        from optivedge_integrations.integrations.models import SystemIdentity
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.derived2")
+        appliance = Appliance.objects.create(
+            management_station=station, serial_number="S-DERIVED2", hostname="fw-derived2")
+        snapshot = Snapshot.objects.create(
+            management_station=station, appliance=appliance, source_type="show_merged_config",
+            collected_at=timezone.now(), payload={})
+        identity = SystemIdentity.objects.create(
+            management_station=station, appliance=appliance, source_snapshot=snapshot)
+        identity.provenance_for("timezone_is_utc")
+        self.assertFalse(FieldProvenance.objects.filter(provenance_type="derived").exists())

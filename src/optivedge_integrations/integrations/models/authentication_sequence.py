@@ -26,6 +26,20 @@ class AuthenticationSequence(ApplianceScopedObject):
     consultant's call, and this model only records whether a local path exists.
     """
 
+    #: Computed here: methods resolved through the member profiles, and filtered subsets - `member_names` is the payload's own list and is deliberately not here. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "member_count",
+        "member_methods",
+        "local_member_names",
+        "has_local_member",
+        "unresolved_member_count",
+        "all_members_external",
+        "referrer_paths",
+        "referrer_count",
+        "is_administrative",
+    )
+
     #: Profile names, in the order the firewall tries them. Order is the meaning: the same two
     #: members the other way round put the local check FIRST.
     member_names = models.JSONField(default=list, blank=True)

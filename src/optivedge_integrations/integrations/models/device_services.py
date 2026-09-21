@@ -48,6 +48,13 @@ class NtpSettings(ProvenancedMixin, SyncTrackedModel):
     they are answering is a separate question this row does not claim to answer.
     """
 
+    #: Computed here: counts and a verdict over the two slots, not keys. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "server_count",
+        "all_servers_symmetric_key",
+        "unauthenticated_servers",
+    )
+
     class AuthType(models.TextChoices):
         NONE = "none", "None"
         SYMMETRIC_KEY = "symmetric-key", "Symmetric key"
@@ -122,6 +129,23 @@ class SnmpSettings(ProvenancedMixin, SyncTrackedModel):
     device can hold a v2c community string that nothing can reach. The finding says which it is.
     """
 
+    #: Computed here: verdicts over the snmp-setting node, plus the surface walk. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_configured",
+        "uses_v2c",
+        # `community_is_default` is NOT here, though it is every bit as computed. Normalization
+        # writes it a real provenance row on purpose: the community string's VALUE is never
+        # stored, so the row is the only place that says who set the credential - local, or a
+        # template, which is what an assessor asks about a secret they can read in a backup.
+        # Declaring it derived would hide that answer behind the word "Derived".
+        "community_set",
+        "version_implicit",
+        "v3_user_count",
+        "v3_view_count",
+        "is_exposed",
+        "exposed_surfaces",
+    )
+
     class Version(models.TextChoices):
         V2C = "v2c", "SNMPv2c"
         V3 = "v3", "SNMPv3"
@@ -185,6 +209,13 @@ class SystemIdentity(ProvenancedMixin, SyncTrackedModel):
     Hostname field" (Help p.701). A device whose address comes from DHCP can have its NAME come
     from DHCP too, so splitting them would put one half of that sentence on each of two tabs.
     """
+
+    #: Computed here: comparisons against the model name, UTC, and whether a type node was written. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "hostname_is_factory_default",
+        "timezone_is_utc",
+        "addressing_mode_explicit",
+    )
 
     class AddressingMode(models.TextChoices):
         STATIC = "static", "Static"

@@ -39,6 +39,12 @@ class PasswordProfile(ProvenancedMixin, SyncTrackedModel):
     note "flag any larger value" would report it wrongly.
     """
 
+    #: Computed here: a comparison against the device-wide policy. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "weakens_global_expiration",
+    )
+
     management_station = models.ForeignKey(
         "integrations.ManagementStation", on_delete=models.CASCADE,
         related_name="password_profiles")

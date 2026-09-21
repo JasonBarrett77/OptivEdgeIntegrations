@@ -12,6 +12,12 @@ from .base import CONFIG_SOURCE_CHOICES
 
 
 class SecurityRule(ProvenancedMixin, SyncTrackedModel):
+
+    #: Computed here: the position the dataplane evaluates this rule at, which no key carries. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "effective_order",
+    )
     SOURCE_LOCAL = "local"
     SOURCE_PUSHED_PRE = "pushed_pre"
     SOURCE_PUSHED_POST = "pushed_post"

@@ -27,6 +27,27 @@ from .provenance import ProvenancedMixin
 class ManagementSshSettings(ProvenancedMixin, SyncTrackedModel):
     """The management SSH server's configured offer, on one appliance."""
 
+    #: Computed here: verdicts over the offered lists; the lists themselves carry provenance. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "ciphers_default",
+        "kex_default",
+        "macs_default",
+        "defaults_measured",
+        "ciphers_below_preferred",
+        "non_preferred_ciphers",
+        "kex_below_preferred",
+        "non_preferred_kex",
+        "macs_below_preferred",
+        "non_preferred_macs",
+        "offers_cbc_cipher",
+        "offers_weak_mac",
+        "weak_macs",
+        "offers_sha1_kex",
+        "offers_weak_kex",
+        "offers_sha2_256_mac",
+    )
+
     management_station = models.ForeignKey(
         "integrations.ManagementStation", on_delete=models.CASCADE,
         related_name="management_ssh_settings")

@@ -97,6 +97,15 @@ class ScopedPolicyObject(PolicyObjectBase, SyncTrackedModel):
 
 
 class AddressObject(ScopedPolicyObject):
+
+    #: Computed here: classifications of what the entry turned out to be. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "is_any",
+        "is_edl",
+        "is_builtin",
+        "is_synthetic",
+    )
     TYPE_BUILTIN_ANY = "builtin_any"
     TYPE_EDL = "edl"
     TYPE_IP_NETMASK = "ip_netmask"
@@ -282,6 +291,11 @@ class AddressObjectResolvedEntry(models.Model):
 
 
 class AddressGroup(ScopedPolicyObject):
+
+    #: Computed here: referenced but never defined. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+    )
     management_station = models.ForeignKey(
         ManagementStation,
         on_delete=models.CASCADE,
@@ -368,6 +382,11 @@ class Region(ScopedPolicyObject):
     """A PAN-OS custom Region object (Objects > Regions), collected as a named
     reference only — no member IP ranges or geo-location, since rule resolution
     only needs to know the region exists and which object it is."""
+
+    #: Computed here: referenced but never defined. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+    )
 
     management_station = models.ForeignKey(
         ManagementStation,

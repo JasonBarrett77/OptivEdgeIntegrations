@@ -35,6 +35,22 @@ from .objects import ScopedPolicyObject
 
 
 class SecurityProfile(ScopedPolicyObject):
+
+    #: Computed here: severity verdicts over the rule list, and the referrer walk. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "is_predefined",
+        "rule_count",
+        "threat_exception_count",
+        "critical_blocked",
+        "critical_detail",
+        "high_blocked",
+        "high_detail",
+        "medium_blocked",
+        "medium_detail",
+        "referrer_count",
+        "is_used",
+    )
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
     KIND_CHOICES = [
@@ -106,6 +122,11 @@ class SecurityProfileGroup(ScopedPolicyObject):
     """Objects > Security Profile Groups. Modelled because it is how profiles reach rules: on the
     lab every Panorama-shared rule protection arrives through a group, and a predefined profile
     counts as used when a group names it. Not assessed itself."""
+
+    #: Computed here: referenced but never defined. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+    )
 
     management_station = models.ForeignKey(
         ManagementStation, on_delete=models.CASCADE, related_name="security_profile_groups")

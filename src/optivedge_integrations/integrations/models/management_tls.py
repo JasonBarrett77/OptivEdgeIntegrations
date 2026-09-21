@@ -31,6 +31,15 @@ from .provenance import ProvenancedMixin
 class ManagementTlsBinding(ProvenancedMixin, SyncTrackedModel):
     """The SSL/TLS service profile the management interface serves, on one appliance."""
 
+    #: Computed here: resolved through the profile this binding names, which carries no marker of its own. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "profile_scope",
+        "certificate_trust",
+        "certificate_scope",
+        "certificate_issuer",
+    )
+
     #: Which definition the bound name resolved to. PREDEFINED BEATS SHARED - measured
     #: 2026-09-02, a shared entry written under a predefined name was accepted, committed and
     #: ignored whole - and a vsys profile can never be bound here at all. The string values are

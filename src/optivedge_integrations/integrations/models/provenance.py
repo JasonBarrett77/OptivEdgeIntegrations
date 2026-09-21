@@ -8,7 +8,22 @@ from django.db import models
 
 
 class ProvenancedMixin(models.Model):
-    """Add a GenericRelation to FieldProvenance for any model that tracks provenance."""
+    """A GenericRelation to FieldProvenance, and the model's own account of its computed fields.
+
+    `DERIVED_FIELDS` names the columns normalization WORKED OUT rather than read: a verdict over
+    several keys, a count, a value resolved through another object. They have no payload key, so
+    they can never have a provenance row, and without being declared they are indistinguishable
+    from a field nobody tracks.
+
+    Declared here rather than recorded as rows because derived-ness belongs to the FIELD and
+    never varies by object: 885 security rules would otherwise carry 885 identical copies of a
+    static fact. It was hand-kept per SHEET in the xlsx prototype, which put it a repository
+    away from the field it describes; `test_declared_derived_fields` holds it honest by failing
+    if a declared field turns out to have a stored row.
+    """
+
+    #: Column names this model computes. Every one must exist on the model.
+    DERIVED_FIELDS: tuple[str, ...] = ()
 
     field_provenance = GenericRelation(
         "integrations.FieldProvenance",
@@ -17,6 +32,22 @@ class ProvenancedMixin(models.Model):
 
     class Meta:
         abstract = True
+
+    def provenance_for(self, field_name: str):
+        """One answer for any field, so a consumer never has to interpret a blank.
+
+        Returns the stored row; an UNSAVED FieldProvenance typed `derived` for a computed
+        column; or None, which now means only that nothing tracks this field.
+        """
+        row = self.field_provenance.filter(field_name=field_name).first()
+        if row is not None:
+            return row
+        if field_name in self.DERIVED_FIELDS:
+            return FieldProvenance(
+                content_type=ContentType.objects.get_for_model(type(self)),
+                object_id=self.pk, field_name=field_name,
+                provenance_type=FieldProvenance.ProvenanceType.DERIVED)
+        return None
 
 
 class FieldProvenance(models.Model):
@@ -70,6 +101,9 @@ class FieldProvenance(models.Model):
         ASSUMED_DEFAULT = "assumed_default", "Assumed default"
         #: Key absent and nothing stored - the field is null and we say why.
         NOT_CONFIGURED  = "not_configured",  "Not configured"
+        #: No payload key at all: normalization computed this column. Never stored as a row -
+        #: see ProvenancedMixin.DERIVED_FIELDS for why it is a declaration instead.
+        DERIVED         = "derived",         "Derived"
         UNKNOWN         = "unknown",         "Unknown"
 
     #: The types that mean "this key was absent from the payload". A consumer asking "was this

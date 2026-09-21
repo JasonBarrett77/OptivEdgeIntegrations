@@ -31,6 +31,11 @@ from .provenance import ProvenancedMixin
 
 
 class ManagementInterface(ProvenancedMixin, SyncTrackedModel):
+
+    #: Computed here: referenced but never defined. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+    )
     PLANE_MGT = "mgt"
     PLANE_AUX1 = "aux-1"
     PLANE_AUX2 = "aux-2"

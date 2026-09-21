@@ -55,6 +55,16 @@ class Certificate(ApplianceScopedObject):
     does not exist on a PA-5220, and `show system state` returns NO_MATCHES for *cert*.
     """
 
+    #: Computed here: decoded from the public key blob - `is_ca` reads the `ca` KEY and has a row of its own. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "is_self_signed",
+        "key_algorithm",
+        "key_size_bits",
+        "signature_algorithm",
+        "parse_error",
+    )
+
     #: As PAN-OS reports them. `subject` and `issuer` are stored because an engineer reads
     #: them, and are NEVER compared: they are formatted three ways depending on where they are
     #: read - "/CN=x" in shared, a bare "x" in predefined, and "CN = x" in subject-int and from
@@ -112,6 +122,14 @@ class Certificate(ApplianceScopedObject):
 
 class SslTlsServiceProfile(ApplianceScopedObject):
     """One SSL/TLS service profile as an object. PAN-CRT-005's subject."""
+
+    #: Computed here: the effective algorithm set, which expands absent keys to enabled, and the column over it. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "allows_sha1",
+        "explicit_algorithms",
+        "protocol_algorithms",
+    )
 
     certificate_name = models.CharField(max_length=255, blank=True)
     min_version = models.CharField(max_length=16, blank=True)
@@ -177,6 +195,11 @@ class CertificateProfile(ApplianceScopedObject):
     DISABLED, so one assumption across neighbouring keys would have been wrong for one of
     them. Here a profile that sets nothing performs no revocation checking and blocks nothing.
     """
+
+    #: Computed here: `ca_certificate_names` is the payload's CA list rather than a verdict. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+    )
 
     use_crl = models.BooleanField(default=False)
     use_ocsp = models.BooleanField(default=False)

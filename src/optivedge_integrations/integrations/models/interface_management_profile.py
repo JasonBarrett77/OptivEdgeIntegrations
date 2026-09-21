@@ -38,6 +38,13 @@ class InterfaceManagementProfile(ProvenancedMixin, SyncTrackedModel):
     Adding them is additive when one does.
     """
 
+    #: Computed here: a reverse lookup: which interfaces name this profile. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "bound_interface_names",
+        "bound_interface_count",
+    )
+
     management_station = models.ForeignKey(
         "integrations.ManagementStation", on_delete=models.CASCADE,
         related_name="interface_management_profiles")

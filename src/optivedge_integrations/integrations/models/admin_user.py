@@ -36,6 +36,17 @@ from .provenance import ProvenancedMixin
 class AdminUser(ProvenancedMixin, SyncTrackedModel):
     """One administrator account under `mgt-config/users`."""
 
+    #: Computed here: verdicts over the account, and a cohort counted across the appliance. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "is_superuser",
+        "superuser_cohort_size",
+        "has_password",
+        "has_public_key",
+        "authentication_is_external",
+        "centrally_authenticated",
+    )
+
     class AuthenticationBinding(models.TextChoices):
         #: `mgt-config/users/entry/authentication-profile`.
         USER = "user", "Per-account"

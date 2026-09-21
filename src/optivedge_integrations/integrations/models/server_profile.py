@@ -24,6 +24,14 @@ from .base import ApplianceScopedObject
 class ServerProfile(ApplianceScopedObject):
     """One AAA server profile, in whichever scope defines it."""
 
+    #: Computed here: counts and the referrer walk - `server_addresses` is the payload's. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "server_count",
+        "referrer_paths",
+        "referrer_count",
+    )
+
     class Kind(models.TextChoices):
         LDAP = "ldap", "LDAP"
         RADIUS = "radius", "RADIUS"

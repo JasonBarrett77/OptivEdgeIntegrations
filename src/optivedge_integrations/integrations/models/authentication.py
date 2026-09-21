@@ -28,6 +28,17 @@ class AuthenticationProfile(ApplianceScopedObject):
     the BINDING rather than of the profile, so they belong to whatever reads the binding.
     """
 
+    #: Computed here: counts, an allow-list verdict, and the referrer walk. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "mfa_factor_count",
+        "allow_list_count",
+        "allow_list_is_all",
+        "referrer_paths",
+        "referrer_count",
+        "is_administrative",
+    )
+
     METHOD_NONE = "none"
     METHOD_LOCAL_DATABASE = "local-database"
     METHOD_CLOUD = "cloud"
