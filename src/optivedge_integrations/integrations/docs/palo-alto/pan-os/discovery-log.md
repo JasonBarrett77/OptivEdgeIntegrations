@@ -37,6 +37,42 @@ Entry shape:
 
 
 
+## 2026-09-21 — which of our PAN-OS defaults are measured, and which we were guessing
+
+**Did:** Audited every site in normalization that stores a value for an ABSENT key - 33 of them,
+each a claim about what PAN-OS does with no key written - against the payload contract and these
+guides. Prompted by the artifact work, which needed to render "PAN-OS default" without inventing
+one.
+
+**Found:** Three kinds, previously indistinguishable because each was a bare `default_effective`
+argument with nothing saying where it came from.
+
+  measured, citable   19 sites - the mgt-services and interface-profile key sets, the
+                      aaa-server-profile four, authentication-settings, password-complexity,
+                      certificate-profile's six booleans, the authentication-sequence trio,
+                      system-identity, the SSL/TLS algorithm expansion, ack-login-banner,
+                      server-verification, enable-log-high-dp-load, client-certificate-only
+  guide-documented    3 sites - `disabled`, `negate-source`, `negate-destination`, which
+                      read-a-security-rule.md states as "absent -> no"
+  never measured      14 sites - the authentication-PROFILE lockout pair and mfa-enable,
+                      certificate-profile timeouts, master key auto-renew and on-hsm,
+                      accept-dhcp-hostname/domain, password-profile change periods,
+                      admin-use-only, the zone flags, and the SSH offer of an unmeasured release
+
+Most of the measured ones were already in the contract and hard to find: they live in
+`$implicit_values` blocks keyed by VENDOR PATH, not as per-field `implicit` keys, so a scan of
+the field entries missed them entirely and reported far more as unevidenced than really were.
+
+**Landed:** In OptivEdgeIntegrations, every site now declares which kind it is and measured ones
+carry their citation in code. Two guides state the old FieldProvenance contract - an absent key
+getting no row - and corrections for both are staged in OptivEdgeProbe's doc-drafts, along with
+checklist items for building-a-control.md. The 14 assumptions are listed in a test, so the count
+cannot grow quietly, and in `scratch/in-flight.json` as the queue of what to measure.
+
+**Open:** All 14. `admin-use-only` is 23 of the 57 rows they produce on the lab and would be one
+short session: write an aaa-server-profile without the key, commit, and read the checkbox the UI
+renders - the same method that settled the other four keys on that object on 2026-09-09.
+
 ## 2026-09-18 — `action=complete` lists the LOCAL config, not what the device is running
 
 **Did:** Jason asked which of the two the completion set actually is. The entry below says
