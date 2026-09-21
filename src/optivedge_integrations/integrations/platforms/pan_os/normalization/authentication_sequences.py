@@ -17,11 +17,16 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.authenti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     scoped_entries, write_scoped_objects)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    Implicit,
     iter_member_values, parse_yes_no_field)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     latest_merged_snapshot)
 
 LOCAL_METHODS = (AuthenticationProfile.METHOD_LOCAL_DATABASE, AuthenticationProfile.METHOD_NONE)
+
+
+#: The payload contract node whose $implicit_values block backs the three flags below.
+CONTRACT_NODE = "payload contract, authentication-sequence"
 
 
 def _member_names(entry: dict[str, Any]) -> list[str]:
@@ -62,11 +67,22 @@ def normalize_authentication_sequences(appliance: Appliance) -> dict[str, int]:
         local = [m for m, method in zip(members, resolved) if method in LOCAL_METHODS]
         unresolved = sum(1 for method in resolved if method is None)
         exit_on_failure, _, _ = parse_yes_no_field(
-            scoped.entry.get("exit-sequence-on-failure"), default_effective=False)
+            scoped.entry.get("exit-sequence-on-failure"),
+            implicit=Implicit.measured(
+                False,
+                f"{CONTRACT_NODE}.exit-sequence-on-failure: 'no', measured 2026-09-11 from a "
+                "committed sequence the form had not touched"))
         use_domain, _, _ = parse_yes_no_field(
-            scoped.entry.get("use-domain-find-profile"), default_effective=True)
+            scoped.entry.get("use-domain-find-profile"),
+            implicit=Implicit.measured(
+                True,
+                f"{CONTRACT_NODE}.use-domain-find-profile: 'yes', measured 2026-09-11 and "
+                "agreeing with Help p.844 'enabled by default'"))
         use_userid, _, _ = parse_yes_no_field(
-            scoped.entry.get("use-userid-domain"), default_effective=False)
+            scoped.entry.get("use-userid-domain"),
+            implicit=Implicit.measured(
+                False,
+                f"{CONTRACT_NODE}.use-userid-domain: 'no', measured 2026-09-11"))
         where = sorted(set(references.get((vsys, name), [])))
         rows.append((scoped, {
             "member_names": members,

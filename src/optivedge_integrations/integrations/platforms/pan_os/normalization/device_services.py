@@ -22,7 +22,8 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, ManagementService, NtpSettings, SnmpSettings, SystemIdentity)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type, ensure_list, entry_provenance, parse_yes_no_field, scalar_value)
+    Implicit,
+    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, entry_provenance, parse_yes_no_field, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot, latest_merged_snapshot)
 
@@ -70,8 +71,10 @@ def _server(node: Any) -> tuple[str, str, str, Any, str | None]:
 def _provenance(model, obj, rows: list[tuple[str, Any, str | None]]) -> None:
     """Replace this object's provenance with `rows` of (field, raw key, raw value).
 
-    A row is written only where the payload carried a key, so an absent setting gets no row -
-    which is how `FieldProvenance` distinguishes "never written" from "written locally".
+    A row is written for every tracked field: one typed `local` or `template` where the payload
+    carried the key, and one typed `pan_os_default` / `assumed_default` / `not_configured` where
+    it did not. Skipping the absent ones - which this did until 2026-09-21 - is what left
+    "PAN-OS supplied it", "we inferred it" and "nobody tracks it" sharing one blank.
     """
     content_type = ContentType.objects.get_for_model(model)
     FieldProvenance.objects.filter(content_type=content_type, object_id=obj.pk).delete()
@@ -81,7 +84,7 @@ def _provenance(model, obj, rows: list[tuple[str, Any, str | None]]) -> None:
         FieldProvenance.objects.create(
             content_type=content_type, object_id=obj.pk, field_name=field_name,
             provenance_type=classify_prov_type(raw_key),
-            raw_key=raw_key or "", raw_value=raw_value or "")
+            raw_key=provenance_raw_key(raw_key), raw_value=provenance_value(raw_key, raw_value))
 
 
 def _exposed_surfaces(appliance: Appliance) -> list[str]:
@@ -188,9 +191,16 @@ def _identity(appliance, snapshot, system) -> None:
         system.get("type"), dict) else (ABSENT, None)
 
     accept_hostname, _, _ = parse_yes_no_field(
-        mode_body.get("accept-dhcp-hostname"), default_effective=False)
+        mode_body.get("accept-dhcp-hostname"),
+        implicit=Implicit.assumed(
+            False,
+            "the system-identity contract measured `type` and `hostname` and not these two. "
+            "False reads the device as keeping its configured name, which is what the "
+            "hostname control assumes when it compares against the model"))
     accept_domain, _, _ = parse_yes_no_field(
-        mode_body.get("accept-dhcp-domain"), default_effective=False)
+        mode_body.get("accept-dhcp-domain"),
+        implicit=Implicit.assumed(
+            False, "same node as accept-dhcp-hostname above, and unmeasured with it"))
 
     # Help p.700: with no hostname written, PAN-OS uses the model - "for example, PA-5220_2".
     # So the default name is the model, optionally suffixed with an index; an absent hostname is

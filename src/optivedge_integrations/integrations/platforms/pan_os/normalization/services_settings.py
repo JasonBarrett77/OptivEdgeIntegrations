@@ -16,7 +16,8 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, LoggingSettings, UpdateServerSettings)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type, parse_yes_no_field)
+    Implicit,
+    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, parse_yes_no_field)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot, latest_merged_snapshot)
 
@@ -49,7 +50,7 @@ def _write(model, appliance, snapshot, field, value, raw_key, raw_value):
         FieldProvenance.objects.create(
             content_type=content_type, object_id=obj.pk, field_name=field,
             provenance_type=classify_prov_type(raw_key),
-            raw_key=raw_key or "", raw_value=raw_value or "")
+            raw_key=provenance_raw_key(raw_key), raw_value=provenance_value(raw_key, raw_value))
     return obj
 
 
@@ -60,9 +61,17 @@ def normalize_services_settings(appliance: Appliance) -> dict[str, int]:
     system, management = _nodes(snapshot)
 
     verify, verify_rk, verify_rv = parse_yes_no_field(
-        system.get("server-verification"), default_effective=True)
+        system.get("server-verification"),
+        implicit=Implicit.measured(
+            True,
+            "payload contract, mgmt-settings.server-verification: implicit 'yes' - the "
+            "checkbox reads ticked with the key absent, measured 2026-09-01"))
     log_on_load, log_rk, log_rv = parse_yes_no_field(
-        management.get("enable-log-high-dp-load"), default_effective=False)
+        management.get("enable-log-high-dp-load"),
+        implicit=Implicit.measured(
+            False,
+            "payload contract, mgmt-settings.enable-log-high-dp-load: implicit 'no' - the "
+            "opposite polarity to server-verification in the same node"))
 
     with transaction.atomic():
         _write(UpdateServerSettings, appliance, snapshot, "verify_identity",

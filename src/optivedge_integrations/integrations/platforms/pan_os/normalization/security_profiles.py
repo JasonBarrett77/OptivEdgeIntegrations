@@ -49,6 +49,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.addresse
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     ABSENT,
     classify_prov_type,
+    provenance_raw_key,
+    provenance_value,
     ensure_list,
     entry_provenance,
     member_values,
@@ -523,7 +525,7 @@ def replace_security_profiles(
 
     def provenance(content_type, row, data):
         rows = [FieldProvenance(content_type=content_type, object_id=row.pk, field_name=name,
-                                provenance_type=classify_prov_type(rk), raw_key=rk or "", raw_value=rv or "")
+                                provenance_type=classify_prov_type(rk), raw_key=provenance_raw_key(rk), raw_value=provenance_value(rk, rv))
                 for name, rk, rv in data if rk is not ABSENT]
         if rows:
             FieldProvenance.objects.bulk_create(rows)

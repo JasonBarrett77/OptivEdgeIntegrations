@@ -19,7 +19,8 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, PasswordComplexityPolicy)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type)
+    ABSENT, classify_prov_type, provenance_raw_key,
+    provenance_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     latest_merged_snapshot, password_complexity_from_snapshot)
 
@@ -77,5 +78,5 @@ def normalize_password_complexity(appliance: Appliance) -> dict[str, int]:
                 FieldProvenance.objects.create(
                     content_type=content_type, object_id=obj.pk, field_name=RENAMED[field],
                     provenance_type=classify_prov_type(raw_key),
-                    raw_key=raw_key or "", raw_value=raw_value or "")
+                    raw_key=provenance_raw_key(raw_key), raw_value=provenance_value(raw_key, raw_value))
     return {"password_complexity_policies": 1}

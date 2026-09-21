@@ -23,17 +23,62 @@ class FieldProvenance(models.Model):
     """Provenance record for a single field (or entry) on a normalized configuration object.
 
     One row per tracked field per object. field_name "__entry__" records the object's
-    own entry-level provenance (e.g., the @ptpl on a named PAN-OS entry). Absence of a
-    row for a given field_name means the key was absent from the source payload — no
-    default value should be inferred.
+    own entry-level provenance (e.g., the @ptpl on a named PAN-OS entry).
+
+    WHAT A MISSING ROW MEANS CHANGED ON 2026-09-21. It used to mean "the key was absent from the
+    payload", which made three situations look identical: a key absent with PAN-OS supplying a
+    known default, a key absent with the stored value being OUR inference, and a field
+    normalization does not track at all. Consumers could only guess between them, and the xlsx
+    prototype was guessing per MODEL - `absent_provenance="PAN-OS default"` on a whole sheet -
+    while implicit values are per KEY and point opposite ways inside one node: `disable-http`
+    absent means the service is ON, `enable-log-high-dp-load` absent means it is OFF.
+
+    So an absent key now records a row too, and a missing row means only that the field is not
+    tracked. The five types that describe a value's origin:
+
+      LOCAL / TEMPLATE / DEVICE_GROUP / PANORAMA   the key was PRESENT; this is where it came
+                                                   from, read off the payload's own marker
+      PAN_OS_DEFAULT   the key was ABSENT and PAN-OS's own default applies. The stored value is
+                       that default, and the claim is backed by a measurement - `raw_value`
+                       carries the value, and the citation lives with the declaration in
+                       `normalization.common.Implicit`, in code, where it is reviewable and
+                       cannot drift from the value it justifies
+      ASSUMED_DEFAULT  the key was ABSENT and the stored value is OUR INFERENCE, not a measured
+                       vendor fact. A consumer must not render this as a vendor default
+      NOT_CONFIGURED   the key was ABSENT and normalization stored NOTHING - the field is null,
+                       because assuming a value here would be worse than admitting ignorance.
+                       `log-start` and `log-end` on a security rule are the case this exists
+                       for: `read-a-security-rule.md` says their defaults are unmeasured and
+                       must not be assumed, PAN-POL-009 asserts log-end, and the rule normalizer
+                       has always stored null rather than False. Without this type that null
+                       would have had to be described as a default of "no", which is the exact
+                       fabrication the split above exists to prevent
+
+    The split between the last two is the whole point and is not a formality. Jason, 2026-09-21:
+    "It's critical that we get this right, we can't afford mistakes here." An assumed default
+    presented as a vendor default is a fabricated fact about a customer's firewall.
     """
 
     class ProvenanceType(models.TextChoices):
-        LOCAL        = "local",        "Local"
-        TEMPLATE     = "template",     "Template"
-        DEVICE_GROUP = "device_group", "Device Group"
-        PANORAMA     = "panorama",     "Panorama"
-        UNKNOWN      = "unknown",      "Unknown"
+        LOCAL           = "local",           "Local"
+        TEMPLATE        = "template",        "Template"
+        DEVICE_GROUP    = "device_group",    "Device Group"
+        PANORAMA        = "panorama",        "Panorama"
+        #: Key absent, PAN-OS supplies this value, and we have measured that it does.
+        PAN_OS_DEFAULT  = "pan_os_default",  "PAN-OS default"
+        #: Key absent, the stored value is our inference. NOT a vendor fact.
+        ASSUMED_DEFAULT = "assumed_default", "Assumed default"
+        #: Key absent and nothing stored - the field is null and we say why.
+        NOT_CONFIGURED  = "not_configured",  "Not configured"
+        UNKNOWN         = "unknown",         "Unknown"
+
+    #: The types that mean "this key was absent from the payload". A consumer asking "was this
+    #: configured" asks this, rather than listing the two and falling behind a third.
+    DEFAULTED_TYPES = ("pan_os_default", "assumed_default")
+
+    #: Every type meaning "the payload did not carry this key". A consumer asking "did anyone
+    #: configure this" asks this one; the three differ only in what we could say about it.
+    ABSENT_TYPES = ("pan_os_default", "assumed_default", "not_configured")
 
     content_type   = models.ForeignKey(ContentType, on_delete=models.CASCADE)
     object_id      = models.PositiveIntegerField()

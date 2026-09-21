@@ -16,7 +16,7 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, ManagementSshSettings)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type, ensure_list, iter_member_values, scalar_value)
+    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, iter_member_values, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot, latest_merged_snapshot)
 
@@ -183,5 +183,5 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
             FieldProvenance.objects.create(
                 content_type=content_type, object_id=row.pk, field_name="profile_name",
                 provenance_type=classify_prov_type(name_rk),
-                raw_key=name_rk or "", raw_value=name_rv or "")
+                raw_key=provenance_raw_key(name_rk), raw_value=provenance_value(name_rk, name_rv))
     return {"management_ssh_settings": 1}

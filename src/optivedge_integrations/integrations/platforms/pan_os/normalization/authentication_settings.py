@@ -14,7 +14,8 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance, AuthenticationSettings, FieldProvenance)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type)
+    ABSENT, classify_prov_type, provenance_raw_key,
+    provenance_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     authentication_settings_from_node, device_entry_from_snapshot, latest_merged_snapshot)
 
@@ -54,5 +55,5 @@ def normalize_authentication_settings(appliance: Appliance) -> dict[str, int]:
                 FieldProvenance.objects.create(
                     content_type=content_type, object_id=obj.pk, field_name=field,
                     provenance_type=classify_prov_type(raw_key),
-                    raw_key=raw_key or "", raw_value=raw_value or "")
+                    raw_key=provenance_raw_key(raw_key), raw_value=provenance_value(raw_key, raw_value))
     return {"authentication_settings": 1}

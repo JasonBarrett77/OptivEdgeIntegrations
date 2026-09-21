@@ -25,7 +25,8 @@ from optivedge_integrations.integrations.models import (
     AdminUser, Appliance, AuthenticationProfile, AuthenticationSequence, FieldProvenance,
     NormalizationIssue, Snapshot)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type, entry_provenance, ensure_list, iter_member_values,
+    Implicit,
+    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, entry_provenance, ensure_list, iter_member_values,
     parse_yes_no_field, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     latest_merged_snapshot)
@@ -194,7 +195,10 @@ def normalize_admin_users(appliance: Appliance) -> dict[str, int]:
         auth_profile, auth_key, auth_value = scalar_value(entry.get("authentication-profile"))
         pwd_profile, pwd_key, pwd_value = scalar_value(entry.get("password-profile"))
         cert_only, cert_key, cert_value = parse_yes_no_field(
-            entry.get("client-certificate-only"), default_effective=False)
+            entry.get("client-certificate-only"),
+        implicit=Implicit.measured(
+            False,
+            "payload contract, admin-user.client-certificate-only: implicit 'no'"))
 
         has_password = bool(str(entry.get("phash") or "").strip())
         has_public_key = bool(str(entry.get("public-key") or "").strip())
@@ -279,13 +283,13 @@ def normalize_admin_users(appliance: Appliance) -> dict[str, int]:
                 FieldProvenance.objects.create(
                     content_type=content_type, object_id=obj.pk, field_name="__entry__",
                     provenance_type=classify_prov_type(raw_key),
-                    raw_key=raw_key, raw_value=raw_value or "")
+                    raw_key=provenance_raw_key(raw_key), raw_value=provenance_value(raw_key, raw_value))
             for field, rk, rv in provenance:
                 if rk is not ABSENT:
                     FieldProvenance.objects.create(
                         content_type=content_type, object_id=obj.pk, field_name=field,
                         provenance_type=classify_prov_type(rk),
-                        raw_key=rk or "", raw_value=rv or "")
+                        raw_key=provenance_raw_key(rk), raw_value=provenance_value(rk, rv))
 
         # An account deleted on the device must not linger: every one of these controls is
         # about who CAN log in, and a stale row is a finding about somebody who cannot.

@@ -29,8 +29,11 @@ from optivedge_integrations.integrations.models import (
     SslTlsServiceProfile,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    Implicit,
     ABSENT,
     classify_prov_type,
+    provenance_raw_key,
+    provenance_value,
     ensure_list,
     entry_provenance,
     parse_integer_field,
@@ -60,6 +63,15 @@ ALGORITHM_KEYS = (
     "auth-algo-sha1", "auth-algo-sha256", "auth-algo-sha384",
 )
 UNMEASURED_ALGORITHM_KEYS = ("enc-algo-camellia128", "enc-algo-camellia256", "enc-algo-seed")
+
+#: Measured 2026-09-02 on oep-mgmt-tls-hardened: a profile writing only min/max version renders
+#: EVERY algorithm checkbox ticked. The consequence is why this is stated rather than assumed -
+#: a profile carrying only a version range permits SHA-1 and CBC.
+ALGORITHM_IMPLICIT = Implicit.measured(
+    True,
+    "payload contract, ssl-tls-service-profile.protocol-settings/*: ABSENT = ENABLED for every "
+    "algorithm key the UI exposes, measured 2026-09-02")
+
 
 def decode_certificate(pem: str) -> dict[str, Any]:
     """Key algorithm, key size and signature algorithm - none of which PAN-OS exposes.
@@ -203,12 +215,15 @@ def _algorithms(protocol_settings: dict[str, Any]) -> tuple[dict[str, bool], lis
             effective[key] = True
             continue
         explicit.append(key)
-        value, _, _ = parse_yes_no_field(raw, default_effective=True)
+        # Reached only when the key is PRESENT - absence short-circuits above - so this
+        # declaration describes an empty element rather than a missing one.
+        value, _, _ = parse_yes_no_field(raw, implicit=ALGORITHM_IMPLICIT)
         effective[key] = value
     for key in UNMEASURED_ALGORITHM_KEYS:
         if protocol_settings.get(key, ABSENT) is not ABSENT:
             explicit.append(key)
-            value, _, _ = parse_yes_no_field(protocol_settings.get(key), default_effective=True)
+            value, _, _ = parse_yes_no_field(
+                protocol_settings.get(key), implicit=ALGORITHM_IMPLICIT)
             effective[key] = value
     return effective, sorted(explicit)
 
@@ -248,7 +263,7 @@ def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
                     content_type=content_type, object_id=obj.pk,
                     field_name="__entry__",
                     provenance_type=classify_prov_type(raw_key),
-                    raw_key=raw_key or "", raw_value=raw_value or "")
+                    raw_key=provenance_raw_key(raw_key), raw_value=provenance_value(raw_key, raw_value))
         # Anything not seen this pass is gone from the device. Deleting rather than leaving it
         # matters for the hygiene controls: a stale profile row is a false finding.
         model.objects.filter(appliance=appliance).exclude(pk__in=seen).delete()
@@ -285,11 +300,21 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
     for scoped in scoped_entries(snapshot, "certificate-profile"):
         defaults: dict[str, Any] = {}
         for field, key in CERTIFICATE_PROFILE_BOOLEANS:
-            value, _, _ = parse_yes_no_field(scoped.entry.get(key), default_effective=False)
+            value, _, _ = parse_yes_no_field(
+                scoped.entry.get(key),
+                implicit=Implicit.measured(
+                    False,
+                    "payload contract, certificate-profile $implicit_values: all six booleans "
+                    "absent = DISABLED (unticked), measured 2026-09-02 from the blank Add "
+                    "Certificate Profile form"))
             defaults[field] = value
         for field, key, fallback in CERTIFICATE_PROFILE_TIMEOUTS:
-            value, _, _ = parse_integer_field(scoped.entry.get(key),
-                                              default_effective=fallback)
+            value, _, _ = parse_integer_field(
+                scoped.entry.get(key),
+                implicit=Implicit.assumed(
+                    fallback,
+                    "the certificate-profile implicit block measured the six BOOLEANS and says "
+                    "nothing about the timeouts; this fallback predates it"))
             defaults[field] = value
         ca = scoped.entry.get("CA")
         defaults["ca_certificate_names"] = [e["@name"] for e in _entries(ca)]
@@ -304,7 +329,12 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
         common_name, _, _ = scalar_value(entry.get("common-name"))
         subject, _, _ = scalar_value(entry.get("subject"))
         issuer, _, _ = scalar_value(entry.get("issuer"))
-        is_ca, _, _ = parse_yes_no_field(entry.get("ca"), default_effective=False)
+        is_ca, _, _ = parse_yes_no_field(
+            entry.get("ca"),
+            implicit=Implicit.assumed(
+                False,
+                "a certificate entry carries `ca` only when it IS one in every sample seen, but "
+                "nobody has written a certificate without it and re-read the device"))
         public_key, _, _ = scalar_value(entry.get("public-key"))
         decoded = decode_certificate(public_key)
         certificate_rows.append((scoped, {

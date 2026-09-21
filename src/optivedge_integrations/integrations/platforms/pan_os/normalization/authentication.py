@@ -11,6 +11,7 @@ from typing import Any
 from optivedge_integrations.integrations.models import (
     Appliance, AuthenticationProfile)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    Implicit,
     ensure_list, parse_integer_field, parse_yes_no_field, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     scoped_entries, write_scoped_objects)
@@ -45,11 +46,25 @@ def _profile_fields(entry: dict[str, Any]) -> tuple[dict[str, Any], list]:
         mfa = {}
 
     failed, failed_rk, failed_rv = parse_integer_field(
-        lockout.get("failed-attempts"), default_effective=0)
+        lockout.get("failed-attempts"),
+        implicit=Implicit.assumed(
+            0,
+            "the authentication-PROFILE lockout is not in the contract - what was measured "
+            "2026-09-04 is the device-wide admin-lockout under deviceconfig/setting/management. "
+            "0 mirrors that one, where it means UNLIMITED attempts, so this errs toward "
+            "reporting a profile as unprotected rather than protected"))
     locktime, lock_rk, lock_rv = parse_integer_field(
-        lockout.get("lockout-time"), default_effective=0)
+        lockout.get("lockout-time"),
+        implicit=Implicit.assumed(
+            0,
+            "same node as failed-attempts above, and unmeasured for the same reason"))
     mfa_on, mfa_rk, mfa_rv = parse_yes_no_field(
-        mfa.get("mfa-enable"), default_effective=False)
+        mfa.get("mfa-enable"),
+        implicit=Implicit.assumed(
+            False,
+            "the discovery log records that mfa-enable has no implicit value to measure - the "
+            "factor list is what makes MFA real. False reads a profile with no factors as not "
+            "enforcing MFA, which is what PAN-AUTH-020 needs"))
     domain, domain_rk, domain_rv = scalar_value(entry.get("user-domain"))
     modifier, mod_rk, mod_rv = scalar_value(entry.get("username-modifier"))
 

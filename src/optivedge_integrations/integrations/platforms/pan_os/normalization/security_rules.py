@@ -50,10 +50,14 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.addresse
     derive_address_fields,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    Implicit,
     ABSENT,
+    was_absent,
     ISO_3166_1_ALPHA2_REGIONS,
     PANOS_VENDOR_REGION_CODES,
     classify_prov_type,
+    provenance_raw_key,
+    provenance_value,
     ensure_list,
     entry_provenance,
     iter_member_values,
@@ -266,22 +270,45 @@ def normalize_rule(
 ) -> NormalizedSecurityRule:
     entry_rk, entry_rv = entry_provenance(rule)
     action, action_rk, action_rv = scalar_value(rule.get("action"))
-    disabled, disabled_rk, disabled_rv = parse_yes_no_field(rule.get("disabled"), default_effective=False)
+    disabled, disabled_rk, disabled_rv = parse_yes_no_field(
+        rule.get("disabled"),
+        implicit=Implicit.measured(
+            False, "read-a-security-rule.md: 'disabled absent -> no'"))
     rule_type, rule_type_rk, rule_type_rv = scalar_value(rule.get("rule-type"))
     description, description_rk, description_rv = scalar_value(rule.get("description"))
-    log_start, log_start_rk, log_start_rv = parse_yes_no_field(rule.get("log-start"), default_effective=False)
-    log_end, log_end_rk, log_end_rv = parse_yes_no_field(rule.get("log-end"), default_effective=False)
+    log_start, log_start_rk, log_start_rv = parse_yes_no_field(
+        rule.get("log-start"),
+        # The guide says this one outright: "**Unmeasured:** `log-start` / `log-end` defaults.
+        # If a consumer needs them, it needs to measure them, not assume." PAN-POL-009 asserts
+        # log-end, so presenting this as a vendor default would fabricate the fact the control
+        # turns on.
+        implicit=Implicit.not_assumed(
+            "read-a-security-rule.md: '**Unmeasured:** log-start / log-end defaults. If a "
+            "consumer needs them, it needs to measure them, not assume.' So the field stays "
+            "NULL and the provenance row says not configured - PAN-POL-009 asserts log-end, "
+            "and a guess either way would decide that control on nothing"))
+    log_end, log_end_rk, log_end_rv = parse_yes_no_field(
+        rule.get("log-end"),
+        implicit=Implicit.not_assumed(
+            "read-a-security-rule.md records both log flags as UNMEASURED; see log-start"))
     log_setting, log_setting_rk, log_setting_rv = scalar_value(rule.get("log-setting"))
     negate_source, negate_source_rk, negate_source_rv = parse_yes_no_field(
-        rule.get("negate-source"), default_effective=False
+        rule.get("negate-source"),
+        implicit=Implicit.measured(
+            False, "read-a-security-rule.md: 'negate-source absent -> no'")
     )
     negate_destination, negate_destination_rk, negate_destination_rv = parse_yes_no_field(
-        rule.get("negate-destination"), default_effective=False
+        rule.get("negate-destination"),
+        implicit=Implicit.measured(
+            False, "read-a-security-rule.md: 'negate-destination absent -> no'")
     )
 
-    # log_start/log_end: treat ABSENT as null (not configured at all)
-    log_start_value: bool | None = None if log_start_rk is ABSENT else bool(log_start)
-    log_end_value: bool | None = None if log_end_rk is ABSENT else bool(log_end)
+    # log_start/log_end stay NULL when the key is absent - the corpus says their defaults are
+    # unmeasured, so there is nothing to default them TO. `was_absent` rather than `is ABSENT`:
+    # an absent key now arrives as the declaration below, and the old test would have quietly
+    # turned both into False.
+    log_start_value: bool | None = None if was_absent(log_start_rk) else bool(log_start)
+    log_end_value: bool | None = None if was_absent(log_end_rk) else bool(log_end)
 
     members: list[NormalizedSecurityRuleMember] = []
 
@@ -1247,8 +1274,8 @@ def _persist_one_security_rule(
             object_id=security_rule.pk,
             field_name=fname,
             provenance_type=classify_prov_type(rk),
-            raw_key=rk or "",
-            raw_value=rv or "",
+            raw_key=provenance_raw_key(rk),
+            raw_value=provenance_value(rk, rv),
         )
         for fname, rk, rv in normalized_rule.field_provenance_data
         if rk is not ABSENT

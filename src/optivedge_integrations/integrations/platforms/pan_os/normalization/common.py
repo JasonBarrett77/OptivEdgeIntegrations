@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 
 
@@ -10,15 +11,116 @@ from typing import Any
 # Provenance helpers — used across all PAN-OS normalizers
 # ---------------------------------------------------------------------------
 
-# Returned as raw_key when the payload key was absent entirely.
-# Callers check `raw_key is ABSENT` to skip FieldProvenance row creation.
+# Returned as raw_key when the payload key was absent entirely AND the caller declared no
+# implicit value. Callers check `raw_key is ABSENT` to skip FieldProvenance row creation - it
+# means the field is not tracked, which is now the ONLY thing a missing row means.
 ABSENT = object()
 
 _PROVENANCE_KEYS = ("@ptpl", "@loc", "@panorama")
 
 
-def classify_prov_type(raw_key: str | None) -> str:
-    """Map a raw PAN-OS provenance key to a FieldProvenance.ProvenanceType value."""
+@dataclass(frozen=True)
+class Implicit:
+    """What PAN-OS does when a key is absent - and whether we KNOW or are inferring.
+
+    Every site that stores a value for an absent key makes a claim about the vendor's behaviour.
+    Before 2026-09-21 that claim was a bare `default_effective=False` with nothing saying where
+    it came from, and an audit of all 33 sites found three kinds mixed together: defaults
+    measured on hardware and recorded in the payload contract, defaults documented in a vendor
+    guide, and defaults nobody had ever checked - including `log-start` and `log-end`, which
+    `read-a-security-rule.md` explicitly says must be measured rather than assumed.
+
+    So the constructor is not available: a site uses `Implicit.measured(value, citation)` or
+    `Implicit.assumed(value, why)` and cannot avoid saying which. The citation travels in code
+    next to the value it justifies, rather than in a database column that would copy a constant
+    and then drift from it.
+    """
+
+    value: Any
+    #: Where the measurement is recorded. None means nobody has measured it.
+    citation: str | None
+    #: Why we infer this value, for an assumed default. Empty for a measured one.
+    reasoning: str = ""
+
+    def __post_init__(self):
+        # On the type rather than only in the two constructors below, because `Implicit(x, "")`
+        # would otherwise reach a provenance row as a measured default carrying no measurement.
+        if self.citation is None and not self.reasoning:
+            raise ValueError(
+                f"Implicit({self.value!r}) states neither a citation nor what the inference "
+                f"rests on. Use Implicit.measured() or Implicit.assumed().")
+        if self.citation is not None and len(self.citation) < 12:
+            raise ValueError(f"Implicit({self.value!r}) citation is too short to check")
+
+    @classmethod
+    def measured(cls, value: Any, citation: str) -> "Implicit":
+        """A default someone established, naming where it is written down.
+
+        The citation is required and must be specific enough to check - a payload contract node
+        and field, a guide and its statement, or a dated measurement. "PAN-OS docs" is not a
+        citation; a reader cannot go and disagree with it.
+        """
+        if not citation or len(citation) < 12:
+            raise ValueError(
+                f"Implicit.measured({value!r}) needs a citation a reader can check, not "
+                f"{citation!r}. If nobody has measured it, that is Implicit.assumed().")
+        return cls(value=value, citation=citation)
+
+    @classmethod
+    def assumed(cls, value: Any, why: str) -> "Implicit":
+        """A default we infer. Honest, and never to be presented as a vendor fact.
+
+        `why` says what the inference rests on - the neighbouring keys' polarity, the UI, a
+        vendor statement about a different field - so that whoever measures it later knows what
+        they are testing against.
+        """
+        if not why:
+            raise ValueError(f"Implicit.assumed({value!r}) must say what the inference rests on")
+        return cls(value=value, citation=None, reasoning=why)
+
+    @classmethod
+    def not_assumed(cls, why: str) -> "Implicit":
+        """Absent, and normalization stores NOTHING rather than guess.
+
+        The field ends up null and the provenance row says so. This is the right declaration
+        wherever a wrong guess would be worse than no answer - the security rule log flags,
+        where the corpus says the defaults are unmeasured and a control turns on them.
+        """
+        if not why:
+            raise ValueError("Implicit.not_assumed() must say why nothing is assumed")
+        return cls(value=None, citation=None, reasoning=why)
+
+    @property
+    def stores_nothing(self) -> bool:
+        return self.citation is None and self.value is None
+
+    @property
+    def provenance_type(self) -> str:
+        if self.citation:
+            return "pan_os_default"
+        return "not_configured" if self.stores_nothing else "assumed_default"
+
+
+def was_absent(raw_key: Any) -> bool:
+    """Did the payload carry this key at all?
+
+    Callers used to ask `raw_key is ABSENT`, which stopped being the whole answer on 2026-09-21
+    when an absent key started coming back as an `Implicit` instead. Two lines in the security
+    rule normalizer asked the old question and would have turned the log flags from null into
+    False - silently, on the two fields the corpus says must not be assumed. Ask this instead.
+    """
+    return raw_key is ABSENT or isinstance(raw_key, Implicit)
+
+
+def classify_prov_type(raw_key: Any) -> str:
+    """Map a raw PAN-OS provenance key to a FieldProvenance.ProvenanceType value.
+
+    An `Implicit` arrives here when the key was ABSENT and the reading site declared what PAN-OS
+    does without it; it classifies as the measured or assumed default according to its own
+    citation, which is the one place that decision is made.
+    """
+    if isinstance(raw_key, Implicit):
+        return raw_key.provenance_type
     if raw_key == "@ptpl":
         return "template"
     if raw_key == "@loc":
@@ -26,6 +128,31 @@ def classify_prov_type(raw_key: str | None) -> str:
     if raw_key == "@panorama":
         return "panorama"
     return "local"
+
+
+def provenance_value(raw_key: Any, raw_value: str | None) -> str:
+    """What goes in `FieldProvenance.raw_value`.
+
+    For a present key that is the marker's value - the template name, the device group. For an
+    absent key it is the defaulted VALUE, so a reader of the row can see what was assumed
+    without resolving the field on the object.
+    """
+    if isinstance(raw_key, Implicit):
+        return _as_text(raw_key.value)
+    return raw_value or ""
+
+
+def provenance_raw_key(raw_key: Any) -> str:
+    """The payload key a row came from. Empty for a default: there was no key."""
+    if isinstance(raw_key, Implicit) or raw_key is ABSENT or raw_key is None:
+        return ""
+    return str(raw_key)
+
+
+def _as_text(value: Any) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    return "" if value is None else str(value)
 
 
 def scalar_value(node: Any) -> tuple[str, Any, str | None]:
@@ -47,39 +174,41 @@ def scalar_value(node: Any) -> tuple[str, Any, str | None]:
     return str(node).strip(), None, None
 
 
-def parse_yes_no_field(
-    node: Any,
-    *,
-    default_effective: bool,
-) -> tuple[bool, Any, str | None]:
+def parse_yes_no_field(node: Any, *, implicit: Implicit) -> tuple[bool, Any, str | None]:
     """Parse a PAN-OS yes/no boolean scalar.
 
-    Returns (effective_value, raw_key, raw_provenance_value).
-    raw_key is ABSENT when the field was not present in the payload.
+    Returns (effective_value, raw_key, raw_provenance_value). When the key was ABSENT the
+    returned raw_key is the `implicit` declaration itself, so the provenance row records WHY the
+    stored value is what it is - measured vendor default or our inference - instead of the row
+    being skipped, which is what made those two indistinguishable until 2026-09-21.
+
+    `implicit` replaced `default_effective` and is deliberately not optional: storing a value for
+    an absent key is a claim about PAN-OS, and every site now has to say whether it can back it.
     """
     raw_value, raw_key, raw_prov = scalar_value(node)
+    if raw_key is ABSENT:
+        return implicit.value, implicit, None
     if not raw_value:
-        return default_effective, raw_key, raw_prov
+        # The key is PRESENT and carries no text. The value falls back to the implicit one, but
+        # the provenance is the key's own - something wrote this element, and saying "default"
+        # about a node the payload contains would hide that.
+        return implicit.value, raw_key, raw_prov
     return raw_value.lower() == "yes", raw_key, raw_prov
 
 
-def parse_integer_field(
-    node: Any,
-    *,
-    default_effective: int,
-) -> tuple[int, Any, str | None]:
-    """Parse a PAN-OS integer scalar.
-
-    Returns (effective_value, raw_key, raw_provenance_value).
-    raw_key is ABSENT when the field was not present in the payload.
-    """
+def parse_integer_field(node: Any, *, implicit: Implicit) -> tuple[int, Any, str | None]:
+    """Parse a PAN-OS integer scalar. See `parse_yes_no_field` for the `implicit` contract."""
     raw_value, raw_key, raw_prov = scalar_value(node)
+    if raw_key is ABSENT:
+        return implicit.value, implicit, None
     if not raw_value:
-        return default_effective, raw_key, raw_prov
+        return implicit.value, raw_key, raw_prov
     try:
         return int(raw_value), raw_key, raw_prov
     except ValueError:
-        return default_effective, raw_key, raw_prov
+        # Present and unparseable. The value falls back, the provenance stays the key's: the
+        # device does hold something here, and it is not a default.
+        return implicit.value, raw_key, raw_prov
 
 
 def entry_provenance(entry: dict[str, Any]) -> tuple[str | None, str | None]:

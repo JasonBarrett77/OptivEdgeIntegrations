@@ -19,6 +19,8 @@ ethernet and aggregate-ethernet and silently misses the other three.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
@@ -34,8 +36,11 @@ from optivedge_integrations.integrations.models import (
     parse_permitted_source,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    Implicit,
     ABSENT,
     classify_prov_type,
+    provenance_raw_key,
+    provenance_value,
     ensure_list,
     entry_provenance,
     parse_yes_no_field,
@@ -76,6 +81,12 @@ PROFILE_SERVICE_KEYS = (
 #:
 #: An absent key is not an absent setting: the three below are ON when nothing is written.
 MGT_IMPLICIT_ENABLED = frozenset({"https", "ssh", "icmp"})
+
+#: Cited on every row those keys produce, so the claim travels with the value.
+MGT_CITATION = (
+    "payload contract, mgt-services: measured 2026-08-31 - two devices with different "
+    "`service` nodes reporting the same effective services, and the four keys no config read "
+    "shows established from the compiled ACL")
 
 #: A profile stores as a bare entry with every service absent, and absent means OFF - the
 #: opposite polarity to the keys above. Measured 2026-08-27/28.
@@ -129,11 +140,20 @@ def _mgt_services(system_node: Any) -> dict[str, tuple[bool, Any, str | None]]:
     for key in MGT_SERVICE_KEYS:
         name = key[len("disable-"):]
         # `disable-X: yes` means the service is OFF, so the effective value is the negation.
-        # parse_yes_no_field carries the leaf's own provenance out with it, and returns
-        # ABSENT when the key is missing - which is PAN-OS's default rather than anyone's
-        # push, and therefore gets no provenance row at all.
+        # parse_yes_no_field carries the leaf's own provenance out with it, and when the key is
+        # missing it carries the DECLARATION below instead - so the row records that PAN-OS
+        # supplied this, rather than the row being skipped and the fact being lost. Until
+        # 2026-09-21 it was skipped, which is why the comment here used to say so.
         disabled, raw_key, raw_value = parse_yes_no_field(
-            service.get(key), default_effective=name not in MGT_IMPLICIT_ENABLED)
+            service.get(key),
+            implicit=Implicit.measured(name not in MGT_IMPLICIT_ENABLED, MGT_CITATION))
+        if isinstance(raw_key, Implicit):
+            # The declaration above is in the VENDOR key's polarity - `disable-snmp` implicitly
+            # yes - and the row we are about to write is about the model's field, which is the
+            # negation. Left alone the provenance row would read `yes` beside a stored
+            # `enabled=False`, and a reader comparing the two would be told the opposite of what
+            # the device does. The citation is unchanged; only the value flips.
+            raw_key = replace(raw_key, value=not disabled)
         out[name] = (not disabled, raw_key, raw_value)
     return out
 
@@ -148,7 +168,12 @@ def _profile_services(profile_entry: dict) -> dict[str, tuple[bool, Any, str | N
     out: dict[str, tuple[bool, Any, str | None]] = {}
     for key in PROFILE_SERVICE_KEYS:
         enabled, raw_key, raw_value = parse_yes_no_field(
-            node.get(key), default_effective=key in PROFILE_IMPLICIT_ENABLED)
+            node.get(key),
+            implicit=Implicit.measured(
+                key in PROFILE_IMPLICIT_ENABLED,
+                "payload contract, interface-management-profile: every service key implicit "
+                "'no' - a profile stores as a bare entry with every service absent, measured "
+                "2026-08-27/28. The OPPOSITE polarity to the management plane's disable-* keys"))
         if raw_key is not ABSENT and raw_key is None and entry_key is not None:
             # A profile overrides at the ENTRY: its leaves either all carry the profile's
             # source or none do, measured on hardware. So the entry's source is the honest
@@ -186,10 +211,10 @@ def _record(instance, raw_key: Any, raw_value: str | None, *,
     `field_name="__entry__"` is the established name for an object's own annotation. These
     models are one row per value, so the row's own provenance IS that value's.
 
-    ABSENT means the key was not in the payload at all - PAN-OS supplied its default and
-    nobody pushed or wrote anything - so no row is written, and its absence is the answer.
-    A key present with no marker gets a row typed `local`, which is a different fact from
-    a default and one the previous name-only column could not hold.
+    An absent key arrives here as an `Implicit` and gets a row typed `pan_os_default` - PAN-OS
+    supplied the value and nobody pushed or wrote anything, which is a fact worth recording
+    rather than an absence to be inferred later. A key present with no marker gets `local`.
+    ABSENT still means the field is not tracked at all, and only that.
     """
     if raw_key is ABSENT:
         return
@@ -198,8 +223,8 @@ def _record(instance, raw_key: Any, raw_value: str | None, *,
         object_id=instance.pk,
         field_name=field_name,
         provenance_type=classify_prov_type(raw_key),
-        raw_key=(raw_key or "")[:32],
-        raw_value=(raw_value or "")[:128],
+        raw_key=provenance_raw_key(raw_key)[:32],
+        raw_value=provenance_value(raw_key, raw_value)[:128],
     )
 
 

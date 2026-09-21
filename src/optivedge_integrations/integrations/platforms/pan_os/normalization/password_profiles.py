@@ -15,7 +15,8 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, PasswordProfile, Snapshot, expiration_weakens)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type, entry_provenance, ensure_list, parse_integer_field)
+    Implicit,
+    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, entry_provenance, ensure_list, parse_integer_field)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     latest_merged_snapshot, password_complexity_from_snapshot)
 
@@ -66,7 +67,12 @@ def normalize_password_profiles(appliance: Appliance) -> dict[str, int]:
             values, provenance = {}, []
             for field, key in PROFILE_FIELDS:
                 values[field], raw_key, raw_value = parse_integer_field(
-                    change.get(key), default_effective=0)
+                    change.get(key),
+                    implicit=Implicit.assumed(
+                        0,
+                        "the password-complexity form was measured, this object's "
+                        "password-change node was not. 0 matches that neighbour, where it "
+                        "means the rule is not enforced"))
                 provenance.append((field, raw_key, raw_value))
 
             obj, _ = PasswordProfile.objects.update_or_create(
@@ -90,13 +96,13 @@ def normalize_password_profiles(appliance: Appliance) -> dict[str, int]:
                 FieldProvenance.objects.create(
                     content_type=content_type, object_id=obj.pk, field_name="__entry__",
                     provenance_type=classify_prov_type(raw_key),
-                    raw_key=raw_key or "", raw_value=raw_value or "")
+                    raw_key=provenance_raw_key(raw_key), raw_value=provenance_value(raw_key, raw_value))
             for field, rk, rv in provenance:
                 if rk is not ABSENT:
                     FieldProvenance.objects.create(
                         content_type=content_type, object_id=obj.pk, field_name=field,
                         provenance_type=classify_prov_type(rk),
-                        raw_key=rk or "", raw_value=rv or "")
+                        raw_key=provenance_raw_key(rk), raw_value=provenance_value(rk, rv))
 
         # A profile gone from the device must not linger: PAN-AUTH-026 is a hygiene control and
         # a stale row is a finding about something that no longer exists.

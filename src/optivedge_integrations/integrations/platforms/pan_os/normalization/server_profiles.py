@@ -23,6 +23,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.authenti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     ScopedEntry, scoped_nodes, write_scoped_objects)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    Implicit,
     ensure_list, parse_yes_no_field, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     latest_merged_snapshot)
@@ -85,7 +86,13 @@ def _servers(entry: dict[str, Any], kind: str) -> list[str]:
 
 def _fields(entry: dict[str, Any], kind: str, raw_kind: str) -> dict[str, Any]:
     def flag(key, field):
-        value, _, _ = parse_yes_no_field(entry.get(key), default_effective=IMPLICIT[field])
+        value, _, _ = parse_yes_no_field(
+                entry.get(key),
+                implicit=Implicit.measured(
+                    IMPLICIT[field],
+                    "payload contract, aaa-server-profile $implicit_values: measured 2026-09-09 "
+                    "on fw-core-tpa-b by writing the profile without the key and reading the "
+                    "checkbox the UI renders"))
         return value
 
     servers = _servers(entry, kind)
@@ -94,7 +101,13 @@ def _fields(entry: dict[str, Any], kind: str, raw_kind: str) -> dict[str, Any]:
     vendor, _, _ = scalar_value(entry.get("mfa-vendor-type"))
     saml_cert, _, _ = scalar_value(entry.get("certificate"))
     mfa_cert, _, _ = scalar_value(entry.get("mfa-cert-profile"))
-    admin_only, _, _ = parse_yes_no_field(entry.get("admin-use-only"), default_effective=False)
+    admin_only, _, _ = parse_yes_no_field(
+            entry.get("admin-use-only"),
+            implicit=Implicit.assumed(
+                False,
+                "not in the aaa-server-profile implicit block, which measured four other keys on "
+                "this object; False reads an unmarked profile as available to every consumer, "
+                "which is the broader and therefore safer reading for a referrer walk"))
 
     return {
         "kind": kind,

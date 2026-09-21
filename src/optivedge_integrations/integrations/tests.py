@@ -5361,8 +5361,11 @@ class ManagementInterfaceNormalizationTests(TestCase):
         self.assertEqual(prov(by_name["https"]), ("template", "stack_fw-core-tpa"))
         self.assertEqual(prov(by_name["telnet"]), ("local", ""),
                          "an overridden leaf is present-but-unmarked: local, not template")
-        self.assertIsNone(prov(by_name["snmp"]),
-                          "an absent key is a PAN-OS default, which nobody pushed or wrote")
+        # Recorded since 2026-09-21 rather than skipped: nobody pushed or wrote it, and that
+        # is a fact about the value worth keeping. The row's value is the EFFECTIVE one - snmp
+        # off - not `disable-snmp: yes`, so it can be read beside the field it describes.
+        self.assertEqual(prov(by_name["snmp"]), ("pan_os_default", "no"),
+                         "an absent key is a PAN-OS default, and says so")
         sources = {s.value: prov(s) for s in aux.permitted_sources.all()}
         self.assertEqual(sources, {"10.0.0.0/8": ("template", "stack_fw-core-tpa"),
                                    "192.168.1.1": ("local", "")})
@@ -5426,7 +5429,7 @@ class ManagementInterfaceNormalizationTests(TestCase):
         https = surface.services.get(name="https").field_provenance.get(field_name="__entry__")
         self.assertEqual(https.raw_value, "ptpl_fw-core-tpa")
 
-    def test_a_local_value_has_no_provenance(self):
+    def test_a_local_value_and_a_defaulted_one_are_told_apart(self):
         appliance = self._appliance()
         self._snapshot(appliance, {"deviceconfig": {"system": {
             "service": {"disable-telnet": "yes"},
@@ -5434,13 +5437,14 @@ class ManagementInterfaceNormalizationTests(TestCase):
         }}})
         normalize_management_interfaces(appliance)
         mgt = ManagementInterface.objects.get(plane=ManagementInterface.PLANE_MGT)
-        # The surface exists, so it has an origin: locally defined. Only an ABSENT payload
-        # key - a value PAN-OS defaulted - has no row at all.
+        # The surface exists, so it has an origin: locally defined.
         self.assertEqual(mgt.field_provenance.get().provenance_type, "local")
-        # telnet was WRITTEN locally; the rest are PAN-OS defaults with no row at all.
+        # telnet was WRITTEN locally; the rest are PAN-OS defaults, and each says which it is.
         telnet = mgt.services.get(name="telnet").field_provenance.get()
         self.assertEqual((telnet.provenance_type, telnet.raw_value), ("local", ""))
-        self.assertFalse(mgt.services.get(name="snmp").field_provenance.exists())
+        snmp = mgt.services.get(name="snmp").field_provenance.get()
+        self.assertEqual((snmp.provenance_type, snmp.raw_value), ("pan_os_default", "no"),
+                         "written locally and defaulted by the vendor are different facts")
         self.assertEqual(mgt.permitted_sources.get().field_provenance.get().provenance_type,
                          "local")
 
@@ -6279,7 +6283,8 @@ class LoginBannerNormalizationTests(TestCase):
         rows = {p.field_name: p.raw_value for p in FieldProvenance.objects.filter(
             content_type=ContentType.objects.get_for_model(LoginBanner), object_id=banner.pk)}
         self.assertEqual(rows.get("text"), "tpl-base")
-        self.assertNotIn("acknowledgement_required", rows)
+        # Defaulted, and recorded as such: mgmt-settings.ack-login-banner is implicit 'no'.
+        self.assertEqual(rows["acknowledgement_required"], "no")
 
 
 class AuthenticationSettingsNormalizationTests(TestCase):
@@ -6432,7 +6437,9 @@ class PasswordComplexityNormalizationTests(TestCase):
         self.assertEqual(rows["minimum_length"].raw_value, "tpl-base")
         # An absent key produces NO row - that is what keeps "defaulted" and "written locally"
         # apart.
-        self.assertNotIn("minimum_special", rows)
+        # Every complexity key the device does not carry is a measured PAN-OS default - the
+        # whole node absent means 0 and unticked, measured 2026-09-03 from the blank form.
+        self.assertEqual(rows["minimum_special"].provenance_type, "pan_os_default")
 
 
 class ServerProfileNormalizationTests(TestCase):
@@ -6834,3 +6841,148 @@ class ManagementSshNormalizationTests(TestCase):
         self.appliance.save()
         self.assertTrue(self._normalize().defaults_measured)
 
+
+
+class ImplicitDeclarationTests(TestCase):
+    """Storing a value for an absent key is a claim about PAN-OS. This is what makes a site
+    state whether it can back that claim, and what stops the three kinds being mixed again."""
+
+    def test_a_measured_default_needs_a_citation_a_reader_can_check(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+            Implicit)
+        self.assertEqual(
+            Implicit.measured(True, "payload contract, mgt-services.disable-ssh").provenance_type,
+            "pan_os_default")
+        with self.assertRaises(ValueError):
+            Implicit.measured(True, "PAN-OS docs")
+
+    def test_an_assumed_default_must_say_what_the_inference_rests_on(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+            Implicit)
+        self.assertEqual(
+            Implicit.assumed(False, "neighbouring keys in this node default off").provenance_type,
+            "assumed_default")
+        with self.assertRaises(ValueError):
+            Implicit.assumed(False, "")
+
+    def test_the_bare_constructor_cannot_slip_past_either_guard(self):
+        """`Implicit(x, "")` would otherwise reach a row as a measured default with no
+        measurement behind it."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+            Implicit)
+        with self.assertRaises(ValueError):
+            Implicit(value=True, citation=None, reasoning="")
+        with self.assertRaises(ValueError):
+            Implicit(value=True, citation="short")
+
+    def test_declining_to_guess_is_its_own_state(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+            Implicit)
+        declined = Implicit.not_assumed("the corpus records this default as unmeasured")
+        self.assertEqual(declined.provenance_type, "not_configured")
+        self.assertIsNone(declined.value)
+
+    def test_was_absent_covers_both_ways_an_absent_key_arrives(self):
+        """It used to be `raw_key is ABSENT` everywhere. An absent key now arrives as the
+        declaration instead, and two lines asking the old question would have turned the
+        security rule log flags from null into False."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+            ABSENT, Implicit, was_absent)
+        self.assertTrue(was_absent(ABSENT))
+        self.assertTrue(was_absent(Implicit.measured(True, "payload contract, some.node")))
+        self.assertFalse(was_absent(None))
+        self.assertFalse(was_absent("@ptpl"))
+
+    #: Every default this pipeline INFERS rather than knows, by module. Adding one is meant to
+    #: be a deliberate act with a reviewer, and this list is also the queue of what to measure
+    #: next - each entry is a claim about a customer's firewall that nobody has checked.
+    ASSUMED_DEFAULTS = {
+        "authentication.py": 3,       # profile lockout pair, mfa-enable
+        "certificates.py": 2,         # certificate-profile timeouts, certificate `ca`
+        "device_configuration.py": 2, # master key auto-renew, on-hsm
+        "device_services.py": 2,      # accept-dhcp-hostname, accept-dhcp-domain
+        "password_profiles.py": 1,    # password-change periods
+        "server_profiles.py": 1,      # admin-use-only
+        "zones.py": 1,                # user-identification and prenat flags
+    }
+
+    def test_every_assumed_default_is_accounted_for(self):
+        """The inventory, enforced. A new assumption that nobody listed fails here rather than
+        reaching an artifact as a vendor fact."""
+        import re
+        from pathlib import Path
+        from optivedge_integrations.integrations.platforms.pan_os import normalization
+        root = Path(normalization.__file__).parent
+        found = {}
+        for path in sorted(root.glob("*.py")):
+            if path.name == "common.py":      # where the constructor itself is defined
+                continue
+            count = len(re.findall(r"Implicit\.assumed\(", path.read_text()))
+            if count:
+                found[path.name] = count
+        self.assertEqual(found, self.ASSUMED_DEFAULTS)
+
+
+class SecurityRuleLogFlagProvenanceTests(TestCase):
+    """The log flags are the reason `not_configured` exists.
+
+    `read-a-security-rule.md`: "**Unmeasured:** log-start / log-end defaults. If a consumer needs
+    them, it needs to measure them, not assume." The normalizer has always stored null for an
+    absent flag rather than False, and PAN-POL-009 asserts log-end - so a guess either way
+    decides that control on nothing.
+
+    Nothing covered that null until 2026-09-21, when recording absent keys as provenance rows
+    turned `raw_key is ABSENT` false and would have made both flags False. The suite passed.
+    """
+
+    def _rules(self, *entries):
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-LOGFLAGS", appliance_hostname="fw-logflags")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"vsys": {"entry": {
+                "@name": "vsys1",
+                "rulebase": {"security": {"rules": {"entry": list(entries)}}},
+            }}}}}})
+        _create_empty_pushed_policy_snapshot(station=station,
+                                             enforcement_point=enforcement_point)
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalize_enforcement_point_security_rules(enforcement_point)
+        return {rule.name: rule for rule in SecurityRule.objects.all()}
+
+    @staticmethod
+    def _entry(name, **extra):
+        return {"@name": name, "from": {"member": "any"}, "to": {"member": "any"},
+                "source": {"member": "any"}, "destination": {"member": "any"},
+                "application": {"member": "any"}, "service": {"member": "application-default"},
+                "action": "allow", **extra}
+
+    def _provenance(self, rule, field):
+        return rule.field_provenance.filter(field_name=field).first()
+
+    def test_an_absent_log_flag_stays_null_rather_than_becoming_false(self):
+        rules = self._rules(self._entry("quiet"))
+        self.assertIsNone(rules["quiet"].log_start)
+        self.assertIsNone(rules["quiet"].log_end)
+
+    def test_and_the_row_says_not_configured_rather_than_claiming_a_default(self):
+        rules = self._rules(self._entry("quiet"))
+        row = self._provenance(rules["quiet"], "log_end")
+        self.assertIsNotNone(row, "an absent key is recorded now; a missing row means untracked")
+        self.assertEqual(row.provenance_type, "not_configured")
+        self.assertEqual(row.raw_value, "",
+                         "nothing was assumed, so there is no value to show")
+
+    def test_a_written_flag_is_local_and_keeps_its_value(self):
+        rules = self._rules(self._entry("logged", **{"log-end": "yes"}))
+        self.assertTrue(rules["logged"].log_end)
+        row = self._provenance(rules["logged"], "log_end")
+        self.assertEqual((row.provenance_type, row.raw_value), ("local", ""))
+
+    def test_a_measured_default_on_the_same_rule_does_claim_its_value(self):
+        """`disabled` sits beside the log flags and IS documented - absent means no - so the
+        two are told apart on one object rather than by which model they belong to."""
+        rules = self._rules(self._entry("quiet"))
+        row = self._provenance(rules["quiet"], "disabled")
+        self.assertEqual((row.provenance_type, row.raw_value), ("pan_os_default", "no"))

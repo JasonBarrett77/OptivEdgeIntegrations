@@ -19,6 +19,7 @@ from optivedge_integrations.integrations.models import (
     Snapshot,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    Implicit,
     ensure_list,
     parse_integer_field,
     parse_yes_no_field,
@@ -27,6 +28,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
 
 
 DEFAULT_IDLE_TIMEOUT_MINUTES = 60
+
+#: Shared by the thirteen complexity keys, which one form measured in one sitting.
+PASSWORD_COMPLEXITY_CITATION = (
+    "payload contract, password-complexity $implicit_values: measured 2026-09-03 from the "
+    "unconfigured Minimum Password Complexity form, where the whole node is absent - every "
+    "numeric key reads 0 and every checkbox unticked")
 
 #: Raised when deviceconfig/system names an SSL/TLS profile no collected scope defines.
 SSL_TLS_ISSUE_KIND = "ssl_tls_service_profile_unresolved"
@@ -90,7 +97,9 @@ def login_banner_from_node(system: Any) -> tuple[dict[str, Any], list]:
         system = {}
     text, text_rk, text_rv = scalar_value(system.get("login-banner"))
     ack, ack_rk, ack_rv = parse_yes_no_field(
-        system.get("ack-login-banner"), default_effective=False)
+        system.get("ack-login-banner"),
+        implicit=Implicit.measured(
+            False, "payload contract, mgmt-settings.ack-login-banner: implicit 'no'"))
     return ({"text": text, "acknowledgement_required": ack},
             [("text", text_rk, text_rv), ("acknowledgement_required", ack_rk, ack_rv)])
 
@@ -122,16 +131,30 @@ def authentication_settings_from_node(management: Any) -> tuple[dict[str, Any], 
     if not isinstance(api_key, dict):
         api_key = {}
 
+    # All four measured 2026-09-04 from the unconfigured Authentication Settings form, and all
+    # four default to a zero-ish value that means something different - which is why each states
+    # its own citation rather than sharing one.
     reads = (
-        ("idle_timeout_minutes", management.get("idle-timeout"), DEFAULT_IDLE_TIMEOUT_MINUTES),
-        ("lockout_failed_attempts", admin_lockout.get("failed-attempts"), 0),
-        ("lockout_time_minutes", admin_lockout.get("lockout-time"), 0),
-        ("api_key_lifetime_minutes", api_key.get("lifetime"), 0),
+        ("idle_timeout_minutes", management.get("idle-timeout"), Implicit.measured(
+            DEFAULT_IDLE_TIMEOUT_MINUTES,
+            "payload contract, authentication-settings.idle-timeout: 60, from a dropdown that "
+            "labels it '60 (default)'. PAN-AUTH-016's verdict turns on it")),
+        ("lockout_failed_attempts", admin_lockout.get("failed-attempts"), Implicit.measured(
+            0,
+            "payload contract, authentication-settings.admin-lockout/failed-attempts: 0, "
+            "meaning UNLIMITED attempts - Help p.707, and 10 in FIPS-CC mode, which this model "
+            "does not distinguish")),
+        ("lockout_time_minutes", admin_lockout.get("lockout-time"), Implicit.measured(
+            0, "payload contract, authentication-settings.admin-lockout/lockout-time: 0")),
+        ("api_key_lifetime_minutes", api_key.get("lifetime"), Implicit.measured(
+            0,
+            "payload contract, authentication-settings.api/key/lifetime: 0, meaning keys never "
+            "expire - Administrator's Guide p.85")),
     )
     values: dict[str, Any] = {}
     provenance: list[tuple[str, Any, str | None]] = []
     for field, raw, default in reads:
-        values[field], raw_key, raw_value = parse_integer_field(raw, default_effective=default)
+        values[field], raw_key, raw_value = parse_integer_field(raw, implicit=default)
         provenance.append((field, raw_key, raw_value))
     return values, provenance
 
@@ -192,10 +215,10 @@ def password_complexity_from_snapshot(snapshot: Snapshot) -> tuple[dict[str, Any
         raw = source.get(key)
         if kind == "bool":
             values[field], raw_key, raw_value = parse_yes_no_field(
-                raw, default_effective=False)
+                raw, implicit=Implicit.measured(False, PASSWORD_COMPLEXITY_CITATION))
         else:
             values[field], raw_key, raw_value = parse_integer_field(
-                raw, default_effective=0)
+                raw, implicit=Implicit.measured(0, PASSWORD_COMPLEXITY_CITATION))
         # mgt-config is template-managed - the users node on tpa-a arrives carrying @ptpl - so
         # these values can be pushed and the provenance has to be captured like any other.
         # Absent keys produce no row, which is what makes "local" and "defaulted" different
@@ -226,8 +249,18 @@ def read_master_key(snapshot: Snapshot | None) -> tuple[str, str, int, bool]:
     if not isinstance(payload, dict):
         return MasterKey.STATE_UNDETERMINED, "", 0, False
     expires_at, _, _ = scalar_value(payload.get("expire-at"))
-    auto_renew, _, _ = parse_integer_field(payload.get("auto-renew-mkey"), default_effective=0)
-    on_hsm, _, _ = parse_yes_no_field(payload.get("on-hsm"), default_effective=False)
+    auto_renew, _, _ = parse_integer_field(
+        payload.get("auto-renew-mkey"),
+        implicit=Implicit.assumed(
+            0,
+            "the master-key node has no measured implicit block; 0 reads as no automatic "
+            "renewal, which is what the device shows for a key nobody has scheduled"))
+    on_hsm, _, _ = parse_yes_no_field(
+        payload.get("on-hsm"),
+        implicit=Implicit.assumed(
+            False,
+            "the master-key node has no measured implicit block; an HSM-held key is the "
+            "exceptional case and the lab has no HSM to measure against"))
     if not expires_at:
         # The key is absent from the reply entirely - a shape nobody has seen. Not read as
         # default: that verdict rests on expire-at being present and zero.

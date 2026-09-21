@@ -40,6 +40,7 @@ from optivedge_integrations.integrations.models import (
     ZoneInterface,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    Implicit,
     ensure_list,
     merged_vsys_entry,
     parse_yes_no_field,
@@ -260,8 +261,14 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
         prenat = prenat if isinstance(prenat, dict) else {}
 
         def flag(node: Any) -> bool:
-            """These default OFF, unlike packet-buffer protection - absent means False."""
-            value, _raw_key, _raw_prov = parse_yes_no_field(node, default_effective=False)
+            """These read OFF when absent - the claim, and what is behind it, below."""
+            value, _raw_key, _raw_prov = parse_yes_no_field(
+                node,
+                implicit=Implicit.assumed(
+                    False,
+                    "stated in this module since it was written - 'these default OFF, unlike "
+                    "packet-buffer protection' - with no measurement recorded anywhere. OFF "
+                    "reads an unmarked zone as not identifying users, the narrower claim"))
             return value
 
         enable_user_identification = flag(entry.get("enable-user-identification"))
