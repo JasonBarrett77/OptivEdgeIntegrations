@@ -115,13 +115,30 @@ the three cases is not planned. It would produce a distinction with no action at
 ### What IS worth separating, and already is
 
 **A key that was never written** is a different fact from one set locally to the same value:
-one is the platform's default and the other is a decision. `FieldProvenance` already carries
-it — an absent key gets no row at all, a present-but-unmarked key gets a row typed `local` —
-because the remediation differs. Telling an engineer to change a setting nobody has ever
-touched is different from telling them to change one somebody chose.
+one is the platform's default and the other is a decision, and the remediation differs. Telling
+an engineer to change a setting nobody has ever touched is not the same as telling them to
+change one somebody chose.
 
-That distinction is stored today and not yet surfaced. It is the one worth surfacing; the
-local-versus-overridden one is not.
+`FieldProvenance` carries it, and since 2026-09-21 it carries what KIND of absence it was. A
+present-but-unmarked key is a row typed `local`. An absent key is a row too:
+
+| type | the key was absent and... |
+|---|---|
+| `pan_os_default` | PAN-OS supplies this value, and we have measured that it does |
+| `assumed_default` | the stored value is our inference, not a vendor fact |
+| `not_configured` | nothing was stored, because a guess would be worse than the null |
+
+A missing row now means one thing only: nothing tracks that field. A `derived` answer, for a
+column normalization computed rather than read, comes from `ProvenancedMixin.DERIVED_FIELDS`
+and is never stored — derived-ness belongs to the field, not to each object.
+
+Splitting the three mattered more than it looks. Skipping absent keys had made "PAN-OS supplies
+it", "we guessed" and "nobody tracks it" share one blank, and a consumer resolving that blank
+per MODEL gets it wrong per KEY: in `deviceconfig/system`, `disable-http` absent means the
+service is ON while `enable-log-high-dp-load` absent means it is OFF.
+
+It is surfaced now — `OptivEdgeProbe/scratch/provenance-for-artifacts.md` is the consumer
+contract. The local-versus-overridden distinction still is not, and still should not be.
 
 ## `@ptpl` names a template **or** a stack, and the difference does not matter
 

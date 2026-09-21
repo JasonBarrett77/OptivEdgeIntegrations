@@ -190,7 +190,10 @@ Do not assume the omit-on-default behaviour generalises across `deviceconfig`.
 To get one of these keys back to its implicit state, **delete it** — see "To reset a field,
 DELETE the right branch" above. Writing the default value back leaves the key present and set,
 which is a different config from never having written it, and the two are distinguishable:
-`FieldProvenance` gives an absent key no row and a present-but-unmarked key a `local` one.
+`FieldProvenance` gives a present-but-unmarked key a row typed `local`, and an absent key a row
+saying which kind of absence it is — `pan_os_default` where we have measured what PAN-OS
+supplies, `assumed_default` where the stored value is our inference, `not_configured` where
+nothing was stored at all.
 
 ## `deviceconfig/setting/management` can be absent entirely
 
