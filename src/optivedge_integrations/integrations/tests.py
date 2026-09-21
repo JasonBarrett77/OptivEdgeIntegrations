@@ -6901,6 +6901,7 @@ class ImplicitDeclarationTests(TestCase):
         "certificates.py": 2,         # certificate-profile timeouts, certificate `ca`
         "device_configuration.py": 2, # master key auto-renew, on-hsm
         "device_services.py": 2,      # accept-dhcp-hostname, accept-dhcp-domain
+        "management_ssh.py": 1,       # the built-in SSH offer of an UNMEASURED release
         "password_profiles.py": 1,    # password-change periods
         "server_profiles.py": 1,      # admin-use-only
         "zones.py": 1,                # user-identification and prenat flags

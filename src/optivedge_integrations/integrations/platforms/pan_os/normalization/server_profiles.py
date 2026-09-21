@@ -24,7 +24,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.certific
     ScopedEntry, scoped_nodes, write_scoped_objects)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     Implicit,
-    ensure_list, parse_yes_no_field, scalar_value)
+    ensure_list, parse_text_field, parse_yes_no_field, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     latest_merged_snapshot)
 
@@ -84,30 +84,57 @@ def _servers(entry: dict[str, Any], kind: str) -> list[str]:
     return [v for v in out if v]
 
 
-def _fields(entry: dict[str, Any], kind: str, raw_kind: str) -> dict[str, Any]:
+def _fields(entry: dict[str, Any], kind: str,
+            raw_kind: str) -> tuple[dict[str, Any], list[tuple]]:
+    """(values, provenance triples). The four flags below are the reason this returns both:
+    each defaults to a MEASURED vendor value when its key is absent, and two of them default the
+    opposite way to what the checkbox suggests - so which profiles were never configured is not
+    something a reader can infer from the value."""
+    provenance: list[tuple] = []
+
     def flag(key, field):
-        value, _, _ = parse_yes_no_field(
+        value, rk, rv = parse_yes_no_field(
                 entry.get(key),
                 implicit=Implicit.measured(
                     IMPLICIT[field],
                     "payload contract, aaa-server-profile $implicit_values: measured 2026-09-09 "
                     "on fw-core-tpa-b by writing the profile without the key and reading the "
                     "checkbox the UI renders"))
+        provenance.append((field, rk, rv))
         return value
 
     servers = _servers(entry, kind)
-    bind_dn, _, _ = scalar_value(entry.get("bind-dn"))
-    ldap_type, _, _ = scalar_value(entry.get("ldap-type"))
-    vendor, _, _ = scalar_value(entry.get("mfa-vendor-type"))
-    saml_cert, _, _ = scalar_value(entry.get("certificate"))
-    mfa_cert, _, _ = scalar_value(entry.get("mfa-cert-profile"))
-    admin_only, _, _ = parse_yes_no_field(
+    # Text keys whose ABSENCE a reader has to be able to see: an unbound certificate profile on
+    # an MFA server profile is what PAN-AUTH-020's prerequisite turned on.
+    unbound = Implicit.measured(
+        None,
+        "aaa-server-profile: an absent reference key binds nothing - the same reading the "
+        "contract records for ssl-tls-service-profile.certificate")
+    bind_dn, bind_rk, bind_rv = parse_text_field(entry.get("bind-dn"), implicit=unbound)
+    ldap_type, type_rk, type_rv = parse_text_field(entry.get("ldap-type"), implicit=unbound)
+    vendor, vendor_rk, vendor_rv = parse_text_field(
+        entry.get("mfa-vendor-type"), implicit=unbound)
+    saml_cert, saml_rk, saml_rv = parse_text_field(entry.get("certificate"), implicit=unbound)
+    mfa_cert, mfa_rk, mfa_rv = parse_text_field(
+        entry.get("mfa-cert-profile"), implicit=unbound)
+    admin_only, admin_rk, admin_rv = parse_yes_no_field(
             entry.get("admin-use-only"),
             implicit=Implicit.assumed(
                 False,
                 "not in the aaa-server-profile implicit block, which measured four other keys on "
                 "this object; False reads an unmarked profile as available to every consumer, "
                 "which is the broader and therefore safer reading for a referrer walk"))
+
+    provenance.extend([
+        ("admin_use_only", admin_rk, admin_rv),
+        ("ldap_bind_dn", bind_rk, bind_rv),
+        ("ldap_type", type_rk, type_rv),
+        ("mfa_vendor_type", vendor_rk, vendor_rv),
+        # One column fed by whichever of the two reference keys the profile carries, so the row
+        # names the one that answered - or, absent both, that nothing is bound.
+        ("certificate_reference", saml_rk if saml_cert else mfa_rk,
+         saml_rv if saml_cert else mfa_rv),
+    ])
 
     return {
         "kind": kind,
@@ -127,7 +154,7 @@ def _fields(entry: dict[str, Any], kind: str, raw_kind: str) -> dict[str, Any]:
             "want-auth-requests-signed", "saml_want_auth_requests_signed"),
         "mfa_vendor_type": vendor[:64],
         "certificate_reference": (saml_cert or mfa_cert)[:64],
-    }
+    }, provenance
 
 
 def _kind_entries(snapshot: Snapshot, appliance: Appliance) -> list[tuple[ScopedEntry, str, str]]:
@@ -178,13 +205,13 @@ def normalize_server_profiles(appliance: Appliance) -> dict[str, int]:
 
     rows = []
     for scoped, kind, raw_kind in entries:
-        fields = _fields(scoped.entry, kind, raw_kind)
+        fields, provenance = _fields(scoped.entry, kind, raw_kind)
         name = str(scoped.entry.get("@name") or "")
         vsys = scoped.vsys_name if scoped.scope != "shared" else ""
         where = sorted(set(references.get((vsys, name), [])))
         fields["referrer_paths"] = where
         fields["referrer_count"] = len(where)
-        rows.append((scoped, fields))
+        rows.append((scoped, fields, provenance))
 
     return {"server_profiles": write_scoped_objects(
         ServerProfile, appliance, snapshot, rows, extra_key="kind")}

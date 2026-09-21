@@ -66,19 +66,19 @@ def normalize_authentication_sequences(appliance: Appliance) -> dict[str, int]:
                     for m in members]
         local = [m for m, method in zip(members, resolved) if method in LOCAL_METHODS]
         unresolved = sum(1 for method in resolved if method is None)
-        exit_on_failure, _, _ = parse_yes_no_field(
+        exit_on_failure, exit_on_failure_rk, exit_on_failure_rv = parse_yes_no_field(
             scoped.entry.get("exit-sequence-on-failure"),
             implicit=Implicit.measured(
                 False,
                 f"{CONTRACT_NODE}.exit-sequence-on-failure: 'no', measured 2026-09-11 from a "
                 "committed sequence the form had not touched"))
-        use_domain, _, _ = parse_yes_no_field(
+        use_domain, use_domain_rk, use_domain_rv = parse_yes_no_field(
             scoped.entry.get("use-domain-find-profile"),
             implicit=Implicit.measured(
                 True,
                 f"{CONTRACT_NODE}.use-domain-find-profile: 'yes', measured 2026-09-11 and "
                 "agreeing with Help p.844 'enabled by default'"))
-        use_userid, _, _ = parse_yes_no_field(
+        use_userid, use_userid_rk, use_userid_rv = parse_yes_no_field(
             scoped.entry.get("use-userid-domain"),
             implicit=Implicit.measured(
                 False,
@@ -100,6 +100,13 @@ def normalize_authentication_sequences(appliance: Appliance) -> dict[str, int]:
             "referrer_count": len(where),
             "is_administrative": any(marker in path for path in where
                                      for marker in ADMINISTRATIVE_MARKERS),
-        }))
+        }, [
+            # All three measured 2026-09-11, and all three normally ABSENT - the form stores
+            # none of them until it is touched. Without these rows a reader cannot tell a
+            # sequence that was configured to exit on failure from one that never was.
+            ("exit_sequence_on_failure", exit_on_failure_rk, exit_on_failure_rv),
+            ("use_domain_find_profile", use_domain_rk, use_domain_rv),
+            ("use_userid_domain", use_userid_rk, use_userid_rv),
+        ]))
     return {"authentication_sequences": write_scoped_objects(
         AuthenticationSequence, appliance, snapshot, rows)}

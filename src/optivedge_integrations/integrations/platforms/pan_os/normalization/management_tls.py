@@ -23,7 +23,9 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, ManagementTlsBinding, NormalizationIssue, SslTlsServiceProfile)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, scalar_value)
+    ABSENT,
+    Implicit,
+    parse_text_field, classify_prov_type, provenance_raw_key, provenance_value, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     SSL_TLS_ISSUE_KIND, device_entry_from_snapshot, latest_merged_snapshot,
     latest_predefined_certificate_snapshot, predefined_certificates, resolve_certificate,
@@ -69,7 +71,14 @@ def normalize_management_tls(appliance: Appliance) -> dict[str, int]:
     deviceconfig = entry.get("deviceconfig") if isinstance(entry, dict) else None
     system = deviceconfig.get("system") if isinstance(deviceconfig, dict) else None
     system = system if isinstance(system, dict) else {}
-    name, name_rk, name_rv = scalar_value(system.get("ssl-tls-service-profile"))
+    # PAN-MGT-010 fires when nothing is bound, so "no key" is the finding and has to be
+    # recorded as a state rather than left as a gap in the table.
+    name, name_rk, name_rv = parse_text_field(
+        system.get("ssl-tls-service-profile"),
+        implicit=Implicit.measured(
+            None,
+            "payload contract, ssl-tls-service-profile.ssl-tls-service-profile: implicit None - "
+            "deviceconfig/system holds a NAME and an absent key binds no profile"))
 
     scope, row = ("", None)
     trust, cert_scope, issuer = "", "", ""

@@ -37,6 +37,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     ensure_list,
     entry_provenance,
     parse_integer_field,
+    parse_text_field,
     parse_yes_no_field,
     scalar_value,
 )
@@ -229,7 +230,7 @@ def _algorithms(protocol_settings: dict[str, Any]) -> tuple[dict[str, bool], lis
 
 
 def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
-           rows: list[tuple[ScopedEntry, dict[str, Any]]], extra_key: str | None = None):
+           rows: list[tuple], extra_key: str | None = None):
     """Write one row per scoped entry, replacing whatever the appliance held before.
 
     `extra_key` names a field that is part of the object's identity ALONGSIDE the scope and the
@@ -240,7 +241,11 @@ def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
     content_type = ContentType.objects.get_for_model(model)
     with transaction.atomic():
         seen = []
-        for scoped, defaults in rows:
+        for row in rows:
+            # A third element is the per-field provenance. Optional so the callers that have
+            # nothing to say about their fields yet keep working unchanged.
+            scoped, defaults = row[0], row[1]
+            field_rows = row[2] if len(row) > 2 else ()
             lookup = {"appliance": appliance, "scope": scoped.scope,
                       "vsys_name": scoped.vsys_name, "name": scoped.entry["@name"]}
             if extra_key:
@@ -264,6 +269,12 @@ def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
                     field_name="__entry__",
                     provenance_type=classify_prov_type(raw_key),
                     raw_key=provenance_raw_key(raw_key), raw_value=provenance_value(raw_key, raw_value))
+            FieldProvenance.objects.bulk_create([
+                FieldProvenance(
+                    content_type=content_type, object_id=obj.pk, field_name=field_name,
+                    provenance_type=classify_prov_type(rk),
+                    raw_key=provenance_raw_key(rk), raw_value=provenance_value(rk, rv)[:128])
+                for field_name, rk, rv in field_rows if rk is not ABSENT])
         # Anything not seen this pass is gone from the device. Deleting rather than leaving it
         # matters for the hygiene controls: a stale profile row is a false finding.
         model.objects.filter(appliance=appliance).exclude(pk__in=seen).delete()
@@ -282,9 +293,21 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
         if not isinstance(settings, dict):
             settings = {}
         effective, explicit = _algorithms(settings)
-        certificate, _, _ = scalar_value(scoped.entry.get("certificate"))
-        min_version, _, _ = scalar_value(settings.get("min-version"))
-        max_version, _, _ = scalar_value(settings.get("max-version"))
+        certificate, cert_rk, cert_rv = parse_text_field(
+            scoped.entry.get("certificate"),
+            implicit=Implicit.measured(
+                None,
+                "payload contract, ssl-tls-service-profile.certificate: implicit None - a "
+                "profile with no certificate key has none bound"))
+        # The contract marks BOTH version bounds implicit_unmeasured, so nothing is claimed
+        # about a profile that omits them - which is the profile PAN-CRT-005 is about.
+        version_unmeasured = Implicit.not_assumed(
+            "payload contract, ssl-tls-service-profile.protocol-settings/min-version and "
+            "max-version: implicit_unmeasured")
+        min_version, min_rk, min_rv = parse_text_field(
+            settings.get("min-version"), implicit=version_unmeasured)
+        max_version, max_rk, max_rv = parse_text_field(
+            settings.get("max-version"), implicit=version_unmeasured)
         tls_rows.append((scoped, {
             "certificate_name": certificate,
             "min_version": min_version,
@@ -294,13 +317,18 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
             # Promoted to a column so a control can rest on it. Derived here, in the one place
             # that already knows absent means enabled.
             "allows_sha1": effective.get("auth-algo-sha1", True),
-        }))
+        }, [
+            ("certificate_name", cert_rk, cert_rv),
+            ("min_version", min_rk, min_rv),
+            ("max_version", max_rk, max_rv),
+        ]))
 
     cert_rows = []
     for scoped in scoped_entries(snapshot, "certificate-profile"):
         defaults: dict[str, Any] = {}
+        profile_rows = []
         for field, key in CERTIFICATE_PROFILE_BOOLEANS:
-            value, _, _ = parse_yes_no_field(
+            value, rk, rv = parse_yes_no_field(
                 scoped.entry.get(key),
                 implicit=Implicit.measured(
                     False,
@@ -308,17 +336,19 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
                     "absent = DISABLED (unticked), measured 2026-09-02 from the blank Add "
                     "Certificate Profile form"))
             defaults[field] = value
+            profile_rows.append((field, rk, rv))
         for field, key, fallback in CERTIFICATE_PROFILE_TIMEOUTS:
-            value, _, _ = parse_integer_field(
+            value, rk, rv = parse_integer_field(
                 scoped.entry.get(key),
                 implicit=Implicit.assumed(
                     fallback,
                     "the certificate-profile implicit block measured the six BOOLEANS and says "
                     "nothing about the timeouts; this fallback predates it"))
             defaults[field] = value
+            profile_rows.append((field, rk, rv))
         ca = scoped.entry.get("CA")
         defaults["ca_certificate_names"] = [e["@name"] for e in _entries(ca)]
-        cert_rows.append((scoped, defaults))
+        cert_rows.append((scoped, defaults, profile_rows))
 
     certificate_rows = []
     for scoped in scoped_entries(snapshot, "certificate",
@@ -329,7 +359,7 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
         common_name, _, _ = scalar_value(entry.get("common-name"))
         subject, _, _ = scalar_value(entry.get("subject"))
         issuer, _, _ = scalar_value(entry.get("issuer"))
-        is_ca, _, _ = parse_yes_no_field(
+        is_ca, ca_rk, ca_rv = parse_yes_no_field(
             entry.get("ca"),
             implicit=Implicit.assumed(
                 False,
@@ -357,7 +387,7 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
             # returning today's date as every certificate's expiry.
             "not_valid_before": decoded.get("not_valid_before"),
             "not_valid_after": decoded.get("not_valid_after"),
-        }))
+        }, [("is_ca", ca_rk, ca_rv)]))
 
     return {
         "certificates": write_scoped_objects(Certificate, appliance, snapshot, certificate_rows),

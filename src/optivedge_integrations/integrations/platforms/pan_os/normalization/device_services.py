@@ -23,7 +23,7 @@ from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, ManagementService, NtpSettings, SnmpSettings, SystemIdentity)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     Implicit,
-    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, entry_provenance, parse_yes_no_field, scalar_value)
+    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, entry_provenance, parse_text_field, parse_yes_no_field, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot, latest_merged_snapshot)
 
@@ -61,8 +61,16 @@ def _choice_child(node: Any, valid: tuple[str, ...]) -> tuple[str, dict[str, Any
 def _server(node: Any) -> tuple[str, str, str, Any, str | None]:
     """(address, auth type, algorithm, address raw key, address raw value) for one NTP slot."""
     if not isinstance(node, dict):
-        return "", "", "", ABSENT, None
-    address, raw_key, raw_value = scalar_value(node.get("ntp-server-address"))
+        # The whole slot is absent - PAN-OS holds exactly two and an unconfigured one carries
+        # no node at all. That is the measured meaning of absence here, not an inference.
+        return "", "", "", Implicit.measured(
+            None,
+            "payload contract, ntp-servers: the node holds exactly TWO slots and an "
+            "unconfigured slot is absent entirely"), None
+    address, raw_key, raw_value = parse_text_field(
+        node.get("ntp-server-address"),
+        implicit=Implicit.measured(
+            None, "payload contract, ntp-servers: a slot with no address configures no server"))
     auth_type, auth_body = _choice_child(node.get("authentication-type"), AUTH_TYPES)
     algorithm, _, _ = scalar_value(auth_body.get("algorithm")) if auth_body else ("", None, None)
     return address, auth_type, algorithm, raw_key, raw_value
@@ -101,6 +109,19 @@ def _exposed_surfaces(appliance: Appliance) -> list[str]:
              or service.management_interface.plane) for service in services]
 
 
+#: An absent `authentication-type` means none - the contract records the implicit value, and
+#: PAN-SVC-002 reads it as the finding rather than as missing data.
+NTP_AUTH_IMPLICIT = Implicit.measured(
+    "none", "payload contract, ntp-servers.authentication-type: implicit 'none'")
+
+
+def _auth_provenance(auth_type: str):
+    """`local` when the slot named an authentication type, the measured default when it did
+    not. Written here rather than carried out of `_server` because the choice node's own
+    provenance is the child element's, and the child is what is or is not there."""
+    return None if auth_type else NTP_AUTH_IMPLICIT
+
+
 def _ntp(appliance, snapshot, system) -> None:
     servers = system.get("ntp-servers") if isinstance(system.get("ntp-servers"), dict) else {}
     primary, p_auth, p_algo, p_rk, p_rv = _server(servers.get("primary-ntp-server"))
@@ -129,8 +150,14 @@ def _ntp(appliance, snapshot, system) -> None:
             "unauthenticated_servers": unauthenticated,
         },
     )
-    _provenance(NtpSettings, row, [("primary_server", p_rk, p_rv),
-                                   ("secondary_server", s_rk, s_rv)])
+    _provenance(NtpSettings, row, [
+        ("primary_server", p_rk, p_rv),
+        ("secondary_server", s_rk, s_rv),
+        # PAN-SVC-002 turns on the authentication type, and its absence is measured: no
+        # authentication-type node means none, which is the failing state rather than a gap.
+        ("primary_auth_type", _auth_provenance(p_auth), None),
+        ("secondary_auth_type", _auth_provenance(s_auth), None),
+    ])
 
 
 def _snmp(appliance, snapshot, system) -> None:
@@ -180,24 +207,51 @@ def _snmp(appliance, snapshot, system) -> None:
     )
     # The community string's VALUE is not stored; its provenance is, because "who set this" is
     # exactly what an assessor asks about a credential they can see in a backup.
-    _provenance(SnmpSettings, row, [("community_is_default", community_rk, community_rv)])
+    _provenance(SnmpSettings, row, [
+        ("community_is_default", community_rk, community_rv),
+        # PAN-SVC-004 rests on the version. An access-setting with no version child is v2c by
+        # the vendor's own dialog default, and the row says that rather than leaving a reader to
+        # wonder whether v2c was chosen or inherited.
+        ("version", Implicit.measured(
+            "v2c",
+            "payload contract, snmp-setting.version: implicit 'v2c' - Help p.740, the dialog's "
+            "default") if implicit else (None if version_name else ABSENT), None),
+    ])
 
 
 def _identity(appliance, snapshot, system) -> None:
-    hostname, host_rk, host_rv = scalar_value(system.get("hostname"))
-    timezone, tz_rk, tz_rv = scalar_value(system.get("timezone"))
+    # The implicit hostname is the DEVICE'S OWN MODEL, so the declaration is built per appliance
+    # rather than being a constant - Help p.700, "PAN-OS uses the firewall model (for example,
+    # PA-5220_2)". PAN-SVC-010 turns on exactly this, which is why the row has to say that the
+    # name came from the vendor rather than from anyone here.
+    hostname, host_rk, host_rv = parse_text_field(
+        system.get("hostname"),
+        implicit=Implicit.measured(
+            appliance.model or "",
+            "payload contract, system-identity.hostname: implicit 'the appliance model' - "
+            "Help p.700"))
+    timezone, tz_rk, tz_rv = parse_text_field(
+        system.get("timezone"),
+        implicit=Implicit.not_assumed(
+            "the system-identity contract records a 566-value enum for timezone and no implicit "
+            "value; PAN-SVC-009 compares against UTC and an invented default would decide it"))
     mode, mode_body = _choice_child(system.get("type"), ("static", "dhcp-client"))
     type_rk, type_rv = entry_provenance(system.get("type")) if isinstance(
-        system.get("type"), dict) else (ABSENT, None)
+        system.get("type"), dict) else (
+            Implicit.measured(
+                SystemIdentity.AddressingMode.STATIC,
+                "payload contract, system-identity.type: implicit 'static' - fw-core-tpa-b "
+                "carries no type node and reports ip-type static"),
+            None)
 
-    accept_hostname, _, _ = parse_yes_no_field(
+    accept_hostname, accept_host_rk, accept_host_rv = parse_yes_no_field(
         mode_body.get("accept-dhcp-hostname"),
         implicit=Implicit.assumed(
             False,
             "the system-identity contract measured `type` and `hostname` and not these two. "
             "False reads the device as keeping its configured name, which is what the "
             "hostname control assumes when it compares against the model"))
-    accept_domain, _, _ = parse_yes_no_field(
+    accept_domain, accept_domain_rk, accept_domain_rv = parse_yes_no_field(
         mode_body.get("accept-dhcp-domain"),
         implicit=Implicit.assumed(
             False, "same node as accept-dhcp-hostname above, and unmeasured with it"))
@@ -231,9 +285,13 @@ def _identity(appliance, snapshot, system) -> None:
             "accept_dhcp_domain": accept_domain,
         },
     )
-    _provenance(SystemIdentity, row, [("hostname", host_rk, host_rv),
-                                      ("timezone", tz_rk, tz_rv),
-                                      ("addressing_mode", type_rk, type_rv)])
+    _provenance(SystemIdentity, row, [
+        ("hostname", host_rk, host_rv),
+        ("timezone", tz_rk, tz_rv),
+        ("addressing_mode", type_rk, type_rv),
+        ("accept_dhcp_hostname", accept_host_rk, accept_host_rv),
+        ("accept_dhcp_domain", accept_domain_rk, accept_domain_rv),
+    ])
 
 
 def normalize_device_services(appliance: Appliance) -> dict[str, int]:

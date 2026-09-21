@@ -16,7 +16,9 @@ from django.db import transaction
 from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, ManagementSshSettings)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
-    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, iter_member_values, scalar_value)
+    ABSENT,
+    Implicit,
+    parse_text_field, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, iter_member_values, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot, latest_merged_snapshot)
 
@@ -117,7 +119,13 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
     entry = device_entry_from_snapshot(snapshot)
     system = ((entry.get("deviceconfig") or {}).get("system") or {}) if isinstance(entry, dict) else {}
     ssh = system.get("ssh") if isinstance(system.get("ssh"), dict) else {}
-    name, name_rk, name_rv = scalar_value((ssh.get("mgmt") or {}).get("server-profile"))
+    name, name_rk, name_rv = parse_text_field(
+        (ssh.get("mgmt") or {}).get("server-profile"),
+        implicit=Implicit.measured(
+            None,
+            "deviceconfig/system/ssh/mgmt/server-profile holds a NAME; with no key bound the "
+            "device serves its release's built-in offer - which is what `ciphers_default` and "
+            "the DEFAULT_OFFER table in this module record"))
 
     profiles = (((ssh.get("profiles") or {}).get("mgmt-profiles") or {})
                 .get("server-profiles") or {}).get("entry")
@@ -177,11 +185,36 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
                 "rekey_packets_exponent": _int(rekey.get("packets")),
             },
         )
-        # Only the BINDING has provenance; the lists are the profile's, or the device's.
+        # This module worked out the same distinction before FieldProvenance could hold it:
+        # `ciphers_default` says the list came from the release's built-in offer rather than
+        # from a profile, and `defaults_measured` says whether that offer was measured on this
+        # release or fell back to another one. Those are exactly `pan_os_default` and
+        # `assumed_default`, so the three lists say it the way every other field does and a
+        # reader does not need to know this object has its own vocabulary.
+        list_rows = []
+        for field in ("ciphers", "kex", "macs"):
+            if not from_default[field]:
+                # Configured in the profile: the binding's own provenance is the honest source,
+                # since the list was read out of the profile that name resolved to.
+                list_rows.append((field, name_rk if profile is not None else ABSENT, name_rv))
+            elif release in DEFAULT_OFFER:
+                list_rows.append((field, Implicit.measured(
+                    ", ".join(defaults[field])[:120],
+                    f"DEFAULT_OFFER in this module: the {release} built-in offer, measured by "
+                    f"negotiating with the device"), None))
+            else:
+                list_rows.append((field, Implicit.assumed(
+                    ", ".join(defaults[field])[:120],
+                    f"no measured offer for release {release!r}; falling back to "
+                    f"{FALLBACK_RELEASE}'s, which is what `defaults_measured` records as false"),
+                    None))
+
         FieldProvenance.objects.filter(content_type=content_type, object_id=row.pk).delete()
-        if name_rk is not ABSENT:
-            FieldProvenance.objects.create(
-                content_type=content_type, object_id=row.pk, field_name="profile_name",
-                provenance_type=classify_prov_type(name_rk),
-                raw_key=provenance_raw_key(name_rk), raw_value=provenance_value(name_rk, name_rv))
+        entries = [("profile_name", name_rk, name_rv), *list_rows]
+        FieldProvenance.objects.bulk_create([
+            FieldProvenance(
+                content_type=content_type, object_id=row.pk, field_name=field_name,
+                provenance_type=classify_prov_type(rk),
+                raw_key=provenance_raw_key(rk), raw_value=provenance_value(rk, rv)[:128])
+            for field_name, rk, rv in entries if rk is not ABSENT])
     return {"management_ssh_settings": 1}

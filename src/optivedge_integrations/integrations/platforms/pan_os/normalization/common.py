@@ -196,6 +196,23 @@ def parse_yes_no_field(node: Any, *, implicit: Implicit) -> tuple[bool, Any, str
     return raw_value.lower() == "yes", raw_key, raw_prov
 
 
+def parse_text_field(node: Any, *, implicit: Implicit) -> tuple[str, Any, str | None]:
+    """A PAN-OS text scalar, declaring what an absent key means.
+
+    `scalar_value` stays the plain reader for the many places that only want the text. This one
+    exists for fields whose ABSENCE a consumer has to be able to read - a certificate name, a
+    time zone, a log-forwarding profile - where the empty string a model stores is the absence
+    itself and not a value anyone wrote.
+
+    Most absent text keys are `Implicit.measured("", ...)` where the contract has established
+    that absence means "nothing bound", or `Implicit.not_assumed(...)` where it has not.
+    """
+    raw_value, raw_key, raw_prov = scalar_value(node)
+    if raw_key is ABSENT:
+        return ("" if implicit.value is None else str(implicit.value)), implicit, None
+    return raw_value, raw_key, raw_prov
+
+
 def parse_integer_field(node: Any, *, implicit: Implicit) -> tuple[int, Any, str | None]:
     """Parse a PAN-OS integer scalar. See `parse_yes_no_field` for the `implicit` contract."""
     raw_value, raw_key, raw_prov = scalar_value(node)

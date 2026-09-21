@@ -242,7 +242,7 @@ def normalize_authentication_profiles(appliance: Appliance) -> dict[str, int]:
     admin_sequences = _administrative_sequences(snapshot, references)
     rows = []
     for scoped in scoped_entries(snapshot, "authentication-profile"):
-        fields, _provenance = _profile_fields(scoped.entry)
+        fields, provenance = _profile_fields(scoped.entry)
         name = str(scoped.entry.get("@name") or "")
         where = references.get((scoped.vsys_name if scoped.scope != "shared" else "", name), [])
         fields["referrer_paths"] = sorted(set(where))
@@ -255,6 +255,9 @@ def normalize_authentication_profiles(appliance: Appliance) -> dict[str, int]:
         fields["is_administrative"] = any(
             any(marker in path for marker in ADMINISTRATIVE_MARKERS + admin_sequences)
             for path in fields["referrer_paths"])
-        rows.append((scoped, fields))
+        # `_profile_fields` has always built this list and the caller has always dropped it,
+        # so an AuthenticationProfile carried no field provenance at all - including for the
+        # lockout pair, whose absence PAN-AUTH-018 reads as "no lockout configured".
+        rows.append((scoped, fields, provenance))
     return {"authentication_profiles": write_scoped_objects(
         AuthenticationProfile, appliance, snapshot, rows)}
