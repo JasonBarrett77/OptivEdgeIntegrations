@@ -22,6 +22,8 @@ from optivedge_integrations.integrations.models import (
     AddressObject,
     AddressObjectResolvedEntry,
     Appliance,
+    DeviceGroup,
+    DeviceGroupBinding,
     ApplianceGroup,
     EnforcementNode,
     EnforcementPoint,
@@ -2118,12 +2120,16 @@ class ManagementStationActionViewTests(TestCase):
 
         with patch(
             "optivedge_integrations.integrations.views.collect_persist_and_normalize"
-        ) as mocked_collect:
+        ) as mocked_collect, patch(
+            "optivedge_integrations.integrations.views.collect_and_normalize_device_groups"
+        ) as mocked_device_groups:
             response = self.client.post(
                 reverse("management_station_sync", kwargs={"pk": station.pk})
             )
 
         mocked_collect.assert_called_once()
+        # A station sync collects the device-group tree as well as the devices.
+        mocked_device_groups.assert_called_once()
         self.assertRedirects(
             response,
             reverse("management_station_detail", kwargs={"pk": station.pk}),
@@ -7085,3 +7091,310 @@ class DerivedFieldDeclarationTests(TestCase):
             management_station=station, appliance=appliance, source_snapshot=snapshot)
         identity.provenance_for("timezone_is_utc")
         self.assertFalse(FieldProvenance.objects.filter(provenance_type="derived").exists())
+
+
+# ---------------------------------------------------------------------------------------
+# Device groups
+# ---------------------------------------------------------------------------------------
+
+#: The lab Panorama's own answer, measured 2026-09-22. Two top-level groups with no children,
+#: one with five - which is the shape that matters, because `dg_fw-core-tpa-base-01` exists,
+#: is parent to nothing, has no devices assigned, and therefore appears in no provenance row.
+#: Derivation from provenance cannot see it; this is why the hierarchy is collected.
+_DG_HIERARCHY_PAYLOAD = {
+    "dg-hierarchy": {
+        "dg": [
+            {"@name": "prod-west-2", "@dg_id": "16"},
+            {
+                "@name": "dg_fw-core-tpa_base",
+                "@dg_id": "137",
+                "dg": [
+                    {"@name": "dg_fw-core-tpa_edge", "@dg_id": "140"},
+                    {"@name": "dg_fw-core-tpa_access", "@dg_id": "138"},
+                ],
+            },
+            {"@name": "dg_fw-core-tpa-base-01", "@dg_id": "630"},
+        ]
+    }
+}
+
+
+def _collected_dg_hierarchy(payload):
+    from optivedge_integrations.integrations.platforms.pan_os.collectors.device_groups import (
+        DG_HIERARCHY_SOURCE_TYPE,
+        SHOW_DG_HIERARCHY_COMMAND,
+    )
+    from optivedge_integrations.integrations.platforms.pan_os.collectors.types import (
+        PANOSCollectedResponse,
+        PANOSOperationRequest,
+    )
+
+    return PANOSCollectedResponse(
+        source_type=DG_HIERARCHY_SOURCE_TYPE,
+        request=PANOSOperationRequest(command_xml=SHOW_DG_HIERARCHY_COMMAND),
+        response={"response": {"@status": "success", "result": payload}},
+    )
+
+
+class DeviceGroupHierarchyNormalizationTests(TestCase):
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.local",
+        )
+
+    def _normalize(self, payload):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.device_groups import (
+            normalize_show_dg_hierarchy,
+        )
+
+        return normalize_show_dg_hierarchy(self.station, _collected_dg_hierarchy(payload))
+
+    def test_shared_is_synthesized_as_the_root(self):
+        """`show dg-hierarchy` does not emit Shared; Panorama shows it, so we create it."""
+        result = self._normalize(_DG_HIERARCHY_PAYLOAD)
+
+        shared = result.shared
+        self.assertEqual(shared.name, "Shared")
+        self.assertTrue(shared.is_shared)
+        self.assertEqual(shared.discovered_from, DeviceGroup.DISCOVERED_SYNTHESIZED)
+        self.assertIsNone(shared.parent)
+
+        top_level = DeviceGroup.objects.get(management_station=self.station, name="prod-west-2")
+        self.assertEqual(top_level.parent, shared)
+        self.assertEqual(top_level.discovered_from, DeviceGroup.DISCOVERED_COLLECTED)
+
+    def test_nesting_and_dg_id_come_from_the_payload(self):
+        self._normalize(_DG_HIERARCHY_PAYLOAD)
+
+        base = DeviceGroup.objects.get(management_station=self.station, name="dg_fw-core-tpa_base")
+        edge = DeviceGroup.objects.get(management_station=self.station, name="dg_fw-core-tpa_edge")
+        self.assertEqual(edge.parent, base)
+        self.assertEqual(edge.dg_id, "140")
+        self.assertEqual([group.name for group in edge.ancestors()],
+                         ["dg_fw-core-tpa_base", "Shared"])
+
+    def test_a_group_with_no_bindings_is_still_collected(self):
+        """The case derivation from provenance cannot see."""
+        self._normalize(_DG_HIERARCHY_PAYLOAD)
+
+        empty = DeviceGroup.objects.get(
+            management_station=self.station, name="dg_fw-core-tpa-base-01")
+        self.assertEqual(empty.bindings.count(), 0)
+        self.assertFalse(empty.is_missing)
+
+    def test_a_single_child_arrives_as_a_dict_and_is_not_dropped(self):
+        """xmltodict gives a lone child as a dict; reading it as a list loses the subtree."""
+        payload = {"dg-hierarchy": {"dg": {"@name": "solo-parent", "@dg_id": "1",
+                                           "dg": {"@name": "solo-child", "@dg_id": "2"}}}}
+        self._normalize(payload)
+
+        child = DeviceGroup.objects.get(management_station=self.station, name="solo-child")
+        self.assertEqual(child.parent.name, "solo-parent")
+
+    def test_a_group_that_stops_appearing_is_marked_missing(self):
+        self._normalize(_DG_HIERARCHY_PAYLOAD)
+        result = self._normalize({"dg-hierarchy": {"dg": [{"@name": "prod-west-2", "@dg_id": "16"}]}})
+
+        self.assertIn("dg_fw-core-tpa_base", result.missing_names)
+        gone = DeviceGroup.objects.get(
+            management_station=self.station, name="dg_fw-core-tpa_base")
+        self.assertTrue(gone.is_missing)
+        self.assertIsNotNone(gone.missing_since)
+        self.assertFalse(
+            DeviceGroup.objects.get(management_station=self.station,
+                                    name="prod-west-2").is_missing)
+
+    def test_a_provenance_only_group_is_not_swept(self):
+        """It was never in the hierarchy, so its absence from one says nothing."""
+        seen_only_in_provenance = DeviceGroup.objects.create(
+            management_station=self.station,
+            name="dg-from-provenance",
+            discovered_from=DeviceGroup.DISCOVERED_PROVENANCE,
+        )
+        self._normalize(_DG_HIERARCHY_PAYLOAD)
+
+        seen_only_in_provenance.refresh_from_db()
+        self.assertFalse(seen_only_in_provenance.is_missing)
+
+    def test_an_empty_hierarchy_is_an_answer_not_an_error(self):
+        result = self._normalize({})
+
+        self.assertEqual(result.device_groups, [])
+        self.assertEqual(
+            list(DeviceGroup.objects.filter(management_station=self.station)
+                 .values_list("name", flat=True)),
+            ["Shared"],
+        )
+
+    def test_names_are_unique_per_station_not_globally(self):
+        other = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-two.local",
+        )
+        self._normalize({"dg-hierarchy": {"dg": {"@name": "prod-west-2", "@dg_id": "16"}}})
+        DeviceGroup.objects.create(management_station=other, name="prod-west-2")
+
+        self.assertEqual(DeviceGroup.objects.filter(name="prod-west-2").count(), 2)
+
+    def test_the_hierarchy_can_be_rebuilt_from_the_stored_snapshot(self):
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.device_groups import (
+            DG_HIERARCHY_SOURCE_TYPE,
+        )
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.device_groups import (
+            renormalize_device_groups,
+        )
+
+        self.assertIsNone(renormalize_device_groups(self.station))
+        Snapshot.objects.create(
+            management_station=self.station,
+            source_type=DG_HIERARCHY_SOURCE_TYPE,
+            collected_at=timezone.now(),
+            payload=_DG_HIERARCHY_PAYLOAD,
+        )
+        result = renormalize_device_groups(self.station)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(
+            DeviceGroup.objects.filter(management_station=self.station).count(), 6)
+
+
+class DeviceGroupBindingTests(TestCase):
+    """Bindings say which vsys a group HAS PUSHED TO, read from provenance."""
+
+    def setUp(self):
+        self.station, self.appliance, self.enforcement_point = (
+            _create_panorama_enforcement_point(
+                serial_number="0000000000001",
+                appliance_hostname="fw-a",
+            )
+        )
+        self.snapshot = Snapshot.objects.create(
+            management_station=self.station,
+            appliance=self.appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={},
+        )
+
+    def _address_object(self, name):
+        return AddressObject.objects.create(
+            management_station=self.station,
+            enforcement_point=self.enforcement_point,
+            source_snapshot=self.snapshot,
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name=name,
+            namespace_type="pushed_vsys_effective",
+            namespace_value="vsys1",
+            precedence_rank=10,
+            address_type=AddressObject.TYPE_IP_NETMASK,
+            value="10.0.0.1/32",
+            normalized_value="10.0.0.1/32",
+        )
+
+    def _provenance(self, obj, raw_value, field_name="__entry__"):
+        return FieldProvenance.objects.create(
+            content_type=ContentType.objects.get_for_model(type(obj)),
+            object_id=obj.pk,
+            field_name=field_name,
+            provenance_type=FieldProvenance.ProvenanceType.DEVICE_GROUP,
+            raw_value=raw_value,
+        )
+
+    def _rebuild(self):
+        from optivedge_integrations.integrations.device_group_bindings import (
+            rebuild_device_group_bindings,
+        )
+
+        return rebuild_device_group_bindings(self.station)
+
+    def test_a_device_group_binds_to_the_vsys_it_pushed_to(self):
+        self._provenance(self._address_object("addr-1"), "dg_fw-core-tpa_edge")
+        result = self._rebuild()
+
+        self.assertEqual(result.binding_count, 1)
+        binding = DeviceGroupBinding.objects.get()
+        self.assertEqual(binding.device_group.name, "dg_fw-core-tpa_edge")
+        self.assertEqual(binding.enforcement_point, self.enforcement_point)
+
+    def test_shared_binds_to_the_shared_container_rather_than_a_device_group(self):
+        """1,140 of the lab's device-group rows say `shared`. It is a scope, and an operator
+        still looks for it in the tree as a container."""
+        self._provenance(self._address_object("addr-1"), "shared")
+        self._rebuild()
+
+        shared = DeviceGroup.objects.get(management_station=self.station, name="Shared")
+        self.assertTrue(shared.is_shared)
+        self.assertEqual(shared.discovered_from, DeviceGroup.DISCOVERED_SYNTHESIZED)
+        self.assertEqual([b.enforcement_point for b in shared.bindings.all()],
+                         [self.enforcement_point])
+        self.assertFalse(
+            DeviceGroup.objects.filter(management_station=self.station, name="shared").exists())
+
+    def test_a_name_the_hierarchy_never_carried_is_flagged(self):
+        self._provenance(self._address_object("addr-1"), "dg-never-collected")
+        result = self._rebuild()
+
+        self.assertEqual(result.provenance_only_names, ["dg-never-collected"])
+        group = DeviceGroup.objects.get(
+            management_station=self.station, name="dg-never-collected")
+        self.assertEqual(group.discovered_from, DeviceGroup.DISCOVERED_PROVENANCE)
+
+    def test_a_binding_that_no_longer_has_provenance_is_deleted(self):
+        address_object = self._address_object("addr-1")
+        row = self._provenance(address_object, "dg_fw-core-tpa_edge")
+        self._rebuild()
+        self.assertEqual(DeviceGroupBinding.objects.count(), 1)
+
+        row.delete()
+        result = self._rebuild()
+
+        self.assertEqual(result.deleted_binding_count, 1)
+        self.assertEqual(DeviceGroupBinding.objects.count(), 0)
+
+    def test_a_content_type_whose_model_is_gone_is_skipped(self):
+        """Generic relations do not cascade when a MODEL is dropped - DeviceConfigurationProfile
+        left 28 such rows. Migration 0065 removes them; this must not raise on a later one."""
+        FieldProvenance.objects.create(
+            content_type=ContentType.objects.create(app_label="integrations", model="goneaway"),
+            object_id=1,
+            field_name="__entry__",
+            provenance_type=FieldProvenance.ProvenanceType.DEVICE_GROUP,
+            raw_value="dg_fw-core-tpa_edge",
+        )
+        self._provenance(self._address_object("addr-1"), "dg_fw-core-tpa_edge")
+        result = self._rebuild()
+
+        self.assertEqual(result.skipped_content_type_count, 1)
+        self.assertEqual(result.binding_count, 1)
+
+    def test_one_group_pushing_to_several_vsys_binds_to_each(self):
+        second_point = EnforcementPoint.objects.create(
+            management_station=self.station,
+            appliance_group=self.appliance.appliance_group,
+            vsys_name="vsys2",
+        )
+        first = self._address_object("addr-1")
+        second = AddressObject.objects.create(
+            management_station=self.station,
+            enforcement_point=second_point,
+            source_snapshot=self.snapshot,
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="addr-2",
+            namespace_type="pushed_vsys_effective",
+            namespace_value="vsys2",
+            precedence_rank=10,
+            address_type=AddressObject.TYPE_IP_NETMASK,
+            value="10.0.0.2/32",
+            normalized_value="10.0.0.2/32",
+        )
+        self._provenance(first, "dg_fw-core-tpa_edge")
+        self._provenance(second, "dg_fw-core-tpa_edge")
+        self._rebuild()
+
+        group = DeviceGroup.objects.get(
+            management_station=self.station, name="dg_fw-core-tpa_edge")
+        self.assertEqual(
+            sorted(b.enforcement_point.vsys_name for b in group.bindings.all()),
+            ["vsys1", "vsys2"],
+        )

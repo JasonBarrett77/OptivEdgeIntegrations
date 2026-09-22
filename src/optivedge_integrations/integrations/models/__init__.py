@@ -16,6 +16,7 @@ from .collected import (
     Snapshot,
 )
 from .events import IntegrationEvent, IntegrationRun
+from .panorama import DeviceGroup, DeviceGroupBinding
 from .authentication import AuthenticationProfile
 from .authentication_sequence import AuthenticationSequence
 from .certificates import Certificate, CertificateProfile, SslTlsServiceProfile
@@ -96,6 +97,8 @@ __all__ = [
     "EnforcementPoint",
     "IntegrationEvent",
     "IntegrationRun",
+    "DeviceGroup",
+    "DeviceGroupBinding",
     "ManagementStation",
     "Interface",
     "AuthenticationProfile",

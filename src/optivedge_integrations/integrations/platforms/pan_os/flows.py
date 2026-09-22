@@ -40,7 +40,14 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_pushed_shared_policy_vsys,
     set_target_vsys,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.device_groups import (
+    collect_show_dg_hierarchy,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import PANOSCollectedResponse
+from optivedge_integrations.integrations.platforms.pan_os.normalization.device_groups import (
+    NormalizedDeviceGroups,
+    normalize_show_dg_hierarchy,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     PANOSNormalizedCollection,
     normalize_appliance_group_shared_scope,
@@ -339,6 +346,9 @@ class PANOSInScopeConfigCollection:
 class PANOSInScopeRefreshCollection:
     inventory: PANOSProcessedCollection
     configuration_snapshots: PANOSInScopeConfigCollection
+    #: None only for a station whose hierarchy could not be collected; every Panorama has
+    #: at least the synthesized Shared root once it has been.
+    device_groups: NormalizedDeviceGroups | None = None
 
 
 @dataclass(slots=True)
@@ -466,6 +476,30 @@ def collect_persist_and_normalize(
         persisted=persisted,
         normalized=normalized,
     )
+
+
+def collect_and_normalize_device_groups(
+    management_station: ManagementStation,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> NormalizedDeviceGroups:
+    """Collect the device-group hierarchy for one station and normalize it into the tree.
+
+    Its own flow rather than a branch of `collect_persist_and_normalize`, because that one
+    returns a `PANOSNormalizedCollection` of topology objects and this returns a tree - a
+    shape it has no field for, and no reason to grow one.
+    """
+    session = open_session(
+        management_station,
+        credentials_provider=credentials_provider,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    collected = collect_show_dg_hierarchy(session)
+    persist_collected_response(management_station, collected)
+    return normalize_show_dg_hierarchy(management_station, collected)
 
 
 def collect_appliance_and_persist(
@@ -1084,6 +1118,13 @@ def refresh_in_scope_configuration_snapshots(
             user_agent=user_agent,
         )
 
+    device_groups = collect_and_normalize_device_groups(
+        management_station,
+        credentials_provider=credentials_provider,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+
     configuration_snapshots = collect_in_scope_configuration_snapshots(
         management_station,
         credentials_provider=credentials_provider,
@@ -1093,6 +1134,7 @@ def refresh_in_scope_configuration_snapshots(
     return PANOSInScopeRefreshCollection(
         inventory=inventory,
         configuration_snapshots=configuration_snapshots,
+        device_groups=device_groups,
     )
 
 

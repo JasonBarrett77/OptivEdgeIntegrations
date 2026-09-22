@@ -20,3 +20,11 @@ def persist_show_managed_devices(
     collected: PANOSCollectedResponse,
 ) -> PANOSPersistedCollection:
     return persist_management_station_snapshot(management_station, collected)
+
+
+def persist_show_dg_hierarchy(
+    management_station: ManagementStation,
+    collected: PANOSCollectedResponse,
+) -> PANOSPersistedCollection:
+    """The device-group hierarchy is station-scoped, like the managed-device inventory."""
+    return persist_management_station_snapshot(management_station, collected)

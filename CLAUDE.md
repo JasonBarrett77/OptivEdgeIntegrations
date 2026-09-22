@@ -226,6 +226,44 @@ preserve that guarantee in any replacement. Note what it guarantees: one row per
 firewall (see "`vsys_name` is the key" below). `get_in_scope_*` in `flows.py` `select_related`s
 `management_station` to keep the discriminant from costing a query per point.
 
+### Device groups are collected; their membership is derived (`models/panorama.py`)
+
+`DeviceGroup` comes from one op call per station, `show dg-hierarchy`, whose entries carry
+`@name` and `@dg_id` and express nesting by containment - nothing else. Measured against the
+lab Panorama on 2026-09-22, and the three things it does NOT say are each recorded rather
+than inferred:
+
+* **Shared is not emitted.** The result starts at the top-level groups. Panorama presents
+  Shared as a container and an operator looks for it by that name, so one row per station is
+  synthesized as the ROOT and every top-level group hangs off it. `discovered_from` says
+  `synthesized`, which is the honest label: no device said it.
+* **`dg_id` is not durable.** A group deleted and recreated takes a new one - a traffic log's
+  `dg_hier_level_*` matching nothing is exactly that case. Stored as an attribute, never as a
+  key. The key is `(management_station, name)`: names are unique per Panorama, not globally,
+  and the lab has `prod-west-2` alongside the `dg_fw-core-tpa_*` tree to prove it.
+* **Membership is not in it.** `DeviceGroupBinding` is DERIVED from `FieldProvenance` rows of
+  type `device_group` (`device_group_bindings.py`, rebuilt by `orchestration/pan_os.py` after
+  a refresh, never before - it reads rows that refresh has just rewritten). A binding means
+  "has pushed here", not "is assigned here".
+
+**Why the hierarchy is collected rather than derived from those same provenance markers:**
+derivation cannot see an empty container. `dg_fw-core-tpa-base-01` exists in the lab, is
+parent to nothing, has no devices assigned, and therefore appears in zero provenance rows.
+
+`shared` is a provenance VALUE (1,140 of the lab's 4,919 device-group rows) and is the shared
+scope rather than a device group - it binds to the Shared container, and no `DeviceGroup` row
+named `shared` is ever created.
+
+Templates have no collector yet, so there is no `Template` model: `@ptpl` names templates and
+template STACKS indistinguishably (`ptpl_fw-core-tpa`, `stack_fw-core-tpa`), and only a
+template source could tell them apart.
+
+**A generic relation does not cascade when a MODEL is dropped.** `DeviceConfigurationProfile`
+left 28 `FieldProvenance` rows pointing at a content type with no class; migration 0065
+removes them, and the binding rebuild skips any that appear later rather than raising
+mid-sync. Rows pointing at a deleted OBJECT were measured at zero - object provenance is
+rewritten correctly on every renormalization.
+
 ### `vsys_name` is the key, and it identifies a slot rather than a firewall
 
 `EnforcementPoint` is keyed on `vsys_name` (`@name`, always `vsysN`), and that is correct — it is the only

@@ -54,6 +54,7 @@ from optivedge_integrations.integrations.platforms.pan_os import (
     PANOSDynamicContentRefreshResult,
     PANOSInScopeRefreshCollection,
     PANOSInScopeRenormalizationResult,
+    collect_and_normalize_device_groups,
     collect_persist_and_normalize,
     refresh_in_scope_configuration_snapshots,
     refresh_in_scope_dynamic_content,
@@ -555,6 +556,9 @@ class ManagementStationSyncView(View):
                 management_station,
                 collector=collect_show_managed_devices,
             )
+            # The device-group tree is station inventory too, and one op call: an operator
+            # who syncs a station gets the containers as well as the devices.
+            collect_and_normalize_device_groups(management_station)
         except Exception as exc:
             IntegrationEvent.objects.create(
                 management_station=management_station,
@@ -578,9 +582,9 @@ class ManagementStationSyncView(View):
             level=IntegrationEvent.LEVEL_INFO,
             stage="",
             reason="InventorySyncCompleted",
-            message="Managed devices collected, persisted, and normalized.",
+            message="Managed devices and device groups collected, persisted, and normalized.",
         )
-        messages.success(request, "Managed devices collected, persisted, and normalized.")
+        messages.success(request, "Managed devices and device groups collected, persisted, and normalized.")
         return HttpResponseRedirect(detail_url)
 
 

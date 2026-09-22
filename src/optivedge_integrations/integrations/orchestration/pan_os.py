@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from optivedge_integrations.integrations.device_group_bindings import (
+    DeviceGroupBindingRebuildResult,
+    rebuild_device_group_bindings,
+)
 from optivedge_integrations.integrations.models import ManagementStation
 from optivedge_integrations.integrations.platforms.pan_os.flows import (
     DEFAULT_TIMEOUT,
@@ -22,6 +26,7 @@ from optivedge_integrations.integrations.search_vocabulary import (
 class PANOSIntegrationRefreshResult:
     platform_refresh: PANOSInScopeRefreshCollection
     security_rule_search_vocabulary: SecurityRuleSearchVocabularyRebuildResult
+    device_group_bindings: DeviceGroupBindingRebuildResult
 
 
 def refresh_panorama_in_scope_data(
@@ -40,7 +45,11 @@ def refresh_panorama_in_scope_data(
         user_agent=user_agent,
     )
     security_rule_search_vocabulary = rebuild_security_rule_search_vocabulary(management_station)
+    # After the refresh, never before: bindings are read from the provenance rows the refresh
+    # has just rewritten.
+    device_group_bindings = rebuild_device_group_bindings(management_station)
     return PANOSIntegrationRefreshResult(
         platform_refresh=platform_refresh,
         security_rule_search_vocabulary=security_rule_search_vocabulary,
+        device_group_bindings=device_group_bindings,
     )

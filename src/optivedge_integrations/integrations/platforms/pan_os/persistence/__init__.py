@@ -8,6 +8,9 @@ remain a separate concern, even when endpoint-specific routing lives nearby.
 from __future__ import annotations
 
 from optivedge_integrations.integrations.models import Appliance, ApplianceGroup, EnforcementPoint, ManagementStation
+from optivedge_integrations.integrations.platforms.pan_os.collectors.device_groups import (
+    DG_HIERARCHY_SOURCE_TYPE,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import PANOSCollectedResponse
 from optivedge_integrations.integrations.platforms.pan_os.persistence.appliance import (
     persist_appliance_dynamic_content_snapshot,
@@ -29,6 +32,7 @@ from optivedge_integrations.integrations.platforms.pan_os.persistence.enforcemen
     persist_show_pushed_shared_policy_vsys,
 )
 from optivedge_integrations.integrations.platforms.pan_os.persistence.panorama import (
+    persist_show_dg_hierarchy,
     persist_show_managed_devices,
 )
 
@@ -39,6 +43,9 @@ def persist_collected_response(
 ) -> PANOSPersistedCollection:
     if collected.source_type == "show_managed_devices":
         return persist_show_managed_devices(management_station, collected)
+
+    if collected.source_type == DG_HIERARCHY_SOURCE_TYPE:
+        return persist_show_dg_hierarchy(management_station, collected)
 
     return persist_management_station_snapshot(management_station, collected)
 
@@ -99,5 +106,6 @@ __all__ = [
     "persist_show_merged_config",
     "persist_show_pushed_shared_policy",
     "persist_show_pushed_shared_policy_vsys",
+    "persist_show_dg_hierarchy",
     "persist_show_managed_devices",
 ]
