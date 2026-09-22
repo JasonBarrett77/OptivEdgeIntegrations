@@ -242,9 +242,16 @@ than inferred:
   key. The key is `(management_station, name)`: names are unique per Panorama, not globally,
   and the lab has `prod-west-2` alongside the `dg_fw-core-tpa_*` tree to prove it.
 * **Membership is not in it.** `DeviceGroupBinding` is DERIVED from `FieldProvenance` rows of
-  type `device_group` (`device_group_bindings.py`, rebuilt by `orchestration/pan_os.py` after
-  a refresh, never before - it reads rows that refresh has just rewritten). A binding means
-  "has pushed here", not "is assigned here".
+  type `device_group` (`device_group_bindings.py`), rebuilt in
+  `views._refresh_station_in_scope_with_tracking` after the refresh and never before, since
+  it reads rows the refresh has just rewritten. A binding means "has pushed here", not "is
+  assigned here".
+
+  **It is wired to that helper because both refresh paths go through it** - the single
+  station and the bulk sweep. It was first placed in
+  `orchestration.refresh_panorama_in_scope_data`, which NOTHING but tests calls, and the lab
+  came back from a full refresh with nine device groups and zero bindings.
+  `test_the_refresh_path_a_view_actually_calls_rebuilds_bindings` is that failure.
 
 **Why the hierarchy is collected rather than derived from those same provenance markers:**
 derivation cannot see an empty container. `dg_fw-core-tpa-base-01` exists in the lab, is

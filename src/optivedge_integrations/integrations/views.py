@@ -61,6 +61,7 @@ from optivedge_integrations.integrations.platforms.pan_os import (
     renormalize_in_scope_configuration,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors import collect_show_managed_devices
+from optivedge_integrations.integrations.device_group_bindings import rebuild_device_group_bindings
 from optivedge_integrations.integrations.search_vocabulary import rebuild_all_security_rule_search_vocabulary
 
 
@@ -735,6 +736,21 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
             ),
             enforcement_point=f.enforcement_point,
         ))
+    # Here rather than in `orchestration.refresh_panorama_in_scope_data`, which no view calls:
+    # both refresh paths - one station and the bulk sweep - come through this helper, and
+    # bindings must be rebuilt AFTER the refresh, from the provenance rows it just rewrote.
+    bindings = rebuild_device_group_bindings(management_station)
+    events.append(IntegrationEvent(
+        management_station=management_station, run=run,
+        level=IntegrationEvent.LEVEL_INFO, stage=IntegrationEvent.STAGE_NORMALIZE,
+        reason="DeviceGroupBindingsRebuilt",
+        message=(
+            f"{bindings.binding_count} device-group binding(s) across "
+            f"{bindings.device_group_count} group(s); "
+            f"{bindings.unresolved_row_count} provenance row(s) resolved to no vsys."
+        ),
+    ))
+
     failure_count = sum(1 for e in events if e.level == IntegrationEvent.LEVEL_ERROR)
     events.append(IntegrationEvent(
         management_station=management_station, run=run,

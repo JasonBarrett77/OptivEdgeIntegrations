@@ -7398,3 +7398,28 @@ class DeviceGroupBindingTests(TestCase):
             sorted(b.enforcement_point.vsys_name for b in group.bindings.all()),
             ["vsys1", "vsys2"],
         )
+
+    def test_the_refresh_path_a_view_actually_calls_rebuilds_bindings(self):
+        """The rebuild has to sit on a path a VIEW calls.
+
+        It first went into `orchestration.refresh_panorama_in_scope_data`, which nothing but
+        tests calls - so the lab came back from a full refresh with nine device groups and
+        zero bindings. Both refresh paths go through this helper instead.
+        """
+        from optivedge_integrations.integrations.views import (
+            _refresh_station_in_scope_with_tracking,
+        )
+
+        self._provenance(self._address_object("addr-1"), "dg_fw-core-tpa_edge")
+
+        with patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
+            return_value=_empty_in_scope_refresh_collection(),
+        ):
+            outcome = _refresh_station_in_scope_with_tracking(self.station)
+
+        self.assertTrue(outcome.succeeded)
+        self.assertEqual(DeviceGroupBinding.objects.count(), 1)
+        self.assertTrue(
+            IntegrationEvent.objects.filter(reason="DeviceGroupBindingsRebuilt").exists()
+        )
