@@ -6925,15 +6925,20 @@ class ImplicitDeclarationTests(TestCase):
 
 
 class SecurityRuleLogFlagProvenanceTests(TestCase):
-    """The log flags are the reason `not_configured` exists.
+    """What PAN-OS does with an absent log flag - measured 2026-09-22, after a year of not being.
 
-    `read-a-security-rule.md`: "**Unmeasured:** log-start / log-end defaults. If a consumer needs
-    them, it needs to measure them, not assume." The normalizer has always stored null for an
-    absent flag rather than False, and PAN-POL-009 asserts log-end - so a guess either way
-    decides that control on nothing.
+    The corpus recorded both defaults as unmeasured, so the normalizer stored NULL for an absent
+    flag rather than guess, and PAN-POL-009 asserts log-end. Jason then said he believed the
+    default was yes, and the Help turned out to say both things - p.134 "enabled by default" on
+    the security rule screen, p.142 "cleared by default" on another.
 
-    Nothing covered that null until 2026-09-21, when recording absent keys as provenance rows
-    turned `raw_key is ABSENT` false and would have made both flags False. The suite passed.
+    So it was measured the way the checklist's oracle table says to: a rule pushed with NEITHER
+    key, absent in every config source including effective-running, opened in the device's own
+    UI. `log-end` renders TICKED and `log-start` unticked. Both are `pan_os_default` now, and
+    neither is null.
+
+    These tests were the opposite assertion until that measurement, which is the point: they
+    were right to hold the null while nobody knew, and the measurement is what changed it.
     """
 
     def _rules(self, *entries):
@@ -6962,18 +6967,23 @@ class SecurityRuleLogFlagProvenanceTests(TestCase):
     def _provenance(self, rule, field):
         return rule.field_provenance.filter(field_name=field).first()
 
-    def test_an_absent_log_flag_stays_null_rather_than_becoming_false(self):
+    def test_an_absent_log_flag_takes_its_measured_default(self):
+        """log-end absent means the session IS logged at end; log-start absent means it is not.
+        Stored, rather than left null, because the device was asked."""
         rules = self._rules(self._entry("quiet"))
-        self.assertIsNone(rules["quiet"].log_start)
-        self.assertIsNone(rules["quiet"].log_end)
+        self.assertTrue(rules["quiet"].log_end)
+        self.assertFalse(rules["quiet"].log_start)
 
-    def test_and_the_row_says_not_configured_rather_than_claiming_a_default(self):
+    def test_and_the_row_says_pan_os_default_carrying_that_value(self):
         rules = self._rules(self._entry("quiet"))
         row = self._provenance(rules["quiet"], "log_end")
-        self.assertIsNotNone(row, "an absent key is recorded now; a missing row means untracked")
-        self.assertEqual(row.provenance_type, "not_configured")
-        self.assertEqual(row.raw_value, "",
-                         "nothing was assumed, so there is no value to show")
+        self.assertIsNotNone(row, "an absent key is recorded; a missing row means untracked")
+        self.assertEqual(row.provenance_type, "pan_os_default")
+        self.assertEqual(row.raw_value, "yes",
+                         "the row carries what the vendor supplies, so a reader need not "
+                         "resolve the field to see it")
+        start = self._provenance(rules["quiet"], "log_start")
+        self.assertEqual((start.provenance_type, start.raw_value), ("pan_os_default", "no"))
 
     def test_a_written_flag_is_local_and_keeps_its_value(self):
         rules = self._rules(self._entry("logged", **{"log-end": "yes"}))

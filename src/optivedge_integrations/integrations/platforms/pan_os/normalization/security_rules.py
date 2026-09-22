@@ -152,6 +152,18 @@ class LiteralAddressObjectSpec:
     num_hosts: int | None
 
 
+#: What PAN-OS does with an absent log flag. Measured rather than read, because the Help says
+#: both things: p.134 "Log At Session End (enabled by default)" on the security rule screen, and
+#: p.142 "cleared by default" on another. The measurement settles it for the rule screen.
+LOG_FLAG_CITATION = (
+    "measured 2026-09-22 on pan-fw-111. `log_default_probe`, a shared rule pushed with NEITHER "
+    "key - absent in Panorama running and candidate, in the device's pushed-shared-policy and "
+    "in effective-running - renders Log at Session End TICKED and Log at Session Start unticked "
+    "in the device's own UI. Help p.134 agrees for log-end, 'enabled by default'; p.142 says "
+    "'cleared by default' about the same field on another screen, which is why this was "
+    "measured rather than read")
+
+
 def first_vsys_rulebase(payload: dict[str, Any], vsys_name: str) -> dict[str, Any]:
     entry = merged_vsys_entry(payload, vsys_name)
     rulebase = entry.get("rulebase")
@@ -282,15 +294,10 @@ def normalize_rule(
         # If a consumer needs them, it needs to measure them, not assume." PAN-POL-009 asserts
         # log-end, so presenting this as a vendor default would fabricate the fact the control
         # turns on.
-        implicit=Implicit.not_assumed(
-            "read-a-security-rule.md: '**Unmeasured:** log-start / log-end defaults. If a "
-            "consumer needs them, it needs to measure them, not assume.' So the field stays "
-            "NULL and the provenance row says not configured - PAN-POL-009 asserts log-end, "
-            "and a guess either way would decide that control on nothing"))
+        implicit=Implicit.measured(False, f"log-start absent means NO - {LOG_FLAG_CITATION}"))
     log_end, log_end_rk, log_end_rv = parse_yes_no_field(
         rule.get("log-end"),
-        implicit=Implicit.not_assumed(
-            "read-a-security-rule.md records both log flags as UNMEASURED; see log-start"))
+        implicit=Implicit.measured(True, f"log-end absent means YES - {LOG_FLAG_CITATION}"))
     log_setting, log_setting_rk, log_setting_rv = scalar_value(rule.get("log-setting"))
     negate_source, negate_source_rk, negate_source_rv = parse_yes_no_field(
         rule.get("negate-source"),
@@ -303,12 +310,14 @@ def normalize_rule(
             False, "read-a-security-rule.md: 'negate-destination absent -> no'")
     )
 
-    # log_start/log_end stay NULL when the key is absent - the corpus says their defaults are
-    # unmeasured, so there is nothing to default them TO. `was_absent` rather than `is ABSENT`:
-    # an absent key now arrives as the declaration below, and the old test would have quietly
-    # turned both into False.
-    log_start_value: bool | None = None if was_absent(log_start_rk) else bool(log_start)
-    log_end_value: bool | None = None if was_absent(log_end_rk) else bool(log_end)
+    # Both flags now carry their MEASURED default when the key is absent, so neither is null any
+    # more. They were null from the day this module was written until 2026-09-22, because the
+    # corpus recorded the defaults as unmeasured and a guess would have decided PAN-POL-009 on
+    # nothing. They are measured now - see LOG_FLAG_CITATION - and the provenance row says
+    # `pan_os_default` rather than `not_configured`, which is the difference between "the device
+    # logs this and nobody wrote it down" and "we have no idea".
+    log_start_value: bool = bool(log_start)
+    log_end_value: bool = bool(log_end)
 
     members: list[NormalizedSecurityRuleMember] = []
 

@@ -37,6 +37,41 @@ Entry shape:
 
 
 
+## 2026-09-22 — what a security rule does with no log-end key
+
+**Did:** Pushed `log_default_probe`, a shared rule identical to one Jason had built by hand
+except that `log-start` and `log-end` are not written, and asked the device. Jason read the
+result in the UI on pan-fw-111 and in Panorama.
+
+**Found:** `log-end` absent means YES - the session is logged at end - and `log-start` absent
+means NO. The two default opposite ways.
+
+The keys really were absent: confirmed in Panorama's running and candidate configs, in the
+device's `pushed-shared-policy` and in `effective-running`. `show running security-policy` is
+NOT an oracle for this - it reports `terminal yes;` for the rule and nothing about logging - so
+the UI was the deciding read, which is the oracle the checklist names for exactly this case.
+
+**The Help says both things.** p.134, security rule screen: "Log At Session End (enabled by
+default)". p.142, Applications and Usage: "cleared by default", same field. And a rule created
+through the UI writes BOTH keys explicitly - Jason's `log_end_default` carries `log-start: no`
+and `log-end: yes` - so "enabled by default" describes the checkbox, which is a different claim
+from what an absent key means. Separating those two is what the probe was for.
+
+**Landed:** `reference/panos-payload-contract.json` gained a `security-rule-logging` node.
+Normalization stored NULL for an absent flag since it was written and now stores the measured
+default with a `pan_os_default` row; two tests that asserted the null were rewritten. A
+correction for this guide's "**Unmeasured:** log-start / log-end defaults" line is staged in
+OptivEdgeProbe's doc-drafts. On the lab, ten rules moved from null to logging-at-end, so
+PAN-POL-009's minimum would now fire on ONE rule rather than ten.
+
+**Open:** whether a Panorama-pushed security RULE can be overridden on the device. An
+`action=override` carrying a fragment came back `code=12 "log_default_probe is missing 'from'"`,
+which is schema validation rather than a refusal of the operation - the same shape as every
+other override, where the element must be restated in full. The same call against
+`intrazone-default` answered "Object cannot be overridden", which is the opposite of what the UI
+suggests, so one of the two xpaths is probably wrong. Not settled, and not worth mutating a rule
+somebody is looking at to settle.
+
 ## 2026-09-21 — which of our PAN-OS defaults are measured, and which we were guessing
 
 **Did:** Audited every site in normalization that stores a value for an ABSENT key - 33 of them,
