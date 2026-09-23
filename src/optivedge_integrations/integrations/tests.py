@@ -153,6 +153,8 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
     total_valid_from_result,
 )
 from optivedge_integrations.integrations.platforms.pan_os.flows import _candidate_edl_names
+from optivedge_integrations.integrations import query_chunking
+from optivedge_integrations.integrations.query_chunking import chunked
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     decode_certificate,
 )
@@ -7967,6 +7969,45 @@ class DeviceGroupBindingTests(TestCase):
             ["vsys1", "vsys2"],
         )
 
+    def test_bindings_are_rebuilt_correctly_when_the_in_clause_has_to_be_chunked(self):
+        """The crash that stopped a real refresh: `OperationalError: too many SQL variables`.
+
+        `pk__in` carried every object of one type holding device-group provenance - tens of
+        thousands on a real estate - and SQLite caps host parameters per statement at a limit
+        set when SQLite was BUILT. The development build allows 250,000 and a Windows Python
+        3.12 allows far fewer, so the query that worked everywhere it was written failed where
+        it ran. Chunk size is forced to 1 here rather than creating 900 objects, because what
+        needs proving is that chunking returns the same answer, not that a big list is big.
+        """
+        for index in range(5):
+            self._provenance(self._address_object(f"addr-{index}"), "dg_edge")
+        self._provenance(self._address_object("addr-other"), "dg_core")
+
+        with patch.object(query_chunking, "CHUNK_SIZE", 1):
+            result = self._rebuild()
+
+        self.assertEqual(result.device_group_count, 2)
+        self.assertEqual(
+            set(DeviceGroupBinding.objects.values_list("device_group__name", flat=True)),
+            {"dg_edge", "dg_core"},
+        )
+        self.assertEqual(result.unresolved_row_count, 0)
+
+    def test_chunking_does_not_change_which_stale_bindings_are_deleted(self):
+        self._provenance(self._address_object("addr-1"), "dg_edge")
+        self._rebuild()
+        self.assertEqual(DeviceGroupBinding.objects.count(), 1)
+
+        # The provenance is gone, so the binding is now stale and must be removed - through
+        # the chunked delete.
+        FieldProvenance.objects.all().delete()
+        with patch.object(query_chunking, "CHUNK_SIZE", 1):
+            result = self._rebuild()
+
+        self.assertEqual(DeviceGroupBinding.objects.count(), 0)
+        self.assertEqual(result.binding_count, 0)
+
+
     def test_the_refresh_path_a_view_actually_calls_rebuilds_bindings(self):
         """The rebuild has to sit on a path a VIEW calls.
 
@@ -8271,3 +8312,84 @@ class CollectionScriptViewTests(TestCase):
             for item in section["items"]
         }
         self.assertIn("/integrations/collection-script/", hrefs)
+
+
+class QueryChunkingTests(SimpleTestCase):
+    def test_chunked_splits_and_keeps_order(self):
+        self.assertEqual([list(c) for c in chunked(range(5), 2)], [[0, 1], [2, 3], [4]])
+
+    def test_chunked_yields_nothing_for_an_empty_input(self):
+        self.assertEqual(list(chunked([])), [])
+
+    def test_chunked_rejects_a_useless_size(self):
+        with self.assertRaises(ValueError):
+            list(chunked([1, 2], 0))
+
+
+class InScopeRefreshRunFinalizationTests(TestCase):
+    """A run must be finished even when the refresh dies part way through it.
+
+    Reported from a real estate: the bulk refresh raised in the binding rebuild, and the
+    station showed "Refreshing..." for ever afterwards with a single InScopeRefreshStarted
+    event to explain it. Only the collection call was guarded, so the run was never closed and
+    the per-item events - gathered in memory and written in one go at the end - were all
+    discarded by the exception.
+    """
+
+    def setUp(self):
+        self.station, self.appliance, self.enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-RUN-001",
+            appliance_hostname="fw-run-01",
+        )
+
+    def _collection_with_one_failure(self):
+        collection = _empty_in_scope_refresh_collection()
+        collection.configuration_snapshots.merged_config_failures.append(
+            SimpleNamespace(appliance=self.appliance, error_text="device unreachable")
+        )
+        return collection
+
+    def test_a_failure_after_collection_closes_the_run_and_keeps_the_events(self):
+        from optivedge_integrations.integrations.views import (
+            _refresh_station_in_scope_with_tracking,
+        )
+
+        with patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
+            return_value=self._collection_with_one_failure(),
+        ), patch(
+            "optivedge_integrations.integrations.views.rebuild_device_group_bindings",
+            side_effect=Exception("too many SQL variables"),
+        ):
+            outcome = _refresh_station_in_scope_with_tracking(self.station)
+
+        self.assertFalse(outcome.succeeded)
+        outcome.run.refresh_from_db()
+        # The symptom: without this the run stays RUNNING and the UI never stops spinning.
+        self.assertEqual(outcome.run.status, IntegrationRun.STATUS_FAILED)
+        self.assertIsNotNone(outcome.run.completed_at)
+
+        reasons = set(IntegrationEvent.objects.filter(run=outcome.run).values_list("reason", flat=True))
+        self.assertIn("InScopeRefreshFailed", reasons)
+        # The account of the run survives the failure rather than being thrown away with it.
+        self.assertIn("MergedConfigCollectionFailed", reasons)
+        self.assertIn(
+            "too many SQL variables",
+            IntegrationEvent.objects.get(run=outcome.run, reason="InScopeRefreshFailed").message,
+        )
+
+    def test_a_clean_run_still_succeeds_and_is_closed(self):
+        from optivedge_integrations.integrations.views import (
+            _refresh_station_in_scope_with_tracking,
+        )
+
+        with patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
+            return_value=_empty_in_scope_refresh_collection(),
+        ):
+            outcome = _refresh_station_in_scope_with_tracking(self.station)
+
+        self.assertTrue(outcome.succeeded)
+        outcome.run.refresh_from_db()
+        self.assertEqual(outcome.run.status, IntegrationRun.STATUS_SUCCEEDED)
+        self.assertIsNotNone(outcome.run.completed_at)

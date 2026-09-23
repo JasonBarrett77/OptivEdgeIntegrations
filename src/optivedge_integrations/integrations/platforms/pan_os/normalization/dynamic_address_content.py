@@ -45,6 +45,7 @@ from optivedge_integrations.integrations.models import (
     SecurityRuleSourceAddressRef,
     Snapshot,
 )
+from optivedge_integrations.integrations.query_chunking import chunked
 from optivedge_integrations.integrations.platforms.pan_os.collectors.external_list import (
     members_from_result,
     total_valid_from_result,
@@ -84,7 +85,10 @@ def _candidate_dynamic_address_objects(enforcement_point: EnforcementPoint) -> l
     candidate_ids = set(source_ids) | set(destination_ids)
     if not candidate_ids:
         return []
-    return list(AddressObject.objects.filter(pk__in=candidate_ids))
+    # Chunked for the same reason as device_group_bindings: this grows with the estate, and
+    # SQLite's host-parameter limit varies by build. See query_chunking.
+    return [obj for chunk in chunked(candidate_ids)
+            for obj in AddressObject.objects.filter(pk__in=chunk)]
 
 
 def _parse_ipv4_literal_interval(raw_value: str) -> tuple[int, int] | None:

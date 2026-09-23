@@ -34,6 +34,7 @@ from django.apps import apps
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
+from optivedge_integrations.integrations.query_chunking import chunked
 from optivedge_integrations.integrations.models import (
     DeviceGroup,
     DeviceGroupBinding,
@@ -108,7 +109,13 @@ def _resolve_points(model, pks, management_station, by_group, by_appliance):
         columns.append("management_station_id")
 
     resolved: dict[int, list[int]] = {}
-    for row in model.objects.filter(pk__in=pks).values("pk", *columns):
+    # Chunked because `pks` is every object of this type carrying device-group provenance -
+    # on a real estate that is tens of thousands of rules and address objects, and an IN
+    # clause that long exceeds SQLite's host-parameter limit on some builds. See
+    # query_chunking: the limit varies by SQLite build, so this cannot be caught locally.
+    rows = (row for chunk in chunked(pks)
+            for row in model.objects.filter(pk__in=chunk).values("pk", *columns))
+    for row in rows:
         if has_station and row["management_station_id"] != management_station.pk:
             continue
         points: list[int] = []
@@ -184,7 +191,10 @@ def rebuild_device_group_bindings(
     stale = [binding_pk for pair, binding_pk in existing.items() if pair not in wanted_pairs]
     deleted = 0
     if stale:
-        deleted = DeviceGroupBinding.objects.filter(pk__in=stale).delete()[0]
+        # Same reason as _resolve_points: one binding per (group name, enforcement point),
+        # so this grows with the estate too.
+        deleted = sum(DeviceGroupBinding.objects.filter(pk__in=chunk).delete()[0]
+                      for chunk in chunked(stale))
 
     created = DeviceGroupBinding.objects.bulk_create(
         [

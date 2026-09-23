@@ -605,7 +605,19 @@ class InScopeRefreshTrackingResult:
 def _refresh_station_in_scope_with_tracking(management_station: ManagementStation) -> InScopeRefreshTrackingResult:
     """Run the in-scope configuration refresh for one station, recording an IntegrationRun
     and any per-item IntegrationEvents. Shared by the single-station and bulk in-scope
-    refresh views so both stay consistent in what they track."""
+    refresh views so both stay consistent in what they track.
+
+    A RUN IS ALWAYS FINISHED, whatever happens inside it. Only the collection call used to be
+    guarded, so anything that went wrong afterwards - normalization bookkeeping, the binding
+    rebuild - left the run RUNNING for ever. The station then showed "Refreshing..."
+    indefinitely with nothing to explain it, because the per-item events are gathered in
+    memory and written in one go at the end, so the failure discarded the entire account of
+    the run and left only InScopeRefreshStarted behind.
+
+    That is why the events list is owned HERE and passed down: on failure, whatever was
+    gathered before the exception is still written, and an explicit failure event is added
+    beside it. A refresh that dies half way is a thing that has to be readable afterwards.
+    """
     run = IntegrationRun.objects.create(
         management_station=management_station,
         run_scope=IntegrationRun.SCOPE_APPLIANCE,
@@ -619,6 +631,39 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
         reason="InScopeRefreshStarted",
         message="In-scope configuration refresh started.",
     )
+    events: list[IntegrationEvent] = []
+    try:
+        return _refresh_station_in_scope_tracked(management_station, run, events)
+    except Exception as exc:  # noqa: BLE001 - the run must be closed whatever this was
+        logger.exception(
+            "In-scope configuration refresh failed for management station %s", management_station.pk,
+        )
+        if events:
+            IntegrationEvent.objects.bulk_create(events)
+        IntegrationEvent.objects.create(
+            management_station=management_station,
+            run=run,
+            level=IntegrationEvent.LEVEL_ERROR,
+            stage="",
+            reason="InScopeRefreshFailed",
+            message=f"{type(exc).__name__}: {exc}",
+        )
+        run.status = IntegrationRun.STATUS_FAILED
+        run.completed_at = timezone.now()
+        run.save(update_fields=["status", "completed_at"])
+        return InScopeRefreshTrackingResult(
+            run=run, succeeded=False, refresh=None, error=exc,
+            failure_count=sum(1 for e in events if e.level == IntegrationEvent.LEVEL_ERROR) + 1,
+        )
+
+
+def _refresh_station_in_scope_tracked(
+    management_station: ManagementStation,
+    run: IntegrationRun,
+    events: list[IntegrationEvent],
+) -> InScopeRefreshTrackingResult:
+    """The body of one tracked refresh. Appends to `events` as it goes so the caller can still
+    write them if this raises - see _refresh_station_in_scope_with_tracking."""
     try:
         refresh = refresh_in_scope_configuration_snapshots(management_station)
     except Exception as exc:
@@ -638,7 +683,6 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
         )
 
     batch = refresh.configuration_snapshots
-    events = []
     for f in batch.merged_config_failures:
         events.append(IntegrationEvent(
             management_station=management_station, run=run,
