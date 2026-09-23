@@ -19,6 +19,7 @@ from optivedge_integrations.integrations.models import (
     ApplianceGroup,
     EnforcementPoint,
     ManagementStation,
+    PolicyObjectNamespace,
     SecurityRule,
     SecurityRuleDestinationAddressRef,
     SecurityRuleSourceAddressRef,
@@ -27,6 +28,8 @@ from optivedge_integrations.integrations.models import (
 from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     clear_target_vsys,
     collect_show_dns_proxy_fqdn_all,
+    LIST_TYPE_CUSTOM,
+    LIST_TYPE_PREDEFINED,
     collect_show_external_list,
     collect_show_managed_devices,
     collect_show_merged_config,
@@ -1156,26 +1159,38 @@ def collect_appliance_fqdn_cache(
     return persist_appliance_collected_response(appliance, collected)
 
 
-def _candidate_edl_names(enforcement_point: EnforcementPoint) -> list[str]:
-    """Distinct ip-type EDL address object names actually referenced by this enforcement
-    point's rules - directly or via any level of nested static group, already flattened onto
-    ref rows by resolve_static_group_members. Excludes FQDN (handled by the bulk appliance-wide
-    FQDN cache call, not a per-name EDL show command)."""
+def _candidate_edl_names(enforcement_point: EnforcementPoint) -> list[tuple[str, str]]:
+    """Distinct ip-type EDL address objects referenced by this enforcement point's rules, each
+    paired with the command type that can actually read it.
+
+    Referenced directly or via any level of nested static group, already flattened onto ref rows
+    by resolve_static_group_members. Excludes FQDN (handled by the bulk appliance-wide FQDN
+    cache call, not a per-name EDL show command).
+
+    The type is not decoration. Measured 2026-09-22 on pan-fw-111: `type ip` and
+    `type predefined-ip` accept disjoint sets of names and reject each other's outright, so a
+    name alone is not enough to read one - see build_show_external_list_command. A predefined
+    list is exactly the one this normalization marked PREDEFINED, which is how the pairing is
+    decided here rather than by guessing from the name's prefix.
+    """
     candidate_filter = Q(
         address_object__address_type=AddressObject.TYPE_EDL,
         address_object__edl_list_type="ip",
     )
-    source_names = (
-        SecurityRuleSourceAddressRef.objects.filter(security_rule__enforcement_point=enforcement_point)
-        .filter(candidate_filter)
-        .values_list("address_object__name", flat=True)
-    )
-    destination_names = (
-        SecurityRuleDestinationAddressRef.objects.filter(security_rule__enforcement_point=enforcement_point)
-        .filter(candidate_filter)
-        .values_list("address_object__name", flat=True)
-    )
-    return sorted(set(source_names) | set(destination_names))
+    pairs: set[tuple[str, str]] = set()
+    for ref_model in (SecurityRuleSourceAddressRef, SecurityRuleDestinationAddressRef):
+        for name, namespace_type in (
+            ref_model.objects.filter(security_rule__enforcement_point=enforcement_point)
+            .filter(candidate_filter)
+            .values_list("address_object__name", "address_object__namespace_type")
+        ):
+            list_type = (
+                LIST_TYPE_PREDEFINED
+                if namespace_type == PolicyObjectNamespace.PREDEFINED
+                else LIST_TYPE_CUSTOM
+            )
+            pairs.add((name, list_type))
+    return sorted(pairs)
 
 
 def collect_enforcement_point_external_lists(
@@ -1194,8 +1209,8 @@ def collect_enforcement_point_external_lists(
     on it, then clears target-vsys before returning - never reuse this session for anything
     else, and never call this same vsys context from more than one session concurrently.
     """
-    candidate_names = _candidate_edl_names(enforcement_point)
-    if not candidate_names:
+    candidates = _candidate_edl_names(enforcement_point)
+    if not candidates:
         return []
 
     appliance = resolve_enforcement_point_collection_appliance(enforcement_point)
@@ -1209,8 +1224,8 @@ def collect_enforcement_point_external_lists(
     set_target_vsys(session, vsys_name=enforcement_point.vsys_name)
     try:
         persisted: list[PANOSPersistedCollection] = []
-        for name in candidate_names:
-            collected = collect_show_external_list(session, name=name)
+        for name, list_type in candidates:
+            collected = collect_show_external_list(session, name=name, list_type=list_type)
             persisted.append(
                 persist_appliance_collected_response(
                     appliance,

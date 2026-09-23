@@ -19,6 +19,8 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.dns_proxy_f
     collect_show_dns_proxy_fqdn_all,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.external_list import (
+    LIST_TYPE_CUSTOM,
+    LIST_TYPE_PREDEFINED,
     NUM_RECORDS_PER_PAGE,
     build_clear_target_vsys_command,
     build_set_target_vsys_command,
@@ -45,6 +47,8 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.types impor
 )
 
 __all__ = [
+    "LIST_TYPE_CUSTOM",
+    "LIST_TYPE_PREDEFINED",
     "NUM_RECORDS_PER_PAGE",
     "PANOSCollectedResponse",
     "PANOSOperationRequest",

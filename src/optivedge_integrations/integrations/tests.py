@@ -138,10 +138,14 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_zones,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.external_list import (
+    LIST_TYPE_CUSTOM,
+    LIST_TYPE_PREDEFINED,
     NUM_RECORDS_PER_PAGE,
+    build_show_external_list_command,
     collect_show_external_list,
     members_from_result,
 )
+from optivedge_integrations.integrations.platforms.pan_os.flows import _candidate_edl_names
 from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
     _edl_members_from_snapshot,
     _fqdn_addresses_by_name,
@@ -1417,6 +1421,63 @@ class DynamicAddressContentNormalizationTests(TestCase):
 
         self.assertEqual(result.total_resolved_entries, 0)
         self.assertEqual(edl_object.resolved_entries.count(), 0)
+
+
+    def test_candidate_edls_are_paired_with_the_command_type_that_can_read_them(self):
+        """`type ip` and `type predefined-ip` accept disjoint sets of names (measured
+        2026-09-22 on pan-fw-111), so a candidate name alone cannot be read - every predefined
+        list was unreachable while the builder only ever emitted `ip`, and the device's
+        rejection blames target-vsys, which sends you looking in the wrong place entirely."""
+        station, appliance, enforcement_point = self._build_enforcement_point()
+        snapshot = Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={},
+        )
+
+        def _edl(name, namespace_type, precedence_rank):
+            return AddressObject.objects.create(
+                management_station=station,
+                enforcement_point=enforcement_point,
+                source_snapshot=snapshot,
+                config_source=SecurityRule.SOURCE_LOCAL,
+                name=name,
+                namespace_type=namespace_type,
+                namespace_value="vsys1",
+                precedence_rank=precedence_rank,
+                address_type=AddressObject.TYPE_EDL,
+                is_edl=True,
+                edl_list_type="ip",
+                value="ip",
+                normalized_value="ip",
+            )
+
+        predefined = _edl("panw-highrisk-ip-list", PolicyObjectNamespace.PREDEFINED, 90)
+        custom = _edl("prod_west_edl", PolicyObjectNamespace.LOCAL_VSYS, 10)
+        self._build_candidate_rule(
+            enforcement_point=enforcement_point,
+            source_address_object=predefined,
+            destination_address_object=custom,
+        )
+
+        self.assertEqual(
+            _candidate_edl_names(enforcement_point),
+            [("panw-highrisk-ip-list", LIST_TYPE_PREDEFINED), ("prod_west_edl", LIST_TYPE_CUSTOM)],
+        )
+
+    def test_show_external_list_command_carries_the_requested_type(self):
+        self.assertIn(
+            "<predefined-ip><name>panw-highrisk-ip-list</name>",
+            build_show_external_list_command(
+                name="panw-highrisk-ip-list", anchor=1, list_type=LIST_TYPE_PREDEFINED
+            ),
+        )
+        self.assertIn(
+            "<ip><name>prod_west_edl</name>",
+            build_show_external_list_command(name="prod_west_edl", anchor=1, list_type=LIST_TYPE_CUSTOM),
+        )
 
 
 class DynamicAddressContentPayloadParsingTests(SimpleTestCase):

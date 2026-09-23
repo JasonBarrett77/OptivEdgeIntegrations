@@ -37,6 +37,37 @@ Entry shape:
 
 
 
+## 2026-09-22 — `type ip` and `type predefined-ip` are disjoint, and the error blames the wrong thing
+
+**Did:** Ran the EDL collector against pan-fw-111 for real, closing the round-trip left open
+in the entry below. It failed immediately, on the first name.
+
+**Found:** `request system external-list show` has two type nodes that accept strictly disjoint
+sets of names and reject each other's outright:
+
+    type ip             panw-highrisk-ip-list   FAIL  invalid name
+    type ip             prod_west_edl           OK    0 valid / 1 invalid
+    type predefined-ip  panw-highrisk-ip-list   OK    2,776 valid
+    type predefined-ip  panw-known-ip-list      OK    4,000 valid
+    type predefined-ip  prod_west_edl           FAIL  invalid name
+
+We only ever emitted `type ip`, so every predefined EDL on every device was unreadable — and
+because candidate selection is driven by rule references, a rule referencing a predefined list
+aborted that vsys's whole EDL collection, not just that one name.
+
+**Cost an attempt:** the refusal is `api_code=17`, "panw-highrisk-ip-list is invalid
+name.Current target-vsys is vsys1". It names target-vsys, so it reads as a scoping fault. It is
+not one — the predefined lists are refused identically under `target-vsys none` and under
+`vsys1`. Only the type is wrong. `action=complete` on the name node answers "No completions
+available", so the schema cannot be asked either; the two types had to be tried against each
+other.
+
+**Landed:** Candidates now carry the type that can read them, decided by the object's PREDEFINED
+namespace rather than by guessing from the name's prefix. Live proof on pan-fw-111:
+`panw-highrisk-ip-list` collects 2,776 members and normalizes to 2,570 merged intervals;
+`prod_west_edl` collects 0 valid / 1 invalid and correctly resolves to nothing. `num-records`
+is also settled — 2,776 arrived in one page, against a default of 100.
+
 ## 2026-09-22 — the EDL and FQDN cache payloads, neither of which we had ever seen
 
 **Did:** Read a real `request system external-list show` and `show dns-proxy fqdn all` off

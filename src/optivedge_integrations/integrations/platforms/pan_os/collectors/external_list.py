@@ -46,16 +46,39 @@ def build_clear_target_vsys_command() -> str:
     return "<set><system><setting><target-vsys>none</target-vsys></setting></system></set>"
 
 
+LIST_TYPE_CUSTOM = "ip"
+LIST_TYPE_PREDEFINED = "predefined-ip"
+
+
 def build_show_external_list_command(
     *,
     name: str,
     anchor: int,
     num_records: int = NUM_RECORDS_PER_PAGE,
+    list_type: str = LIST_TYPE_CUSTOM,
 ) -> str:
+    """One page of an EDL's cached content.
+
+    MEASURED 2026-09-22 on pan-fw-111: `type ip` and `type predefined-ip` are strictly
+    DISJOINT, and each rejects the other's names outright with api_code=17,
+    "<name> is invalid name.Current target-vsys is <vsys>":
+
+        type ip             panw-highrisk-ip-list   FAIL invalid name
+        type ip             prod_west_edl           OK   0 valid / 1 invalid
+        type predefined-ip  panw-highrisk-ip-list   OK   2,776 valid
+        type predefined-ip  panw-known-ip-list      OK   4,000 valid
+        type predefined-ip  prod_west_edl           FAIL invalid name
+
+    The error names target-vsys, which reads like a scoping problem and is not one - the
+    predefined lists are refused under `target-vsys none` and under `vsys1` alike. Only the
+    type is wrong. So the caller must pick the type from the object, not from the vsys.
+    """
     return (
-        "<request><system><external-list><show><type><ip>"
+        "<request><system><external-list><show><type>"
+        f"<{list_type}>"
         f"<name>{name}</name><anchor>{anchor}</anchor><num-records>{num_records}</num-records>"
-        "</ip></type></show></external-list></system></request>"
+        f"</{list_type}>"
+        "</type></show></external-list></system></request>"
     )
 
 
@@ -95,7 +118,12 @@ def clear_target_vsys(session: PANSession) -> None:
     session.op(build_clear_target_vsys_command(), target=session.target)
 
 
-def collect_show_external_list(session: PANSession, *, name: str) -> PANOSCollectedResponse:
+def collect_show_external_list(
+    session: PANSession,
+    *,
+    name: str,
+    list_type: str = LIST_TYPE_CUSTOM,
+) -> PANOSCollectedResponse:
     """Collect every cached entry for one EDL, walking anchor-based pagination.
 
     Caller is responsible for having already called set_target_vsys() on this same session -
@@ -128,7 +156,7 @@ def collect_show_external_list(session: PANSession, *, name: str) -> PANOSCollec
     all_entries: list[str] = []
     anchor = 1
     while True:
-        command_xml = build_show_external_list_command(name=name, anchor=anchor)
+        command_xml = build_show_external_list_command(name=name, anchor=anchor, list_type=list_type)
         request = PANOSOperationRequest(
             command_xml=command_xml,
             target=session.target,
@@ -136,6 +164,7 @@ def collect_show_external_list(session: PANSession, *, name: str) -> PANOSCollec
                 "command_name": "request system external-list show",
                 "name": name,
                 "anchor": anchor,
+                "list_type": list_type,
             },
         )
         collected = collect_op_response(session, source_type="show_external_list", request=request)
@@ -164,9 +193,13 @@ def collect_show_external_list(session: PANSession, *, name: str) -> PANOSCollec
     return PANOSCollectedResponse(
         source_type="show_external_list",
         request=PANOSOperationRequest(
-            command_xml=build_show_external_list_command(name=name, anchor=1),
+            command_xml=build_show_external_list_command(name=name, anchor=1, list_type=list_type),
             target=session.target,
-            metadata={"command_name": "request system external-list show", "name": name},
+            metadata={
+                "command_name": "request system external-list show",
+                "name": name,
+                "list_type": list_type,
+            },
         ),
         response=aggregated_response,
     )
