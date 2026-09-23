@@ -2,6 +2,7 @@ from django.urls import path
 
 from optivedge_integrations.integrations.views import (
     ApplianceGroupSnapshotView,
+    CollectionScriptView,
     DeveloperView,
     EnforcementPointAddressListView,
     EnforcementPointDetailView,
@@ -26,6 +27,11 @@ from optivedge_integrations.integrations.views import (
 )
 
 urlpatterns = [
+    path(
+        "collection-script/",
+        CollectionScriptView.as_view(),
+        name="collection_script",
+    ),
     # Hidden operations page - intentionally not registered in app_meta.py's sidebar.
     path("developer/", DeveloperView.as_view(), name="developer"),
     # Reachable from the shell health indicator, which is the only thing that links here.

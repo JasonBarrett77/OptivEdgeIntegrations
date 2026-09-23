@@ -47,6 +47,12 @@ SIDEBAR_SECTION = [
                     "enforcement_point_zone_detail",
                 },
             },
+            {
+                "href": "/integrations/collection-script/",
+                "icon": "wand-sparkles",
+                "label": "Collection Script",
+                "active_names": {"collection_script"},
+            },
         ],
     },
     {

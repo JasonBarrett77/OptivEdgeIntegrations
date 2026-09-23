@@ -56,6 +56,17 @@ $ErrorActionPreference = 'Stop'
 $script:ScriptVersion = '1.0.0'
 $script:BundleSchemaVersion = 1
 
+# Substituted when this script is GENERATED for an engagement. They are left as tokens in the
+# source so the committed script still runs and still tests: the banner checks for the token
+# rather than for emptiness, so an ungenerated copy simply says nothing about a client.
+$script:ClientName = '__OPTIVEDGE_CLIENT_NAME__'
+$script:GeneratedOn = '__OPTIVEDGE_GENERATED_ON__'
+
+function Test-Substituted {
+    param([string] $Value)
+    return ($Value -and $Value -notlike '__OPTIVEDGE_*')
+}
+
 # Let Windows choose the TLS version. MEASURED 2026-09-23 against a Panorama that offers
 # TLS 1.3 ONLY: the usual PowerShell 5.1 incantation - pinning SecurityProtocol to
 # Tls12 -bor Tls11 - excludes 1.3 and every request fails with "Could not create SSL/TLS
@@ -84,6 +95,14 @@ function Write-Bad  { param([string] $Text) Write-Host ("        " + $Text) -For
 function Write-Banner {
     Write-Plain ''
     Write-Plain '  OptivEdge configuration collection'
+    if (Test-Substituted $script:ClientName) {
+        if (Test-Substituted $script:GeneratedOn) {
+            Write-Plain ('  prepared for {0}, {1}' -f $script:ClientName, $script:GeneratedOn)
+        }
+        else {
+            Write-Plain ('  prepared for {0}' -f $script:ClientName)
+        }
+    }
     Write-Plain ('  version {0}   read-only: this script issues only show and get commands' -f $script:ScriptVersion)
     Write-Plain ''
 }

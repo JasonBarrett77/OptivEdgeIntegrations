@@ -1,0 +1,119 @@
+{% load lucide %}
+<section class="flex h-full w-full min-h-0 min-w-0 flex-col">
+    <div class="flex min-h-0 flex-1 flex-col px-4 py-3">
+        <div class="flex min-h-0 flex-1 flex-col border border-slate-200">
+            <div class="flex shrink-0 items-center justify-between bg-white px-4 py-2">
+                <h1 class="text-sm font-semibold text-slate-900">Collection Script</h1>
+            </div>
+
+            <div class="min-h-0 flex-1 overflow-auto bg-white px-4 py-4">
+                <div class="max-w-3xl space-y-6">
+
+                    <p class="text-sm text-slate-700">
+                        For an estate this deployment cannot reach. The customer runs the script on
+                        their own Windows machine and sends back what it collects; you import the
+                        archive here.
+                    </p>
+
+                    <form method="post" class="space-y-3">
+                        {% csrf_token %}
+                        <div>
+                            <label for="client_name" class="block text-xs font-medium uppercase tracking-wide text-slate-600">
+                                Prepared for
+                            </label>
+                            <p class="mt-1 text-xs text-slate-500">
+                                Printed in the script banner and at the top of the instructions, so
+                                whoever runs it can see who asked.
+                            </p>
+                            <input
+                                type="text"
+                                id="client_name"
+                                name="client_name"
+                                value="{{ client_name }}"
+                                required
+                                class="mt-2 h-9 w-full border border-slate-300 px-3 text-sm text-slate-900 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                                placeholder="Client name"
+                            >
+                            {% if not has_environment %}
+                                <p class="mt-2 text-xs text-amber-700">
+                                    No application environment is configured, so there is no client
+                                    name to suggest.
+                                </p>
+                            {% endif %}
+                        </div>
+
+                        <button type="submit" class="inline-flex h-8 items-center justify-center gap-1.5 border border-blue-300 bg-blue-50 px-3 text-sm font-medium whitespace-nowrap text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20">
+                            {% lucide "wand-sparkles" class="h-4 w-4" %}
+                            Download
+                        </button>
+                    </form>
+
+                    <div class="border-t border-slate-200 pt-5">
+                        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-600">What they get</h2>
+                        <dl class="mt-2 space-y-1.5 text-sm text-slate-700">
+                            <div class="flex gap-2">
+                                <dt class="w-72 shrink-0 font-mono text-xs text-slate-500">Collect-OptivEdgeConfiguration.cmd</dt>
+                                <dd>The launcher they double-click.</dd>
+                            </div>
+                            <div class="flex gap-2">
+                                <dt class="w-72 shrink-0 font-mono text-xs text-slate-500">Collect-OptivEdgeConfiguration.ps1</dt>
+                                <dd>The script itself.</dd>
+                            </div>
+                            <div class="flex gap-2">
+                                <dt class="w-72 shrink-0 font-mono text-xs text-slate-500">Instructions.txt</dt>
+                                <dd>One page, written for whoever runs it.</dd>
+                            </div>
+                        </dl>
+                    </div>
+
+                    <div class="border-t border-slate-200 pt-5">
+                        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-600">How it runs</h2>
+                        <ul class="mt-2 space-y-1.5 text-sm text-slate-700">
+                            <li>
+                                <span class="font-medium">Read-only.</span>
+                                Every command is a <span class="font-mono text-xs">show</span> or a
+                                configuration <span class="font-mono text-xs">get</span>.
+                            </li>
+                            <li>
+                                <span class="font-medium">Two passes.</span>
+                                First it lists what a management station manages and writes a scope
+                                file of serial numbers; then it collects against that file. The scope
+                                file is plain text, so they can edit it or you can send them one.
+                            </li>
+                            <li>
+                                <span class="font-medium">Resumable.</span>
+                                A collection can take a while. If it is interrupted, running it again
+                                picks up where it stopped.
+                            </li>
+                            <li>
+                                <span class="font-medium">The certificate is shown before any password.</span>
+                                Untrusted is expected on a management interface; it is displayed in
+                                full and confirmed first, then pinned by thumbprint.
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div class="border-t border-slate-200 pt-5">
+                        <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-600">Worth telling them</h2>
+                        <ul class="mt-2 space-y-1.5 text-sm text-slate-700">
+                            <li>
+                                Windows PowerShell 5.1, which ships with Windows — nothing to install.
+                            </li>
+                            <li>
+                                The script is unsigned, so the
+                                <span class="font-mono text-xs">.cmd</span> launcher is what gets it
+                                started. <span class="font-medium">If their execution policy is set by
+                                Group Policy, nothing will run it</span> and they will need to tell you.
+                            </li>
+                            <li>
+                                <span class="font-medium">The archive is not encrypted yet.</span>
+                                Agree how it comes back before they send it.
+                            </li>
+                        </ul>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+    </div>
+</section>

@@ -13,7 +13,7 @@ from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db import connections
 from django.db.models import Count, OuterRef, Subquery
-from django.http import HttpResponseRedirect
+from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
@@ -22,8 +22,12 @@ from django.views.generic import DetailView, ListView, TemplateView
 from django.views.generic.edit import CreateView, DeleteView, UpdateView
 
 from django.contrib.contenttypes.models import ContentType
+from optivedge.models import ApplicationEnvironment
 from optivedge.views import RightOverlayMixin
 from optivedge_integrations.integrations.forms import ManagementStationForm, NoteForm
+from optivedge_integrations.integrations.scripted_collection.generator import (
+    build_collection_package,
+)
 from optivedge_integrations.integrations.diagnostics import (
     capture_census,
     diagnose_collisions,
@@ -1155,6 +1159,41 @@ def build_note_rows(notes):
 
 def get_note_rows():
     return build_note_rows(list(Note.objects.select_related("content_type")))
+
+
+class CollectionScriptView(TemplateView):
+    """Build the collection package for a customer to run.
+
+    For an estate this deployment cannot reach: the customer runs the script on their own
+    machine and sends back what it collects. The page hands out three files in one .zip -
+    the script, the launcher and the instructions - with the client's name substituted in,
+    so whoever opens it can see who asked for it.
+
+    The files come from `scripted_collection/`, which is the same copy the test suite checks
+    against the collector command set. Nothing is generated from scratch here.
+    """
+
+    template_name = "integrations/collection_script.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        environment = ApplicationEnvironment.objects.order_by("pk").first()
+        context["client_name"] = self.request.POST.get("client_name") or (
+            environment.client_name if environment else ""
+        )
+        context["has_environment"] = environment is not None
+        return context
+
+    def post(self, request, *args, **kwargs):
+        client_name = (request.POST.get("client_name") or "").strip()
+        if not client_name:
+            messages.error(request, "Enter the client name to put on the script.")
+            return HttpResponseRedirect(reverse("collection_script"))
+
+        package = build_collection_package(client_name)
+        response = HttpResponse(package.content, content_type="application/zip")
+        response["Content-Disposition"] = f'attachment; filename="{package.file_name}"'
+        return response
 
 
 class NoteListView(TemplateView):

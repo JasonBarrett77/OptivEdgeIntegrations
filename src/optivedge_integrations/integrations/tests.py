@@ -3350,7 +3350,9 @@ class EnforcementPointNavigationTests(TestCase):
         self.assertEqual(len(sections), 1)
 
         labels = [item["label"] for item in sections[0]["items"]]
-        self.assertEqual(labels, ["Management Stations", "Enforcement Points"])
+        self.assertEqual(
+            labels, ["Management Stations", "Enforcement Points", "Collection Script"]
+        )
 
     def test_sidebar_active_names_cover_every_enforcement_point_route(self):
         """A route missing from active_names silently stops highlighting its own page."""
@@ -8033,3 +8035,154 @@ class ScriptedCollectionScriptTests(SimpleTestCase):
         """A collector performs reads. An action that mutates config must never appear."""
         for mutating in ("action=set", "action=edit", "action=delete", "'set'", "<commit"):
             self.assertNotIn(mutating, self.code, mutating)
+
+
+class CollectionPackageTests(SimpleTestCase):
+    """The .zip a consultant hands to a customer."""
+
+    def _package(self, client_name="Contoso Manufacturing", generated_on=None):
+        from datetime import date
+
+        from optivedge_integrations.integrations.scripted_collection.generator import (
+            build_collection_package,
+        )
+
+        return build_collection_package(
+            client_name, generated_on=generated_on or date(2026, 9, 23)
+        )
+
+    def _members(self, package):
+        import io
+        import zipfile
+
+        with zipfile.ZipFile(io.BytesIO(package.content)) as archive:
+            return {name: archive.read(name) for name in archive.namelist()}
+
+    def test_it_contains_the_three_files_the_customer_needs(self):
+        members = self._members(self._package())
+
+        self.assertEqual(
+            sorted(members),
+            [
+                "OptivEdge-Collection/Collect-OptivEdgeConfiguration.cmd",
+                "OptivEdge-Collection/Collect-OptivEdgeConfiguration.ps1",
+                "OptivEdge-Collection/Instructions.txt",
+            ],
+        )
+
+    def test_the_client_name_reaches_the_script_and_the_instructions(self):
+        members = self._members(self._package())
+        script = members["OptivEdge-Collection/Collect-OptivEdgeConfiguration.ps1"].decode("utf-8")
+        instructions = members["OptivEdge-Collection/Instructions.txt"].decode("utf-8")
+
+        from optivedge_integrations.integrations.scripted_collection.generator import (
+            CLIENT_NAME_TOKEN,
+            GENERATED_ON_TOKEN,
+        )
+
+        self.assertIn("$script:ClientName = 'Contoso Manufacturing'", script)
+        self.assertIn("$script:GeneratedOn = '2026-09-23'", script)
+        self.assertNotIn(CLIENT_NAME_TOKEN, script)
+        self.assertNotIn(GENERATED_ON_TOKEN, script)
+        # `__OPTIVEDGE_*` still appears once, in the guard the script uses to decide whether
+        # it was generated at all. That one must survive substitution.
+        self.assertIn("-notlike '__OPTIVEDGE_*'", script)
+        self.assertTrue(instructions.startswith("Prepared for Contoso Manufacturing"))
+
+    def test_an_apostrophe_in_the_name_does_not_break_the_script(self):
+        """A single quote would close the PowerShell string the name sits inside, and the
+        customer would get a script that cannot parse."""
+        members = self._members(self._package(client_name="O'Brien Industries"))
+        script = members["OptivEdge-Collection/Collect-OptivEdgeConfiguration.ps1"].decode("utf-8")
+
+        self.assertIn("$script:ClientName = 'O''Brien Industries'", script)
+
+    def test_windows_line_endings_survive(self):
+        """A .cmd with bare LF endings misbehaves under cmd.exe, and text mode would rewrite
+        them silently."""
+        members = self._members(self._package())
+
+        for name, content in members.items():
+            self.assertIn(b"\r\n", content, name)
+            self.assertNotIn(b"\n\n", content.replace(b"\r\n", b"\r"), name)
+
+    def test_the_download_is_named_for_the_client_and_the_day(self):
+        self.assertEqual(
+            self._package().file_name,
+            "OptivEdge-Collection-Contoso-Manufacturing-2026-09-23.zip",
+        )
+
+    def test_a_name_of_punctuation_still_produces_a_usable_file_name(self):
+        self.assertEqual(
+            self._package(client_name="///").file_name,
+            "OptivEdge-Collection-client-2026-09-23.zip",
+        )
+
+    def test_it_refuses_to_build_without_a_client_name(self):
+        with self.assertRaises(ValueError):
+            self._package(client_name="   ")
+
+    def test_the_shipped_script_is_the_one_the_tests_check(self):
+        """Not a copy, not a rendering - the same file the collector-drift test reads."""
+        from pathlib import Path
+
+        import optivedge_integrations.integrations as integrations_package
+        from optivedge_integrations.integrations.scripted_collection.generator import (
+            CLIENT_NAME_TOKEN,
+            read_source,
+            SCRIPT_NAME,
+        )
+
+        on_disk = (
+            Path(integrations_package.__file__).parent / "scripted_collection" / SCRIPT_NAME
+        ).read_bytes()
+        self.assertEqual(read_source(SCRIPT_NAME), on_disk)
+        self.assertIn(CLIENT_NAME_TOKEN.encode(), on_disk)
+
+
+class CollectionScriptViewTests(TestCase):
+    def test_the_page_suggests_the_configured_client(self):
+        from optivedge.models import ApplicationEnvironment
+
+        ApplicationEnvironment.objects.create(
+            client_name="Contoso Manufacturing",
+            client_short_name="Contoso",
+            opportunity_number="OP-1234567",
+        )
+
+        response = self.client.get(reverse("collection_script"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Contoso Manufacturing")
+
+    def test_the_page_says_so_when_no_environment_is_configured(self):
+        response = self.client.get(reverse("collection_script"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No application environment is configured")
+
+    def test_posting_a_client_name_downloads_the_package(self):
+        response = self.client.post(
+            reverse("collection_script"), {"client_name": "Contoso Manufacturing"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/zip")
+        self.assertIn("Contoso-Manufacturing", response["Content-Disposition"])
+        self.assertTrue(response.content.startswith(b"PK"))
+
+    def test_an_empty_client_name_is_refused_rather_than_downloaded(self):
+        response = self.client.post(reverse("collection_script"), {"client_name": "  "})
+
+        self.assertRedirects(response, reverse("collection_script"))
+
+    def test_it_is_in_the_sidebar(self):
+        """A page nothing links to is a page nobody finds."""
+        from optivedge_integrations.integrations import app_meta
+
+        hrefs = {
+            item["href"]
+            for section in app_meta.SIDEBAR_SECTION
+            for item in section["items"]
+        }
+        self.assertIn("/integrations/collection-script/", hrefs)
