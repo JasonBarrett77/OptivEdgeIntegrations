@@ -1,0 +1,61 @@
+OptivEdge configuration collection
+=================================
+
+What this does
+--------------
+Collects the configuration of the Palo Alto Networks devices in scope for your assessment,
+writes it to files on this machine, and puts them in a single .zip for you to send back.
+
+It is READ-ONLY. Every command it runs is a "show" or a configuration "get". It does not
+change anything on any device.
+
+What you need
+-------------
+  * A Windows machine that can reach your Panorama (or firewall) management interface.
+  * An administrator account on it. A read-only account is enough.
+
+How to run it
+-------------
+  1. Double-click Collect-OptivEdgeConfiguration.cmd
+
+     (If you would rather run it yourself, open PowerShell in this folder and run:
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Collect-OptivEdgeConfiguration.ps1
+      The -ExecutionPolicy setting applies only to that one command. It does not change
+      anything on this machine.)
+
+  2. Choose option 1, "Choose the devices in scope".
+
+     Enter your management station's hostname or IP. The script shows you the certificate it
+     presents before asking for any credentials - check the thumbprint against the device if
+     you want to. Then enter your username and password. The password is not shown as you type
+     and is never written to disk.
+
+     You will see the devices that station manages. Enter the ones in scope, for example:
+
+        1,3,5-8      or      all
+
+     This writes OptivEdgeScope.txt. You can open it and edit it if it is easier than running
+     this step again.
+
+  3. Run it again and choose option 2, "Collect the configuration".
+
+     This is the long step. It prints a line for each file as it collects it. If it is
+     interrupted - a dropped connection, a closed window - just run it again: it picks up where
+     it stopped and does not re-collect what it already has.
+
+  4. Send back the .zip file it names at the end.
+
+     The plain files stay in the folder beside it, so you can see exactly what is in it.
+
+If something goes wrong
+-----------------------
+  "running scripts is disabled on this system"
+      Your organisation sets the PowerShell execution policy through Group Policy, and this
+      script cannot override that. Contact us and we will find another way.
+
+  A device shows as "not connected"
+      Panorama cannot reach it, so we cannot collect it through Panorama. That is worth
+      knowing either way - tell us and we will note it.
+
+  Anything else
+      The script prints the reason it stopped. Send us what it printed.

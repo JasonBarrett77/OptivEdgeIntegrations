@@ -28,6 +28,11 @@ where = ["src"]
 "optivedge_integrations.integrations" = [
     "templates/**/*.html",
     "docs/**/*.md",
+    # The customer-run collector, which a downstream host has to be able to hand out. Without
+    # these the wheel installs an app that cannot produce the script it is supposed to send.
+    "scripted_collection/*.ps1",
+    "scripted_collection/*.cmd",
+    "scripted_collection/*.txt",
 ]
 
 # Keep the wheel staging path short. Windows still caps a path at 260 characters

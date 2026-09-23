@@ -7904,3 +7904,132 @@ class DeviceGroupBindingTests(TestCase):
         self.assertTrue(
             IntegrationEvent.objects.filter(reason="DeviceGroupBindingsRebuilt").exists()
         )
+
+
+class ScriptedCollectionScriptTests(SimpleTestCase):
+    """The PowerShell collector must ask for exactly what the live collectors ask for.
+
+    It is a separate implementation in a separate language, so nothing links the two: a
+    command changed here would leave the script asking a device for something else, and the
+    bundle would be wrong in a way that only shows up after a customer has run it.
+
+    These are string comparisons against the collector constants, which is the whole point -
+    the constants are the source, the script is the copy.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        from pathlib import Path
+        import optivedge_integrations.integrations as integrations_package
+
+        root = Path(integrations_package.__file__).parent / "scripted_collection"
+        cls.script_dir = root
+        cls.script = (root / "Collect-OptivEdgeConfiguration.ps1").read_text(encoding="utf-8")
+        # Comments name several of the things the code must not use, saying why - so the
+        # forbidden-construct check reads the code with the commentary removed.
+        code = re.sub(r"<#.*?#>", "", cls.script, flags=re.S)
+        cls.code = re.sub(r"#.*$", "", code, flags=re.M)
+
+    def test_the_shipped_files_are_all_present(self):
+        for name in (
+            "Collect-OptivEdgeConfiguration.ps1",
+            "Collect-OptivEdgeConfiguration.cmd",
+            "Instructions.txt",
+            "README.md",
+            "tests/Invoke-CollectorTests.ps1",
+        ):
+            self.assertTrue((self.script_dir / name).exists(), name)
+
+    def test_every_op_command_matches_its_collector(self):
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.device_groups import (
+            SHOW_DG_HIERARCHY_COMMAND,
+        )
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.managed_devices import (
+            SHOW_MANAGED_DEVICES_COMMAND,
+        )
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.merged_config import (
+            SHOW_MERGED_CONFIG_COMMAND,
+        )
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
+            SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND,
+            SHOW_PREDEFINED_URL_LISTS_COMMAND,
+        )
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.pushed_shared_policy import (
+            SHOW_PUSHED_SHARED_POLICY_COMMAND,
+            build_show_pushed_shared_policy_vsys_command,
+        )
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.system import (
+            SHOW_MASTERKEY_PROPERTIES_COMMAND,
+        )
+
+        commands = [
+            SHOW_MANAGED_DEVICES_COMMAND,
+            SHOW_DG_HIERARCHY_COMMAND,
+            SHOW_MERGED_CONFIG_COMMAND,
+            SHOW_MASTERKEY_PROPERTIES_COMMAND,
+            SHOW_PUSHED_SHARED_POLICY_COMMAND,
+            SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND,
+            SHOW_PREDEFINED_URL_LISTS_COMMAND,
+            # The script substitutes the vsys name with -f, so {0} stands where it goes.
+            build_show_pushed_shared_policy_vsys_command("{0}"),
+        ]
+        for command in commands:
+            self.assertIn(command, self.script, command)
+
+    def test_every_config_xpath_matches_its_collector(self):
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
+            PREDEFINED_CERTIFICATE_XPATH,
+            PREDEFINED_SECURITY_PROFILES_XPATH,
+            PREDEFINED_SSL_TLS_SERVICE_PROFILE_XPATH,
+        )
+
+        for xpath in (
+            PREDEFINED_CERTIFICATE_XPATH,
+            PREDEFINED_SECURITY_PROFILES_XPATH,
+            PREDEFINED_SSL_TLS_SERVICE_PROFILE_XPATH,
+        ):
+            self.assertIn(xpath, self.script, xpath)
+
+    def test_file_names_match_the_source_types_ingest_will_look_for(self):
+        """The bundle names each file after the `source_type` of the snapshot it becomes.
+
+        A substring check, because the script builds some names by concatenation and writes
+        others as a literal path - what matters is that the token itself survives a rename.
+        """
+        for source_type in (
+            "show_devices_all",
+            "show_dg_hierarchy",
+            "show_config_merged",
+            "show_masterkey_properties",
+            "show_pushed_shared_policy",
+            "show_pushed_shared_policy_vsys",
+            "show_predefined_ip_block_lists",
+            "show_predefined_url_lists",
+            "config_predefined_ssl_tls_service_profiles",
+            "config_predefined_certificates",
+            "config_predefined_security_profiles",
+        ):
+            self.assertIn(source_type, self.script, source_type)
+
+    def test_it_stays_within_windows_powershell_5_1(self):
+        """5.1 is what ships with Windows; 7 is an optional install a locked estate lacks."""
+        for forbidden, why in (
+            ("-SkipCertificateCheck", "PowerShell 7 only"),
+            ("??", "null-coalescing is PowerShell 7 only"),
+            ("AesGcm", "not in .NET Framework"),
+            ("ImportSubjectPublicKeyInfo", "not in .NET Framework"),
+            ("ConvertFrom-Json -AsHashtable", "PowerShell 6 only"),
+        ):
+            self.assertNotIn(forbidden, self.code, why)
+
+    def test_the_tls_version_is_left_to_windows(self):
+        """Measured 2026-09-23: a Panorama offering TLS 1.3 ONLY refuses a connection pinned
+        to Tls12 -bor Tls11, which is the usual 5.1 incantation."""
+        self.assertIn("SecurityProtocol = 0", self.code)
+        self.assertNotIn("SecurityProtocolType]::Tls12 -bor", self.code)
+
+    def test_it_is_read_only(self):
+        """A collector performs reads. An action that mutates config must never appear."""
+        for mutating in ("action=set", "action=edit", "action=delete", "'set'", "<commit"):
+            self.assertNotIn(mutating, self.code, mutating)

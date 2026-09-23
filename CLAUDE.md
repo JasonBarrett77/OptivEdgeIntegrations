@@ -226,6 +226,28 @@ preserve that guarantee in any replacement. Note what it guarantees: one row per
 firewall (see "`vsys_name` is the key" below). `get_in_scope_*` in `flows.py` `select_related`s
 `management_station` to keep the discriminant from costing a query per point.
 
+### Scripted collection (`integrations/scripted_collection/`)
+
+For an estate this tool cannot reach. The customer runs a PowerShell script that issues the
+same commands the live collectors issue, writes one file per response, and archives them; we
+ingest the archive. Its own README carries the detail. Four things belong here:
+
+* **The script is a second implementation of the collector command set, in another language,
+  with nothing linking the two.** `ScriptedCollectionScriptTests` compares it against the
+  collector constants - the constants are the source, the script is the copy. A command
+  changed in Python and not there would have a customer collect the wrong thing, and we would
+  find out after they had run it.
+* **PowerShell 5.1, because that is what ships with Windows.** The test refuses
+  `-SkipCertificateCheck`, `??`, `AesGcm`, `ImportSubjectPublicKeyInfo` and
+  `ConvertFrom-Json -AsHashtable`, all of which are newer.
+* **The TLS version is left to Windows.** MEASURED 2026-09-23 against a Panorama offering
+  **TLS 1.3 only**: pinning `SecurityProtocol` to `Tls12 -bor Tls11` - the usual 5.1
+  incantation, and what this script did first - EXCLUDES 1.3 and every request fails with
+  "Could not create SSL/TLS secure channel".
+* **`package-data` must list the shipped files.** They are not `.py`, so nothing includes them
+  automatically, and a wheel without them installs an app that cannot hand out the script it
+  exists to hand out.
+
 ### Device groups are collected; their membership is derived (`models/panorama.py`)
 
 `DeviceGroup` comes from one op call per station, `show dg-hierarchy`, whose entries carry
