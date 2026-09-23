@@ -149,9 +149,26 @@ def collect_show_external_list(
     normalised to nothing at all, and silently, because an empty EDL is indistinguishable from
     one the device could not fetch.
 
-    `count` versus `total-count` is why the paging matters: a request that does not ask for a
-    page size gets 100. This asks for NUM_RECORDS_PER_PAGE and walks anchor forward until a
-    short page arrives.
+    Paging semantics, all measured 2026-09-22 against panw-known-ip-list (4,000 valid):
+
+      * `num-records` IS the page size and is honoured exactly - ask 3, get 3; ask 100, get
+        100. Omit it and the device gives 100, which is why a 2,776-entry list first looked
+        like a 100-entry one.
+      * Its accepted range is 1 to 4294967295 (`value=0 should be equal to or between 1 and
+        4294967295`). Asking for more than the list holds is not an error and is not clamped to
+        a page - the whole list comes back. So NUM_RECORDS_PER_PAGE is a ceiling on one
+        response's size, not a limit the device imposes.
+      * `anchor` is 1-BASED and is an offset into the member list, not a page number:
+        anchor=2 returns the list from its second member. So walking it forward by the number
+        of members received is right.
+      * DO NOT drive the loop from the `count` attribute. Asking past the end
+        (anchor=4001 of 4,000) answers `count="100"` with ZERO members - `count` reports what
+        was asked for there, not what was sent, so a loop that trusted it would never
+        terminate. This counts members.
+
+    Proven live end to end: forced to a 100-member page, this walks anchors 1, 101, ... 3901,
+    then 4001 which returns nothing, and returns all 4,000 members with no duplicates and no
+    gaps.
     """
     all_entries: list[str] = []
     anchor = 1

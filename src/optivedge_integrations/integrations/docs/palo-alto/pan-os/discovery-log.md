@@ -37,6 +37,26 @@ Entry shape:
 
 
 
+## 2026-09-22 — how EDL paging actually behaves, and one attribute not to trust
+
+**Did:** Asked what sets the page size, then measured the whole paging contract against
+panw-known-ip-list (4,000 valid entries) rather than answering from the one call that had
+happened to fit in a single page.
+
+**Found:** `num-records` is the page size and is honoured exactly — ask 3, get 3. Its range is
+1 to 4294967295; asking for more than the list holds is neither an error nor clamped, the whole
+list simply comes back. `anchor` is 1-based and is an offset into the member list, not a page
+number: anchor=2 returns the list from its second member.
+
+**The trap:** asking past the end (anchor=4001 of 4,000) answers `count="100"` with ZERO
+members. The `count` attribute reports what was *asked for* there, not what was sent, so a loop
+driven by `count` would never terminate. Ours counts members, which is why it was already
+right — but nothing in the code said so, and it does now.
+
+**Proven live:** forced to a 100-member page, the collector walked anchors 1, 101 … 3901, then
+4001 which returned nothing, and returned all 4,000 members with no duplicates and no gaps —
+41 requests. Until this, no real list had ever exceeded one page, so the loop had never run.
+
 ## 2026-09-22 — `type ip` and `type predefined-ip` are disjoint, and the error blames the wrong thing
 
 **Did:** Ran the EDL collector against pan-fw-111 for real, closing the round-trip left open

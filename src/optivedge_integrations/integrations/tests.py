@@ -1556,6 +1556,16 @@ class ExternalListCollectorPaginationTests(SimpleTestCase):
         self.assertEqual(calls, [1])
         self.assertEqual(members, ["1.2.3.4", "1.2.3.5"])
 
+    def test_an_empty_final_page_ends_the_loop(self):
+        """The exact-multiple case, and the reason the loop counts members rather than reading
+        the `count` attribute: asking past the end of a 4,000-member list answers
+        `count="100"` with zero members (measured), so `count` cannot end the loop."""
+        full_page = [str(ipaddress.IPv4Address(index)) for index in range(1, NUM_RECORDS_PER_PAGE + 1)]
+        calls, members = self._run_with_pages([full_page, []])
+
+        self.assertEqual(calls, [1, 1 + NUM_RECORDS_PER_PAGE])
+        self.assertEqual(len(members), NUM_RECORDS_PER_PAGE)
+
     def test_a_full_page_advances_the_anchor_and_concatenates(self):
         full_page = [str(ipaddress.IPv4Address(index)) for index in range(1, NUM_RECORDS_PER_PAGE + 1)]
         calls, members = self._run_with_pages([full_page, ["9.9.9.9"]])
