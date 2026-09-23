@@ -29,6 +29,12 @@ from optivedge_integrations.integrations.platforms.pan_os.session import PANSess
 
 NUM_RECORDS_PER_PAGE = 10000
 
+#: Hard ceiling on how many members we will keep for ONE list, across all pages.
+#: A list longer than this is collected up to the ceiling and recorded as INCOMPLETE - see
+#: collect_show_external_list. Deliberately equal to the page size, so the common case is a
+#: single request and the ceiling costs nothing.
+MAX_MEMBERS_COLLECTED = 10000
+
 
 def _ensure_list(value: Any) -> list[Any]:
     if value is None:
@@ -102,6 +108,23 @@ def members_from_result(result: Any) -> list[str]:
             if isinstance(member, str) and member.strip()]
 
 
+def total_valid_from_result(result: Any) -> int | None:
+    """How many valid members the DEVICE says the list holds, regardless of how many it sent.
+
+    This is the number a truncated collection is measured against, so it is read from the
+    device's own `total-valid` and never inferred from the members in hand.
+    """
+    if not isinstance(result, dict):
+        return None
+    external_list = result.get("external-list")
+    if not isinstance(external_list, dict):
+        return None
+    try:
+        return int(str(external_list.get("total-valid")).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def set_target_vsys(session: PANSession, *, vsys_name: str) -> None:
     """Switch this connection's operational context to vsys_name.
 
@@ -169,8 +192,15 @@ def collect_show_external_list(
     Proven live end to end: forced to a 100-member page, this walks anchors 1, 101, ... 3901,
     then 4001 which returns nothing, and returns all 4,000 members with no duplicates and no
     gaps.
+
+    TRUNCATION: at most MAX_MEMBERS_COLLECTED members are kept. A longer list stops there and
+    the aggregated payload carries the device's OWN `total-valid` rather than the number
+    stored, which is what makes the shortfall visible - downstream, an EDL resolved from a
+    truncated collection must not be read as a complete set, or an address in the discarded
+    tail looks like an address the list does not contain.
     """
     all_entries: list[str] = []
+    reported_total = None
     anchor = 1
     while True:
         command_xml = build_show_external_list_command(name=name, anchor=anchor, list_type=list_type)
@@ -187,8 +217,13 @@ def collect_show_external_list(
         collected = collect_op_response(session, source_type="show_external_list", request=request)
         response_root = collected.response.get("response", {})
         result = response_root.get("result", {}) if isinstance(response_root, dict) else {}
+        if reported_total is None:
+            reported_total = total_valid_from_result(result)
         page_members = members_from_result(result)
         all_entries.extend(page_members)
+        if len(all_entries) >= MAX_MEMBERS_COLLECTED:
+            del all_entries[MAX_MEMBERS_COLLECTED:]
+            break
         if len(page_members) < NUM_RECORDS_PER_PAGE:
             break
         anchor += len(page_members)
@@ -201,7 +236,9 @@ def collect_show_external_list(
             "result": {
                 "external-list": {
                     "name": name,
-                    "total-valid": str(len(all_entries)),
+                    # The DEVICE's count, not len(all_entries). Overwriting it with what we
+                    # kept would erase the only evidence that anything was dropped.
+                    "total-valid": str(reported_total if reported_total is not None else len(all_entries)),
                     "valid-members": {"member": all_entries},
                 }
             },

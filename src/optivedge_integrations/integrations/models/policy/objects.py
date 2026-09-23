@@ -99,12 +99,16 @@ class ScopedPolicyObject(PolicyObjectBase, SyncTrackedModel):
 class AddressObject(ScopedPolicyObject):
 
     #: Computed here: classifications of what the entry turned out to be. See ProvenancedMixin.DERIVED_FIELDS.
+    #: The two resolved_* fields are collection outcomes of the EDL/FQDN cache refresh, not
+    #: configuration - nothing in the config says them, so there is no provenance row to carry.
     DERIVED_FIELDS = (
         "is_missing",
         "is_any",
         "is_edl",
         "is_builtin",
         "is_synthetic",
+        "resolved_content_truncated",
+        "resolved_content_source_total",
     )
     TYPE_BUILTIN_ANY = "builtin_any"
     TYPE_EDL = "edl"
@@ -167,6 +171,14 @@ class AddressObject(ScopedPolicyObject):
     is_synthetic = models.BooleanField(default=False)
     synthetic_kind = models.CharField(max_length=32, choices=SYNTHETIC_KIND_CHOICES, blank=True, default="")
     edl_list_type = models.CharField(max_length=16, blank=True, default="")
+    #: True when resolved_entries hold only part of what the device reported for this object.
+    #: An object whose resolved content is truncated must NOT be read as a complete set: an
+    #: address in the discarded tail is indistinguishable from an address the list excludes,
+    #: so "not in this EDL" is unanswerable while this is True.
+    resolved_content_truncated = models.BooleanField(default=False)
+    #: What the device said the list holds, which is what truncation is measured against.
+    #: Null means never refreshed, or a kind that has no such count (FQDN).
+    resolved_content_source_total = models.BigIntegerField(null=True, blank=True)
     description = models.TextField(blank=True)
     raw_object = models.JSONField(default=dict, blank=True)
 

@@ -45,7 +45,10 @@ from optivedge_integrations.integrations.models import (
     SecurityRuleSourceAddressRef,
     Snapshot,
 )
-from optivedge_integrations.integrations.platforms.pan_os.collectors.external_list import members_from_result
+from optivedge_integrations.integrations.platforms.pan_os.collectors.external_list import (
+    members_from_result,
+    total_valid_from_result,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import derive_address_fields
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import merge_intervals
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
@@ -97,19 +100,24 @@ def _parse_ipv4_literal_interval(raw_value: str) -> tuple[int, int] | None:
     return start_int, end_int
 
 
-def _edl_members_from_snapshot(snapshot: Snapshot) -> list[str]:
-    """Valid members of a collected external-list snapshot.
+def _edl_result_from_snapshot(snapshot: Snapshot) -> Any:
+    """The `result` subtree of a collected external-list snapshot.
 
     The payload is stored in the device's own shape, whether it arrived as one response or was
     paged together by the collector, so one reader serves both.
     """
     payload = snapshot.payload
     if not isinstance(payload, dict):
-        return []
+        return None
     result = payload.get("response", payload)
     if isinstance(result, dict):
         result = result.get("result", result)
-    return members_from_result(result)
+    return result
+
+
+def _edl_members_from_snapshot(snapshot: Snapshot) -> list[str]:
+    """Valid members of a collected external-list snapshot."""
+    return members_from_result(_edl_result_from_snapshot(snapshot))
 
 
 def _fqdn_payload_text(payload: Any) -> str:
@@ -202,6 +210,18 @@ def _latest_fqdn_cache_snapshot(appliance_id: int) -> Snapshot | None:
     )
 
 
+def _record_completeness(address_object: AddressObject, *, truncated: bool, source_total: int | None) -> None:
+    """Mark whether this object's resolved content is the whole of what the device reported."""
+    if (
+        address_object.resolved_content_truncated == truncated
+        and address_object.resolved_content_source_total == source_total
+    ):
+        return
+    address_object.resolved_content_truncated = truncated
+    address_object.resolved_content_source_total = source_total
+    address_object.save(update_fields=["resolved_content_truncated", "resolved_content_source_total"])
+
+
 def normalize_enforcement_point_dynamic_address_content(
     enforcement_point: EnforcementPoint,
 ) -> NormalizedDynamicAddressContent:
@@ -222,6 +242,10 @@ def normalize_enforcement_point_dynamic_address_content(
 
     for address_object in candidates:
         address_object.resolved_entries.all().delete()
+        # Cleared on every pass, so a list that shrank below the ceiling - or an object whose
+        # snapshot has gone - never keeps a stale "incomplete" mark from an earlier refresh.
+        truncated = False
+        source_total = None
 
         if address_object.address_type == AddressObject.TYPE_EDL:
             snapshot = _latest_external_list_snapshot(
@@ -229,17 +253,28 @@ def normalize_enforcement_point_dynamic_address_content(
                 scope_name=f"{enforcement_point.vsys_name}:{address_object.name}",
             )
             if snapshot is None:
+                _record_completeness(address_object, truncated=False, source_total=None)
                 continue
-            intervals = _intervals_from_values(_edl_members_from_snapshot(snapshot))
+            result = _edl_result_from_snapshot(snapshot)
+            members = members_from_result(result)
+            source_total = total_valid_from_result(result)
+            # Measured against the DEVICE's count, never against the members in hand - those
+            # two are equal exactly when nothing was dropped, which is the thing being tested.
+            truncated = source_total is not None and len(members) < source_total
+            intervals = _intervals_from_values(members)
             source_snapshot = snapshot
         else:
             if fqdn_snapshot is None:
+                _record_completeness(address_object, truncated=False, source_total=None)
                 continue
             matching = fqdn_addresses.get((address_object.normalized_value or "").strip().lower())
             if not matching:
+                _record_completeness(address_object, truncated=False, source_total=None)
                 continue
             intervals = _intervals_from_values(matching)
             source_snapshot = fqdn_snapshot
+
+        _record_completeness(address_object, truncated=truncated, source_total=source_total)
 
         if not intervals:
             continue

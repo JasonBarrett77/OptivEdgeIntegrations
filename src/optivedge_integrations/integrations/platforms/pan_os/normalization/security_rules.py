@@ -983,10 +983,16 @@ IPV4_MAX = 4_294_967_295
 def _member_intervals_or_none(ref: ResolvedAddressRef) -> list[tuple[int, int]] | None:
     """The IPv4 interval(s) a single resolved ref represents, or None if unresolvable.
 
-    None means: a dynamic address group or region member (unknowable statically), or an
-    address object with no known IPv4 data at all (e.g. an EDL/FQDN never refreshed via
-    "Refresh EDL/FQDN Cache"). Callers computing a negate complement must treat None as
-    "can't soundly compute this" and skip materializing a complement, not guess.
+    None means: a dynamic address group or region member (unknowable statically), an address
+    object with no known IPv4 data at all (e.g. an EDL/FQDN never refreshed via "Refresh
+    EDL/FQDN Cache"), or an object whose resolved content is TRUNCATED. Callers computing a
+    negate complement must treat None as "can't soundly compute this" and skip materializing a
+    complement, not guess.
+
+    Truncation belongs in that list because a complement inverts the set: intervals missing
+    from a partial EDL become intervals the complement CLAIMS, so a negated rule would be
+    recorded as matching addresses the list actually contains. A partial set is fine for "does
+    it contain this" (it under-reports) and unsound the moment it is inverted.
     """
     if ref.ref_type in (
         SecurityRuleSourceAddressRef.RefType.DYNAMIC_ADDRESS_GROUP,
@@ -995,6 +1001,8 @@ def _member_intervals_or_none(ref: ResolvedAddressRef) -> list[tuple[int, int]] 
         return None
     address_object = ref.address_object
     if address_object is None:
+        return None
+    if address_object.resolved_content_truncated:
         return None
     resolved_entries = list(address_object.resolved_entries.all())
     if resolved_entries:

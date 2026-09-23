@@ -2,6 +2,7 @@ import ipaddress
 from pathlib import Path
 import tempfile
 import re
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -137,15 +138,22 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_security_rules,
     normalize_enforcement_point_zones,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors import (
+    external_list as external_list_collector,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.external_list import (
     LIST_TYPE_CUSTOM,
     LIST_TYPE_PREDEFINED,
-    NUM_RECORDS_PER_PAGE,
     build_show_external_list_command,
     collect_show_external_list,
     members_from_result,
+    total_valid_from_result,
 )
 from optivedge_integrations.integrations.platforms.pan_os.flows import _candidate_edl_names
+from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
+    ResolvedAddressRef,
+    _member_intervals_or_none,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
     _edl_members_from_snapshot,
     _fqdn_addresses_by_name,
@@ -1133,7 +1141,7 @@ sinkhole.paloaltonetworks.com
 """
 
 
-def _external_list_payload(*, name, members, total_invalid=0):
+def _external_list_payload(*, name, members, total_invalid=0, reported_total=None):
     """A `request system external-list show` result in the shape a real device returns.
 
     Measured on pan-fw-111: members live under external-list > valid-members > member, and the
@@ -1143,7 +1151,7 @@ def _external_list_payload(*, name, members, total_invalid=0):
         "external-list": {
             "vsys": "vsys1",
             "name": name,
-            "total-valid": str(len(members)),
+            "total-valid": str(reported_total if reported_total is not None else len(members)),
             "total-ignored": "0",
             "total-invalid": str(total_invalid),
         }
@@ -1423,6 +1431,132 @@ class DynamicAddressContentNormalizationTests(TestCase):
         self.assertEqual(edl_object.resolved_entries.count(), 0)
 
 
+    def test_a_truncated_edl_is_marked_incomplete_and_the_mark_clears(self):
+        """A partially-collected EDL must be readable as partial.
+
+        Resolved entries alone cannot say it: an address in the discarded tail looks exactly
+        like an address the list does not contain, so "not in this EDL" is unanswerable unless
+        the shortfall is recorded. It is measured against the device's own total, never against
+        the members in hand.
+        """
+        station, appliance, enforcement_point = self._build_enforcement_point()
+        edl_object = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station,
+                appliance=appliance,
+                source_type="show_pushed_shared_policy_vsys",
+                collected_at=timezone.now(),
+                payload={},
+            ),
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="my-edl",
+            namespace_type="pushed_vsys_effective",
+            namespace_value="vsys1",
+            precedence_rank=30,
+            address_type=AddressObject.TYPE_EDL,
+            is_edl=True,
+            edl_list_type="ip",
+            value="ip",
+            normalized_value="ip",
+        )
+        self._build_candidate_rule(
+            enforcement_point=enforcement_point,
+            source_address_object=edl_object,
+            destination_address_object=edl_object,
+        )
+        truncated_snapshot = Snapshot.objects.create(
+            appliance=appliance,
+            source_type="show_external_list",
+            scope_name="vsys1:my-edl",
+            collected_at=timezone.now(),
+            payload=_external_list_payload(
+                name="my-edl", members=["1.2.3.4", "5.6.7.8"], reported_total=4000
+            ),
+        )
+
+        normalize_enforcement_point_dynamic_address_content(enforcement_point)
+
+        edl_object.refresh_from_db()
+        self.assertTrue(edl_object.resolved_content_truncated)
+        self.assertEqual(edl_object.resolved_content_source_total, 4000)
+        # Truncated is not empty - what WAS collected still resolves.
+        self.assertEqual(edl_object.resolved_entries.count(), 2)
+
+        # A later refresh that captures the whole list must clear the mark, not leave the
+        # object permanently suspect.
+        truncated_snapshot.delete()
+        Snapshot.objects.create(
+            appliance=appliance,
+            source_type="show_external_list",
+            scope_name="vsys1:my-edl",
+            collected_at=timezone.now(),
+            payload=_external_list_payload(name="my-edl", members=["1.2.3.4", "5.6.7.8"]),
+        )
+
+        normalize_enforcement_point_dynamic_address_content(enforcement_point)
+
+        edl_object.refresh_from_db()
+        self.assertFalse(edl_object.resolved_content_truncated)
+        self.assertEqual(edl_object.resolved_content_source_total, 2)
+
+    def test_truncated_resolved_content_is_never_inverted_into_a_complement(self):
+        """Partial content is usable for "does it contain this" and unsound once inverted.
+
+        A complement turns the intervals a truncated EDL is MISSING into intervals it claims,
+        so a negated rule would be recorded as matching addresses the list actually holds -
+        a false clean result, which is the failure direction that matters.
+        """
+        station, appliance, enforcement_point = self._build_enforcement_point()
+        snapshot = Snapshot.objects.create(
+            management_station=station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={},
+        )
+        edl_object = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name="partial-edl",
+            namespace_type="local_vsys",
+            namespace_value="vsys1",
+            precedence_rank=10,
+            address_type=AddressObject.TYPE_EDL,
+            is_edl=True,
+            edl_list_type="ip",
+            value="ip",
+            normalized_value="ip",
+        )
+        AddressObjectResolvedEntry.objects.create(
+            address_object=edl_object,
+            ipv4_start_int=int(ipaddress.IPv4Address("1.2.3.4")),
+            ipv4_end_int=int(ipaddress.IPv4Address("1.2.3.4")),
+            source_snapshot=snapshot,
+            collected_at=timezone.now(),
+        )
+        ref = ResolvedAddressRef(
+            raw_value="partial-edl",
+            position=0,
+            ref_type=SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT,
+            address_object=edl_object,
+            address_group=None,
+        )
+
+        # Complete: the intervals are usable.
+        self.assertEqual(
+            _member_intervals_or_none(ref),
+            [(int(ipaddress.IPv4Address("1.2.3.4")),) * 2],
+        )
+
+        edl_object.resolved_content_truncated = True
+        edl_object.save(update_fields=["resolved_content_truncated"])
+
+        self.assertIsNone(_member_intervals_or_none(ref))
+
     def test_candidate_edls_are_paired_with_the_command_type_that_can_read_them(self):
         """`type ip` and `type predefined-ip` accept disjoint sets of names (measured
         2026-09-22 on pan-fw-111), so a candidate name alone cannot be read - every predefined
@@ -1528,30 +1662,56 @@ class DynamicAddressContentPayloadParsingTests(SimpleTestCase):
 
 
 class ExternalListCollectorPaginationTests(SimpleTestCase):
-    """A request that does not ask for a page size gets 100 of 2,776 (measured). The collector
-    asks for NUM_RECORDS_PER_PAGE and must walk `anchor` until a short page arrives - the old
-    page-extraction read the wrong key, saw zero entries, and stopped after one request."""
+    """Paging and the keep-ceiling.
 
-    def _run_with_pages(self, pages):
+    Both knobs ship at 10,000, so in production the ceiling is reached on the first page and
+    the walk never runs. The walk is still correct and still tested - the constants are driven
+    explicitly here rather than left at their shipped values, because a test that only ever
+    exercises "one page, nothing dropped" is how this collector came to have a paging loop that
+    had never once executed.
+    """
+
+    def _run_with_pages(self, pages, *, page_size=None, max_members=None, reported_total=None):
         calls = []
 
         def fake_collect(session, *, source_type, request):
             calls.append(request.metadata["anchor"])
             page = pages[len(calls) - 1]
             return SimpleNamespace(
-                response={"response": {"result": _external_list_payload(name="edl", members=page)}}
+                response={
+                    "response": {
+                        "result": _external_list_payload(
+                            name="edl", members=page, reported_total=reported_total
+                        )
+                    }
+                }
             )
 
-        with patch(
-            "optivedge_integrations.integrations.platforms.pan_os.collectors.external_list.collect_op_response",
-            side_effect=fake_collect,
-        ):
+        patches = [
+            patch(
+                "optivedge_integrations.integrations.platforms.pan_os.collectors.external_list."
+                "collect_op_response",
+                side_effect=fake_collect,
+            )
+        ]
+        if page_size is not None:
+            patches.append(patch.object(external_list_collector, "NUM_RECORDS_PER_PAGE", page_size))
+        if max_members is not None:
+            patches.append(patch.object(external_list_collector, "MAX_MEMBERS_COLLECTED", max_members))
+
+        with ExitStack() as stack:
+            for one in patches:
+                stack.enter_context(one)
             collected = collect_show_external_list(SimpleNamespace(target=None), name="edl")
-        members = collected.response["response"]["result"]["external-list"]["valid-members"]["member"]
-        return calls, members
+        result = collected.response["response"]["result"]
+        members = result["external-list"]["valid-members"]["member"]
+        return calls, members, result
+
+    def _members(self, count, *, start=1):
+        return [str(ipaddress.IPv4Address(index)) for index in range(start, start + count)]
 
     def test_a_short_first_page_ends_collection(self):
-        calls, members = self._run_with_pages([["1.2.3.4", "1.2.3.5"]])
+        calls, members, _ = self._run_with_pages([["1.2.3.4", "1.2.3.5"]])
 
         self.assertEqual(calls, [1])
         self.assertEqual(members, ["1.2.3.4", "1.2.3.5"])
@@ -1560,19 +1720,49 @@ class ExternalListCollectorPaginationTests(SimpleTestCase):
         """The exact-multiple case, and the reason the loop counts members rather than reading
         the `count` attribute: asking past the end of a 4,000-member list answers
         `count="100"` with zero members (measured), so `count` cannot end the loop."""
-        full_page = [str(ipaddress.IPv4Address(index)) for index in range(1, NUM_RECORDS_PER_PAGE + 1)]
-        calls, members = self._run_with_pages([full_page, []])
+        calls, members, _ = self._run_with_pages(
+            [self._members(100), []], page_size=100, max_members=10_000
+        )
 
-        self.assertEqual(calls, [1, 1 + NUM_RECORDS_PER_PAGE])
-        self.assertEqual(len(members), NUM_RECORDS_PER_PAGE)
+        self.assertEqual(calls, [1, 101])
+        self.assertEqual(len(members), 100)
 
     def test_a_full_page_advances_the_anchor_and_concatenates(self):
-        full_page = [str(ipaddress.IPv4Address(index)) for index in range(1, NUM_RECORDS_PER_PAGE + 1)]
-        calls, members = self._run_with_pages([full_page, ["9.9.9.9"]])
+        calls, members, _ = self._run_with_pages(
+            [self._members(100), ["9.9.9.9"]], page_size=100, max_members=10_000
+        )
 
-        self.assertEqual(calls, [1, 1 + NUM_RECORDS_PER_PAGE])
-        self.assertEqual(len(members), NUM_RECORDS_PER_PAGE + 1)
+        self.assertEqual(calls, [1, 101])
+        self.assertEqual(len(members), 101)
         self.assertEqual(members[-1], "9.9.9.9")
+
+    def test_the_ceiling_stops_collection_and_keeps_the_first_members(self):
+        """A list longer than the ceiling is kept up to it - the FIRST members, and no more."""
+        calls, members, _ = self._run_with_pages(
+            [self._members(100), self._members(100, start=101), self._members(100, start=201)],
+            page_size=100,
+            max_members=250,
+            reported_total=4000,
+        )
+
+        self.assertEqual(calls, [1, 101, 201])
+        self.assertEqual(len(members), 250)
+        self.assertEqual(members[0], "0.0.0.1")
+        self.assertEqual(members[-1], "0.0.0.250")
+
+    def test_the_stored_payload_reports_the_devices_total_not_what_was_kept(self):
+        """The shortfall is the only evidence anything was dropped, so the device's own count
+        has to survive into the snapshot - overwriting it with len(kept) would erase it."""
+        _calls, members, result = self._run_with_pages(
+            [self._members(100), self._members(100, start=101)],
+            page_size=100,
+            max_members=150,
+            reported_total=4000,
+        )
+
+        self.assertEqual(len(members), 150)
+        self.assertEqual(result["external-list"]["total-valid"], "4000")
+        self.assertEqual(total_valid_from_result(result), 4000)
 
 
     def test_collector_output_survives_persistence_into_the_normalizer(self):
