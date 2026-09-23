@@ -143,9 +143,11 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
     members_from_result,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
+    _edl_members_from_snapshot,
     _fqdn_addresses_by_name,
     _intervals_from_values,
 )
+from optivedge_integrations.integrations.platforms.pan_os.persistence.common import extract_result_payload
 from optivedge_integrations.integrations.orchestration import refresh_panorama_in_scope_data
 from optivedge_integrations.integrations.search_vocabulary import (
     rebuild_all_security_rule_search_vocabulary,
@@ -1500,6 +1502,36 @@ class ExternalListCollectorPaginationTests(SimpleTestCase):
         self.assertEqual(calls, [1, 1 + NUM_RECORDS_PER_PAGE])
         self.assertEqual(len(members), NUM_RECORDS_PER_PAGE + 1)
         self.assertEqual(members[-1], "9.9.9.9")
+
+
+    def test_collector_output_survives_persistence_into_the_normalizer(self):
+        """The seam between the two modules this pair of bugs lived in.
+
+        Each side was tested against its own idea of the payload and never against the other,
+        which is exactly how a shape nobody had measured stayed wrong in both places. This
+        asserts the contract directly: what the collector emits, put through the persistence
+        step that decides what lands in Snapshot.payload, is what the normalizer's reader
+        parses - no fixture standing in for either side.
+        """
+        calls_pages = [["1.2.3.4", "10.0.0.0/24"]]
+
+        def fake_collect(session, *, source_type, request):
+            return SimpleNamespace(
+                response={"response": {"result": _external_list_payload(name="edl", members=calls_pages[0])}}
+            )
+
+        with patch(
+            "optivedge_integrations.integrations.platforms.pan_os.collectors.external_list.collect_op_response",
+            side_effect=fake_collect,
+        ):
+            collected = collect_show_external_list(SimpleNamespace(target=None), name="edl")
+
+        payload = extract_result_payload(collected)
+
+        self.assertEqual(
+            _edl_members_from_snapshot(SimpleNamespace(payload=payload)),
+            ["1.2.3.4", "10.0.0.0/24"],
+        )
 
 
 class NegatedComplementNormalizationTests(TestCase):
