@@ -6,8 +6,13 @@ __pycache__/
 .env.*
 !.env.example
 
-db.sqlite3
+# Any local database, including the droppings around one: journals, write-ahead logs and
+# the .bak-rename-<stamp> copies a rename leaves behind. `*.sqlite3` alone matched none of
+# those - two `db.sqlite3.bak-rename-...` files were sitting untracked in a repo whose rules
+# forbid committing a database.
+*.sqlite
 *.sqlite3
+*.sqlite*
 
 dist/
 build/
