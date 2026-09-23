@@ -2,6 +2,9 @@ import ipaddress
 from pathlib import Path
 import tempfile
 import re
+import base64
+import textwrap
+import warnings
 from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -150,6 +153,9 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
     total_valid_from_result,
 )
 from optivedge_integrations.integrations.platforms.pan_os.flows import _candidate_edl_names
+from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
+    decode_certificate,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     ResolvedAddressRef,
     _member_intervals_or_none,
@@ -1159,6 +1165,85 @@ def _external_list_payload(*, name, members, total_invalid=0, reported_total=Non
     if members:
         payload["external-list"]["valid-members"] = {"member": list(members)}
     return payload
+
+
+class CertificateDecodeNonConformanceTests(SimpleTestCase):
+    """A certificate that breaks RFC 5280 but still parses.
+
+    Reported from a remote environment on cryptography 50.0.1: every normalization printed
+    "Parsed a serial number which wasn't positive ... disallowed by RFC 5280". Two things were
+    wrong with leaving it. The warning subclasses UserWarning rather than DeprecationWarning,
+    so Python shows it by default and one bad certificate spams every refresh - twice, since
+    loading it and reading its serial each warn. And the fact itself was going nowhere: the
+    certificate decodes fine, so `parse_error` stays empty, and `parse_error` is what a control
+    reads as "could not be decoded".
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        import datetime
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "serial-probe")])
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(1)
+            .not_valid_before(datetime.datetime(2020, 1, 1))
+            .not_valid_after(datetime.datetime(2030, 1, 1))
+            .sign(key, hashes.SHA256())
+        )
+        der = certificate.public_bytes(serialization.Encoding.DER)
+        cls.valid_pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
+
+        # CertificateBuilder refuses a non-positive serial, so the only way to get one is to
+        # edit the DER: the version block A0 03 02 01 02 is followed by serialNumber as
+        # INTEGER 02 01 01, and the value byte becomes 00. Nothing verifies the signature on
+        # load, so the certificate still parses - which is the whole point.
+        marker = bytes.fromhex("a003020102" "020101")
+        assert der.count(marker) == 1
+        bad_der = der.replace(marker, bytes.fromhex("a003020102" "020100"), 1)
+        cls.serial_zero_pem = (
+            "-----BEGIN CERTIFICATE-----\n"
+            + "\n".join(textwrap.wrap(base64.b64encode(bad_der).decode(), 64))
+            + "\n-----END CERTIFICATE-----\n"
+        )
+
+    def test_a_non_positive_serial_is_recorded_without_warning_or_parse_error(self):
+        with warnings.catch_warnings(record=True) as raised:
+            warnings.simplefilter("always")
+            decoded = decode_certificate(self.serial_zero_pem)
+
+        # Nothing reaches the caller's log.
+        self.assertEqual([str(w.message) for w in raised], [])
+        # It decoded, so this is NOT a parse failure - conflating the two would make a control
+        # report a readable certificate as unreadable.
+        self.assertEqual(decoded["parse_error"], "")
+        self.assertEqual(decoded["serial_number"], 0)
+        self.assertIn("RFC 5280", decoded["nonconformance"])
+        # And the data the certificate controls actually need survives.
+        self.assertEqual(decoded["key_algorithm"], "RSA")
+        self.assertEqual(decoded["key_size_bits"], 2048)
+
+    def test_a_conformant_certificate_reports_no_nonconformance(self):
+        decoded = decode_certificate(self.valid_pem)
+
+        self.assertEqual(decoded["parse_error"], "")
+        self.assertEqual(decoded["nonconformance"], "")
+        self.assertEqual(decoded["serial_number"], 1)
+
+    def test_unreadable_data_is_still_a_parse_error(self):
+        decoded = decode_certificate("-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n")
+
+        self.assertNotEqual(decoded["parse_error"], "")
+        self.assertNotIn("serial_number", decoded)
 
 
 class DynamicAddressContentNormalizationTests(TestCase):

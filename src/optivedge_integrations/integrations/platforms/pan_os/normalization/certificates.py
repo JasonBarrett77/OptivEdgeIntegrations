@@ -11,6 +11,7 @@ than "none exist", which are different facts and only one of them is a finding.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,7 @@ from django.db import transaction
 
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519, rsa
+from cryptography.utils import CryptographyDeprecationWarning
 
 from optivedge_integrations.integrations.models import (
     Appliance,
@@ -84,13 +86,44 @@ def decode_certificate(pem: str) -> dict[str, Any]:
     A failure is RECORDED, not raised. One unreadable certificate must not stop the other
     fifty from normalizing, and a control seeing a blank algorithm with a parse_error reports
     it - an unreadable certificate is not a compliant one.
+
+    NON-CONFORMANCE IS NOT A PARSE FAILURE, and the two must not be conflated: `parse_error`
+    means the certificate could not be read, and a control reports it as "could not be
+    decoded". A certificate that reads perfectly well but breaks a rule of RFC 5280 is a
+    different fact, and it is a fact about the ESTATE rather than about our decoder, so it is
+    returned separately in `nonconformance`.
+
+    The one seen in the wild so far is a serial number of zero or below, which RFC 5280
+    4.1.2.2 disallows. cryptography 50 warns and still parses it; a future release says it
+    will raise, and if it does, the except below turns it into a parse_error and the
+    certificate's key data is lost - so that is worth knowing about before it happens.
+
+    The warning is CAPTURED rather than left to print. It is a CryptographyDeprecationWarning,
+    which subclasses UserWarning rather than DeprecationWarning, so Python shows it by default
+    and one bad certificate prints on every normalization - twice, because loading it and
+    reading its serial each warn. The condition itself is then re-established by testing the
+    serial directly, so what gets recorded does not depend on matching the text of a warning
+    message that upstream is free to reword.
+
+    catch_warnings manipulates a process-global filter, so a thread normalizing concurrently
+    could briefly see the altered state. That is accepted here: the window is one function
+    call, and the alternative is unbounded log noise on every refresh.
     """
     if not pem or not pem.strip():
         return {"parse_error": "no certificate data"}
     try:
-        certificate = x509.load_pem_x509_certificate(pem.encode("utf-8"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", CryptographyDeprecationWarning)
+            certificate = x509.load_pem_x509_certificate(pem.encode("utf-8"))
+            serial_number = certificate.serial_number
     except Exception as exc:  # noqa: BLE001 - any decode failure is the same outcome here
         return {"parse_error": f"{type(exc).__name__}: {exc}"[:255]}
+
+    nonconformance = ""
+    if serial_number <= 0:
+        nonconformance = (
+            f"serial number is {serial_number}; RFC 5280 4.1.2.2 requires a positive integer"
+        )
 
     key = certificate.public_key()
     if isinstance(key, rsa.RSAPublicKey):
@@ -119,6 +152,8 @@ def decode_certificate(pem: str) -> dict[str, Any]:
         "not_valid_before": certificate.not_valid_before_utc,
         "not_valid_after": certificate.not_valid_after_utc,
         "parse_error": "",
+        "serial_number": serial_number,
+        "nonconformance": nonconformance,
     }
 
 
