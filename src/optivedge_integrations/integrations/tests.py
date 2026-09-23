@@ -1664,11 +1664,11 @@ class DynamicAddressContentPayloadParsingTests(SimpleTestCase):
 class ExternalListCollectorPaginationTests(SimpleTestCase):
     """Paging and the keep-ceiling.
 
-    Both knobs ship at 10,000, so in production the ceiling is reached on the first page and
-    the walk never runs. The walk is still correct and still tested - the constants are driven
-    explicitly here rather than left at their shipped values, because a test that only ever
-    exercises "one page, nothing dropped" is how this collector came to have a paging loop that
-    had never once executed.
+    The ceiling is a TOTAL across pages (50,000) and the page size is 10,000, so a large list
+    is walked up to five times before being cut. The constants are driven explicitly here
+    rather than left at their shipped values, because a test that only ever exercises "one
+    page, nothing dropped" is how this collector came to have a paging loop that had never once
+    executed against anything.
     """
 
     def _run_with_pages(self, pages, *, page_size=None, max_members=None, reported_total=None):

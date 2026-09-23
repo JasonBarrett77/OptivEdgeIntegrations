@@ -31,9 +31,9 @@ NUM_RECORDS_PER_PAGE = 10000
 
 #: Hard ceiling on how many members we will keep for ONE list, across all pages.
 #: A list longer than this is collected up to the ceiling and recorded as INCOMPLETE - see
-#: collect_show_external_list. Deliberately equal to the page size, so the common case is a
-#: single request and the ceiling costs nothing.
-MAX_MEMBERS_COLLECTED = 10000
+#: collect_show_external_list. Five pages at the current page size, so a list large enough to
+#: need paging is collected whole up to this point rather than cut at the first page.
+MAX_MEMBERS_COLLECTED = 50000
 
 
 def _ensure_list(value: Any) -> list[Any]:
@@ -193,7 +193,8 @@ def collect_show_external_list(
     then 4001 which returns nothing, and returns all 4,000 members with no duplicates and no
     gaps.
 
-    TRUNCATION: at most MAX_MEMBERS_COLLECTED members are kept. A longer list stops there and
+    TRUNCATION: at most MAX_MEMBERS_COLLECTED members are kept, across however many pages that
+    takes - the ceiling is a total, not a per-page limit. A longer list stops there and
     the aggregated payload carries the device's OWN `total-valid` rather than the number
     stored, which is what makes the shortfall visible - downstream, an EDL resolved from a
     truncated collection must not be read as a complete set, or an address in the discarded
