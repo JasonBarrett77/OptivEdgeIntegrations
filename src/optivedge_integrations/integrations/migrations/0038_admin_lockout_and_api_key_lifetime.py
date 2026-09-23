@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('integrations', '0037_deviceconfigurationprofile_password_block_repeated_characters_and_more'),
+        ('integrations', '0037_profile_password_policy_fields'),
     ]
 
     operations = [

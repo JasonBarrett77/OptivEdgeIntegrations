@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('integrations', '0034_deviceconfigurationprofile_master_key_auto_renew_hours_and_more'),
+        ('integrations', '0034_profile_master_key_fields'),
     ]
 
     operations = [

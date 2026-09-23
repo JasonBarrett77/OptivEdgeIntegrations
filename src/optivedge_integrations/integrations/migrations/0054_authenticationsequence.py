@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('integrations', '0053_remove_deviceconfigurationprofile_integration_managem_2ecbec_idx_and_more'),
+        ('integrations', '0053_delete_deviceconfigurationprofile'),
     ]
 
     operations = [

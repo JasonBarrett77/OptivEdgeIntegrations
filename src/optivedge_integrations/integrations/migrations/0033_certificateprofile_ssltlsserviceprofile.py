@@ -7,7 +7,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('integrations', '0032_deviceconfigurationprofile_ssl_tls_certificate_issuer_and_more'),
+        ('integrations', '0032_profile_ssl_tls_certificate_fields'),
     ]
 
     operations = [
