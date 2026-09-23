@@ -37,6 +37,39 @@ Entry shape:
 
 
 
+## 2026-09-22 — the EDL and FQDN cache payloads, neither of which we had ever seen
+
+**Did:** Read a real `request system external-list show` and `show dns-proxy fqdn all` off
+pan-fw-111, because no EDL or FQDN address object in the lab had ever resolved to a single
+entry and nobody had established whether that was a collection gap or a parsing one.
+
+**Found:** Both parsers were reading a shape no device produces. EDL members arrive under
+`result > external-list > valid-members > member`, beside `total-valid` / `total-ignored` /
+`total-invalid` — not as `result > entry`. The FQDN cache is not XML at all: it is a plain text
+table, a name at column zero with its answers indented beneath, so `payload.get("entry")` never
+had a dict to ask. Both modules carried a written note that the shape was unverified; the tests
+were written from the same guess as the code, so the suite was green the whole time.
+
+**Also found:** a response that does not ask for a page size returns `count="100"` of
+`total-count="2776"`. The old page loop read the wrong key, measured a zero-length page, and
+would have stopped after one request even once the key was right.
+
+**Landed:** Both readers, against the measured shapes, with the real payloads as fixtures.
+Proof on real data: snapshot 394, which had produced zero entries, now resolves `example.com`
+to its two A records. IPv6 answers and the device's `::  unknown` placeholder are skipped
+without discarding the IPv4 answer beside them — an AAAA-only host therefore resolves to
+nothing and stays excluded from IP-semantic search, which is the right answer until v6
+intervals exist.
+
+**Not a bug, worth knowing:** EDL collection is driven by *normalized* rule refs, so it cannot
+find anything on a pass before the referencing rules are normalized. That is why the lab held
+zero `show_external_list` snapshots and not evidence of a broken collector.
+
+**Open:** the live EDL round-trip is unproven — Panorama went unreachable before it could run,
+and pan-fw-111's management IP is not reachable from the probe host, so it is the only route.
+The two subjects are waiting: `panw-highrisk-ip-list` (2,776 valid, enough to page) and
+`prod_west_edl` (0 valid / 1 invalid, `error:28`, permanently unresolvable).
+
 ## 2026-09-22 — what a security rule does with no log-end key
 
 **Did:** Pushed `log_default_probe`, a shared rule identical to one Jason had built by hand

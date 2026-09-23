@@ -2,6 +2,7 @@ import ipaddress
 from pathlib import Path
 import tempfile
 import re
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.contenttypes.models import ContentType
@@ -135,6 +136,15 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
     normalize_enforcement_point_zones,
+)
+from optivedge_integrations.integrations.platforms.pan_os.collectors.external_list import (
+    NUM_RECORDS_PER_PAGE,
+    collect_show_external_list,
+    members_from_result,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
+    _fqdn_addresses_by_name,
+    _intervals_from_values,
 )
 from optivedge_integrations.integrations.orchestration import refresh_panorama_in_scope_data
 from optivedge_integrations.integrations.search_vocabulary import (
@@ -1093,6 +1103,50 @@ class AddressNormalizationTests(TestCase):
         )
 
 
+# Captured verbatim from pan-fw-111 on 2026-09-22 (snapshot 394). `show dns-proxy fqdn all`
+# answers with a plain text table, not XML - the reason every FQDN object resolved to nothing
+# while the tests below were green against an invented `{"entry": [...]}` payload.
+REAL_FQDN_CACHE_TABLE = """FQDN Table : Request time 2026-09-22 22:07:46
+--------------------------------------------------------------------------------
+\tIP Address
+--------------------------------------------------------------------------------
+
+VSYS : (using mgmt-obj dnsproxy object)
+\tShared
+\tvsys1
+
+example.com
+\t104.20.23.154
+\t172.66.147.243
+\t2606:4700:10::ac42:93f3
+\t2606:4700:10::6814:179a
+
+sinkhole.paloaltonetworks.com
+\t198.135.184.22
+\t::  unknown
+"""
+
+
+def _external_list_payload(*, name, members, total_invalid=0):
+    """A `request system external-list show` result in the shape a real device returns.
+
+    Measured on pan-fw-111: members live under external-list > valid-members > member, and the
+    stored snapshot payload is the `result` element only (persistence extracts it).
+    """
+    payload = {
+        "external-list": {
+            "vsys": "vsys1",
+            "name": name,
+            "total-valid": str(len(members)),
+            "total-ignored": "0",
+            "total-invalid": str(total_invalid),
+        }
+    }
+    if members:
+        payload["external-list"]["valid-members"] = {"member": list(members)}
+    return payload
+
+
 class DynamicAddressContentNormalizationTests(TestCase):
     def _build_enforcement_point(self):
         station, appliance, enforcement_point = _create_panorama_enforcement_point(
@@ -1170,13 +1224,13 @@ class DynamicAddressContentNormalizationTests(TestCase):
                 payload={},
             ),
             config_source=SecurityRule.SOURCE_LOCAL,
-            name="www.example.com",
+            name="example.com",
             namespace_type="local_vsys",
             namespace_value="vsys1",
             precedence_rank=10,
             address_type=AddressObject.TYPE_FQDN,
-            value="www.example.com",
-            normalized_value="www.example.com",
+            value="example.com",
+            normalized_value="example.com",
         )
         # Never-collected candidate, to prove graceful "no snapshot yet" degradation.
         never_refreshed_edl = AddressObject.objects.create(
@@ -1224,26 +1278,21 @@ class DynamicAddressContentNormalizationTests(TestCase):
             source_type="show_external_list",
             scope_name="vsys1:my-edl",
             collected_at=timezone.now(),
-            payload={"entry": [{"member": "1.2.3.4"}, {"member": "1.2.3.5"}]},
+            payload=_external_list_payload(name="my-edl", members=["1.2.3.4", "1.2.3.5"]),
         )
         Snapshot.objects.create(
             appliance=appliance,
             source_type="show_dns_proxy_fqdn_all",
             collected_at=timezone.now(),
-            payload={
-                "entry": [
-                    {"fqdn": "www.example.com", "ip": "5.6.7.8"},
-                    {"fqdn": "other.example.com", "ip": "9.9.9.9"},
-                ]
-            },
+            payload=REAL_FQDN_CACHE_TABLE,
         )
 
         result = normalize_enforcement_point_dynamic_address_content(enforcement_point)
 
-        self.assertEqual(result.total_resolved_entries, 2)
+        self.assertEqual(result.total_resolved_entries, 3)
         self.assertEqual(
             {obj.name for obj in result.updated_address_objects},
-            {"my-edl", "www.example.com"},
+            {"my-edl", "example.com"},
         )
 
         edl_entries = list(edl_object.resolved_entries.order_by("ipv4_start_int"))
@@ -1256,11 +1305,17 @@ class DynamicAddressContentNormalizationTests(TestCase):
             ),
         )
 
-        fqdn_entries = list(fqdn_object.resolved_entries.all())
-        self.assertEqual(len(fqdn_entries), 1)
-        expected_ip = int(ipaddress.IPv4Address("5.6.7.8"))
-        self.assertEqual(fqdn_entries[0].ipv4_start_int, expected_ip)
-        self.assertEqual(fqdn_entries[0].ipv4_end_int, expected_ip)
+        # The A records only: the two AAAA answers in the same block are out of scope for
+        # interval search and must not be mistaken for IPv4 literals.
+        fqdn_entries = list(fqdn_object.resolved_entries.order_by("ipv4_start_int"))
+        self.assertEqual(len(fqdn_entries), 2)
+        self.assertEqual(
+            [(entry.ipv4_start_int, entry.ipv4_end_int) for entry in fqdn_entries],
+            [
+                (int(ipaddress.IPv4Address(host)), int(ipaddress.IPv4Address(host)))
+                for host in ("104.20.23.154", "172.66.147.243")
+            ],
+        )
 
         self.assertEqual(never_refreshed_edl.resolved_entries.count(), 0)
 
@@ -1304,7 +1359,7 @@ class DynamicAddressContentNormalizationTests(TestCase):
             source_type="show_external_list",
             scope_name="vsys1:my-edl",
             collected_at=timezone.now(),
-            payload={"entry": [{"member": "10.0.0.0/24"}]},
+            payload=_external_list_payload(name="my-edl", members=["10.0.0.0/24"]),
         )
 
         normalize_enforcement_point_dynamic_address_content(enforcement_point)
@@ -1312,6 +1367,139 @@ class DynamicAddressContentNormalizationTests(TestCase):
         entries = list(edl_object.resolved_entries.all())
         self.assertEqual(len(entries), 1)
         self.assertNotEqual(entries[0].ipv4_start_int, 1)
+
+
+    def test_unresolvable_external_list_resolves_to_no_entries(self):
+        """An EDL the device could not fetch must stay empty, not guess.
+
+        `prod_west_edl` on the lab answers total-valid 0 / total-invalid 1 ("web request failed
+        to complete, error:28"). There is nothing to resolve it to, and an object with no
+        resolved entries correctly falls back to exclusion from IP-semantic search.
+        """
+        station, appliance, enforcement_point = self._build_enforcement_point()
+        edl_object = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station,
+                appliance=appliance,
+                source_type="show_pushed_shared_policy_vsys",
+                collected_at=timezone.now(),
+                payload={},
+            ),
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="my-edl",
+            namespace_type="pushed_vsys_effective",
+            namespace_value="vsys1",
+            precedence_rank=30,
+            address_type=AddressObject.TYPE_EDL,
+            is_edl=True,
+            edl_list_type="ip",
+            value="ip",
+            normalized_value="ip",
+        )
+        self._build_candidate_rule(
+            enforcement_point=enforcement_point,
+            source_address_object=edl_object,
+            destination_address_object=edl_object,
+        )
+        Snapshot.objects.create(
+            appliance=appliance,
+            source_type="show_external_list",
+            scope_name="vsys1:my-edl",
+            collected_at=timezone.now(),
+            payload=_external_list_payload(name="my-edl", members=[], total_invalid=1),
+        )
+
+        result = normalize_enforcement_point_dynamic_address_content(enforcement_point)
+
+        self.assertEqual(result.total_resolved_entries, 0)
+        self.assertEqual(edl_object.resolved_entries.count(), 0)
+
+
+class DynamicAddressContentPayloadParsingTests(SimpleTestCase):
+    """Parsing guards on the two real payload shapes, measured 2026-09-22 on pan-fw-111.
+
+    Both parsers previously read a shape no device produces, and no test caught it because the
+    fixtures were invented from the same guess as the code.
+    """
+
+    def test_fqdn_cache_table_parses_names_and_skips_banner_lines(self):
+        parsed = _fqdn_addresses_by_name(REAL_FQDN_CACHE_TABLE)
+
+        self.assertEqual(set(parsed), {"example.com", "sinkhole.paloaltonetworks.com"})
+        self.assertEqual(
+            parsed["example.com"],
+            [
+                "104.20.23.154",
+                "172.66.147.243",
+                "2606:4700:10::ac42:93f3",
+                "2606:4700:10::6814:179a",
+            ],
+        )
+
+    def test_fqdn_cache_intervals_skip_ipv6_and_the_unknown_placeholder(self):
+        parsed = _fqdn_addresses_by_name(REAL_FQDN_CACHE_TABLE)
+
+        # Four answers, two of them AAAA: only the A records become intervals.
+        self.assertEqual(len(_intervals_from_values(parsed["example.com"])), 2)
+        # `::  unknown` is the device's placeholder for a family it did not resolve. It must be
+        # skipped WITHOUT discarding the IPv4 answer sitting beside it.
+        self.assertEqual(
+            _intervals_from_values(parsed["sinkhole.paloaltonetworks.com"]),
+            [(int(ipaddress.IPv4Address("198.135.184.22")),) * 2],
+        )
+
+    def test_external_list_members_are_read_from_valid_members(self):
+        result = _external_list_payload(name="panw-highrisk-ip-list", members=["94.156.14.17"])
+
+        self.assertEqual(members_from_result(result), ["94.156.14.17"])
+        # The shape this code used to assume. It must not quietly resolve to anything.
+        self.assertEqual(members_from_result({"entry": [{"member": "94.156.14.17"}]}), [])
+
+    def test_external_list_ignores_invalid_and_ignored_counts(self):
+        self.assertEqual(
+            members_from_result(_external_list_payload(name="prod_west_edl", members=[], total_invalid=1)),
+            [],
+        )
+
+
+class ExternalListCollectorPaginationTests(SimpleTestCase):
+    """A request that does not ask for a page size gets 100 of 2,776 (measured). The collector
+    asks for NUM_RECORDS_PER_PAGE and must walk `anchor` until a short page arrives - the old
+    page-extraction read the wrong key, saw zero entries, and stopped after one request."""
+
+    def _run_with_pages(self, pages):
+        calls = []
+
+        def fake_collect(session, *, source_type, request):
+            calls.append(request.metadata["anchor"])
+            page = pages[len(calls) - 1]
+            return SimpleNamespace(
+                response={"response": {"result": _external_list_payload(name="edl", members=page)}}
+            )
+
+        with patch(
+            "optivedge_integrations.integrations.platforms.pan_os.collectors.external_list.collect_op_response",
+            side_effect=fake_collect,
+        ):
+            collected = collect_show_external_list(SimpleNamespace(target=None), name="edl")
+        members = collected.response["response"]["result"]["external-list"]["valid-members"]["member"]
+        return calls, members
+
+    def test_a_short_first_page_ends_collection(self):
+        calls, members = self._run_with_pages([["1.2.3.4", "1.2.3.5"]])
+
+        self.assertEqual(calls, [1])
+        self.assertEqual(members, ["1.2.3.4", "1.2.3.5"])
+
+    def test_a_full_page_advances_the_anchor_and_concatenates(self):
+        full_page = [str(ipaddress.IPv4Address(index)) for index in range(1, NUM_RECORDS_PER_PAGE + 1)]
+        calls, members = self._run_with_pages([full_page, ["9.9.9.9"]])
+
+        self.assertEqual(calls, [1, 1 + NUM_RECORDS_PER_PAGE])
+        self.assertEqual(len(members), NUM_RECORDS_PER_PAGE + 1)
+        self.assertEqual(members[-1], "9.9.9.9")
 
 
 class NegatedComplementNormalizationTests(TestCase):

@@ -59,6 +59,26 @@ def build_show_external_list_command(
     )
 
 
+def members_from_result(result: Any) -> list[str]:
+    """The valid member addresses in one `external-list show` result.
+
+    Only `valid-members` is read. The device reports `total-invalid` and `total-ignored`
+    separately, and an entry it rejected is not something to resolve a rule against - the
+    unreachable EDL on the lab answers `total-valid 0, total-invalid 1` with a cURL error, and
+    that must stay empty rather than becoming an interval.
+    """
+    if not isinstance(result, dict):
+        return []
+    external_list = result.get("external-list")
+    if not isinstance(external_list, dict):
+        return []
+    valid = external_list.get("valid-members")
+    if not isinstance(valid, dict):
+        return []
+    return [member.strip() for member in _ensure_list(valid.get("member"))
+            if isinstance(member, str) and member.strip()]
+
+
 def set_target_vsys(session: PANSession, *, vsys_name: str) -> None:
     """Switch this connection's operational context to vsys_name.
 
@@ -86,13 +106,26 @@ def collect_show_external_list(session: PANSession, *, name: str) -> PANOSCollec
     artifact, matching every other collector in this codebase), walking `anchor` forward until a
     page returns fewer than NUM_RECORDS_PER_PAGE entries.
 
-    NOTE: the exact shape of a real `request system external-list show` response hasn't been
-    verified against a live payload yet (only the command syntax has been confirmed against a
-    real device). This assumes entries appear as a list under result["entry"], consistent with
-    the xmltodict force_list=("entry", "member") convention already used everywhere in this
-    codebase's session/response parsing. Revisit this assumption once a real payload is seen.
+    MEASURED 2026-09-22 on pan-fw-111, and the assumption this carried until then was wrong.
+    A real response is not a list of entries under result["entry"]; it is:
+
+        <result total-count="2776" count="100">
+          <external-list>
+            <vsys>vsys1</vsys><name>panw-highrisk-ip-list</name>
+            <total-valid>2776</total-valid><total-ignored>0</total-ignored>
+            <total-invalid>0</total-invalid>
+            <valid-members><member>94.156.14.17</member>...</valid-members>
+
+    Reading result["entry"] found nothing, so the loop below saw a zero-length page, stopped
+    after one request, and stored an empty list - an EDL with 2,776 entries would have
+    normalised to nothing at all, and silently, because an empty EDL is indistinguishable from
+    one the device could not fetch.
+
+    `count` versus `total-count` is why the paging matters: a request that does not ask for a
+    page size gets 100. This asks for NUM_RECORDS_PER_PAGE and walks anchor forward until a
+    short page arrives.
     """
-    all_entries: list[dict[str, Any]] = []
+    all_entries: list[str] = []
     anchor = 1
     while True:
         command_xml = build_show_external_list_command(name=name, anchor=anchor)
@@ -108,16 +141,24 @@ def collect_show_external_list(session: PANSession, *, name: str) -> PANOSCollec
         collected = collect_op_response(session, source_type="show_external_list", request=request)
         response_root = collected.response.get("response", {})
         result = response_root.get("result", {}) if isinstance(response_root, dict) else {}
-        page_entries = [entry for entry in _ensure_list(result.get("entry")) if isinstance(entry, dict)]
-        all_entries.extend(page_entries)
-        if len(page_entries) < NUM_RECORDS_PER_PAGE:
+        page_members = members_from_result(result)
+        all_entries.extend(page_members)
+        if len(page_members) < NUM_RECORDS_PER_PAGE:
             break
-        anchor += len(page_entries)
+        anchor += len(page_members)
 
+    # Stored in the device's own shape rather than a shape of our own, so the normalizer reads
+    # one payload whether it came from here or straight off a device.
     aggregated_response = {
         "response": {
             "@status": "success",
-            "result": {"entry": all_entries},
+            "result": {
+                "external-list": {
+                    "name": name,
+                    "total-valid": str(len(all_entries)),
+                    "valid-members": {"member": all_entries},
+                }
+            },
         }
     }
     return PANOSCollectedResponse(
