@@ -155,6 +155,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
 )
 from optivedge_integrations.integrations.platforms.pan_os.flows import _candidate_edl_names
 from optivedge_integrations.integrations import query_chunking
+from optivedge_integrations.integrations import views as views_module
 from optivedge_integrations.integrations.query_chunking import chunked
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     decode_certificate,
@@ -2760,10 +2761,69 @@ class ManagementStationActionViewTests(TestCase):
             reverse("management_station_detail", kwargs={"pk": station.pk}),
         )
 
-    def test_in_scope_sync_view_collects_everything_for_panorama_station(self):
+    def test_in_scope_sync_view_starts_a_background_collection_and_returns_at_once(self):
+        station = self._create_panorama_station("panorama-in-scope.local")
+
+        with patch("optivedge_integrations.integrations.views.threading.Thread") as mocked_thread_cls, patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
+        ) as mocked_refresh:
+            response = self.client.post(
+                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
+            )
+
+        self.assertRedirects(
+            response,
+            reverse("management_station_detail", kwargs={"pk": station.pk}),
+        )
+        # Nothing is collected inside the request.
+        mocked_refresh.assert_not_called()
+        mocked_thread_cls.return_value.start.assert_called_once()
+        _, kwargs = mocked_thread_cls.call_args
+        self.assertTrue(kwargs["daemon"])
+        self.assertIs(kwargs["target"], views_module._run_station_collection_in_background)
+        # The run is opened BEFORE the redirect, so the page landed on already shows it.
+        run = IntegrationRun.objects.get(management_station=station)
+        self.assertEqual(run.status, IntegrationRun.STATUS_RUNNING)
+        self.assertEqual(kwargs["args"], (station.pk, run.pk))
+        self.assertTrue(views_module.collection_in_progress(station))
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertIn("started in the background", messages[0])
+
+    def test_a_second_collection_is_refused_while_one_is_running(self):
+        station = self._create_panorama_station("panorama-in-scope-busy.local")
+        views_module._open_in_scope_refresh_run(station)
+
+        with patch("optivedge_integrations.integrations.views.threading.Thread") as mocked_thread_cls:
+            response = self.client.post(
+                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
+            )
+
+        mocked_thread_cls.assert_not_called()
+        self.assertEqual(IntegrationRun.objects.filter(management_station=station).count(), 1)
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertIn("already running", messages[0])
+
+    def test_an_orphaned_running_run_does_not_lock_the_button_for_ever(self):
+        """A daemon thread dies with the server and leaves its run RUNNING."""
+        station = self._create_panorama_station("panorama-in-scope-orphan.local")
+        orphan = views_module._open_in_scope_refresh_run(station)
+        IntegrationRun.objects.filter(pk=orphan.pk).update(
+            started_at=timezone.now() - views_module.COLLECTION_LOCK_MAX_AGE - timedelta(minutes=1),
+        )
+        self.assertFalse(views_module.collection_in_progress(station))
+
+        with patch("optivedge_integrations.integrations.views.threading.Thread") as mocked_thread_cls:
+            self.client.post(
+                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
+            )
+
+        mocked_thread_cls.return_value.start.assert_called_once()
+
+    def test_the_background_collection_runs_every_collection_type(self):
         """Step 3 is one action for every collection type: configuration, then EDL/FQDN
         content, then the search grounding built from the rules just written."""
-        station = self._create_panorama_station("panorama-in-scope.local")
+        station = self._create_panorama_station("panorama-in-scope-body.local")
+        run = views_module._open_in_scope_refresh_run(station)
 
         with patch(
             "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
@@ -2774,46 +2834,38 @@ class ManagementStationActionViewTests(TestCase):
         ) as mocked_dynamic, patch(
             "optivedge_integrations.integrations.views.rebuild_security_rule_search_vocabulary",
         ) as mocked_vocab:
-            response = self.client.post(
-                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
-            )
+            views_module._collect_and_normalize_station(station, run)
 
-        self.assertRedirects(
-            response,
-            reverse("management_station_detail", kwargs={"pk": station.pk}),
-        )
         mocked_dynamic.assert_called_once_with(station)
         mocked_vocab.assert_called_once_with(station)
         runs = IntegrationRun.objects.filter(management_station=station)
         self.assertEqual(runs.count(), 2)
-        self.assertEqual(
-            {run.status for run in runs}, {IntegrationRun.STATUS_SUCCEEDED},
-        )
-        messages = [m.message for m in response.wsgi_request._messages]
-        self.assertIn("In-scope configuration refresh completed", messages[0])
-        self.assertIn("EDL/FQDN cache refresh completed", messages[1])
+        self.assertEqual({r.status for r in runs}, {IntegrationRun.STATUS_SUCCEEDED})
+        self.assertFalse(views_module.collection_in_progress(station))
 
-    def test_in_scope_sync_view_skips_edl_fqdn_when_the_configuration_refresh_failed(self):
+    def test_the_background_collection_skips_edl_fqdn_when_the_configuration_refresh_failed(self):
         """EDL/FQDN candidates are read from the rules the configuration refresh writes, so
         after an outright failure there is nothing current to resolve against."""
         station = self._create_panorama_station("panorama-in-scope-fail.local")
+        run = views_module._open_in_scope_refresh_run(station)
 
         with patch(
             "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
             side_effect=RuntimeError("panorama unreachable"),
         ), patch(
             "optivedge_integrations.integrations.views.refresh_in_scope_dynamic_content",
-        ) as mocked_dynamic:
-            response = self.client.post(
-                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
-            )
+        ) as mocked_dynamic, patch(
+            "optivedge_integrations.integrations.views.rebuild_security_rule_search_vocabulary",
+        ):
+            views_module._collect_and_normalize_station(station, run)
 
         mocked_dynamic.assert_not_called()
-        messages = [m.message for m in response.wsgi_request._messages]
-        self.assertIn("In-scope configuration refresh failed", messages[0])
+        run.refresh_from_db()
+        self.assertEqual(run.status, IntegrationRun.STATUS_FAILED)
 
     def test_an_edl_fqdn_refresh_that_raises_still_closes_its_run(self):
         station = self._create_panorama_station("panorama-dynamic-raise.local")
+        run = views_module._open_in_scope_refresh_run(station)
 
         with patch(
             "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
@@ -2824,9 +2876,7 @@ class ManagementStationActionViewTests(TestCase):
         ), patch(
             "optivedge_integrations.integrations.views.rebuild_security_rule_search_vocabulary",
         ):
-            response = self.client.post(
-                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
-            )
+            views_module._collect_and_normalize_station(station, run)
 
         self.assertFalse(
             IntegrationRun.objects.filter(
@@ -2838,8 +2888,29 @@ class ManagementStationActionViewTests(TestCase):
                 management_station=station, reason="DynamicContentRefreshFailed",
             ).exists()
         )
-        messages = [m.message for m in response.wsgi_request._messages]
-        self.assertIn("EDL/FQDN cache refresh failed: edl endpoint exploded", messages)
+
+    def test_the_thread_entry_point_closes_the_run_when_something_unexpected_raises(self):
+        station = self._create_panorama_station("panorama-thread-raise.local")
+        run = views_module._open_in_scope_refresh_run(station)
+        # A renormalize beside it is not this collection's to close.
+        other = IntegrationRun.objects.create(
+            management_station=station,
+            run_scope=IntegrationRun.SCOPE_APPLIANCE,
+            status=IntegrationRun.STATUS_RUNNING,
+        )
+
+        with patch(
+            "optivedge_integrations.integrations.views._collect_and_normalize_station",
+            side_effect=RuntimeError("bookkeeping bug"),
+        ), patch("optivedge_integrations.integrations.views.connections") as mocked_connections:
+            views_module._run_station_collection_in_background(station.pk, run.pk)
+
+        mocked_connections.close_all.assert_called_once_with()
+        run.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(run.status, IntegrationRun.STATUS_FAILED)
+        self.assertIsNotNone(run.completed_at)
+        self.assertEqual(other.status, IntegrationRun.STATUS_RUNNING)
 
     def test_renormalize_view_succeeds(self):
         station = self._create_panorama_station("panorama-renorm.local")
@@ -3063,6 +3134,25 @@ class ManagementStationWorkflowTests(TestCase):
                 label = "Running" if status == IntegrationRun.STATUS_RUNNING else dict(
                     IntegrationRun.STATUS_CHOICES)[status]
                 self.assertContains(response, label)
+
+    def test_a_running_collection_disables_step_3_and_refreshes_the_page(self):
+        self.point.in_scope = True
+        self.point.save()
+        self._record_inventory(timezone.now())
+        views_module._open_in_scope_refresh_run(self.station)
+
+        response = self.client.get(self.detail_url)
+
+        self.assertTrue(response.context["workflow"]["collection_in_progress"])
+        self.assertIsNone(response.context["workflow"]["next_step"])
+        self.assertContains(response, "data-collection-in-progress")
+        self.assertContains(response, "window.location.reload()")
+        self.assertContains(response, "Collecting…")
+
+    def test_an_idle_page_does_not_refresh_itself(self):
+        response = self.client.get(self.detail_url)
+
+        self.assertNotContains(response, "window.location.reload()")
 
     def test_a_non_panorama_station_says_why_it_cannot_collect(self):
         station = ManagementStation.objects.create(

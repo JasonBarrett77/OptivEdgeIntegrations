@@ -1115,6 +1115,22 @@ from the rules that refresh writes), then `rebuild_security_rule_search_vocabula
 rebuild used to run only from the bulk sweep, so a station refreshed on its own left OptivEdgeAssessments'
 plain-language search grounded on stale rules.
 
+**Step 3 runs on a background thread** (`_run_station_collection_in_background`); the request only
+opens the configuration run and returns, so the page it redirects to already shows it RUNNING and
+reloads itself every 10 seconds until it is not. Three things follow from it having no request:
+
+* its outcome is its runs and events, never a flash message — there is nobody to show one to;
+* `collection_in_progress()` refuses a second start, since two collections would interleave
+  delete-and-recreate writes on the same enforcement points;
+* the thread is a **daemon**, so a server restart kills it and leaves its run RUNNING. The lock
+  therefore ignores runs older than `COLLECTION_LOCK_MAX_AGE` (2 hours) — without that, one restart
+  mid-collection would disable the button permanently. An unexpected exception in the thread closes
+  only that collection's own runs, not a renormalize running beside it.
+
+It is the bulk sweep's pattern, with that pattern's cost: the thread writes while requests are
+served, and on a SQLite host database a write made during a collection can wait on the thread's
+lock or fail with `database is locked`. Not measured; a host on PostgreSQL does not have it.
+
 **Routes left in place with no page linking them — a decision, not an oversight** (Jason,
 2026-09-25: "Leave them, but record the decision so I can revisit later. I might create a hidden
 view for some of these options."). The UI rework took their buttons away:

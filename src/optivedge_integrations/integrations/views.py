@@ -8,6 +8,7 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
+from datetime import timedelta
 
 from django.contrib import messages
 from django.core.paginator import Paginator
@@ -211,7 +212,9 @@ def build_management_station_workflow(management_station):
         and collection_run.completed_at < inventory_as_of
     )
 
-    if not is_panorama:
+    in_progress = collection_in_progress(management_station)
+
+    if not is_panorama or in_progress:
         next_step = None
     elif inventory_as_of is None:
         next_step = WORKFLOW_STEP_INVENTORY
@@ -251,6 +254,7 @@ def build_management_station_workflow(management_station):
         "collection_run": collection_run,
         "collection_is_stale": collection_is_stale,
         "dynamic_content_run": dynamic_content_run,
+        "collection_in_progress": in_progress,
     }
 
 
@@ -691,7 +695,30 @@ class InScopeRefreshTrackingResult:
     failure_count: int
 
 
-def _refresh_station_in_scope_with_tracking(management_station: ManagementStation) -> InScopeRefreshTrackingResult:
+def _open_in_scope_refresh_run(management_station: ManagementStation) -> IntegrationRun:
+    """Create the RUNNING run and its opening event. Split out so the background collection
+    can open it inside the request, before the redirect: the page the operator lands on then
+    already shows the run, rather than the previous one until the thread gets going."""
+    run = IntegrationRun.objects.create(
+        management_station=management_station,
+        run_scope=IntegrationRun.SCOPE_APPLIANCE,
+        status=IntegrationRun.STATUS_RUNNING,
+    )
+    IntegrationEvent.objects.create(
+        management_station=management_station,
+        run=run,
+        level=IntegrationEvent.LEVEL_INFO,
+        stage="",
+        reason=_COLLECTION_RUN_REASON,
+        message="In-scope configuration refresh started.",
+    )
+    return run
+
+
+def _refresh_station_in_scope_with_tracking(
+    management_station: ManagementStation,
+    run: IntegrationRun | None = None,
+) -> InScopeRefreshTrackingResult:
     """Run the in-scope configuration refresh for one station, recording an IntegrationRun
     and any per-item IntegrationEvents. Shared by the single-station and bulk in-scope
     refresh views so both stay consistent in what they track.
@@ -706,20 +733,11 @@ def _refresh_station_in_scope_with_tracking(management_station: ManagementStatio
     That is why the events list is owned HERE and passed down: on failure, whatever was
     gathered before the exception is still written, and an explicit failure event is added
     beside it. A refresh that dies half way is a thing that has to be readable afterwards.
+
+    Pass `run` when it was already opened by _open_in_scope_refresh_run().
     """
-    run = IntegrationRun.objects.create(
-        management_station=management_station,
-        run_scope=IntegrationRun.SCOPE_APPLIANCE,
-        status=IntegrationRun.STATUS_RUNNING,
-    )
-    IntegrationEvent.objects.create(
-        management_station=management_station,
-        run=run,
-        level=IntegrationEvent.LEVEL_INFO,
-        stage="",
-        reason="InScopeRefreshStarted",
-        message="In-scope configuration refresh started.",
-    )
+    if run is None:
+        run = _open_in_scope_refresh_run(management_station)
     events: list[IntegrationEvent] = []
     try:
         return _refresh_station_in_scope_tracked(management_station, run, events)
@@ -905,7 +923,78 @@ def _refresh_station_in_scope_tracked(
     )
 
 
+#: A RUNNING collection younger than this blocks starting another. Older ones are taken to
+#: be orphans - the thread is a daemon, so a server restart mid-collection kills it and
+#: leaves its run RUNNING for ever, and without an age limit that would lock the button
+#: permanently. Collections take minutes; this is far outside any real one.
+COLLECTION_LOCK_MAX_AGE = timedelta(hours=2)
+
+
+def collection_in_progress(management_station: ManagementStation) -> bool:
+    """Whether step 3 is running for this station: either half of it, configuration or
+    EDL/FQDN, holds a RUNNING run recent enough not to be an orphan."""
+    return IntegrationRun.objects.filter(
+        management_station=management_station,
+        status=IntegrationRun.STATUS_RUNNING,
+        started_at__gte=timezone.now() - COLLECTION_LOCK_MAX_AGE,
+        events__reason__in=(_COLLECTION_RUN_REASON, _DYNAMIC_CONTENT_RUN_REASON),
+    ).exists()
+
+
+def _collect_and_normalize_station(management_station: ManagementStation, run: IntegrationRun) -> None:
+    """Step 3 of the station workflow: the in-scope configuration refresh, then EDL/FQDN
+    content, then the search vocabulary. Runs on a background thread - there is no request
+    to report to, so each part's outcome is its run and events, which the details tab and
+    the Events tab show.
+    """
+    outcome = _refresh_station_in_scope_with_tracking(management_station, run)
+
+    # EDL/FQDN content hangs off the address objects in-scope rules reference, so it can
+    # only follow a configuration refresh that ran, rather than resolving against stale
+    # rules. Its run and events record the outcome.
+    if outcome.succeeded:
+        _refresh_station_dynamic_content_with_tracking(management_station)
+
+    # The bulk sweep used to be the only caller of this, so a station collected on its own
+    # left the assessment search grounding stale.
+    rebuild_security_rule_search_vocabulary(management_station)
+
+
+def _run_station_collection_in_background(management_station_pk: int, run_pk: int) -> None:
+    """Thread entry point for ManagementStationInScopeSyncView.
+
+    Takes primary keys rather than instances: the thread has its own database connection
+    and reads its own rows. Nothing it raises reaches a user, so it is logged, and a run
+    that the failure left open is closed - the details tab would otherwise show "Running"
+    until COLLECTION_LOCK_MAX_AGE passed.
+    """
+    run = None
+    try:
+        management_station = ManagementStation.objects.get(pk=management_station_pk)
+        run = IntegrationRun.objects.get(pk=run_pk)
+        _collect_and_normalize_station(management_station, run)
+    except Exception:
+        logger.exception(
+            "Background collection failed for management station %s", management_station_pk,
+        )
+        if run is not None:
+            # Only this collection's own runs - its configuration run and any EDL/FQDN run
+            # it went on to open - never, say, a renormalize running beside it.
+            IntegrationRun.objects.filter(
+                management_station_id=management_station_pk,
+                status=IntegrationRun.STATUS_RUNNING,
+                started_at__gte=run.started_at,
+                events__reason__in=(_COLLECTION_RUN_REASON, _DYNAMIC_CONTENT_RUN_REASON),
+            ).update(status=IntegrationRun.STATUS_FAILED, completed_at=timezone.now())
+    finally:
+        connections.close_all()
+
+
 class ManagementStationInScopeSyncView(View):
+    """Starts step 3 on a background thread and returns at once. A collection contacts every
+    in-scope device and takes minutes; held in the request, it kept the browser waiting for
+    all of it and ran into any proxy or server timeout on the way."""
+
     def post(self, request, pk):
         management_station = get_object_or_404(ManagementStation, pk=pk)
         detail_url = reverse("management_station_detail", kwargs={"pk": management_station.pk})
@@ -917,46 +1006,25 @@ class ManagementStationInScopeSyncView(View):
             )
             return HttpResponseRedirect(detail_url)
 
-        outcome = _refresh_station_in_scope_with_tracking(management_station)
-
-        if not outcome.succeeded:
-            messages.error(request, f"In-scope configuration refresh failed: {outcome.error}")
+        # Two collections at once would interleave their delete-and-recreate writes on the
+        # same enforcement points.
+        if collection_in_progress(management_station):
+            messages.error(request, "A collection is already running for this station.")
             return HttpResponseRedirect(detail_url)
 
-        batch = outcome.refresh.configuration_snapshots
+        run = _open_in_scope_refresh_run(management_station)
+        threading.Thread(
+            target=_run_station_collection_in_background,
+            args=(management_station.pk, run.pk),
+            name=f"station-collection-{management_station.pk}",
+            daemon=True,
+        ).start()
+
         messages.success(
             request,
-            "In-scope configuration refresh completed for "
-            f"{len(batch.merged_config_collections)} appliance config snapshot(s), "
-            f"{len(batch.shared_policy_collections)} shared policy snapshot(s), and "
-            f"{len(batch.vsys_policy_collections)} VSYS policy snapshot(s). "
-            f"Normalized {sum(len(item.address_objects) for item in batch.address_normalizations)} address object(s) "
-            f"and {sum(len(item.address_groups) for item in batch.address_normalizations)} address group(s). "
-            f"Normalized {sum(len(item.security_rules) for item in batch.security_rule_normalizations)} security rule(s).",
+            "Collection started in the background. This page refreshes itself until it "
+            "finishes; the Events tab has the detail.",
         )
-        if outcome.failure_count:
-            messages.error(
-                request,
-                f"{outcome.failure_count} in-scope collection task(s) failed. Review the Events tab for details.",
-            )
-
-        # EDL/FQDN content hangs off the address objects in-scope rules reference, so it
-        # can only follow a configuration refresh that ran - which is why it is skipped
-        # above when that failed outright, rather than resolving against stale rules.
-        dynamic = _refresh_station_dynamic_content_with_tracking(management_station)
-        if dynamic.refresh is None:
-            messages.error(request, f"EDL/FQDN cache refresh failed: {dynamic.error}")
-        else:
-            messages.success(request, _dynamic_content_summary(dynamic.refresh))
-            if dynamic.failure_count:
-                messages.error(
-                    request,
-                    f"{dynamic.failure_count} EDL/FQDN refresh task(s) failed. Review the Events tab for details.",
-                )
-
-        # The bulk sweep used to be the only caller of this, so a station collected on its
-        # own left the assessment search grounding stale.
-        rebuild_security_rule_search_vocabulary(management_station)
         return HttpResponseRedirect(detail_url)
 
 

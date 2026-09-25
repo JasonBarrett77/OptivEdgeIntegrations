@@ -150,7 +150,7 @@
                                         <p class="text-xs leading-5 text-slate-600">
                                             Collects configuration from every in-scope appliance and normalizes all of it:
                                             policy, objects, zones and device settings, then EDL and FQDN runtime content.
-                                            It contacts each device and can take several minutes.
+                                            It contacts each device and can take several minutes, so it runs in the background.
                                         </p>
                                         <dl class="grid grid-cols-[max-content_1fr] gap-x-3 text-sm leading-5">
                                             <dt class="text-slate-500">Configuration</dt>
@@ -158,7 +158,12 @@
                                             <dt class="text-slate-500">EDL / FQDN</dt>
                                             <dd class="text-slate-800">{% include "integrations/partials/run_status.html" with run=workflow.dynamic_content_run never="Not collected yet." %}</dd>
                                         </dl>
-                                        {% if workflow.collection_is_stale %}
+                                        {% if workflow.collection_in_progress %}
+                                        <div data-collection-in-progress class="text-xs leading-5 text-blue-700">
+                                            Running in the background. This page refreshes every 10 seconds until it finishes.
+                                        </div>
+                                        <script>setTimeout(function () { window.location.reload(); }, 10000);</script>
+                                        {% elif workflow.collection_is_stale %}
                                         <div class="text-xs leading-5 text-slate-600">
                                             The inventory is newer than the last collection, so newly discovered devices may not be collected yet.
                                         </div>
@@ -166,14 +171,14 @@
                                     </div>
                                     <div class="flex shrink-0 flex-col items-end gap-1.5">
                                         <form method="post" action="{% url 'management_station_in_scope_sync' pk=management_station.pk %}"
-                                              onsubmit="var b = this.querySelector('button'); b.disabled = true; b.textContent = 'Collecting…';">
+                                              onsubmit="var b = this.querySelector('button'); b.disabled = true; b.textContent = 'Starting…';">
                                             {% csrf_token %}
                                             <button
                                                 type="submit"
-                                                {% if not workflow.is_panorama or not workflow.ep_in_scope %}disabled{% endif %}
+                                                {% if not workflow.is_panorama or not workflow.ep_in_scope or workflow.collection_in_progress %}disabled{% endif %}
                                                 class="inline-flex h-8 items-center justify-center border px-3 text-sm font-medium whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50 {% if workflow.next_step == 'collect' %}border-blue-600 bg-blue-600 text-white hover:bg-blue-700{% else %}border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}"
                                             >
-                                                Collect and normalize
+                                                {% if workflow.collection_in_progress %}Collecting…{% else %}Collect and normalize{% endif %}
                                             </button>
                                         </form>
                                         <form method="post" action="{% url 'management_station_renormalize' pk=management_station.pk %}"
@@ -181,7 +186,7 @@
                                             {% csrf_token %}
                                             <button
                                                 type="submit"
-                                                {% if not workflow.collection_run %}disabled{% endif %}
+                                                {% if not workflow.collection_run or workflow.collection_in_progress %}disabled{% endif %}
                                                 title="Re-run normalization on the configuration already collected, without contacting any device"
                                                 class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
                                             >
