@@ -123,8 +123,17 @@ def get_management_station_list_queryset():
     ).order_by("hostname")
 
 
+EVENT_LEVEL_FILTER_ALL = "all"
+
+
+def normalize_event_level_filter(level):
+    valid = {EVENT_LEVEL_FILTER_ALL, *(value for value, _ in IntegrationEvent.LEVEL_CHOICES)}
+    return level if level in valid else EVENT_LEVEL_FILTER_ALL
+
+
 def build_management_station_detail_context(
     management_station, *, active_tab=TAB_DETAILS, scope=SCOPE_FILTER_ALL,
+    level=EVENT_LEVEL_FILTER_ALL,
 ):
     if active_tab not in _VALID_TABS:
         active_tab = TAB_DETAILS
@@ -155,8 +164,19 @@ def build_management_station_detail_context(
         context["enforcement_points"] = enforcement_points
 
     elif active_tab == TAB_EVENTS:
+        level = normalize_event_level_filter(level)
+        events = management_station.integration_events
+        if level != EVENT_LEVEL_FILTER_ALL:
+            events = events.filter(level=level)
+        context["event_level_filter"] = level
+        context["event_level_filters"] = [
+            {"value": EVENT_LEVEL_FILTER_ALL, "label": "All"},
+            *({"value": value, "label": label} for value, label in IntegrationEvent.LEVEL_CHOICES),
+        ]
+        # Filtered BEFORE the cap, so "errors only" is the latest thousand errors rather than
+        # whichever errors happen to sit among the latest thousand events.
         context["integration_events"] = (
-            management_station.integration_events
+            events
             .select_related("run", "appliance", "appliance_group", "enforcement_point")
             .order_by("-occurred_at")[:1000]
         )
@@ -473,6 +493,7 @@ class ManagementStationDetailView(DetailView):
             self.object,
             active_tab=active_tab,
             scope=self.request.GET.get("scope", SCOPE_FILTER_ALL),
+            level=self.request.GET.get("level", EVENT_LEVEL_FILTER_ALL),
         ))
         return context
 

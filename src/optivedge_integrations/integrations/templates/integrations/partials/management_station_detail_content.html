@@ -339,8 +339,18 @@
                 <div>
                     <div class="flex items-center justify-between gap-3 pb-1.5">
                         <h2 class="text-sm font-semibold text-slate-950">Events</h2>
-                        <div class="text-[11px] uppercase tracking-wide text-slate-500">
-                            {{ integration_events|length }} event{{ integration_events|length|pluralize }}
+                        <div class="flex items-center gap-3">
+                            <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                                {{ integration_events|length }} event{{ integration_events|length|pluralize }}
+                            </div>
+                            <div class="flex gap-0" role="group" aria-label="Filter by level">
+                                {% for option in event_level_filters %}
+                                <a href="?tab=events&level={{ option.value }}"
+                                   class="inline-flex h-7 items-center border px-3 text-[11px] font-medium {% if not forloop.first %}-ml-px{% endif %} {% if event_level_filter == option.value %}relative border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                                    {{ option.label }}
+                                </a>
+                                {% endfor %}
+                            </div>
                         </div>
                     </div>
                     <div class="overflow-auto border border-slate-200">
@@ -388,7 +398,7 @@
                                 {% empty %}
                                 <tr>
                                     <td colspan="6" class="px-4 py-8 text-center text-sm text-slate-500">
-                                        No events recorded for this station.
+                                        {% if event_level_filter == "all" %}No events recorded for this station.{% else %}No events at this level.{% endif %}
                                     </td>
                                 </tr>
                                 {% endfor %}

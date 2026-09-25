@@ -3653,6 +3653,74 @@ class ZoneViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
 
+class ManagementStationEventsTabTests(TestCase):
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-events.local",
+        )
+        self.url = reverse("management_station_detail", kwargs={"pk": self.station.pk})
+        for level, reason in (
+            (IntegrationEvent.LEVEL_INFO, "InfoThing"),
+            (IntegrationEvent.LEVEL_WARNING, "WarningThing"),
+            (IntegrationEvent.LEVEL_ERROR, "ErrorThing"),
+        ):
+            IntegrationEvent.objects.create(
+                management_station=self.station, level=level, stage="", reason=reason, message="m",
+            )
+
+    def reasons(self, level=None):
+        query = {"tab": "events"}
+        if level is not None:
+            query["level"] = level
+        response = self.client.get(self.url, query)
+        self.assertEqual(response.status_code, 200)
+        return response, sorted(e.reason for e in response.context["integration_events"])
+
+    def test_all_levels_by_default(self):
+        response, reasons = self.reasons()
+
+        self.assertEqual(reasons, ["ErrorThing", "InfoThing", "WarningThing"])
+        self.assertEqual(response.context["event_level_filter"], "all")
+
+    def test_each_level_filters_to_itself(self):
+        for level, reason in (("info", "InfoThing"), ("warning", "WarningThing"), ("error", "ErrorThing")):
+            with self.subTest(level=level):
+                response, reasons = self.reasons(level)
+                self.assertEqual(reasons, [reason])
+                self.assertEqual(response.context["event_level_filter"], level)
+
+    def test_unknown_level_falls_back_to_all(self):
+        response, reasons = self.reasons("catastrophic")
+
+        self.assertEqual(len(reasons), 3)
+        self.assertEqual(response.context["event_level_filter"], "all")
+
+    def test_the_filter_buttons_render_for_every_level(self):
+        response, _ = self.reasons()
+
+        for value in ("all", "info", "warning", "error"):
+            self.assertContains(response, f'href="?tab=events&level={value}"')
+
+    def test_the_filter_applies_before_the_display_cap(self):
+        """Errors only means the latest errors, not the errors among the latest events."""
+        IntegrationEvent.objects.bulk_create(
+            IntegrationEvent(
+                management_station=self.station, level=IntegrationEvent.LEVEL_INFO,
+                stage="", reason="Noise", message="m",
+            )
+            for _ in range(1000)
+        )
+        _, reasons = self.reasons("error")
+
+        self.assertEqual(reasons, ["ErrorThing"])
+
+    def test_empty_state_names_the_filter(self):
+        IntegrationEvent.objects.filter(level=IntegrationEvent.LEVEL_WARNING).delete()
+
+        self.assertContains(self.reasons("warning")[0], "No events at this level.")
+
+
 class ManagementStationEnforcementPointTabTests(TestCase):
     """The station's Enforcement Points tab absorbed the standalone /enforcement-points/
     list: its scope filter and its links to each point's detail page."""
