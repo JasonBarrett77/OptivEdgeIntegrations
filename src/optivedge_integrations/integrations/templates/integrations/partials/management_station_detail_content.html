@@ -11,17 +11,6 @@
                     </div>
                 </div>
                 <div class="flex shrink-0 items-center gap-1.5 pt-0.5">
-                    {% if management_station.station_type == "pan_panorama" %}
-                    <form method="post" action="{% url 'management_station_sync' pk=management_station.pk %}">
-                        {% csrf_token %}
-                        <button
-                            type="submit"
-                            class="inline-flex h-8 items-center justify-center border border-blue-200 bg-blue-50 px-3 text-sm font-medium whitespace-nowrap text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
-                        >
-                            Sync
-                        </button>
-                    </form>
-                    {% endif %}
                     <a
                         href="{% url 'management_station_update' pk=management_station.pk %}"
                         class="inline-flex h-8 items-center justify-center border border-slate-200 bg-white px-3 text-sm font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
@@ -52,10 +41,6 @@
                    class="inline-flex h-9 items-center border-b-2 px-3 text-[13px] font-medium {% if active_tab == 'details' %}border-blue-500 text-slate-900{% else %}border-transparent text-slate-500 hover:text-slate-700{% endif %}">
                     Details
                 </a>
-                <a href="?tab=appliance-groups"
-                   class="inline-flex h-9 items-center border-b-2 px-3 text-[13px] font-medium {% if active_tab == 'appliance-groups' %}border-blue-500 text-slate-900{% else %}border-transparent text-slate-500 hover:text-slate-700{% endif %}">
-                    Appliance Groups
-                </a>
                 <a href="?tab=enforcement-points"
                    class="inline-flex h-9 items-center border-b-2 px-3 text-[13px] font-medium {% if active_tab == 'enforcement-points' %}border-blue-500 text-slate-900{% else %}border-transparent text-slate-500 hover:text-slate-700{% endif %}">
                     Enforcement Points
@@ -69,127 +54,175 @@
             <div class="px-4 py-3">
 
                 {% if active_tab == "details" %}
-                <div class="grid grid-cols-1 gap-4 py-1 xl:grid-cols-2">
-                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
-                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Name</div>
-                        <div class="text-sm leading-5 text-slate-900">
-                            {% if management_station.name %}
-                                {{ management_station.name }}
-                            {% else %}
-                                <span class="text-slate-400">-</span>
-                            {% endif %}
+                <div class="flex max-w-3xl flex-col gap-6 py-1">
+
+                    <div class="flex flex-col gap-2">
+                        <h2 class="text-sm font-semibold text-slate-950">Collection</h2>
+                        {% if not workflow.is_panorama %}
+                        <div class="border border-slate-200 bg-slate-50 px-3 py-2 text-sm leading-5 text-slate-600">
+                            Collection is currently supported only for Panorama management stations.
                         </div>
-                    </div>
-
-                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
-                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Hostname</div>
-                        <div class="break-all text-sm leading-5 text-slate-900">{{ management_station.hostname }}</div>
-                    </div>
-
-                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
-                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Type</div>
-                        <div class="text-sm leading-5 text-slate-900">{{ management_station.get_station_type_display }}</div>
-                    </div>
-
-                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
-                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">TLS Verify</div>
-                        <div class="text-sm leading-5 text-slate-900">{% if management_station.verify_tls %}Enabled{% else %}Disabled{% endif %}</div>
-                    </div>
-
-                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
-                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">CA Bundle</div>
-                        <div class="text-sm leading-5 text-slate-900">
-                            {% if management_station.ca_bundle_path %}
-                                <span class="break-all">{{ management_station.ca_bundle_path }}</span>
-                            {% else %}
-                                <span class="text-slate-400">-</span>
-                            {% endif %}
-                        </div>
-                    </div>
-
-                    <div class="flex min-w-0 flex-col gap-0.5 py-1">
-                        <div class="text-[11px] font-medium uppercase tracking-wide text-slate-500">Notes</div>
-                        {% if management_station.notes %}
-                            <div class="whitespace-pre-wrap break-words text-left text-sm leading-5 text-slate-900">{{ management_station.notes }}</div>
-                        {% else %}
-                            <div class="text-left text-sm leading-5 text-slate-400">-</div>
                         {% endif %}
-                    </div>
-                </div>
 
-                {% elif active_tab == "appliance-groups" %}
-                <div>
-                    <div class="flex items-center justify-between gap-3 pb-1.5">
-                        <h2 class="text-sm font-semibold text-slate-950">Appliance Groups</h2>
-                        <div class="flex items-center gap-2">
-                            {% if management_station.station_type == "pan_panorama" %}
-                            <form method="post" action="{% url 'management_station_in_scope_sync' pk=management_station.pk %}">
-                                {% csrf_token %}
-                                <button
-                                    type="submit"
-                                    class="inline-flex h-8 w-8 items-center justify-center border border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
-                                    title="Refresh in-scope configuration snapshots"
-                                    aria-label="Refresh in-scope configuration snapshots"
-                                >
-                                    {% lucide "refresh-cw" class="h-4 w-4" %}
-                                </button>
-                            </form>
-                            {% endif %}
-                            <div class="text-[11px] uppercase tracking-wide text-slate-500">
-                                {{ appliance_groups|length }} row{{ appliance_groups|length|pluralize }}
-                            </div>
-                        </div>
-                    </div>
-                    <div class="overflow-auto border border-slate-200">
-                        <table class="min-w-full table-fixed border-separate border-spacing-0">
-                            <thead>
-                                <tr>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Name</th>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Type</th>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Appliances</th>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Active Appliance</th>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Last Synced</th>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for appliance_group in appliance_groups %}
-                                <tr>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-900">{{ appliance_group.name }}</td>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">{{ appliance_group.get_group_type_display }}</td>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">{{ appliance_group.appliances.count }}</td>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
-                                        {% if appliance_group.active_appliance %}
-                                            {{ appliance_group.active_appliance }}
-                                        {% else %}
-                                            <span class="text-slate-400">-</span>
+                        <ol class="flex flex-col gap-3">
+                            {# Step 1 - inventory #}
+                            <li data-step="inventory" class="border {% if workflow.next_step == 'inventory' %}border-blue-300 bg-blue-50/40{% else %}border-slate-200 bg-white{% endif %}">
+                                <div class="flex items-start gap-3 px-4 py-3">
+                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.next_step == 'inventory' %}border-blue-500 bg-blue-600 text-white{% else %}border-slate-300 text-slate-600{% endif %}">1</div>
+                                    <div class="min-w-0 flex-1 space-y-1">
+                                        <div class="flex items-center gap-2">
+                                            <h3 class="text-sm font-semibold text-slate-950">Sync inventory</h3>
+                                            {% if workflow.next_step == 'inventory' %}<span class="bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700">Next step</span>{% endif %}
+                                        </div>
+                                        <p class="text-xs leading-5 text-slate-600">
+                                            Reads the devices and device groups this Panorama manages. It discovers the
+                                            appliances and virtual systems (enforcement points) that can be put in scope,
+                                            and collects no configuration. Run it again whenever devices are added or removed.
+                                        </p>
+                                        <div class="text-sm leading-5 text-slate-800">
+                                            {% if workflow.inventory_as_of %}
+                                                As of {{ workflow.inventory_as_of|local_time }}
+                                                <span class="text-slate-500">&middot; {{ workflow.inventory_summary }}</span>
+                                            {% else %}
+                                                <span class="text-slate-400">Not synced yet.</span>
+                                            {% endif %}
+                                        </div>
+                                        {% if workflow.inventory_run.status == "failed" %}
+                                        <div class="text-xs leading-5 text-red-700">
+                                            The last attempt failed at {{ workflow.inventory_run.completed_at|local_time }}. See the Events tab.
+                                        </div>
                                         {% endif %}
-                                    </td>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
-                                        {% if appliance_group.last_synced_at %}
-                                            {{ appliance_group.last_synced_at|local_time }}
-                                        {% else %}
-                                            <span class="text-slate-400">-</span>
-                                        {% endif %}
-                                    </td>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
-                                        <a
-                                            href="{% url 'appliance_group_snapshots' pk=management_station.pk appliance_group_pk=appliance_group.pk %}"
-                                            class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
+                                    </div>
+                                    <form method="post" action="{% url 'management_station_sync' pk=management_station.pk %}" class="shrink-0"
+                                          onsubmit="var b = this.querySelector('button'); b.disabled = true; b.textContent = 'Syncing…';">
+                                        {% csrf_token %}
+                                        <button
+                                            type="submit"
+                                            {% if not workflow.is_panorama %}disabled{% endif %}
+                                            class="inline-flex h-8 items-center justify-center border px-3 text-sm font-medium whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50 {% if workflow.next_step == 'inventory' %}border-blue-600 bg-blue-600 text-white hover:bg-blue-700{% else %}border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}"
                                         >
-                                            Snapshots
-                                        </a>
-                                    </td>
-                                </tr>
-                                {% empty %}
-                                <tr>
-                                    <td colspan="6" class="px-4 py-8 text-center text-sm text-slate-500">
-                                        No appliance groups recorded for this station.
-                                    </td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
+                                            Sync inventory
+                                        </button>
+                                    </form>
+                                </div>
+                            </li>
+
+                            {# Step 2 - scope #}
+                            <li data-step="scope" class="border {% if workflow.scope_needs_attention %}border-amber-300 bg-amber-50{% elif workflow.next_step == 'scope' %}border-blue-300 bg-blue-50/40{% else %}border-slate-200 bg-white{% endif %}">
+                                <div class="flex items-start gap-3 px-4 py-3">
+                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.scope_needs_attention %}border-amber-500 bg-amber-500 text-white{% elif workflow.next_step == 'scope' %}border-blue-500 bg-blue-600 text-white{% else %}border-slate-300 text-slate-600{% endif %}">2</div>
+                                    <div class="min-w-0 flex-1 space-y-1">
+                                        <div class="flex items-center gap-2">
+                                            <h3 class="text-sm font-semibold text-slate-950">Choose scope</h3>
+                                            {% if workflow.next_step == 'scope' %}<span class="{% if workflow.scope_needs_attention %}bg-amber-100 text-amber-800{% else %}bg-blue-100 text-blue-700{% endif %} px-1.5 py-0.5 text-[11px] font-medium">Next step</span>{% endif %}
+                                        </div>
+                                        <p class="text-xs leading-5 text-slate-600">
+                                            Picks which enforcement points are assessed. Only in-scope enforcement points,
+                                            and the appliances they run on, are collected in step 3.
+                                        </p>
+                                        <div class="text-sm leading-5 {% if workflow.scope_needs_attention %}font-medium text-amber-800{% else %}text-slate-800{% endif %}">
+                                            {% if workflow.scope_needs_attention %}{% lucide "triangle-alert" class="mr-1 inline h-4 w-4 align-[-3px]" %}{% endif %}{{ workflow.scope_summary }}
+                                        </div>
+                                        {% if workflow.scope_needs_attention %}
+                                        <div class="text-xs leading-5 text-amber-800">
+                                            Nothing is in scope, so step 3 has nothing to collect.
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                    <a
+                                        href="?tab=enforcement-points"
+                                        class="inline-flex h-8 shrink-0 items-center justify-center border px-3 text-sm font-medium whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 {% if workflow.next_step == 'scope' %}border-blue-600 bg-blue-600 text-white hover:bg-blue-700{% else %}border-slate-200 bg-white text-slate-700 hover:bg-slate-50{% endif %}"
+                                    >
+                                        Manage scope
+                                    </a>
+                                </div>
+                            </li>
+
+                            {# Step 3 - collect and normalize #}
+                            <li data-step="collect" class="border {% if workflow.next_step == 'collect' %}border-blue-300 bg-blue-50/40{% else %}border-slate-200 bg-white{% endif %}">
+                                <div class="flex items-start gap-3 px-4 py-3">
+                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.next_step == 'collect' %}border-blue-500 bg-blue-600 text-white{% else %}border-slate-300 text-slate-600{% endif %}">3</div>
+                                    <div class="min-w-0 flex-1 space-y-1">
+                                        <div class="flex items-center gap-2">
+                                            <h3 class="text-sm font-semibold text-slate-950">Collect and normalize</h3>
+                                            {% if workflow.next_step == 'collect' %}<span class="bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700">Next step</span>{% endif %}
+                                        </div>
+                                        <p class="text-xs leading-5 text-slate-600">
+                                            Collects configuration from every in-scope appliance and normalizes all of it:
+                                            policy, objects, zones and device settings, then EDL and FQDN runtime content.
+                                            It contacts each device and can take several minutes.
+                                        </p>
+                                        <dl class="grid grid-cols-[max-content_1fr] gap-x-3 text-sm leading-5">
+                                            <dt class="text-slate-500">Configuration</dt>
+                                            <dd class="text-slate-800">{% include "integrations/partials/run_status.html" with run=workflow.collection_run never="Not collected yet." %}</dd>
+                                            <dt class="text-slate-500">EDL / FQDN</dt>
+                                            <dd class="text-slate-800">{% include "integrations/partials/run_status.html" with run=workflow.dynamic_content_run never="Not collected yet." %}</dd>
+                                        </dl>
+                                        {% if workflow.collection_is_stale %}
+                                        <div class="text-xs leading-5 text-slate-600">
+                                            The inventory is newer than the last collection, so newly discovered devices may not be collected yet.
+                                        </div>
+                                        {% endif %}
+                                    </div>
+                                    <div class="flex shrink-0 flex-col items-end gap-1.5">
+                                        <form method="post" action="{% url 'management_station_in_scope_sync' pk=management_station.pk %}"
+                                              onsubmit="var b = this.querySelector('button'); b.disabled = true; b.textContent = 'Collecting…';">
+                                            {% csrf_token %}
+                                            <button
+                                                type="submit"
+                                                {% if not workflow.is_panorama or not workflow.ep_in_scope %}disabled{% endif %}
+                                                class="inline-flex h-8 items-center justify-center border px-3 text-sm font-medium whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50 {% if workflow.next_step == 'collect' %}border-blue-600 bg-blue-600 text-white hover:bg-blue-700{% else %}border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}"
+                                            >
+                                                Collect and normalize
+                                            </button>
+                                        </form>
+                                        <form method="post" action="{% url 'management_station_renormalize' pk=management_station.pk %}"
+                                              onsubmit="var b = this.querySelector('button'); b.disabled = true; b.textContent = 'Renormalizing…';">
+                                            {% csrf_token %}
+                                            <button
+                                                type="submit"
+                                                {% if not workflow.collection_run %}disabled{% endif %}
+                                                title="Re-run normalization on the configuration already collected, without contacting any device"
+                                                class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+                                            >
+                                                Renormalize only
+                                            </button>
+                                        </form>
+                                        <div class="text-[11px] text-slate-500">Reuses collected data; no device contact.</div>
+                                    </div>
+                                </div>
+                            </li>
+                        </ol>
+                    </div>
+
+                    <div class="flex flex-col gap-2">
+                        <h2 class="text-sm font-semibold text-slate-950">Connection</h2>
+                        <dl class="divide-y divide-slate-200 border border-slate-200">
+                            <div class="flex gap-4 px-4 py-2">
+                                <dt class="w-32 shrink-0 text-[11px] font-medium uppercase leading-5 tracking-wide text-slate-500">Name</dt>
+                                <dd class="min-w-0 text-sm leading-5 text-slate-900">{% if management_station.name %}{{ management_station.name }}{% else %}<span class="text-slate-400">-</span>{% endif %}</dd>
+                            </div>
+                            <div class="flex gap-4 px-4 py-2">
+                                <dt class="w-32 shrink-0 text-[11px] font-medium uppercase leading-5 tracking-wide text-slate-500">Hostname</dt>
+                                <dd class="min-w-0 break-all text-sm leading-5 text-slate-900">{{ management_station.hostname }}:{{ management_station.port }}</dd>
+                            </div>
+                            <div class="flex gap-4 px-4 py-2">
+                                <dt class="w-32 shrink-0 text-[11px] font-medium uppercase leading-5 tracking-wide text-slate-500">Type</dt>
+                                <dd class="min-w-0 text-sm leading-5 text-slate-900">{{ management_station.get_station_type_display }}</dd>
+                            </div>
+                            <div class="flex gap-4 px-4 py-2">
+                                <dt class="w-32 shrink-0 text-[11px] font-medium uppercase leading-5 tracking-wide text-slate-500">TLS Verify</dt>
+                                <dd class="min-w-0 text-sm leading-5 text-slate-900">{% if management_station.verify_tls %}Enabled{% else %}Disabled{% endif %}</dd>
+                            </div>
+                            <div class="flex gap-4 px-4 py-2">
+                                <dt class="w-32 shrink-0 text-[11px] font-medium uppercase leading-5 tracking-wide text-slate-500">CA Bundle</dt>
+                                <dd class="min-w-0 break-all text-sm leading-5 text-slate-900">{% if management_station.ca_bundle_path %}{{ management_station.ca_bundle_path }}{% else %}<span class="text-slate-400">-</span>{% endif %}</dd>
+                            </div>
+                            <div class="flex gap-4 px-4 py-2">
+                                <dt class="w-32 shrink-0 text-[11px] font-medium uppercase leading-5 tracking-wide text-slate-500">Notes</dt>
+                                <dd class="min-w-0 whitespace-pre-wrap break-words text-sm leading-5 {% if management_station.notes %}text-slate-900{% else %}text-slate-400{% endif %}">{{ management_station.notes|default:"-" }}</dd>
+                            </div>
+                        </dl>
                     </div>
                 </div>
 
@@ -197,8 +230,24 @@
                 <div>
                     <div class="flex items-center justify-between gap-3 pb-1.5">
                         <h2 class="text-sm font-semibold text-slate-950">Enforcement Points</h2>
-                        <div class="text-[11px] uppercase tracking-wide text-slate-500">
-                            {{ enforcement_points|length }} row{{ enforcement_points|length|pluralize }}
+                        <div class="flex items-center gap-3">
+                            <div class="text-[11px] uppercase tracking-wide text-slate-500">
+                                {{ enforcement_points|length }} row{{ enforcement_points|length|pluralize }}
+                            </div>
+                            <div class="flex gap-0">
+                                <a href="?tab=enforcement-points&scope=all"
+                                   class="inline-flex h-7 items-center border px-3 text-[11px] font-medium {% if scope_filter == 'all' %}border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                                    All
+                                </a>
+                                <a href="?tab=enforcement-points&scope=in"
+                                   class="inline-flex h-7 items-center border-y px-3 text-[11px] font-medium {% if scope_filter == 'in' %}border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                                    In Scope
+                                </a>
+                                <a href="?tab=enforcement-points&scope=out"
+                                   class="inline-flex h-7 items-center border px-3 text-[11px] font-medium {% if scope_filter == 'out' %}border-blue-300 bg-blue-50 text-blue-700{% else %}border-slate-200 bg-white text-slate-600 hover:bg-slate-50{% endif %}">
+                                    Out of Scope
+                                </a>
+                            </div>
                         </div>
                     </div>
                     <div class="overflow-auto border border-slate-200">
@@ -207,16 +256,19 @@
                                 <tr>
                                     <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Appliance Names</th>
                                     <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">VSYS</th>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Owner Type</th>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Appliance Group</th>
                                     <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Last Synced</th>
-                                    <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">Actions</th>
                                     <th class="sticky top-0 z-10 h-8 border-b border-slate-200 bg-slate-50 px-3 text-left text-[11px] font-medium uppercase tracking-wide text-slate-600">In Scope</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for enforcement_point in enforcement_points %}
-                                <tr>
+                                <tr
+                                    class="cursor-pointer transition-colors duration-150 hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none"
+                                    onclick="window.location.href='{% url 'enforcement_point_detail' pk=enforcement_point.pk %}'"
+                                    onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); window.location.href='{% url 'enforcement_point_detail' pk=enforcement_point.pk %}'; }"
+                                    tabindex="0"
+                                    role="link"
+                                >
                                     <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
                                         {% if enforcement_point.nodes.all %}
                                             {% for node in enforcement_point.nodes.all %}
@@ -235,20 +287,6 @@
                                         {% endif %}
                                     </td>
                                     <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
-                                        {% if enforcement_point.appliance_group %}
-                                            Appliance Group
-                                        {% else %}
-                                            Appliance
-                                        {% endif %}
-                                    </td>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
-                                        {% if enforcement_point.appliance_group %}
-                                            {{ enforcement_point.appliance_group.name }}
-                                        {% else %}
-                                            <span class="text-slate-400">-</span>
-                                        {% endif %}
-                                    </td>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
                                         {% if enforcement_point.last_synced_at %}
                                             {{ enforcement_point.last_synced_at|local_time }}
                                         {% else %}
@@ -256,22 +294,15 @@
                                         {% endif %}
                                     </td>
                                     <td class="h-8 border-b border-slate-200 px-3 py-1.5 align-middle text-sm text-slate-800">
-                                        <div class="flex items-center gap-1.5">
-                                            <a
-                                                href="{% url 'enforcement_point_addresses' pk=management_station.pk enforcement_point_pk=enforcement_point.pk %}"
-                                                class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
-                                            >
-                                                Addresses
-                                            </a>
-                                        </div>
-                                    </td>
-                                    <td class="h-8 border-b border-slate-200 px-3 py-1.5 align-middle text-sm text-slate-800">
                                         <form
                                             method="post"
                                             action="{% url 'enforcement_point_scope_toggle' pk=management_station.pk enforcement_point_pk=enforcement_point.pk %}"
                                             class="flex h-full items-center"
+                                            onclick="event.stopPropagation()"
+                                            onkeydown="event.stopPropagation()"
                                         >
                                             {% csrf_token %}
+                                            <input type="hidden" name="scope" value="{{ scope_filter }}">
                                             <button
                                                 type="submit"
                                                 class="inline-flex h-7 items-center justify-center border px-2 text-xs font-medium whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 {% if enforcement_point.in_scope %}border-blue-300 bg-blue-50 text-blue-700 hover:bg-blue-100{% else %}border-slate-200 bg-white text-slate-700 hover:bg-slate-50{% endif %}"
@@ -283,8 +314,14 @@
                                 </tr>
                                 {% empty %}
                                 <tr>
-                                    <td colspan="7" class="px-4 py-8 text-center text-sm text-slate-500">
-                                        No enforcement points recorded for this station.
+                                    <td colspan="4" class="px-4 py-8 text-center text-sm text-slate-500">
+                                        {% if scope_filter == 'in' %}
+                                            No in-scope enforcement points. Mark one in scope under All or Out of Scope.
+                                        {% elif scope_filter == 'out' %}
+                                            No out-of-scope enforcement points.
+                                        {% else %}
+                                            No enforcement points recorded for this station. Run Sync inventory on the Details tab to discover them.
+                                        {% endif %}
                                     </td>
                                 </tr>
                                 {% endfor %}

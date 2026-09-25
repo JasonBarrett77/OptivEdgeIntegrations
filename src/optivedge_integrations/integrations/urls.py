@@ -6,7 +6,6 @@ from optivedge_integrations.integrations.views import (
     DeveloperView,
     EnforcementPointAddressListView,
     EnforcementPointDetailView,
-    EnforcementPointListView,
     EnforcementPointScopeToggleView,
     EnforcementPointZoneDetailView,
     ManagementStationBulkInScopeSyncView,
@@ -50,6 +49,7 @@ urlpatterns = [
         ManagementStationListView.as_view(),
         name="management_station_list",
     ),
+    # Unlinked from every page by decision - see CLAUDE.md "Views". Kept for a hidden view.
     path(
         "management-stations/sync-in-scope-all/",
         ManagementStationBulkInScopeSyncView.as_view(),
@@ -90,11 +90,13 @@ urlpatterns = [
         ManagementStationRenormalizeView.as_view(),
         name="management_station_renormalize",
     ),
+    # Unlinked from every page by decision - see CLAUDE.md "Views". Kept for a hidden view.
     path(
         "management-stations/<int:pk>/refresh-dynamic-content/",
         ManagementStationRefreshDynamicContentView.as_view(),
         name="management_station_refresh_dynamic_content",
     ),
+    # Unlinked from every page by decision - see CLAUDE.md "Views". Kept for a hidden view.
     path(
         "management-stations/<int:pk>/appliance-groups/<int:appliance_group_pk>/snapshots/",
         ApplianceGroupSnapshotView.as_view(),
@@ -105,15 +107,11 @@ urlpatterns = [
         EnforcementPointScopeToggleView.as_view(),
         name="enforcement_point_scope_toggle",
     ),
+    # Unlinked from every page by decision - see CLAUDE.md "Views". Kept for a hidden view.
     path(
         "management-stations/<int:pk>/enforcement-points/<int:enforcement_point_pk>/addresses/",
         EnforcementPointAddressListView.as_view(),
         name="enforcement_point_addresses",
-    ),
-    path(
-        "enforcement-points/",
-        EnforcementPointListView.as_view(),
-        name="enforcement_point_list",
     ),
     path(
         "enforcement-points/<int:pk>/",

@@ -35,14 +35,8 @@ SIDEBAR_SECTION = [
                     "appliance_group_snapshots",
                     "enforcement_point_scope_toggle",
                     "enforcement_point_addresses",
-                },
-            },
-            {
-                "href": "/integrations/enforcement-points/",
-                "icon": "shield",
-                "label": "Enforcement Points",
-                "active_names": {
-                    "enforcement_point_list",
+                    # Enforcement points are browsed from their station's tab, so their
+                    # pages light up the station's item - there is no list of their own.
                     "enforcement_point_detail",
                     "enforcement_point_zone_detail",
                 },

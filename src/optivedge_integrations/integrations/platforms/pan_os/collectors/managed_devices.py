@@ -17,6 +17,10 @@ from optivedge_integrations.integrations.platforms.pan_os.session import PANSess
 
 SHOW_MANAGED_DEVICES_COMMAND = "<show><devices><all></all></devices></show>"
 
+#: The snapshot source_type this collector writes. Named here, beside the command it comes
+#: from, so persistence and the station views cannot drift from the collector.
+MANAGED_DEVICES_SOURCE_TYPE = "show_managed_devices"
+
 
 def collect_show_managed_devices(session: PANSession) -> PANOSCollectedResponse:
     management_station = getattr(session, "management_station", None)
@@ -33,6 +37,6 @@ def collect_show_managed_devices(session: PANSession) -> PANOSCollectedResponse:
     )
     return collect_op_response(
         session,
-        source_type="show_managed_devices",
+        source_type=MANAGED_DEVICES_SOURCE_TYPE,
         request=request,
     )

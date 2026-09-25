@@ -1,4 +1,5 @@
 import ipaddress
+from datetime import timedelta
 from pathlib import Path
 import tempfile
 import re
@@ -2565,11 +2566,25 @@ class ManagementStationBulkInScopeSyncViewTests(TestCase):
         )
         mocked_vocab.assert_called_once_with()
 
-    def test_get_renders_bulk_refresh_button(self):
+    def test_the_list_no_longer_offers_the_bulk_or_per_row_actions(self):
+        """The bulk sweep, Renormalize and the EDL/FQDN refresh were taken off the list:
+        the station detail's workflow is where collection is driven from now. The routes
+        stay by decision - this pins only that the page stopped linking them."""
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama-list-actions.local",
+        )
         response = self.client.get(reverse("management_station_list"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Refresh All In Scope")
+        self.assertNotContains(response, "Refresh All In Scope")
+        self.assertNotContains(response, reverse("management_station_bulk_in_scope_sync"))
+        self.assertNotContains(
+            response, reverse("management_station_renormalize", kwargs={"pk": station.pk}))
+        self.assertNotContains(
+            response,
+            reverse("management_station_refresh_dynamic_content", kwargs={"pk": station.pk}),
+        )
 
 
 class ManagementStationCrudViewTests(TestCase):
@@ -2602,7 +2617,7 @@ class ManagementStationCrudViewTests(TestCase):
             hostname="panorama-detail.local",
         )
 
-        for tab in ("details", "appliance-groups", "enforcement-points", "events"):
+        for tab in ("details", "enforcement-points", "events"):
             response = self.client.get(
                 reverse("management_station_detail", kwargs={"pk": station.pk}),
                 {"tab": tab},
@@ -2745,13 +2760,20 @@ class ManagementStationActionViewTests(TestCase):
             reverse("management_station_detail", kwargs={"pk": station.pk}),
         )
 
-    def test_in_scope_sync_view_succeeds_for_panorama_station(self):
+    def test_in_scope_sync_view_collects_everything_for_panorama_station(self):
+        """Step 3 is one action for every collection type: configuration, then EDL/FQDN
+        content, then the search grounding built from the rules just written."""
         station = self._create_panorama_station("panorama-in-scope.local")
 
         with patch(
             "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
             return_value=_empty_in_scope_refresh_collection(),
-        ):
+        ), patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_dynamic_content",
+            return_value=_empty_dynamic_content_refresh_result(),
+        ) as mocked_dynamic, patch(
+            "optivedge_integrations.integrations.views.rebuild_security_rule_search_vocabulary",
+        ) as mocked_vocab:
             response = self.client.post(
                 reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
             )
@@ -2760,10 +2782,64 @@ class ManagementStationActionViewTests(TestCase):
             response,
             reverse("management_station_detail", kwargs={"pk": station.pk}),
         )
-        run = IntegrationRun.objects.get(management_station=station)
-        self.assertEqual(run.status, IntegrationRun.STATUS_SUCCEEDED)
-        messages = list(response.wsgi_request._messages)
-        self.assertIn("In-scope configuration refresh completed", messages[0].message)
+        mocked_dynamic.assert_called_once_with(station)
+        mocked_vocab.assert_called_once_with(station)
+        runs = IntegrationRun.objects.filter(management_station=station)
+        self.assertEqual(runs.count(), 2)
+        self.assertEqual(
+            {run.status for run in runs}, {IntegrationRun.STATUS_SUCCEEDED},
+        )
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertIn("In-scope configuration refresh completed", messages[0])
+        self.assertIn("EDL/FQDN cache refresh completed", messages[1])
+
+    def test_in_scope_sync_view_skips_edl_fqdn_when_the_configuration_refresh_failed(self):
+        """EDL/FQDN candidates are read from the rules the configuration refresh writes, so
+        after an outright failure there is nothing current to resolve against."""
+        station = self._create_panorama_station("panorama-in-scope-fail.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
+            side_effect=RuntimeError("panorama unreachable"),
+        ), patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_dynamic_content",
+        ) as mocked_dynamic:
+            response = self.client.post(
+                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
+            )
+
+        mocked_dynamic.assert_not_called()
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertIn("In-scope configuration refresh failed", messages[0])
+
+    def test_an_edl_fqdn_refresh_that_raises_still_closes_its_run(self):
+        station = self._create_panorama_station("panorama-dynamic-raise.local")
+
+        with patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_configuration_snapshots",
+            return_value=_empty_in_scope_refresh_collection(),
+        ), patch(
+            "optivedge_integrations.integrations.views.refresh_in_scope_dynamic_content",
+            side_effect=RuntimeError("edl endpoint exploded"),
+        ), patch(
+            "optivedge_integrations.integrations.views.rebuild_security_rule_search_vocabulary",
+        ):
+            response = self.client.post(
+                reverse("management_station_in_scope_sync", kwargs={"pk": station.pk})
+            )
+
+        self.assertFalse(
+            IntegrationRun.objects.filter(
+                management_station=station, status=IntegrationRun.STATUS_RUNNING,
+            ).exists()
+        )
+        self.assertTrue(
+            IntegrationEvent.objects.filter(
+                management_station=station, reason="DynamicContentRefreshFailed",
+            ).exists()
+        )
+        messages = [m.message for m in response.wsgi_request._messages]
+        self.assertIn("EDL/FQDN cache refresh failed: edl endpoint exploded", messages)
 
     def test_renormalize_view_succeeds(self):
         station = self._create_panorama_station("panorama-renorm.local")
@@ -2776,7 +2852,9 @@ class ManagementStationActionViewTests(TestCase):
                 reverse("management_station_renormalize", kwargs={"pk": station.pk})
             )
 
-        self.assertRedirects(response, reverse("management_station_list"))
+        # Offered from step 3 on the station details tab now, so it returns there.
+        self.assertRedirects(
+            response, reverse("management_station_detail", kwargs={"pk": station.pk}))
         run = IntegrationRun.objects.get(management_station=station)
         self.assertEqual(run.status, IntegrationRun.STATUS_SUCCEEDED)
 
@@ -2797,6 +2875,226 @@ class ManagementStationActionViewTests(TestCase):
         self.assertRedirects(response, reverse("management_station_list"))
         run = IntegrationRun.objects.get(management_station=station)
         self.assertEqual(run.status, IntegrationRun.STATUS_SUCCEEDED)
+
+
+class ManagementStationWorkflowTests(TestCase):
+    """The station list's currency columns and the three-step workflow on the details tab:
+    sync inventory, choose scope, collect and normalize."""
+
+    def setUp(self):
+        self.station, self.appliance, self.point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-WF-001",
+            appliance_hostname="fw-workflow",
+            station_hostname="panorama-workflow.local",
+        )
+        EnforcementPoint.objects.create(
+            management_station=self.station,
+            appliance_group=self.point.appliance_group,
+            vsys_name="vsys2",
+        )
+        self.detail_url = reverse("management_station_detail", kwargs={"pk": self.station.pk})
+
+    def _record_inventory(self, at):
+        return Snapshot.objects.create(
+            management_station=self.station,
+            source_type="show_managed_devices",
+            collected_at=at,
+        )
+
+    def _record_collection(self, at, status=IntegrationRun.STATUS_SUCCEEDED):
+        run = IntegrationRun.objects.create(
+            management_station=self.station,
+            run_scope=IntegrationRun.SCOPE_APPLIANCE,
+            status=status,
+            completed_at=at,
+        )
+        IntegrationRun.objects.filter(pk=run.pk).update(started_at=at)
+        IntegrationEvent.objects.create(
+            management_station=self.station, run=run, level=IntegrationEvent.LEVEL_INFO,
+            stage="", reason="InScopeRefreshStarted", message="started",
+        )
+        return run
+
+    def _workflow(self):
+        return self.client.get(self.detail_url).context["workflow"]
+
+    def test_the_list_shows_inventory_currency_and_enforcement_point_counts(self):
+        response = self.client.get(reverse("management_station_list"))
+        self.assertContains(response, "Inventory")
+        self.assertContains(response, "Never synced")
+        self.assertContains(response, "(0 in scope)")
+
+        self._record_inventory(timezone.now())
+        self.point.in_scope = True
+        self.point.save()
+        response = self.client.get(reverse("management_station_list"))
+        station = response.context["management_stations"].get(pk=self.station.pk)
+        self.assertIsNotNone(station.inventory_as_of)
+        self.assertEqual(station.enforcement_point_count, 2)
+        self.assertEqual(station.in_scope_enforcement_point_count, 1)
+        self.assertContains(response, "As of ")
+        self.assertContains(response, "(1 in scope)")
+
+    def test_inventory_currency_ignores_other_station_snapshots(self):
+        Snapshot.objects.create(
+            management_station=self.station,
+            source_type="show_dg_hierarchy",
+            collected_at=timezone.now(),
+        )
+        response = self.client.get(reverse("management_station_list"))
+        station = response.context["management_stations"].get(pk=self.station.pk)
+        self.assertIsNone(station.inventory_as_of)
+
+    def test_the_next_step_walks_inventory_then_scope_then_collect(self):
+        workflow = self._workflow()
+        self.assertEqual(workflow["next_step"], "inventory")
+
+        inventory_at = timezone.now() - timedelta(hours=2)
+        self._record_inventory(inventory_at)
+        workflow = self._workflow()
+        self.assertEqual(workflow["next_step"], "scope")
+        self.assertTrue(workflow["scope_needs_attention"])
+        self.assertEqual(workflow["scope_summary"], "0 of 2 enforcement points in scope.")
+
+        self.point.in_scope = True
+        self.point.save()
+        workflow = self._workflow()
+        self.assertEqual(workflow["next_step"], "collect")
+        self.assertFalse(workflow["scope_needs_attention"])
+
+        self._record_collection(inventory_at + timedelta(hours=1))
+        workflow = self._workflow()
+        self.assertIsNone(workflow["next_step"])
+        self.assertFalse(workflow["collection_is_stale"])
+
+    def test_a_collection_older_than_the_inventory_is_the_next_step_again(self):
+        self.point.in_scope = True
+        self.point.save()
+        now = timezone.now()
+        self._record_collection(now - timedelta(days=1))
+        self._record_inventory(now)
+
+        workflow = self._workflow()
+        self.assertEqual(workflow["next_step"], "collect")
+        self.assertTrue(workflow["collection_is_stale"])
+
+    def test_the_inventory_a_collection_takes_itself_does_not_make_it_stale(self):
+        """The in-scope refresh re-reads `show devices all`, so its inventory snapshot is
+        always newer than the moment the run began. Measured against lab data, where
+        comparing to the start reported every collection as stale."""
+        self.point.in_scope = True
+        self.point.save()
+        now = timezone.now()
+        run = self._record_collection(now)
+        IntegrationRun.objects.filter(pk=run.pk).update(started_at=now - timedelta(minutes=5))
+        self._record_inventory(now - timedelta(minutes=4))
+
+        workflow = self._workflow()
+        self.assertFalse(workflow["collection_is_stale"])
+        self.assertIsNone(workflow["next_step"])
+
+    def test_a_running_collection_is_not_stale(self):
+        self.point.in_scope = True
+        self.point.save()
+        now = timezone.now()
+        self._record_inventory(now)
+        run = self._record_collection(now - timedelta(minutes=1), status=IntegrationRun.STATUS_RUNNING)
+        IntegrationRun.objects.filter(pk=run.pk).update(completed_at=None)
+
+        self.assertFalse(self._workflow()["collection_is_stale"])
+
+    def test_a_failed_collection_is_the_next_step_again(self):
+        self.point.in_scope = True
+        self.point.save()
+        now = timezone.now()
+        self._record_inventory(now - timedelta(hours=1))
+        self._record_collection(now, status=IntegrationRun.STATUS_FAILED)
+
+        self.assertEqual(self._workflow()["next_step"], "collect")
+
+    def test_an_edl_run_is_not_mistaken_for_a_configuration_collection(self):
+        run = IntegrationRun.objects.create(
+            management_station=self.station,
+            run_scope=IntegrationRun.SCOPE_APPLIANCE,
+            status=IntegrationRun.STATUS_SUCCEEDED,
+        )
+        IntegrationEvent.objects.create(
+            management_station=self.station, run=run, level=IntegrationEvent.LEVEL_INFO,
+            stage="", reason="DynamicContentRefreshStarted", message="started",
+        )
+        workflow = self._workflow()
+        self.assertIsNone(workflow["collection_run"])
+        self.assertEqual(workflow["dynamic_content_run"], run)
+
+    def test_the_details_tab_renders_all_three_steps_with_their_actions(self):
+        response = self.client.get(self.detail_url)
+
+        self.assertContains(response, 'data-step="inventory"')
+        self.assertContains(response, 'data-step="scope"')
+        self.assertContains(response, 'data-step="collect"')
+        self.assertContains(
+            response, reverse("management_station_sync", kwargs={"pk": self.station.pk}))
+        self.assertContains(
+            response, reverse("management_station_in_scope_sync", kwargs={"pk": self.station.pk}))
+        self.assertContains(
+            response, reverse("management_station_renormalize", kwargs={"pk": self.station.pk}))
+        self.assertContains(response, "?tab=enforcement-points")
+        self.assertContains(response, "Next step")
+        # Edit and Delete stay in the header.
+        self.assertContains(
+            response, reverse("management_station_update", kwargs={"pk": self.station.pk}))
+        self.assertContains(
+            response, reverse("management_station_delete", kwargs={"pk": self.station.pk}))
+
+    def test_the_details_tab_renders_every_run_status(self):
+        self.point.in_scope = True
+        self.point.save()
+        self._record_inventory(timezone.now())
+        for status in (
+            IntegrationRun.STATUS_RUNNING,
+            IntegrationRun.STATUS_PARTIAL,
+            IntegrationRun.STATUS_FAILED,
+            IntegrationRun.STATUS_SUCCEEDED,
+        ):
+            with self.subTest(status=status):
+                self._record_collection(timezone.now(), status=status)
+                response = self.client.get(self.detail_url)
+                self.assertEqual(response.status_code, 200)
+                label = "Running" if status == IntegrationRun.STATUS_RUNNING else dict(
+                    IntegrationRun.STATUS_CHOICES)[status]
+                self.assertContains(response, label)
+
+    def test_a_non_panorama_station_says_why_it_cannot_collect(self):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_FIREWALL,
+            hostname="firewall-workflow.local",
+        )
+        response = self.client.get(
+            reverse("management_station_detail", kwargs={"pk": station.pk}))
+
+        self.assertIsNone(response.context["workflow"]["next_step"])
+        self.assertContains(response, "supported only for Panorama")
+        self.assertNotContains(response, "Next step")
+
+    def test_the_appliance_groups_tab_is_gone(self):
+        response = self.client.get(self.detail_url, {"tab": "appliance-groups"})
+
+        self.assertEqual(response.context["active_tab"], "details")
+        self.assertNotContains(response, "?tab=appliance-groups")
+
+    def test_the_enforcement_points_tab_drops_owner_group_and_actions_columns(self):
+        response = self.client.get(self.detail_url, {"tab": "enforcement-points"})
+
+        self.assertContains(response, "vsys2")
+        for heading in ("Owner Type", "Appliance Group", "Actions"):
+            self.assertNotContains(response, f">{heading}</th>")
+        self.assertNotContains(
+            response,
+            reverse(
+                "enforcement_point_addresses",
+                kwargs={"pk": self.station.pk, "enforcement_point_pk": self.point.pk},
+            ),
+        )
 
 
 class ApplianceGroupSnapshotViewTests(TestCase):
@@ -3265,9 +3563,12 @@ class ZoneViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
 
-class EnforcementPointListViewTests(TestCase):
+class ManagementStationEnforcementPointTabTests(TestCase):
+    """The station's Enforcement Points tab absorbed the standalone /enforcement-points/
+    list: its scope filter and its links to each point's detail page."""
+
     def setUp(self):
-        _, _, _, self.in_scope = _create_grouped_enforcement_point(
+        self.station, self.group, self.appliance, self.in_scope = _create_grouped_enforcement_point(
             serial_number="0001",
             appliance_hostname="fw-a",
             station_hostname="panorama-a.local",
@@ -3277,80 +3578,88 @@ class EnforcementPointListViewTests(TestCase):
         )
         self.in_scope.in_scope = True
         self.in_scope.save()
-
-        _, _, _, self.out_of_scope = _create_grouped_enforcement_point(
+        self.out_of_scope = EnforcementPoint.objects.create(
+            management_station=self.station,
+            appliance_group=self.group,
+            vsys_name="vsys2",
+        )
+        # Another station's point must never appear on this station's tab.
+        _, _, _, self.elsewhere = _create_grouped_enforcement_point(
             serial_number="0002",
             appliance_hostname="fw-b",
             station_hostname="firewall-b.local",
             station_type=ManagementStation.StationType.PAN_FIREWALL,
             group_name="grp-b",
-            vsys_name="vsys2",
+            vsys_name="vsys9",
         )
+        self.url = reverse("management_station_detail", kwargs={"pk": self.station.pk})
 
-    def listed_pks(self, query=None):
-        response = self.client.get(reverse("enforcement_point_list"), query or {})
+    def listed_pks(self, scope=None):
+        query = {"tab": "enforcement-points"}
+        if scope is not None:
+            query["scope"] = scope
+        response = self.client.get(self.url, query)
         self.assertEqual(response.status_code, 200)
-        return response, [point.pk for point in response.context["enforcement_points"]]
+        return response, sorted(point.pk for point in response.context["enforcement_points"])
 
-    def test_list_view_shows_only_in_scope_points_by_default(self):
-        """in_scope gates collection, so an out-of-scope point carries no rules or objects."""
+    def test_the_tab_shows_every_point_of_this_station_by_default(self):
+        """All, not in-scope: this is where scope is chosen, so out-of-scope rows must show."""
         response, pks = self.listed_pks()
 
+        self.assertEqual(pks, sorted([self.in_scope.pk, self.out_of_scope.pk]))
+        self.assertEqual(response.context["scope_filter"], "all")
+
+    def test_scope_filter_selects_in_scope_points(self):
+        _, pks = self.listed_pks("in")
+
         self.assertEqual(pks, [self.in_scope.pk])
-        self.assertEqual(response.context["scope_filter"], "in")
 
     def test_scope_filter_selects_out_of_scope_points(self):
-        _, pks = self.listed_pks({"scope": "out"})
+        _, pks = self.listed_pks("out")
 
         self.assertEqual(pks, [self.out_of_scope.pk])
 
-    def test_scope_filter_all_shows_both(self):
-        _, pks = self.listed_pks({"scope": "all"})
+    def test_unknown_scope_filter_falls_back_to_all(self):
+        response, pks = self.listed_pks("not-a-scope")
 
-        self.assertEqual(sorted(pks), sorted([self.in_scope.pk, self.out_of_scope.pk]))
+        self.assertEqual(pks, sorted([self.in_scope.pk, self.out_of_scope.pk]))
+        self.assertEqual(response.context["scope_filter"], "all")
 
-    def test_unknown_scope_filter_falls_back_to_in_scope(self):
-        response, pks = self.listed_pks({"scope": "not-a-scope"})
+    def test_rows_link_to_each_enforcement_point_detail_page(self):
+        response, _ = self.listed_pks()
 
-        self.assertEqual(pks, [self.in_scope.pk])
-        self.assertEqual(response.context["scope_filter"], "in")
-
-    def test_list_view_shows_points_from_every_management_station(self):
-        response, pks = self.listed_pks({"scope": "all"})
-
-        self.assertContains(response, "panorama-a.local")
-        self.assertContains(response, "firewall-b.local")
         self.assertContains(response, reverse("enforcement_point_detail", kwargs={"pk": self.in_scope.pk}))
         self.assertContains(response, reverse("enforcement_point_detail", kwargs={"pk": self.out_of_scope.pk}))
+        self.assertNotContains(response, reverse("enforcement_point_detail", kwargs={"pk": self.elsewhere.pk}))
 
-    def test_columns_lead_with_appliance_names_and_omit_owner_type(self):
-        response = self.client.get(reverse("enforcement_point_list"))
+    def test_columns(self):
+        response, _ = self.listed_pks()
 
         headers = re.findall(r"<th[^>]*>\s*(.*?)\s*</th>", response.content.decode())
-        self.assertEqual(
-            headers,
-            [
-                "Appliance Names",
-                "VSYS",
-                "Management Station",
-                "Appliance Group",
-                "Last Synced",
-                "In Scope",
-            ],
+        self.assertEqual(headers, ["Appliance Names", "VSYS", "Last Synced", "In Scope"])
+
+    def test_the_scope_toggle_returns_to_the_filter_it_was_pressed_under(self):
+        response, _ = self.listed_pks("out")
+        self.assertContains(response, '<input type="hidden" name="scope" value="out">')
+
+        response = self.client.post(
+            reverse(
+                "enforcement_point_scope_toggle",
+                kwargs={"pk": self.station.pk, "enforcement_point_pk": self.out_of_scope.pk},
+            ),
+            {"scope": "out"},
         )
+        self.assertRedirects(response, f"{self.url}?tab=enforcement-points&scope=out")
 
     def test_empty_state_names_the_active_filter(self):
-        EnforcementPoint.objects.all().delete()
+        EnforcementPoint.objects.filter(management_station=self.station).delete()
 
-        self.assertContains(self.client.get(reverse("enforcement_point_list")), "No in-scope enforcement points")
-        self.assertContains(
-            self.client.get(reverse("enforcement_point_list"), {"scope": "out"}),
-            "No out-of-scope enforcement points",
-        )
-        self.assertContains(
-            self.client.get(reverse("enforcement_point_list"), {"scope": "all"}),
-            "No enforcement points discovered",
-        )
+        self.assertContains(self.listed_pks("in")[0], "No in-scope enforcement points")
+        self.assertContains(self.listed_pks("out")[0], "No out-of-scope enforcement points")
+        self.assertContains(self.listed_pks("all")[0], "No enforcement points recorded for this station")
+
+    def test_the_standalone_list_page_is_gone(self):
+        self.assertEqual(self.client.get("/integrations/enforcement-points/").status_code, 404)
 
 
 class EnforcementPointDetailViewTests(TestCase):
@@ -3430,7 +3739,8 @@ class EnforcementPointDetailViewTests(TestCase):
 
 
 class EnforcementPointNavigationTests(TestCase):
-    def test_sidebar_lists_enforcement_points_below_management_stations(self):
+    def test_sidebar_has_no_enforcement_points_item(self):
+        """Enforcement points are browsed from their station's tab."""
         from optivedge.app_registry import sidebar_sections
 
         sections = [s for s in sidebar_sections() if s["label"] == "Firewall Integrations"]
@@ -3438,10 +3748,10 @@ class EnforcementPointNavigationTests(TestCase):
 
         labels = [item["label"] for item in sections[0]["items"]]
         self.assertEqual(
-            labels, ["Management Stations", "Enforcement Points", "Collection Script"]
+            labels, ["Management Stations", "Collection Script"]
         )
 
-    def test_sidebar_active_names_cover_every_enforcement_point_route(self):
+    def test_enforcement_point_pages_light_up_management_stations(self):
         """A route missing from active_names silently stops highlighting its own page."""
         from optivedge_integrations.integrations import app_meta
 
@@ -3449,11 +3759,11 @@ class EnforcementPointNavigationTests(TestCase):
             item
             for section in app_meta.SIDEBAR_SECTION
             for item in section["items"]
-            if item["label"] == "Enforcement Points"
+            if item["label"] == "Management Stations"
         )
-        self.assertEqual(
+        self.assertLessEqual(
+            {"enforcement_point_detail", "enforcement_point_zone_detail"},
             item["active_names"],
-            {"enforcement_point_list", "enforcement_point_detail", "enforcement_point_zone_detail"},
         )
 
 
@@ -3565,7 +3875,7 @@ class EnforcementPointScopeToggleViewTests(TestCase):
         self.assertTrue(enforcement_point.in_scope)
         self.assertRedirects(
             response,
-            f"{reverse('management_station_detail', kwargs={'pk': station.pk})}?tab=enforcement-points",
+            f"{reverse('management_station_detail', kwargs={'pk': station.pk})}?tab=enforcement-points&scope=all",
         )
 
         # Toggling again flips it back.

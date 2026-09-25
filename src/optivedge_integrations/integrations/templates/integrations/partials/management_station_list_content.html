@@ -1,15 +1,10 @@
+{% load local_time %}
 <section class="flex h-full w-full min-h-0 min-w-0 flex-col">
     <div class="flex min-h-0 flex-1 flex-col px-4 py-3">
         <div class="flex min-h-0 flex-1 flex-col border border-slate-200">
             <div class="flex shrink-0 items-center justify-between bg-white px-4 py-2">
                 <h1 class="text-sm font-semibold text-slate-900">Management Stations</h1>
                 <div class="flex items-center gap-2">
-                    <form method="post" action="{% url 'management_station_bulk_in_scope_sync' %}">
-                        {% csrf_token %}
-                        <button type="submit" class="inline-flex h-8 items-center justify-center border border-emerald-300 bg-emerald-50 px-3 text-sm font-medium whitespace-nowrap text-emerald-700 hover:bg-emerald-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-emerald-500/20">
-                            Refresh All In Scope
-                        </button>
-                    </form>
                     <a href="{% url 'management_station_create' %}" class="inline-flex h-8 items-center justify-center border border-blue-300 bg-blue-50 px-3 text-sm font-medium whitespace-nowrap text-blue-700 hover:bg-blue-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20">Create</a>
                 </div>
             </div>
@@ -20,8 +15,9 @@
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Name</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Type</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Host</th>
+                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Inventory</th>
+                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Enforcement Points</th>
                             <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Last Refresh</th>
-                            <th class="sticky top-0 z-10 h-9 border-b border-slate-200 bg-slate-50 px-3 text-left text-xs font-medium uppercase tracking-wide text-slate-600">Actions</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -38,6 +34,17 @@
                             </td>
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">{{ station.get_station_type_display }}</td>
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">{{ station.hostname }}:{{ station.port }}</td>
+                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
+                                {% if station.inventory_as_of %}
+                                    As of {{ station.inventory_as_of|local_time }}
+                                {% else %}
+                                    <span class="text-slate-400">Never synced</span>
+                                {% endif %}
+                            </td>
+                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
+                                {{ station.enforcement_point_count }}
+                                <span class="{% if station.enforcement_point_count and not station.in_scope_enforcement_point_count %}text-amber-700{% else %}text-slate-500{% endif %}">({{ station.in_scope_enforcement_point_count }} in scope)</span>
+                            </td>
                             <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
                                 {% if station.latest_run_status == "running" %}
                                     <span class="inline-flex items-center gap-1 text-blue-700">
@@ -57,44 +64,10 @@
                                     <span class="text-slate-400">Never synced</span>
                                 {% endif %}
                             </td>
-                            <td class="h-9 border-b border-slate-200 px-3 py-2 text-sm text-slate-800">
-                                <div class="flex items-center gap-1.5">
-                                    <form
-                                        method="post"
-                                        action="{% url 'management_station_renormalize' pk=station.pk %}"
-                                        onclick="event.stopPropagation()"
-                                        onkeydown="event.stopPropagation()"
-                                    >
-                                        {% csrf_token %}
-                                        <button
-                                            type="submit"
-                                            class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
-                                            title="Re-run normalization using already-collected data, without contacting the device"
-                                        >
-                                            Renormalize
-                                        </button>
-                                    </form>
-                                    <form
-                                        method="post"
-                                        action="{% url 'management_station_refresh_dynamic_content' pk=station.pk %}"
-                                        onclick="event.stopPropagation()"
-                                        onkeydown="event.stopPropagation()"
-                                    >
-                                        {% csrf_token %}
-                                        <button
-                                            type="submit"
-                                            class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20"
-                                            title="Collect current EDL/FQDN runtime cache content from the device for address objects referenced by in-scope rules - a separate, heavier action than a regular sync"
-                                        >
-                                            Refresh EDL/FQDN Cache
-                                        </button>
-                                    </form>
-                                </div>
-                            </td>
                         </tr>
                         {% empty %}
                         <tr>
-                            <td colspan="5" class="border-b border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
+                            <td colspan="6" class="border-b border-slate-200 px-4 py-8 text-center text-sm text-slate-500">
                                 No management stations configured.
                             </td>
                         </tr>

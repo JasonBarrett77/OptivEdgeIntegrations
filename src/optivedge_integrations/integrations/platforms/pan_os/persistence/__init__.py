@@ -11,6 +11,9 @@ from optivedge_integrations.integrations.models import Appliance, ApplianceGroup
 from optivedge_integrations.integrations.platforms.pan_os.collectors.device_groups import (
     DG_HIERARCHY_SOURCE_TYPE,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.managed_devices import (
+    MANAGED_DEVICES_SOURCE_TYPE,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import PANOSCollectedResponse
 from optivedge_integrations.integrations.platforms.pan_os.persistence.appliance import (
     persist_appliance_dynamic_content_snapshot,
@@ -41,7 +44,7 @@ def persist_collected_response(
     management_station: ManagementStation,
     collected: PANOSCollectedResponse,
 ) -> PANOSPersistedCollection:
-    if collected.source_type == "show_managed_devices":
+    if collected.source_type == MANAGED_DEVICES_SOURCE_TYPE:
         return persist_show_managed_devices(management_station, collected)
 
     if collected.source_type == DG_HIERARCHY_SOURCE_TYPE:

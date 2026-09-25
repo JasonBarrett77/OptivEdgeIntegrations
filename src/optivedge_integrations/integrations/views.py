@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from django.contrib import messages
 from django.core.paginator import Paginator
 from django.db import connections
-from django.db.models import Count, OuterRef, Subquery
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse, reverse_lazy
@@ -65,17 +65,24 @@ from optivedge_integrations.integrations.platforms.pan_os import (
     renormalize_in_scope_configuration,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors import collect_show_managed_devices
+from optivedge_integrations.integrations.platforms.pan_os.collectors.managed_devices import (
+    MANAGED_DEVICES_SOURCE_TYPE,
+)
 from optivedge_integrations.integrations.device_group_bindings import rebuild_device_group_bindings
-from optivedge_integrations.integrations.search_vocabulary import rebuild_all_security_rule_search_vocabulary
+from optivedge_integrations.integrations.search_vocabulary import (
+    rebuild_all_security_rule_search_vocabulary,
+    rebuild_security_rule_search_vocabulary,
+)
 
 
 logger = logging.getLogger(__name__)
 
 TAB_DETAILS = "details"
-TAB_APPLIANCE_GROUPS = "appliance-groups"
 TAB_ENFORCEMENT_POINTS = "enforcement-points"
 TAB_EVENTS = "events"
-_VALID_TABS = {TAB_DETAILS, TAB_APPLIANCE_GROUPS, TAB_ENFORCEMENT_POINTS, TAB_EVENTS}
+# No appliance-groups tab: it was removed as adding no operator value. An old
+# ?tab=appliance-groups link falls back to Details like any unknown tab.
+_VALID_TABS = {TAB_DETAILS, TAB_ENFORCEMENT_POINTS, TAB_EVENTS}
 
 TAB_APPLIANCES = "appliances"
 TAB_ZONES = "zones"
@@ -87,34 +94,55 @@ SCOPE_FILTER_ALL = "all"
 _VALID_SCOPE_FILTERS = {SCOPE_FILTER_IN, SCOPE_FILTER_OUT, SCOPE_FILTER_ALL}
 
 
+def _latest_inventory_snapshot_qs(management_station_ref):
+    """The station's `show devices all` snapshots, newest first. The newest one's
+    collected_at is how current the station's inventory is."""
+    return Snapshot.objects.filter(
+        management_station=management_station_ref,
+        source_type=MANAGED_DEVICES_SOURCE_TYPE,
+    ).order_by("-collected_at")
+
+
 def get_management_station_list_queryset():
     latest_run_qs = IntegrationRun.objects.filter(management_station=OuterRef("pk")).order_by("-started_at")
     return ManagementStation.objects.annotate(
         appliance_group_count=Count("appliance_groups", distinct=True),
         appliance_count=Count("appliances", distinct=True),
         enforcement_point_count=Count("enforcement_points", distinct=True),
+        in_scope_enforcement_point_count=Count(
+            "enforcement_points",
+            filter=Q(enforcement_points__in_scope=True),
+            distinct=True,
+        ),
         latest_run_status=Subquery(latest_run_qs.values("status")[:1]),
         latest_run_completed_at=Subquery(latest_run_qs.values("completed_at")[:1]),
+        inventory_as_of=Subquery(
+            _latest_inventory_snapshot_qs(OuterRef("pk")).values("collected_at")[:1]
+        ),
     ).order_by("hostname")
 
 
-def build_management_station_detail_context(management_station, *, active_tab=TAB_DETAILS):
+def build_management_station_detail_context(
+    management_station, *, active_tab=TAB_DETAILS, scope=SCOPE_FILTER_ALL,
+):
     if active_tab not in _VALID_TABS:
         active_tab = TAB_DETAILS
 
     context = {"active_tab": active_tab}
 
-    if active_tab == TAB_APPLIANCE_GROUPS:
-        context["appliance_groups"] = management_station.appliance_groups.select_related(
-            "active_appliance"
-        ).prefetch_related("appliances")
+    if active_tab == TAB_DETAILS:
+        context["workflow"] = build_management_station_workflow(management_station)
 
     elif active_tab == TAB_ENFORCEMENT_POINTS:
+        scope = normalize_scope_filter(scope)
+        context["scope_filter"] = scope
         enforcement_points = list(
-            management_station.enforcement_points.select_related(
-                "appliance_group",
-                "appliance",
-            ).prefetch_related("nodes__appliance")
+            filter_enforcement_points_by_scope(
+                management_station.enforcement_points.select_related(
+                    "appliance",
+                ).prefetch_related("nodes__appliance"),
+                scope,
+            )
         )
         enforcement_points.sort(
             key=lambda ep: (
@@ -135,36 +163,110 @@ def build_management_station_detail_context(management_station, *, active_tab=TA
     return context
 
 
-def normalize_scope_filter(scope):
-    return scope if scope in _VALID_SCOPE_FILTERS else SCOPE_FILTER_IN
+#: The event each tracked action opens its run with. A run records no kind of its own, so
+#: this is how the workflow tells an inventory sync from a collection.
+_INVENTORY_RUN_REASON = "InventorySyncStarted"
+_COLLECTION_RUN_REASON = "InScopeRefreshStarted"
+_DYNAMIC_CONTENT_RUN_REASON = "DynamicContentRefreshStarted"
+
+WORKFLOW_STEP_INVENTORY = "inventory"
+WORKFLOW_STEP_SCOPE = "scope"
+WORKFLOW_STEP_COLLECT = "collect"
 
 
-def get_enforcement_point_list_queryset(*, scope=SCOPE_FILTER_IN):
-    """In-scope points only by default - those are the ones actually collected against.
-
-    `EnforcementPoint.in_scope` gates what gets collected and normalized on a sync, so an
-    out-of-scope point holds no rules or objects. Listing them alongside the rest by
-    default would bury the working set in rows that carry nothing.
-    """
-    queryset = EnforcementPoint.objects.select_related(
-        "management_station",
-        "appliance_group",
-        "appliance",
-    ).prefetch_related("nodes__appliance")
-
-    scope = normalize_scope_filter(scope)
-    if scope == SCOPE_FILTER_IN:
-        queryset = queryset.filter(in_scope=True)
-    elif scope == SCOPE_FILTER_OUT:
-        queryset = queryset.filter(in_scope=False)
-
-    return queryset.order_by(
-        "management_station__hostname",
-        "appliance_group__name",
-        "appliance__hostname",
-        "vsys_name",
-        "pk",
+def _latest_run_opened_by(management_station, reason):
+    return (
+        IntegrationRun.objects.filter(management_station=management_station, events__reason=reason)
+        .order_by("-started_at")
+        .first()
     )
+
+
+def build_management_station_workflow(management_station):
+    """State of the three operator steps on the station details tab - sync inventory, choose
+    scope, collect and normalize - and which one is the next thing to do.
+
+    `next_step` is the first step whose work is missing or out of date, or None when all
+    three are current. A collection that finished before the latest inventory is out of
+    date: the inventory may have found devices the collection never reached.
+    """
+    is_panorama = management_station.station_type == ManagementStation.StationType.PAN_PANORAMA
+    inventory_snapshot = _latest_inventory_snapshot_qs(management_station).only("collected_at").first()
+    inventory_as_of = inventory_snapshot.collected_at if inventory_snapshot else None
+    inventory_run = _latest_run_opened_by(management_station, _INVENTORY_RUN_REASON)
+
+    enforcement_points = management_station.enforcement_points
+    ep_total = enforcement_points.count()
+    ep_in_scope = enforcement_points.filter(in_scope=True).count()
+    appliance_count = management_station.appliances.count()
+
+    collection_run = _latest_run_opened_by(management_station, _COLLECTION_RUN_REASON)
+    dynamic_content_run = _latest_run_opened_by(management_station, _DYNAMIC_CONTENT_RUN_REASON)
+    # Against completion, not start: the collection re-reads `show devices all` itself, so
+    # every collection writes an inventory snapshot newer than the moment it began.
+    collection_is_stale = bool(
+        collection_run
+        and collection_run.completed_at
+        and inventory_as_of
+        and collection_run.completed_at < inventory_as_of
+    )
+
+    if not is_panorama:
+        next_step = None
+    elif inventory_as_of is None:
+        next_step = WORKFLOW_STEP_INVENTORY
+    elif ep_in_scope == 0:
+        next_step = WORKFLOW_STEP_SCOPE
+    elif (
+        collection_run is None
+        or collection_run.status == IntegrationRun.STATUS_FAILED
+        or collection_is_stale
+    ):
+        next_step = WORKFLOW_STEP_COLLECT
+    else:
+        next_step = None
+
+    if ep_total == 0:
+        scope_summary = "No enforcement points discovered yet."
+    else:
+        scope_summary = (
+            f"{ep_in_scope} of {ep_total} enforcement point{'s' if ep_total != 1 else ''} in scope."
+        )
+
+    return {
+        "is_panorama": is_panorama,
+        "next_step": next_step,
+        "inventory_as_of": inventory_as_of,
+        "inventory_run": inventory_run,
+        "inventory_summary": (
+            f"{appliance_count} appliance{'s' if appliance_count != 1 else ''}, "
+            f"{ep_total} enforcement point{'s' if ep_total != 1 else ''} discovered."
+        ),
+        "ep_total": ep_total,
+        "ep_in_scope": ep_in_scope,
+        "scope_summary": scope_summary,
+        # Emphasised only once there is something to choose from: before the first inventory
+        # sync an empty scope is expected, and step 1 is what needs doing.
+        "scope_needs_attention": ep_total > 0 and ep_in_scope == 0,
+        "collection_run": collection_run,
+        "collection_is_stale": collection_is_stale,
+        "dynamic_content_run": dynamic_content_run,
+    }
+
+
+def normalize_scope_filter(scope):
+    """All by default, unlike the standalone list this tab replaced: the tab is where scope
+    is CHOSEN (step 2 of the station workflow links here), and hiding out-of-scope points
+    by default would hide the very rows an operator came to put in scope."""
+    return scope if scope in _VALID_SCOPE_FILTERS else SCOPE_FILTER_ALL
+
+
+def filter_enforcement_points_by_scope(queryset, scope):
+    if scope == SCOPE_FILTER_IN:
+        return queryset.filter(in_scope=True)
+    if scope == SCOPE_FILTER_OUT:
+        return queryset.filter(in_scope=False)
+    return queryset
 
 
 def build_enforcement_point_detail_context(enforcement_point, *, active_tab=TAB_DETAILS):
@@ -363,24 +465,11 @@ class ManagementStationDetailView(DetailView):
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
         active_tab = self.request.GET.get("tab", TAB_DETAILS)
-        context.update(build_management_station_detail_context(self.object, active_tab=active_tab))
-        return context
-
-
-class EnforcementPointListView(ListView):
-    model = EnforcementPoint
-    context_object_name = "enforcement_points"
-    template_name = "integrations/enforcement_point_list.html"
-
-    def get_scope_filter(self):
-        return normalize_scope_filter(self.request.GET.get("scope", SCOPE_FILTER_IN))
-
-    def get_queryset(self):
-        return get_enforcement_point_list_queryset(scope=self.get_scope_filter())
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        context["scope_filter"] = self.get_scope_filter()
+        context.update(build_management_station_detail_context(
+            self.object,
+            active_tab=active_tab,
+            scope=self.request.GET.get("scope", SCOPE_FILTER_ALL),
+        ))
         return context
 
 
@@ -850,6 +939,24 @@ class ManagementStationInScopeSyncView(View):
                 request,
                 f"{outcome.failure_count} in-scope collection task(s) failed. Review the Events tab for details.",
             )
+
+        # EDL/FQDN content hangs off the address objects in-scope rules reference, so it
+        # can only follow a configuration refresh that ran - which is why it is skipped
+        # above when that failed outright, rather than resolving against stale rules.
+        dynamic = _refresh_station_dynamic_content_with_tracking(management_station)
+        if dynamic.refresh is None:
+            messages.error(request, f"EDL/FQDN cache refresh failed: {dynamic.error}")
+        else:
+            messages.success(request, _dynamic_content_summary(dynamic.refresh))
+            if dynamic.failure_count:
+                messages.error(
+                    request,
+                    f"{dynamic.failure_count} EDL/FQDN refresh task(s) failed. Review the Events tab for details.",
+                )
+
+        # The bulk sweep used to be the only caller of this, so a station collected on its
+        # own left the assessment search grounding stale.
+        rebuild_security_rule_search_vocabulary(management_station)
         return HttpResponseRedirect(detail_url)
 
 
@@ -891,6 +998,9 @@ def _run_bulk_in_scope_refresh_in_background() -> None:
 
 
 class ManagementStationBulkInScopeSyncView(View):
+    """No longer linked from any page - the button was removed from the station list. Kept
+    routable by decision; see CLAUDE.md "Views"."""
+
     def post(self, request):
         list_url = reverse("management_station_list")
 
@@ -999,9 +1109,11 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
 class ManagementStationRenormalizeView(View):
     def post(self, request, pk):
         management_station = get_object_or_404(ManagementStation, pk=pk)
-        list_url = reverse("management_station_list")
+        detail_url = reverse("management_station_detail", kwargs={"pk": management_station.pk})
 
         outcome = _renormalize_station_with_tracking(management_station)
+        # Rules were just rewritten, so the grounding built from them is stale.
+        rebuild_security_rule_search_vocabulary(management_station)
 
         messages.success(
             request,
@@ -1015,14 +1127,15 @@ class ManagementStationRenormalizeView(View):
                 request,
                 f"{outcome.failure_count} normalization task(s) failed. Review the Events tab for details.",
             )
-        return HttpResponseRedirect(list_url)
+        return HttpResponseRedirect(detail_url)
 
 
 @dataclass(slots=True)
 class DynamicContentRefreshTrackingResult:
     run: IntegrationRun
-    refresh: PANOSDynamicContentRefreshResult
+    refresh: PANOSDynamicContentRefreshResult | None
     failure_count: int
+    error: Exception | None = None
 
 
 def _refresh_station_dynamic_content_with_tracking(
@@ -1049,7 +1162,26 @@ def _refresh_station_dynamic_content_with_tracking(
         reason="DynamicContentRefreshStarted",
         message="EDL/FQDN cache refresh started.",
     )
-    refresh = refresh_in_scope_dynamic_content(management_station)
+    # Closed whatever happens, as the in-scope refresh is: an exception here used to leave
+    # the run RUNNING for ever, and it now follows every configuration refresh.
+    try:
+        refresh = refresh_in_scope_dynamic_content(management_station)
+    except Exception as exc:  # noqa: BLE001 - the run must be closed whatever this was
+        logger.exception(
+            "EDL/FQDN cache refresh failed for management station %s", management_station.pk,
+        )
+        IntegrationEvent.objects.create(
+            management_station=management_station,
+            run=run,
+            level=IntegrationEvent.LEVEL_ERROR,
+            stage="",
+            reason="DynamicContentRefreshFailed",
+            message=f"{type(exc).__name__}: {exc}",
+        )
+        run.status = IntegrationRun.STATUS_FAILED
+        run.completed_at = timezone.now()
+        run.save(update_fields=["status", "completed_at"])
+        return DynamicContentRefreshTrackingResult(run=run, refresh=None, failure_count=1, error=exc)
 
     events = []
     for f in refresh.fqdn_cache_failures:
@@ -1114,27 +1246,35 @@ def _refresh_station_dynamic_content_with_tracking(
     return DynamicContentRefreshTrackingResult(run=run, refresh=refresh, failure_count=failure_count)
 
 
+def _dynamic_content_summary(refresh: PANOSDynamicContentRefreshResult) -> str:
+    total_resolved_entries = sum(
+        item.total_resolved_entries for item in refresh.dynamic_content_normalizations
+    )
+    updated_object_count = sum(
+        len(item.updated_address_objects) for item in refresh.dynamic_content_normalizations
+    )
+    return (
+        "EDL/FQDN cache refresh completed: "
+        f"{len(refresh.fqdn_cache_collections)} appliance FQDN cache snapshot(s) collected, "
+        f"{updated_object_count} address object(s) resolved to {total_resolved_entries} "
+        "IP range(s)."
+    )
+
+
 class ManagementStationRefreshDynamicContentView(View):
+    """No longer linked from any page - step 3 on the station details tab runs this after
+    the configuration refresh. Kept routable by decision; see CLAUDE.md "Views"."""
+
     def post(self, request, pk):
         management_station = get_object_or_404(ManagementStation, pk=pk)
         list_url = reverse("management_station_list")
 
         outcome = _refresh_station_dynamic_content_with_tracking(management_station)
-        refresh = outcome.refresh
+        if outcome.refresh is None:
+            messages.error(request, f"EDL/FQDN cache refresh failed: {outcome.error}")
+            return HttpResponseRedirect(list_url)
 
-        total_resolved_entries = sum(
-            item.total_resolved_entries for item in refresh.dynamic_content_normalizations
-        )
-        updated_object_count = sum(
-            len(item.updated_address_objects) for item in refresh.dynamic_content_normalizations
-        )
-        messages.success(
-            request,
-            "EDL/FQDN cache refresh completed: "
-            f"{len(refresh.fqdn_cache_collections)} appliance FQDN cache snapshot(s) collected, "
-            f"{updated_object_count} address object(s) resolved to {total_resolved_entries} "
-            "IP range(s).",
-        )
+        messages.success(request, _dynamic_content_summary(outcome.refresh))
         if outcome.failure_count:
             messages.error(
                 request,
@@ -1151,7 +1291,13 @@ class EnforcementPointScopeToggleView(View):
             pk=enforcement_point_pk,
             management_station=management_station,
         )
-        detail_url = f"{reverse('management_station_detail', kwargs={'pk': management_station.pk})}?tab={TAB_ENFORCEMENT_POINTS}"
+        # Back to the filter the toggle was pressed under, so the list the operator was
+        # working through does not reset to All after every click.
+        scope = normalize_scope_filter(request.POST.get("scope", SCOPE_FILTER_ALL))
+        detail_url = (
+            f"{reverse('management_station_detail', kwargs={'pk': management_station.pk})}"
+            f"?tab={TAB_ENFORCEMENT_POINTS}&scope={scope}"
+        )
         enforcement_point.in_scope = not enforcement_point.in_scope
         enforcement_point.save(update_fields=["in_scope"])
         if enforcement_point.in_scope:

@@ -1,0 +1,4 @@
+{% load local_time %}{% comment %}
+One IntegrationRun as a status word and when it happened. Include with run=<IntegrationRun or None>
+and, optionally, never="<text for no run>".
+{% endcomment %}{% if not run %}<span class="text-slate-400">{{ never|default:"Never run" }}</span>{% elif run.status == "running" %}<span class="inline-flex items-center gap-1 text-blue-700"><span class="h-1.5 w-1.5 animate-pulse rounded-full bg-blue-600"></span>Running</span> <span class="text-slate-500">since {{ run.started_at|local_time }}</span>{% else %}<span class="{% if run.status == 'succeeded' %}text-emerald-700{% elif run.status == 'partial' %}text-amber-700{% else %}text-red-700{% endif %}">{{ run.get_status_display }}</span> <span class="text-slate-500">{{ run.completed_at|local_time }}</span>{% endif %}

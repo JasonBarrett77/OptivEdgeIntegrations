@@ -1097,10 +1097,42 @@ without recording an event.
 
 `integrations/views.py` is UI-only composition (Django CBVs) — vendor session/collection/persistence logic
 must stay in `platforms/pan_os/` or `orchestration/`, not in views. The management-station detail view is
-tab-based (`TAB_DETAILS` / `TAB_APPLIANCE_GROUPS` / `TAB_ENFORCEMENT_POINTS` / `TAB_EVENTS`); each tab's
+tab-based (`TAB_DETAILS` / `TAB_ENFORCEMENT_POINTS` / `TAB_EVENTS`); each tab's
 context is built lazily in `build_management_station_detail_context` so unrelated tabs don't issue queries.
 `presentation.py` holds shared row/label-shaping helpers so multiple views/templates don't duplicate
 `config_source` → label logic or address/security-rule row shaping.
+
+**The details tab is the collection workflow**, three steps in order: *Sync inventory*
+(`management_station_sync`), *Choose scope* (links to the enforcement-points tab), *Collect and
+normalize* (`management_station_in_scope_sync`), with *Renormalize only* as step 3's secondary action.
+`build_management_station_workflow()` decides which step is next. A run records no kind of its own,
+so it tells a collection from an inventory sync by the event that opened the run
+(`InScopeRefreshStarted` etc.) — rename one of those reasons and the step silently reads "never run".
+
+Step 3 is every collection type in one action: the in-scope configuration refresh, then the
+EDL/FQDN refresh (skipped if the configuration refresh failed outright, since its candidates are read
+from the rules that refresh writes), then `rebuild_security_rule_search_vocabulary()`. The vocabulary
+rebuild used to run only from the bulk sweep, so a station refreshed on its own left OptivEdgeAssessments'
+plain-language search grounded on stale rules.
+
+**Routes left in place with no page linking them — a decision, not an oversight** (Jason,
+2026-09-25: "Leave them, but record the decision so I can revisit later. I might create a hidden
+view for some of these options."). The UI rework took their buttons away:
+
+    management_station_bulk_in_scope_sync        "Refresh All In Scope", was on the station list
+    management_station_refresh_dynamic_content   EDL/FQDN refresh on its own, now folded into step 3
+    appliance_group_snapshots                    only linked from the removed Appliance Groups tab
+    enforcement_point_addresses                  only linked from the removed EP "Actions" column
+
+Each still works as a POST/GET, and their tests still run.
+
+**There is no enforcement-point list page.** `/integrations/enforcement-points/` and its sidebar item
+were folded into the station's Enforcement Points tab (2026-09-25), which carries the All / In Scope /
+Out of Scope filter and links each row to `enforcement_point_detail`. The filter defaults to **All**,
+where the old list defaulted to in-scope: the tab is where scope is chosen, so hiding out-of-scope
+points would hide the rows an operator came to change. The detail and zone pages light up the
+Management Stations sidebar item. Revisit when a hidden page (the
+`/developer/` pattern) is built for them, or delete them then.
 
 ## Git hooks
 
