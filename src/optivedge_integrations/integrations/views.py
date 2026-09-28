@@ -256,9 +256,27 @@ def build_management_station_workflow(management_station):
             f"{ep_in_scope} of {ep_total} enforcement point{'s' if ep_total != 1 else ''} in scope."
         )
 
+    # Whether each step's work is DONE, stated per step rather than left to the template to
+    # infer from `next_step`. `next_step` names the first thing missing, so it says nothing
+    # about the steps after it: on a station that has never been synced, steps 2 and 3 are not
+    # done either, and a template reading "not next, so finished" would style them as if they
+    # were. Derived from the same facts `next_step` is, so the two cannot disagree - which
+    # `test_management_station_workflow` asserts directly.
+    inventory_complete = inventory_as_of is not None
+    scope_complete = ep_in_scope > 0
+    collection_complete = bool(
+        collection_run
+        and collection_run.status != IntegrationRun.STATUS_FAILED
+        and not collection_is_stale
+        and not in_progress
+    )
+
     return {
         "is_panorama": is_panorama,
         "next_step": next_step,
+        "inventory_complete": inventory_complete,
+        "scope_complete": scope_complete,
+        "collection_complete": collection_complete,
         "inventory_as_of": inventory_as_of,
         "inventory_run": inventory_run,
         "inventory_summary": (

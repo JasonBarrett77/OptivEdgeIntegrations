@@ -66,13 +66,13 @@
 
                         <ol class="flex flex-col gap-3">
                             {# Step 1 - inventory #}
-                            <li data-step="inventory" class="border {% if workflow.next_step == 'inventory' %}border-blue-300 bg-blue-50/40{% else %}border-slate-200 bg-white{% endif %}">
+                            <li data-step="inventory" class="border {% if workflow.next_step == 'inventory' %}border-blue-300 bg-blue-50/40{% elif workflow.inventory_complete %}border-emerald-200 bg-emerald-50/30{% else %}border-slate-200 bg-white{% endif %}">
                                 <div class="flex items-start gap-3 px-4 py-3">
-                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.next_step == 'inventory' %}border-blue-500 bg-blue-600 text-white{% else %}border-slate-300 text-slate-600{% endif %}">1</div>
+                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.next_step == 'inventory' %}border-blue-500 bg-blue-600 text-white{% elif workflow.inventory_complete %}border-emerald-300 bg-emerald-50 text-emerald-700{% else %}border-slate-300 text-slate-600{% endif %}">1</div>
                                     <div class="min-w-0 flex-1 space-y-1">
                                         <div class="flex items-center gap-2">
                                             <h3 class="text-sm font-semibold text-slate-950">Sync inventory</h3>
-                                            {% if workflow.next_step == 'inventory' %}<span class="bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700">Next step</span>{% endif %}
+                                            {% if workflow.next_step == 'inventory' %}<span class="bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700">Next step</span>{% elif workflow.inventory_complete %}<span class="bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">Done</span>{% endif %}
                                         </div>
                                         <p class="text-xs leading-5 text-slate-600">
                                             Reads the devices and device groups this Panorama manages. It discovers the
@@ -108,13 +108,13 @@
                             </li>
 
                             {# Step 2 - scope #}
-                            <li data-step="scope" class="border {% if workflow.scope_needs_attention %}border-amber-300 bg-amber-50{% elif workflow.next_step == 'scope' %}border-blue-300 bg-blue-50/40{% else %}border-slate-200 bg-white{% endif %}">
+                            <li data-step="scope" class="border {% if workflow.scope_needs_attention %}border-amber-300 bg-amber-50{% elif workflow.next_step == 'scope' %}border-blue-300 bg-blue-50/40{% elif workflow.scope_complete %}border-emerald-200 bg-emerald-50/30{% else %}border-slate-200 bg-white{% endif %}">
                                 <div class="flex items-start gap-3 px-4 py-3">
-                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.scope_needs_attention %}border-amber-500 bg-amber-500 text-white{% elif workflow.next_step == 'scope' %}border-blue-500 bg-blue-600 text-white{% else %}border-slate-300 text-slate-600{% endif %}">2</div>
+                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.scope_needs_attention %}border-amber-500 bg-amber-500 text-white{% elif workflow.next_step == 'scope' %}border-blue-500 bg-blue-600 text-white{% elif workflow.scope_complete %}border-emerald-300 bg-emerald-50 text-emerald-700{% else %}border-slate-300 text-slate-600{% endif %}">2</div>
                                     <div class="min-w-0 flex-1 space-y-1">
                                         <div class="flex items-center gap-2">
                                             <h3 class="text-sm font-semibold text-slate-950">Choose scope</h3>
-                                            {% if workflow.next_step == 'scope' %}<span class="{% if workflow.scope_needs_attention %}bg-amber-100 text-amber-800{% else %}bg-blue-100 text-blue-700{% endif %} px-1.5 py-0.5 text-[11px] font-medium">Next step</span>{% endif %}
+                                            {% if workflow.next_step == 'scope' %}<span class="{% if workflow.scope_needs_attention %}bg-amber-100 text-amber-800{% else %}bg-blue-100 text-blue-700{% endif %} px-1.5 py-0.5 text-[11px] font-medium">Next step</span>{% elif workflow.scope_complete %}<span class="bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">Done</span>{% endif %}
                                         </div>
                                         <p class="text-xs leading-5 text-slate-600">
                                             Picks which enforcement points are assessed. Only in-scope enforcement points,
@@ -139,13 +139,13 @@
                             </li>
 
                             {# Step 3 - collect and normalize #}
-                            <li data-step="collect" class="border {% if workflow.next_step == 'collect' %}border-blue-300 bg-blue-50/40{% else %}border-slate-200 bg-white{% endif %}">
+                            <li data-step="collect" class="border {% if workflow.next_step == 'collect' %}border-blue-300 bg-blue-50/40{% elif workflow.collection_complete %}border-emerald-200 bg-emerald-50/30{% else %}border-slate-200 bg-white{% endif %}">
                                 <div class="flex items-start gap-3 px-4 py-3">
-                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.next_step == 'collect' %}border-blue-500 bg-blue-600 text-white{% else %}border-slate-300 text-slate-600{% endif %}">3</div>
+                                    <div class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-semibold {% if workflow.next_step == 'collect' %}border-blue-500 bg-blue-600 text-white{% elif workflow.collection_complete %}border-emerald-300 bg-emerald-50 text-emerald-700{% else %}border-slate-300 text-slate-600{% endif %}">3</div>
                                     <div class="min-w-0 flex-1 space-y-1">
                                         <div class="flex items-center gap-2">
                                             <h3 class="text-sm font-semibold text-slate-950">Collect and normalize</h3>
-                                            {% if workflow.next_step == 'collect' %}<span class="bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700">Next step</span>{% endif %}
+                                            {% if workflow.next_step == 'collect' %}<span class="bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700">Next step</span>{% elif workflow.collection_complete %}<span class="bg-emerald-50 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">Done</span>{% endif %}
                                         </div>
                                         <p class="text-xs leading-5 text-slate-600">
                                             Collects configuration from every in-scope appliance and normalizes all of it:

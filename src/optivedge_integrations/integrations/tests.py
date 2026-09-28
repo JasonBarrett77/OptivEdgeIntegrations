@@ -3038,6 +3038,104 @@ class ManagementStationWorkflowTests(TestCase):
         self.assertIsNone(workflow["next_step"])
         self.assertFalse(workflow["collection_is_stale"])
 
+    def test_each_step_reports_its_own_completion(self):
+        """`next_step` names the first thing missing and says nothing about the steps after
+        it, so the template cannot read "not next, so finished" - the three flags are what it
+        styles on."""
+        workflow = self._workflow()
+        self.assertEqual(
+            [workflow["inventory_complete"], workflow["scope_complete"],
+             workflow["collection_complete"]],
+            [False, False, False])
+
+        inventory_at = timezone.now() - timedelta(hours=2)
+        self._record_inventory(inventory_at)
+        workflow = self._workflow()
+        self.assertEqual(
+            [workflow["inventory_complete"], workflow["scope_complete"],
+             workflow["collection_complete"]],
+            [True, False, False])
+
+        self.point.in_scope = True
+        self.point.save()
+        workflow = self._workflow()
+        self.assertEqual(
+            [workflow["inventory_complete"], workflow["scope_complete"],
+             workflow["collection_complete"]],
+            [True, True, False])
+
+        self._record_collection(inventory_at + timedelta(hours=1))
+        workflow = self._workflow()
+        self.assertEqual(
+            [workflow["inventory_complete"], workflow["scope_complete"],
+             workflow["collection_complete"]],
+            [True, True, True])
+        self.assertIsNone(workflow["next_step"])
+
+    def test_completion_and_the_next_step_cannot_disagree(self):
+        """The invariant the two are worth having: a step that is the next step is not done,
+        and on a Panorama station with nothing running, no next step means all three are."""
+        cases = (
+            ("nothing done", lambda: None),
+            ("inventory only", lambda: self._record_inventory(timezone.now())),
+            ("scope too", lambda: EnforcementPoint.objects.filter(pk=self.point.pk)
+                .update(in_scope=True)),
+            ("collected", lambda: self._record_collection(timezone.now())),
+            ("collection failed", lambda: self._record_collection(
+                timezone.now(), status=IntegrationRun.STATUS_FAILED)),
+        )
+        for label, arrange in cases:
+            with self.subTest(case=label):
+                arrange()
+                workflow = self._workflow()
+                complete = {
+                    "inventory": workflow["inventory_complete"],
+                    "scope": workflow["scope_complete"],
+                    "collect": workflow["collection_complete"],
+                }
+                if workflow["next_step"] is not None:
+                    self.assertFalse(complete[workflow["next_step"]])
+                elif not workflow["collection_in_progress"]:
+                    self.assertEqual(list(complete.values()), [True, True, True])
+
+    def test_a_failed_collection_is_not_a_completed_step(self):
+        self.point.in_scope = True
+        self.point.save()
+        now = timezone.now()
+        self._record_inventory(now - timedelta(hours=1))
+        self._record_collection(now, status=IntegrationRun.STATUS_FAILED)
+
+        self.assertFalse(self._workflow()["collection_complete"])
+
+    def test_a_collection_in_progress_is_not_yet_a_completed_step(self):
+        """It is not the next step either - the button is disabled while it runs - so a
+        template keying off `next_step` alone would style step 3 as finished mid-collection."""
+        self.point.in_scope = True
+        self.point.save()
+        self._record_inventory(timezone.now())
+        views_module._open_in_scope_refresh_run(self.station)
+
+        workflow = self._workflow()
+        self.assertTrue(workflow["collection_in_progress"])
+        self.assertIsNone(workflow["next_step"])
+        self.assertFalse(workflow["collection_complete"])
+
+    def test_a_completed_step_is_marked_done_on_the_details_tab(self):
+        response = self.client.get(self.detail_url)
+        self.assertNotContains(response, ">Done<")
+
+        self.point.in_scope = True
+        self.point.save()
+        now = timezone.now()
+        self._record_inventory(now - timedelta(hours=1))
+        self._record_collection(now)
+
+        response = self.client.get(self.detail_url)
+        # The chip carries the state in words as well as in colour, which is why it is what is
+        # asserted on rather than the emerald classes beside it.
+        self.assertContains(response, ">Done<", count=3)
+        self.assertNotContains(response, "Next step")
+
     def test_a_collection_older_than_the_inventory_is_the_next_step_again(self):
         self.point.in_scope = True
         self.point.save()
