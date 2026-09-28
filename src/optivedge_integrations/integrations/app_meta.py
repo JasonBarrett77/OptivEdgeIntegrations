@@ -50,7 +50,13 @@ SIDEBAR_SECTION = [
         ],
     },
     {
-        "label": "Notes",
+        # Notes sits under Experimental, a heading Assessments also contributes to: the shell
+        # merges sections sharing a label, so each app still declares only its own items and
+        # its own URL names. `collapsible` and `order` are repeated rather than left to the
+        # other app because this package has to stand alone in a deployment without it.
+        "label": "Experimental",
+        "collapsible": True,
+        "order": 100,
         "items": [
             {
                 "href": "/integrations/notes/",
