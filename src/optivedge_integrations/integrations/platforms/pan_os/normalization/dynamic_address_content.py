@@ -51,7 +51,10 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
     total_valid_from_result,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import derive_address_fields
-from optivedge_integrations.integrations.platforms.pan_os.normalization.common import merge_intervals
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    merge_intervals,
+    num_hosts_from_intervals,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     classify_literal_address_type,
 )
@@ -214,16 +217,35 @@ def _latest_fqdn_cache_snapshot(appliance_id: int) -> Snapshot | None:
     )
 
 
-def _record_completeness(address_object: AddressObject, *, truncated: bool, source_total: int | None) -> None:
-    """Mark whether this object's resolved content is the whole of what the device reported."""
-    if (
-        address_object.resolved_content_truncated == truncated
-        and address_object.resolved_content_source_total == source_total
-    ):
+def _record_resolution(
+    address_object: AddressObject,
+    *,
+    truncated: bool,
+    source_total: int | None,
+    num_hosts: int | None,
+) -> None:
+    """Record what this refresh established about the object: whether the content is the whole
+    of what the device reported, and how many addresses it covers.
+
+    `num_hosts` is NULL, never 0, when nothing resolved. An EDL we could not fetch covers an
+    unknown number of addresses, not none - and 0 is the narrowest possible value, so storing
+    it would make an unreachable list score as the tightest object on the rule. Null is the
+    only honest answer and it is the one that cannot be mistaken for narrow.
+
+    A truncated object gets the count of what WAS collected, which is a known under-count; the
+    shortfall is readable from resolved_content_truncated beside it. Anything scoring breadth
+    has to consult that flag rather than the count alone.
+    """
+    fields = {
+        "resolved_content_truncated": truncated,
+        "resolved_content_source_total": source_total,
+        "num_hosts": num_hosts,
+    }
+    if all(getattr(address_object, name) == value for name, value in fields.items()):
         return
-    address_object.resolved_content_truncated = truncated
-    address_object.resolved_content_source_total = source_total
-    address_object.save(update_fields=["resolved_content_truncated", "resolved_content_source_total"])
+    for name, value in fields.items():
+        setattr(address_object, name, value)
+    address_object.save(update_fields=list(fields))
 
 
 def normalize_enforcement_point_dynamic_address_content(
@@ -250,6 +272,7 @@ def normalize_enforcement_point_dynamic_address_content(
         # snapshot has gone - never keeps a stale "incomplete" mark from an earlier refresh.
         truncated = False
         source_total = None
+        num_hosts = None
 
         if address_object.address_type == AddressObject.TYPE_EDL:
             snapshot = _latest_external_list_snapshot(
@@ -257,7 +280,7 @@ def normalize_enforcement_point_dynamic_address_content(
                 scope_name=f"{enforcement_point.vsys_name}:{address_object.name}",
             )
             if snapshot is None:
-                _record_completeness(address_object, truncated=False, source_total=None)
+                _record_resolution(address_object, truncated=False, source_total=None, num_hosts=None)
                 continue
             result = _edl_result_from_snapshot(snapshot)
             members = members_from_result(result)
@@ -269,16 +292,21 @@ def normalize_enforcement_point_dynamic_address_content(
             source_snapshot = snapshot
         else:
             if fqdn_snapshot is None:
-                _record_completeness(address_object, truncated=False, source_total=None)
+                _record_resolution(address_object, truncated=False, source_total=None, num_hosts=None)
                 continue
             matching = fqdn_addresses.get((address_object.normalized_value or "").strip().lower())
             if not matching:
-                _record_completeness(address_object, truncated=False, source_total=None)
+                _record_resolution(address_object, truncated=False, source_total=None, num_hosts=None)
                 continue
             intervals = _intervals_from_values(matching)
             source_snapshot = fqdn_snapshot
 
-        _record_completeness(address_object, truncated=truncated, source_total=source_total)
+        # Merged and disjoint already, so the total does not double-count an EDL that lists
+        # the same host twice or an FQDN answering with a duplicate.
+        num_hosts = num_hosts_from_intervals(intervals) if intervals else None
+        _record_resolution(
+            address_object, truncated=truncated, source_total=source_total, num_hosts=num_hosts,
+        )
 
         if not intervals:
             continue

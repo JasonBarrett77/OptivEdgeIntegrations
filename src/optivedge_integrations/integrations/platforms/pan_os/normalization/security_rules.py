@@ -66,6 +66,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     parse_yes_no_field,
     pushed_vsys_panorama,
     scalar_value,
+    num_hosts_from_intervals,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     choose_local_appliance,
@@ -1173,6 +1174,11 @@ def _materialize_negated_complement_ref(
         address_type=AddressObject.TYPE_NEGATED_COMPLEMENT,
         value=summary,
         normalized_value=summary,
+        # Sized like every other object. A complement is usually the BROADEST thing on a rule -
+        # inverting one host gives 4,294,967,294 - and leaving it null read as "size unknown",
+        # which for anything scoring breadth is indistinguishable from narrow. The intervals
+        # are already merged and disjoint by the time they get here.
+        num_hosts=num_hosts_from_intervals(complement_intervals),
         is_any=False,
         is_builtin=False,
         is_synthetic=True,

@@ -389,6 +389,20 @@ def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     return merged
 
 
+def num_hosts_from_intervals(intervals: list[tuple[int, int]]) -> int:
+    """How many IPv4 addresses a set of (start, end) intervals covers.
+
+    MERGE FIRST. The intervals must be disjoint or the total double-counts every overlap -
+    two EDL members that happen to cover the same host are one host, and an address group
+    whose members overlap is smaller than the sum of its parts. merge_intervals() is what
+    makes them disjoint, and it is a separate call rather than folded in here so a caller
+    that has already merged does not pay for it twice.
+
+    Inclusive of both ends: a /32 is one host, not zero.
+    """
+    return sum(end - start + 1 for start, end in intervals)
+
+
 def first_text(mapping: dict[str, Any], *keys: str) -> str:
     for key in keys:
         value = mapping.get(key)

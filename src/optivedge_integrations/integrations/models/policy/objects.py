@@ -107,6 +107,11 @@ class AddressObject(ScopedPolicyObject):
         "is_edl",
         "is_builtin",
         "is_synthetic",
+        # Worked out from the address value - 2^(32-prefix) for a prefix, the interval total
+        # for an EDL, FQDN or negated complement. No payload key carries it, so it can have no
+        # provenance row. ipv4_start_int/ipv4_end_int are computed the same way and are not
+        # declared; that is a pre-existing gap, not a statement that they are read.
+        "num_hosts",
         "resolved_content_truncated",
         "resolved_content_source_total",
     )

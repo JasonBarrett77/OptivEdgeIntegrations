@@ -157,6 +157,10 @@ from optivedge_integrations.integrations.platforms.pan_os.flows import _candidat
 from optivedge_integrations.integrations import query_chunking
 from optivedge_integrations.integrations import views as views_module
 from optivedge_integrations.integrations.query_chunking import chunked
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    merge_intervals,
+    num_hosts_from_intervals,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     decode_certificate,
 )
@@ -1520,6 +1524,75 @@ class DynamicAddressContentNormalizationTests(TestCase):
         self.assertEqual(edl_object.resolved_entries.count(), 0)
 
 
+    def test_resolved_content_gives_the_object_a_size(self):
+        """An EDL's size is knowable only from its runtime content, so nothing filled
+        num_hosts for one until the resolved entries existed. Anything scoring address
+        breadth reads that column, and a null on the broadest object type is the gap."""
+        station, appliance, enforcement_point = self._build_enforcement_point()
+        edl_object = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station, appliance=appliance,
+                source_type="show_pushed_shared_policy_vsys",
+                collected_at=timezone.now(), payload={},
+            ),
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="my-edl", namespace_type="pushed_vsys_effective", namespace_value="vsys1",
+            precedence_rank=30, address_type=AddressObject.TYPE_EDL, is_edl=True,
+            edl_list_type="ip", value="ip", normalized_value="ip",
+        )
+        self._build_candidate_rule(
+            enforcement_point=enforcement_point,
+            source_address_object=edl_object, destination_address_object=edl_object,
+        )
+        # 1.2.3.4 and 1.2.3.5 merge to one interval of two; 10.0.0.0/24 is 256.
+        Snapshot.objects.create(
+            appliance=appliance, source_type="show_external_list",
+            scope_name="vsys1:my-edl", collected_at=timezone.now(),
+            payload=_external_list_payload(
+                name="my-edl", members=["1.2.3.4", "1.2.3.5", "10.0.0.0/24"]),
+        )
+
+        normalize_enforcement_point_dynamic_address_content(enforcement_point)
+
+        edl_object.refresh_from_db()
+        self.assertEqual(edl_object.num_hosts, 258)
+
+    def test_an_edl_that_resolved_to_nothing_has_a_NULL_size_not_zero(self):
+        """0 is the narrowest possible value. An EDL the device could not fetch covers an
+        UNKNOWN number of addresses, and storing 0 would make it score as the tightest object
+        on the rule - the safe-looking wrong answer."""
+        station, appliance, enforcement_point = self._build_enforcement_point()
+        edl_object = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station, appliance=appliance,
+                source_type="show_pushed_shared_policy_vsys",
+                collected_at=timezone.now(), payload={},
+            ),
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name="my-edl", namespace_type="pushed_vsys_effective", namespace_value="vsys1",
+            precedence_rank=30, address_type=AddressObject.TYPE_EDL, is_edl=True,
+            edl_list_type="ip", value="ip", normalized_value="ip",
+            num_hosts=999,  # stale from an earlier refresh
+        )
+        self._build_candidate_rule(
+            enforcement_point=enforcement_point,
+            source_address_object=edl_object, destination_address_object=edl_object,
+        )
+        Snapshot.objects.create(
+            appliance=appliance, source_type="show_external_list",
+            scope_name="vsys1:my-edl", collected_at=timezone.now(),
+            payload=_external_list_payload(name="my-edl", members=[], total_invalid=1),
+        )
+
+        normalize_enforcement_point_dynamic_address_content(enforcement_point)
+
+        edl_object.refresh_from_db()
+        self.assertIsNone(edl_object.num_hosts)
+
     def test_a_truncated_edl_is_marked_incomplete_and_the_mark_clears(self):
         """A partially-collected EDL must be readable as partial.
 
@@ -1894,6 +1967,50 @@ class NegatedComplementNormalizationTests(TestCase):
 
     def _build_pushed_snapshot(self, *, station, enforcement_point):
         _create_empty_pushed_policy_snapshot(station=station, enforcement_point=enforcement_point)
+
+    def test_a_negated_complement_is_sized_like_any_other_object(self):
+        """A complement is usually the broadest thing on a rule - inverting two hosts leaves
+        4,294,967,294 addresses - and it carried no num_hosts at all, so a scorer reading that
+        column saw the widest object on the rule as size-unknown."""
+        station, appliance, enforcement_point = self._build_enforcement_point()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"vsys": {"entry": {
+                "@name": "vsys1",
+                "address": {"entry": [
+                    {"@name": "host-a", "ip-netmask": "10.0.0.5/32"},
+                    {"@name": "host-b", "ip-netmask": "10.0.0.10/32"},
+                ]},
+                "address-group": {"entry": [
+                    {"@name": "static-src", "static": {"member": ["host-a", "host-b"]}},
+                ]},
+                "rulebase": {
+                    "security": {"rules": {"entry": [{
+                        "@name": "rule-negated",
+                        "from": {"member": ["trust"]}, "to": {"member": ["untrust"]},
+                        "source": {"member": ["static-src"]},
+                        "destination": {"member": ["any"]},
+                        "application": {"member": ["ssl"]},
+                        "service": {"member": ["application-default"]},
+                        "action": "allow", "negate-source": "yes",
+                    }]}},
+                    "default-security-rules": {"rules": {"entry": []}},
+                },
+            }}}}}},
+        )
+        self._build_pushed_snapshot(station=station, enforcement_point=enforcement_point)
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalize_enforcement_point_security_rules(enforcement_point)
+
+        complement = AddressObject.objects.get(
+            synthetic_kind=AddressObject.SYNTHETIC_KIND_NEGATED_COMPLEMENT)
+        # The whole space minus the two hosts that were negated.
+        self.assertEqual(complement.num_hosts, 4_294_967_296 - 2)
+        self.assertEqual(
+            complement.num_hosts,
+            sum(e.ipv4_end_int - e.ipv4_start_int + 1 for e in complement.resolved_entries.all()),
+        )
 
     def test_negated_source_with_resolvable_members_creates_complement_with_multiple_gaps(self):
         station, appliance, enforcement_point = self._build_enforcement_point()
@@ -8878,6 +8995,22 @@ class CollectionScriptViewTests(TestCase):
             for item in section["items"]
         }
         self.assertIn("/integrations/collection-script/", hrefs)
+
+
+class NumHostsFromIntervalsTests(SimpleTestCase):
+    def test_counts_both_ends_inclusively(self):
+        self.assertEqual(num_hosts_from_intervals([(1, 1)]), 1)
+        self.assertEqual(num_hosts_from_intervals([(0, 4294967295)]), 4294967296)
+
+    def test_nothing_covers_nothing(self):
+        self.assertEqual(num_hosts_from_intervals([]), 0)
+
+    def test_overlapping_intervals_double_count_until_merged(self):
+        """The reason merge_intervals is a separate call and not folded in: two EDL members
+        covering the same host are one host, and this function cannot know that on its own."""
+        overlapping = [(0, 10), (5, 15)]
+        self.assertEqual(num_hosts_from_intervals(overlapping), 22)
+        self.assertEqual(num_hosts_from_intervals(merge_intervals(overlapping)), 16)
 
 
 class QueryChunkingTests(SimpleTestCase):
