@@ -167,6 +167,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.certific
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     ResolvedAddressRef,
     _member_intervals_or_none,
+    compute_negated_complement_intervals,
     side_num_hosts,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
@@ -9238,6 +9239,25 @@ class SideNumHostsTests(TestCase):
 
         self.assertIsNone(
             side_num_hosts([self._ref(edl)], negated=False, complement_ref=None))
+
+    def test_negating_the_whole_space_leaves_an_EMPTY_complement(self):
+        """Reachable in committed config, which is not obvious.
+
+        PAN-OS refuses `negate-source` beside the keyword `any` at COMMIT - "Negate cannot be
+        enabled for security rule X with source address as 'any'" - so the obvious way to write
+        this rule does not exist. It is a KEYWORD check though, not a space check: the same
+        space as a 0.0.0.0/0 ip-netmask OBJECT negates and commits without complaint. Measured
+        on pan-fw-111, 2026-10-05, and `oep002-g-neg-zero` is the lab subject for it.
+
+        So the complement really can be empty, and empty must read as INDETERMINATE rather than
+        0 - a rule permitting nothing is not the narrowest rule on the device, it is a rule
+        whose breadth there is no point scoring.
+        """
+        whole_space = self._ref(self._netmask("everything", "0.0.0.0/0"))
+
+        self.assertEqual(compute_negated_complement_intervals([whole_space]), [])
+        self.assertIsNone(
+            side_num_hosts([whole_space], negated=True, complement_ref=None))
 
     def test_no_members_is_indeterminate_rather_than_zero(self):
         """Zero is the narrowest value there is. A side with nothing resolvable on it must not

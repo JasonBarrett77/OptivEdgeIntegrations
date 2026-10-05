@@ -35,6 +35,44 @@ Entry shape:
 
 
 
+## 2026-10-05 — the negate/`any` refusal is a keyword check (corrects the entry below)
+
+**Did:**    The entry below left open whether the refusal was about the literal `any` or about
+the whole address space. One rule: negate a side whose only member is a `0.0.0.0/0`
+ip-netmask OBJECT — the same space under a different name — then commit.
+
+**Found:**  Commits clean. It is a KEYWORD check. So a negated side CAN permit nothing in
+committed config; it just cannot be spelled `any`. **That corrects the entry below**, which
+concluded the normalizer's empty-complement branch guards an unreachable state. The branch IS
+reachable, and `oep002-g-neg-zero` is now a lab subject for it — the control reports it
+indeterminate at medium, which is what an empty complement should produce.
+
+**Landed:** `panos-payload-contract.json`, both negate fields in `security-rule-scope`, with
+the "do not read this as meaning an empty complement is impossible" warning the first reading
+would have earned.
+
+**Open:**   Nothing on this.
+
+## 2026-10-05 — negate and `any` cannot coexist on a security rule
+
+**Did:**    Built 97 rules on pan-fw-111 covering every case PAN-POL-002 distinguishes, two of
+them negating a side whose only member is `any` — the empty-complement path the normalizer has
+a guard for.
+
+**Found:**  Not constructible. All 160 writes returned success and the COMMIT refused the whole
+candidate: "Negate cannot be enabled for security rule oep002-g-neg-any with source address as
+'any'", twice, then "Configuration is invalid". So a committed rule never has a negated side
+whose members are `any`, and the normalizer's empty-complement branch guards a state the device
+will not store. Deleting the two rules let the other 95 commit unchanged.
+
+**Landed:** `panos-payload-contract.json`, the `security-rule-scope` node — on both negate
+fields, and as a note that a successful `set` is not validity. The commit is a separate gate and
+this is the cheapest possible demonstration of it.
+
+**Open:**   Whether the same check exists for a negated side that resolves to the whole space by
+another route — a `0.0.0.0/0` netmask object, or a group containing one. Not tried; the error
+text names the literal `any`, which suggests it is a keyword check rather than a space check.
+
 ## 2026-10-05 — what a security rule stores for `disabled` and the negate flags
 
 **Did:**    Wrote four allow rules on pan-fw-111 vsys1 through the API carrying none of
