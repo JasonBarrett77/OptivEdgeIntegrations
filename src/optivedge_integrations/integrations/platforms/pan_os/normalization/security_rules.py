@@ -1047,6 +1047,45 @@ def compute_negated_complement_intervals(
     return _complement_of(merge_intervals(all_intervals))
 
 
+def side_num_hosts(
+    resolved_refs: list[ResolvedAddressRef],
+    *,
+    negated: bool,
+    complement_ref: ResolvedAddressRef | None,
+) -> int | None:
+    """How many IPv4 addresses one side of a rule permits, AFTER negation.
+
+    None means INDETERMINATE and is the answer whenever any member cannot be sized - a dynamic
+    address group, a region, an EDL or FQDN with no resolved content, or content truncated at
+    the collection ceiling. It is never 0: zero is the narrowest value there is, and a rule
+    nobody could measure must not read as the tightest rule on the device.
+
+    NEGATION READS THE COMPLEMENT, NOT THE MEMBERS. A negated side keeps its member refs - they
+    are what the config says and what name search needs - and gains a synthetic complement ref
+    beside them. Unioning all of them would cover the whole space on every negated rule. The
+    complement alone is what the rule actually permits; where one could not be computed, the
+    side is indeterminate for the same reason the complement was refused.
+
+    The union is MERGED before counting, so two members covering the same /8 are one /8 rather
+    than two.
+    """
+    if negated:
+        if complement_ref is None:
+            return None
+        intervals = _member_intervals_or_none(complement_ref)
+        return num_hosts_from_intervals(intervals) if intervals else None
+
+    all_intervals: list[tuple[int, int]] = []
+    for ref in resolved_refs:
+        intervals = _member_intervals_or_none(ref)
+        if intervals is None:
+            return None
+        all_intervals.extend(intervals)
+    if not all_intervals:
+        return None
+    return num_hosts_from_intervals(merge_intervals(all_intervals))
+
+
 def build_normalized_security_rules(enforcement_point: EnforcementPoint) -> list[NormalizedSecurityRule]:
     merged_snapshot = latest_merged_snapshot(enforcement_point)
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
@@ -1251,24 +1290,28 @@ def _persist_one_security_rule(
     except ValueError as exc:
         raise _with_rule_context(exc, "destination_address", rule_context) from exc
 
+    # Kept per side rather than reusing one name: side_num_hosts needs to know which complement
+    # belongs to which side, and a shared variable would hand the destination's to both.
+    source_complement_ref = None
+    destination_complement_ref = None
     if normalized_rule.negate_source:
-        complement_ref = _materialize_negated_complement_ref(
+        source_complement_ref = _materialize_negated_complement_ref(
             enforcement_point=enforcement_point,
             normalized_rule=normalized_rule,
             side="source",
             resolved_refs=source_resolved_refs,
         )
-        if complement_ref is not None:
-            source_resolved_refs = [*source_resolved_refs, complement_ref]
+        if source_complement_ref is not None:
+            source_resolved_refs = [*source_resolved_refs, source_complement_ref]
     if normalized_rule.negate_destination:
-        complement_ref = _materialize_negated_complement_ref(
+        destination_complement_ref = _materialize_negated_complement_ref(
             enforcement_point=enforcement_point,
             normalized_rule=normalized_rule,
             side="destination",
             resolved_refs=destination_resolved_refs,
         )
-        if complement_ref is not None:
-            destination_resolved_refs = [*destination_resolved_refs, complement_ref]
+        if destination_complement_ref is not None:
+            destination_resolved_refs = [*destination_resolved_refs, destination_complement_ref]
 
     security_rule = SecurityRule.objects.create(
         management_station=enforcement_point.management_station,
@@ -1288,6 +1331,16 @@ def _persist_one_security_rule(
         log_setting=normalized_rule.log_setting,
         negate_source=normalized_rule.negate_source,
         negate_destination=normalized_rule.negate_destination,
+        source_num_hosts=side_num_hosts(
+            source_resolved_refs,
+            negated=normalized_rule.negate_source,
+            complement_ref=source_complement_ref,
+        ),
+        destination_num_hosts=side_num_hosts(
+            destination_resolved_refs,
+            negated=normalized_rule.negate_destination,
+            complement_ref=destination_complement_ref,
+        ),
         raw_rule=normalized_rule.raw_rule,
         last_synced_at=normalized_rule.source_snapshot.collected_at,
     )

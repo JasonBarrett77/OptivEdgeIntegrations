@@ -167,6 +167,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.certific
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     ResolvedAddressRef,
     _member_intervals_or_none,
+    side_num_hosts,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
     _edl_members_from_snapshot,
@@ -9092,3 +9093,153 @@ class InScopeRefreshRunFinalizationTests(TestCase):
         outcome.run.refresh_from_db()
         self.assertEqual(outcome.run.status, IntegrationRun.STATUS_SUCCEEDED)
         self.assertIsNotNone(outcome.run.completed_at)
+
+
+class SideNumHostsTests(TestCase):
+    """How many addresses one side of a rule permits - the column PAN-POL-002 scores.
+
+    The arithmetic lives here and the severity bands live in OptivEdgeAssessments'
+    `test_address_breadth_control`, so these tests are about the three ways the count can be
+    wrong rather than about any threshold: counting a negated side's members instead of its
+    complement, counting an overlapping union twice, and answering 0 where the truth is
+    "could not be established".
+    """
+
+    def setUp(self):
+        self.station, self.appliance, self.point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-BREADTH-001",
+            appliance_hostname="fw-breadth-01",
+        )
+        self.snapshot = Snapshot.objects.create(
+            management_station=self.station,
+            appliance=self.appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={},
+        )
+        self.rank = 0
+
+    def _netmask(self, name, cidr):
+        network = ipaddress.IPv4Network(cidr)
+        self.rank += 1
+        return AddressObject.objects.create(
+            management_station=self.station,
+            enforcement_point=self.point,
+            source_snapshot=self.snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name=name,
+            namespace_type="local_vsys",
+            namespace_value="vsys1",
+            precedence_rank=self.rank,
+            address_type=AddressObject.TYPE_IP_NETMASK,
+            value=cidr,
+            normalized_value=cidr,
+            ipv4_start_int=int(network.network_address),
+            ipv4_end_int=int(network.broadcast_address),
+        )
+
+    def _unresolvable_edl(self, name):
+        self.rank += 1
+        return AddressObject.objects.create(
+            management_station=self.station,
+            enforcement_point=self.point,
+            source_snapshot=self.snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name=name,
+            namespace_type="local_vsys",
+            namespace_value="vsys1",
+            precedence_rank=self.rank,
+            address_type=AddressObject.TYPE_EDL,
+            is_edl=True,
+            edl_list_type="ip",
+            value="ip",
+            normalized_value="ip",
+        )
+
+    def _ref(self, address_object, *, position=0):
+        return ResolvedAddressRef(
+            raw_value=address_object.name,
+            position=position,
+            ref_type=SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT,
+            address_object=address_object,
+            address_group=None,
+        )
+
+    def test_one_member_is_its_own_size(self):
+        refs = [self._ref(self._netmask("a-slash-24", "10.0.0.0/24"))]
+
+        self.assertEqual(side_num_hosts(refs, negated=False, complement_ref=None), 256)
+
+    def test_two_disjoint_members_add(self):
+        refs = [
+            self._ref(self._netmask("a-slash-24", "10.0.0.0/24")),
+            self._ref(self._netmask("b-slash-24", "10.0.1.0/24"), position=1),
+        ]
+
+        self.assertEqual(side_num_hosts(refs, negated=False, complement_ref=None), 512)
+
+    def test_overlapping_members_are_counted_once(self):
+        """Two objects covering the same space are that space, not twice it. Without the merge
+        a side naming the same /8 under two names reads as a /7 and crosses into critical."""
+        refs = [
+            self._ref(self._netmask("outer", "10.0.0.0/8")),
+            self._ref(self._netmask("inner", "10.1.0.0/16"), position=1),
+        ]
+
+        self.assertEqual(side_num_hosts(refs, negated=False, complement_ref=None), 16_777_216)
+
+    def test_a_negated_side_counts_the_complement_and_not_the_members(self):
+        """The failure this guards: a rule negating ONE HOST permits everything but that host,
+        and reading its member list would score it /32 - the narrowest rule on the device,
+        where the truth is the broadest. The complement ref is what normalization materializes
+        beside the members for exactly this.
+        """
+        members = [self._ref(self._netmask("one-host", "10.1.2.3/32"))]
+        complement = self._ref(self._netmask("not-one-host-complement", "0.0.0.0/0"))
+
+        self.assertEqual(
+            side_num_hosts(members, negated=True, complement_ref=complement),
+            4_294_967_296,
+        )
+        # And the un-negated reading of the same member list, for contrast.
+        self.assertEqual(side_num_hosts(members, negated=False, complement_ref=None), 1)
+
+    def test_a_negated_side_without_a_complement_is_indeterminate(self):
+        """Normalization refuses to materialize a complement when any member is unresolvable,
+        so its absence means the same thing here: not measured, not empty."""
+        members = [self._ref(self._unresolvable_edl("no-content-edl"))]
+
+        self.assertIsNone(side_num_hosts(members, negated=True, complement_ref=None))
+
+    def test_one_unsizeable_member_makes_the_whole_side_indeterminate(self):
+        """A partial union is an under-count, and an under-count on this control reads as a
+        narrower rule than the configuration permits."""
+        refs = [
+            self._ref(self._netmask("known", "10.0.0.0/24")),
+            self._ref(self._unresolvable_edl("unknown-edl"), position=1),
+        ]
+
+        self.assertIsNone(side_num_hosts(refs, negated=False, complement_ref=None))
+
+    def test_a_truncated_edl_makes_the_side_indeterminate(self):
+        """Collected content stopped at the ceiling is a known under-count, which is the same
+        problem as no content at all for a question about size - and different from it for a
+        question about membership, which is why the mark exists rather than discarding."""
+        edl = self._unresolvable_edl("too-big-edl")
+        AddressObjectResolvedEntry.objects.create(
+            address_object=edl,
+            ipv4_start_int=int(ipaddress.IPv4Address("1.2.3.4")),
+            ipv4_end_int=int(ipaddress.IPv4Address("1.2.3.4")),
+            source_snapshot=self.snapshot,
+            collected_at=timezone.now(),
+        )
+        edl.resolved_content_truncated = True
+        edl.save(update_fields=["resolved_content_truncated"])
+
+        self.assertIsNone(
+            side_num_hosts([self._ref(edl)], negated=False, complement_ref=None))
+
+    def test_no_members_is_indeterminate_rather_than_zero(self):
+        """Zero is the narrowest value there is. A side with nothing resolvable on it must not
+        read as the tightest side on the device."""
+        self.assertIsNone(side_num_hosts([], negated=False, complement_ref=None))

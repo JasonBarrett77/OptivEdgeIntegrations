@@ -35,7 +35,44 @@ Entry shape:
 
 
 
+## 2026-10-05 — what a security rule stores for `disabled` and the negate flags
 
+**Did:**    Wrote four allow rules on pan-fw-111 vsys1 through the API carrying none of
+`disabled`, `negate-source` or `negate-destination`, committed, and read them back under both
+`action=get` and `action=show`. Then toggled `disabled` no -> yes -> deleted in the candidate,
+reading after each step.
+
+**Found:**  All three keys are absent at their default and `action=show` does NOT fill them in,
+so the running config is no better an oracle here than the candidate. `<disabled>no</disabled>`
+is separately storable and reads back explicitly, so absent and explicit `no` are two distinct
+wire representations of one behaviour — absence is not "cannot store no". Deleting the node
+returns the rule to absent.
+
+**Landed:** `panos-payload-contract.json`, new `security-rule-scope` node. PAN-POL-002 scopes
+itself on `disabled` and reads each address side after negation, so all three implicit values
+decide a severity.
+
+**Open:**   Nothing on these three. `action` was not measured as an implicit: a rule without it
+is refused at commit, the same way `service` is.
+
+
+
+## 2026-10-05 — a lab band census counted the wrong thing
+
+**Did:**    Sized PAN-POL-002's six severity bands against the lab before building subjects for
+the empty ones. The design doc's census said 490 of 501 address objects were in the narrowest
+band, 2 in High and 9 in Critical, so High looked covered and three bands looked missing.
+
+**Found:**  Measured at the level the control actually scores — rule SIDES, not objects —
+the distribution was 174 critical, 0 high, 0 medium, 0 low, 0 informational, 1,529 narrow, 3
+indeterminate. The two High objects are not on the source or destination of any in-scope allow
+rule, so High had no subject either. Four bands were missing, not three.
+
+**Landed:** Nothing in a guide — it is a measurement method, not a PAN-OS fact. Staged as a
+correction to `rule-permissiveness-scoring.md` in OptivEdgeProbe `scratch/doc-drafts/`.
+
+**Open:**   Nothing. The general form: a band census has to be taken at the level the control
+scores, and for a rule control that is rule sides.
 
 ## 2026-09-22 — how EDL paging actually behaves, and one attribute not to trust
 

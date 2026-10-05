@@ -17,6 +17,10 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     DERIVED_FIELDS = (
         "is_missing",
         "effective_order",
+        # How many IPv4 addresses each side permits, AFTER negation. Worked out by walking the
+        # side's address refs and merging their intervals; no payload key carries it.
+        "source_num_hosts",
+        "destination_num_hosts",
     )
     SOURCE_LOCAL = "local"
     SOURCE_PUSHED_PRE = "pushed_pre"
@@ -24,6 +28,15 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     SOURCE_DEFAULT = "default"
 
     CONFIG_SOURCE_CHOICES = CONFIG_SOURCE_CHOICES
+
+    #: How many IPv4 addresses this side permits once negation is applied. NULL means
+    #: INDETERMINATE, never zero: a side is unknowable when it names a dynamic address group or
+    #: a region, when an EDL or FQDN on it has no resolved content, or when that content was
+    #: truncated and is a known under-count. Zero would be the narrowest possible value, so a
+    #: rule nobody could measure would score as the tightest rule on the device - which is the
+    #: failure direction a breadth control exists to prevent.
+    source_num_hosts = models.BigIntegerField(null=True, blank=True)
+    destination_num_hosts = models.BigIntegerField(null=True, blank=True)
 
     management_station = models.ForeignKey(
         ManagementStation,
