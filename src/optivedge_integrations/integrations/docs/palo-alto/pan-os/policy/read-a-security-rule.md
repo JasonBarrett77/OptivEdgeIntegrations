@@ -46,7 +46,81 @@ absent element is never "not set yet":
 Treat `<rule-type>universal</rule-type>` and an absent `rule-type` as identical; the
 dataplane does.
 
-**Unmeasured:** `log-start` / `log-end` defaults. If a consumer needs them, it needs to measure them, not assume.
+`service` is the exception and it is below: the device refuses to commit a rule without one.
+
+The same holds for the two log flags, and they default OPPOSITE ways:
+
+    log-end absent    -> yes   the session IS logged at end
+    log-start absent  -> no
+
+`[MEASURED 2026-09-22]` on pan-fw-111. A shared rule was pushed carrying NEITHER key, its
+absence confirmed in Panorama's running and candidate configs, in the device's
+`pushed-shared-policy` and in `effective-running`, and the rule then opened in the device's own
+UI: "Log at Session End" renders TICKED and "Log at Session Start" unticked.
+
+**The Help cannot settle this and says so twice.** p.134, on the security rule screen: "Log At
+Session End (enabled by default)". p.142, on Applications and Usage: "cleared by default",
+about the same field. One of them is describing a different screen's form; only the device
+knows which.
+
+**A rule created through the UI writes both keys explicitly** — `log-start: no`, `log-end:
+yes` — so "enabled by default" describes the CHECKBOX, not what an absent key means. Those are
+different claims and only the second one tells a collector what to store. On the lab, 873
+rules carry the keys and 10 carry neither.
+
+The direction matters for the control that rests on it: an unwritten `log-end` is COMPLIANT,
+not a blind spot. Reading it as "no" would have reported ten correctly-logging rules as
+unlogged.
+
+## `service` is required, and `application-default` may not share the list
+
+**Measured:** 2026-09-16 on fw-core-tpa-a (PA-5220, 11.1.13-h3), by writing each shape to the
+vsys6 scratch rulebase and committing. `OptivEdgeProbe/scratch/lab_rule_service_probe.py`.
+The same facts are in `OptivEdgeProbe/reference/panos-payload-contract.json` under
+`security-rule-service`, and PAN-POL-004 rests on both.
+
+Two rules, enforced at two different times. A probe that only writes, or only commits, sees one
+of them and reads the other as permitted.
+
+**`service` is REQUIRED — refused at the COMMIT.** A rule with no `service` element is accepted
+by `action=set` with `status=success`, and the commit then fails validation:
+
+    vsys -> vsys6 -> rulebase -> security -> rules -> svc-probe-absent  is missing 'service'
+    vsys -> vsys6 -> rulebase -> security -> rules is invalid
+
+So every committed rule carries a service list. For a consumer this settles what a rule with no
+service MEANS: it is one of the two predefined defaults — `intrazone-default` and
+`interzone-default`, which exist in no rulebase and carry no service — or the collection lost
+it. It is never an author who left the field alone, which is the reading every other absent
+field gets.
+
+**`application-default` is EXCLUSIVE — refused at the WRITE.** Writing it beside another member
+never reaches a commit:
+
+    status=error code=12
+    svc-probe-mixed -> service  is invalid. 'application-default' should not be used with
+    another service
+
+So "has an `application-default` member" and "the service IS application-default" are the same
+question, and a consumer needs no shape test to tell them apart.
+
+**The member node is where the schema lives.** `action=complete` on `.../service` returns
+nothing — `<completions/>`, `code=19`, which reads exactly like an invalid path and is not one.
+Completing `.../service/member` returns the service objects and groups in scope plus exactly two
+specials, `any` and `application-default`. Anything else in the list is an object reference.
+
+**Effective policy resolves all three states**, which is a second oracle when the stored config
+is ambiguous — `show running security-policy`, on the rule's `application/service` line:
+
+    service any            0:any/any/any/any
+    application-default    0:any/any/any/app-default
+    service-https          0:any/tcp/any/443
+
+A disabled rule appears nowhere in that output, so it cannot be checked this way.
+
+**Unmeasured:** a service GROUP. The lab has none, so whether a group whose members are exactly
+an application's default ports is distinguishable from `application-default` in the resolved
+view is unknown. Nothing in the corpus depends on it yet.
 
 ## Key on `@uuid`, never on `@name`
 
