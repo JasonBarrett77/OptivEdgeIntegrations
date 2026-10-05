@@ -38,6 +38,23 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     source_num_hosts = models.BigIntegerField(null=True, blank=True)
     destination_num_hosts = models.BigIntegerField(null=True, blank=True)
 
+    @property
+    def source_breadth_known(self) -> bool:
+        """Whether the source side's breadth was established at all.
+
+        The search layer filters this with an inverted `__isnull` on the column, because a
+        property cannot appear in a WHERE clause. It is here as well so that a control TESTING
+        the field has somewhere to read it from when presenting a finding: the findings sheet
+        resolves a tested field against the subject model and refuses a name the model can
+        neither store nor compute. Without this, PAN-POL-002 broke the security-rules findings
+        page while every test passed.
+        """
+        return self.source_num_hosts is not None
+
+    @property
+    def destination_breadth_known(self) -> bool:
+        return self.destination_num_hosts is not None
+
     management_station = models.ForeignKey(
         ManagementStation,
         on_delete=models.CASCADE,

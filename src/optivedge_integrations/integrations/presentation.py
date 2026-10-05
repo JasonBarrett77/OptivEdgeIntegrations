@@ -13,6 +13,23 @@ from optivedge_integrations.integrations.models import (
 )
 
 
+def address_breadth_label(num_hosts: int | None) -> str:
+    """One side of a rule's address breadth, as a reader sees it. `Unknown` is NOT `0`.
+
+    A side is unmeasurable when it names a dynamic address group or a region, or an EDL/FQDN
+    with no resolved content or content truncated at the collection ceiling. Printing 0 there
+    would make the rule nobody could measure read as the tightest rule on the page, which is
+    the failure PAN-POL-002 exists to catch.
+
+    Here rather than in either consumer because BOTH of OptivEdgeAssessments' surfaces show it
+    - the configuration explorer's rule rows and the findings sheet's Sources/Destinations
+    columns - and two copies of the wording is two things to keep in step.
+    """
+    if num_hosts is None:
+        return "(Unknown addresses)"
+    return f"({num_hosts:,} address{'' if num_hosts == 1 else 'es'})"
+
+
 def security_rule_config_source_label(config_source: str) -> str:
     if config_source == SecurityRule.SOURCE_PUSHED_PRE:
         return "Pre-Rulebase"

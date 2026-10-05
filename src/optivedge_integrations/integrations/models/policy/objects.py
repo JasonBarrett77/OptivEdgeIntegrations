@@ -187,6 +187,24 @@ class AddressObject(ScopedPolicyObject):
     description = models.TextField(blank=True)
     raw_object = models.JSONField(default=dict, blank=True)
 
+    @property
+    def size_known(self) -> bool:
+        """Whether this object's size was established. Mirrors the search layer's
+        `num_hosts__isnull` inverted, so a control can both FILTER on the field and read it back
+        when presenting the finding - the findings sheet refuses a tested field the model can
+        neither store nor compute, which is how PAN-COV-001 broke the coverage page."""
+        return self.num_hosts is not None
+
+    @property
+    def collection_attempted(self) -> bool:
+        """Whether the DEVICE ever answered about this object's content.
+
+        True and still unsized means the device could not resolve the list - a fault on the
+        device, reported by PAN-POL-023. False means nobody asked yet, which is the gap
+        PAN-COV-001 reports. The two are identical in `num_hosts` and must not be conflated.
+        """
+        return self.resolved_content_source_total is not None
+
     class Meta:
         ordering = ["name", "precedence_rank", "id"]
         indexes = [
