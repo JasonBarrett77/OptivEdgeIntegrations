@@ -189,6 +189,7 @@ def build_management_station_detail_context(
 _INVENTORY_RUN_REASON = "InventorySyncStarted"
 _COLLECTION_RUN_REASON = "InScopeRefreshStarted"
 _DYNAMIC_CONTENT_RUN_REASON = "DynamicContentRefreshStarted"
+_RENORMALIZE_RUN_REASON = "RenormalizationStarted"
 
 WORKFLOW_STEP_INVENTORY = "inventory"
 WORKFLOW_STEP_SCOPE = "scope"
@@ -233,8 +234,9 @@ def build_management_station_workflow(management_station):
     )
 
     in_progress = collection_in_progress(management_station)
+    renormalizing = renormalization_in_progress(management_station)
 
-    if not is_panorama or in_progress:
+    if not is_panorama or in_progress or renormalizing:
         next_step = None
     elif inventory_as_of is None:
         next_step = WORKFLOW_STEP_INVENTORY
@@ -269,11 +271,17 @@ def build_management_station_workflow(management_station):
         and collection_run.status != IntegrationRun.STATUS_FAILED
         and not collection_is_stale
         and not in_progress
+        and not renormalizing
     )
 
     return {
         "is_panorama": is_panorama,
         "next_step": next_step,
+        #: Either kind of background work. Both buttons disable on `work_in_progress` and the
+        #: page refreshes on it, because a collection and a renormalize write the same rows.
+        "renormalization_in_progress": renormalizing,
+        "work_in_progress": in_progress or renormalizing,
+        "renormalize_run": _latest_run_opened_by(management_station, _RENORMALIZE_RUN_REASON),
         "inventory_complete": inventory_complete,
         "scope_complete": scope_complete,
         "collection_complete": collection_complete,
@@ -969,6 +977,27 @@ def _refresh_station_in_scope_tracked(
 COLLECTION_LOCK_MAX_AGE = timedelta(hours=2)
 
 
+def renormalization_in_progress(management_station: ManagementStation) -> bool:
+    """Whether a renormalize is running for this station, orphans aside."""
+    return IntegrationRun.objects.filter(
+        management_station=management_station,
+        status=IntegrationRun.STATUS_RUNNING,
+        started_at__gte=timezone.now() - COLLECTION_LOCK_MAX_AGE,
+        events__reason=_RENORMALIZE_RUN_REASON,
+    ).exists()
+
+
+def station_work_in_progress(management_station: ManagementStation) -> bool:
+    """Either kind of background work on this station.
+
+    Both buttons key off this rather than off their own kind, because the two WRITE THE SAME
+    ROWS: a collection normalizes what it collects, and a renormalize rewrites exactly that.
+    Running them together would interleave delete-and-recreate on the same enforcement points.
+    """
+    return collection_in_progress(management_station) or renormalization_in_progress(
+        management_station)
+
+
 def collection_in_progress(management_station: ManagementStation) -> bool:
     """Whether step 3 is running for this station: either half of it, configuration or
     EDL/FQDN, holds a RUNNING run recent enough not to be an orphan."""
@@ -1133,10 +1162,14 @@ class RenormalizationTrackingResult:
     failure_count: int
 
 
-def _renormalize_station_with_tracking(management_station: ManagementStation) -> RenormalizationTrackingResult:
-    """Re-run normalization for a station's in-scope appliances/enforcement points against
-    already-collected snapshots (no device connection), recording an IntegrationRun and any
-    per-item IntegrationEvents the same way the in-scope refresh views do."""
+def _open_renormalize_run(management_station: ManagementStation) -> IntegrationRun:
+    """The run row, RUNNING and tagged, before any normalizing starts.
+
+    Separated so the view can open it inside the REQUEST and hand the pk to a background
+    thread - the page the browser lands on then always finds work in progress. Opened on the
+    thread, it could render before the row existed and show nothing happening. The same shape
+    as `_open_in_scope_refresh_run`.
+    """
     run = IntegrationRun.objects.create(
         management_station=management_station,
         run_scope=IntegrationRun.SCOPE_APPLIANCE,
@@ -1147,9 +1180,23 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
         run=run,
         level=IntegrationEvent.LEVEL_INFO,
         stage="",
-        reason="RenormalizationStarted",
+        reason=_RENORMALIZE_RUN_REASON,
         message="Renormalization started (using already-collected data).",
     )
+    return run
+
+
+def _renormalize_station_with_tracking(
+    management_station: ManagementStation, run: IntegrationRun | None = None,
+) -> RenormalizationTrackingResult:
+    """Re-run normalization for a station's in-scope appliances/enforcement points against
+    already-collected snapshots (no device connection), recording an IntegrationRun and any
+    per-item IntegrationEvents the same way the in-scope refresh views do.
+
+    Pass `run` when it was already opened by `_open_renormalize_run()`.
+    """
+    if run is None:
+        run = _open_renormalize_run(management_station)
     renormalized = renormalize_in_scope_configuration(management_station)
 
     events = []
@@ -1213,27 +1260,67 @@ def _renormalize_station_with_tracking(management_station: ManagementStation) ->
     return RenormalizationTrackingResult(run=run, renormalized=renormalized, failure_count=failure_count)
 
 
+def _run_station_renormalize_in_background(management_station_pk: int, run_pk: int) -> None:
+    """Thread entry point for ManagementStationRenormalizeView.
+
+    The same shape as `_run_station_collection_in_background`, for the same reason: primary
+    keys rather than instances, because the thread has its own database connection; failures
+    logged, because nothing it raises reaches a user; and a run the failure left open is
+    closed, or the details tab shows "Running" until COLLECTION_LOCK_MAX_AGE passes.
+    """
+    run = None
+    try:
+        management_station = ManagementStation.objects.get(pk=management_station_pk)
+        run = IntegrationRun.objects.get(pk=run_pk)
+        _renormalize_station_with_tracking(management_station, run)
+        # Rules were just rewritten, so the grounding built from them is stale.
+        rebuild_security_rule_search_vocabulary(management_station)
+    except Exception:
+        logger.exception(
+            "Background renormalization failed for management station %s", management_station_pk,
+        )
+        if run is not None:
+            IntegrationRun.objects.filter(pk=run.pk, status=IntegrationRun.STATUS_RUNNING).update(
+                status=IntegrationRun.STATUS_FAILED, completed_at=timezone.now())
+    finally:
+        connections.close_all()
+
+
 class ManagementStationRenormalizeView(View):
+    """Starts a renormalize on a background thread and returns at once.
+
+    Held in the request it rewrote every rule, address and profile for every in-scope
+    enforcement point while the browser waited - the same shape as a collection minus the
+    device contact, and long enough to meet a proxy timeout or, on SQLite, to collide with a
+    concurrent reader. Jason, 2026-10-06, after the same change landed on Run Findings.
+
+    What the request used to report - counts, and a failure tally - is on the RUN now: its
+    status reaches the details tab, and its events reach the Events tab. A background thread
+    has no request to write a message from.
+    """
+
     def post(self, request, pk):
         management_station = get_object_or_404(ManagementStation, pk=pk)
         detail_url = reverse("management_station_detail", kwargs={"pk": management_station.pk})
 
-        outcome = _renormalize_station_with_tracking(management_station)
-        # Rules were just rewritten, so the grounding built from them is stale.
-        rebuild_security_rule_search_vocabulary(management_station)
+        if station_work_in_progress(management_station):
+            messages.error(request, "Collection or renormalization is already running for this station.")
+            return HttpResponseRedirect(detail_url)
+
+        run = _open_renormalize_run(management_station)
+        threading.Thread(
+            target=_run_station_renormalize_in_background,
+            args=(management_station.pk, run.pk),
+            name=f"station-renormalize-{management_station.pk}",
+            daemon=True,
+        ).start()
 
         messages.success(
             request,
-            "Renormalization completed for "
-            f"{len(outcome.renormalized.appliances)} appliance(s) and "
-            f"{len(outcome.renormalized.enforcement_points)} enforcement point(s), "
-            "using already-collected data (no device connection made).",
+            "Renormalization started in the background, using already-collected data (no device "
+            "connection made). This page refreshes itself until it finishes; the Events tab has "
+            "the detail.",
         )
-        if outcome.failure_count:
-            messages.error(
-                request,
-                f"{outcome.failure_count} normalization task(s) failed. Review the Events tab for details.",
-            )
         return HttpResponseRedirect(detail_url)
 
 

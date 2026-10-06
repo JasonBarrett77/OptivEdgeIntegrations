@@ -157,10 +157,23 @@
                                             <dd class="text-slate-800">{% include "integrations/partials/run_status.html" with run=workflow.collection_run never="Not collected yet." %}</dd>
                                             <dt class="text-slate-500">EDL / FQDN</dt>
                                             <dd class="text-slate-800">{% include "integrations/partials/run_status.html" with run=workflow.dynamic_content_run never="Not collected yet." %}</dd>
+                                            {% if workflow.renormalize_run %}
+                                            {% comment %}
+                                            Renormalize runs on a background thread now, so the
+                                            counts it used to report in a message have nowhere to
+                                            go. Its RUN carries the outcome instead, and the
+                                            Events tab carries the per-item detail.
+                                            {% endcomment %}
+                                            <dt class="text-slate-500">Renormalize</dt>
+                                            <dd class="text-slate-800">{% include "integrations/partials/run_status.html" with run=workflow.renormalize_run never="Not run." %}</dd>
+                                            {% endif %}
                                         </dl>
-                                        {% if workflow.collection_in_progress %}
-                                        <div data-collection-in-progress class="text-xs leading-5 text-blue-700">
-                                            Running in the background. This page refreshes every 10 seconds until it finishes.
+                                        {% if workflow.work_in_progress %}
+                                        <div {% if workflow.collection_in_progress %}data-collection-in-progress{% endif %}
+                                             {% if workflow.renormalization_in_progress %}data-renormalization-in-progress{% endif %}
+                                             class="text-xs leading-5 text-blue-700">
+                                            {% if workflow.renormalization_in_progress %}Renormalizing{% else %}Collecting{% endif %}
+                                            in the background. This page refreshes every 10 seconds until it finishes.
                                         </div>
                                         <script>setTimeout(function () { window.location.reload(); }, 10000);</script>
                                         {% elif workflow.collection_is_stale %}
@@ -175,10 +188,10 @@
                                             {% csrf_token %}
                                             <button
                                                 type="submit"
-                                                {% if not workflow.is_panorama or not workflow.ep_in_scope or workflow.collection_in_progress %}disabled{% endif %}
+                                                {% if not workflow.is_panorama or not workflow.ep_in_scope or workflow.work_in_progress %}disabled{% endif %}
                                                 class="inline-flex h-8 items-center justify-center border px-3 text-sm font-medium whitespace-nowrap focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50 {% if workflow.next_step == 'collect' %}border-blue-600 bg-blue-600 text-white hover:bg-blue-700{% else %}border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100{% endif %}"
                                             >
-                                                {% if workflow.collection_in_progress %}Collecting…{% else %}Collect and normalize{% endif %}
+                                                {% if workflow.collection_in_progress %}Collecting…{% elif workflow.renormalization_in_progress %}Renormalizing…{% else %}Collect and normalize{% endif %}
                                             </button>
                                         </form>
                                         <form method="post" action="{% url 'management_station_renormalize' pk=management_station.pk %}"
@@ -186,11 +199,11 @@
                                             {% csrf_token %}
                                             <button
                                                 type="submit"
-                                                {% if not workflow.collection_run or workflow.collection_in_progress %}disabled{% endif %}
+                                                {% if not workflow.collection_run or workflow.work_in_progress %}disabled{% endif %}
                                                 title="Re-run normalization on the configuration already collected, without contacting any device"
                                                 class="inline-flex h-7 items-center justify-center border border-slate-200 bg-white px-2 text-xs font-medium whitespace-nowrap text-slate-700 hover:bg-slate-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-blue-500/20 disabled:cursor-not-allowed disabled:opacity-50"
                                             >
-                                                Renormalize only
+                                                {% if workflow.renormalization_in_progress %}Renormalizing…{% else %}Renormalize only{% endif %}
                                             </button>
                                         </form>
                                         <div class="text-[11px] text-slate-500">Reuses collected data; no device contact.</div>

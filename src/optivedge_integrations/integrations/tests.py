@@ -3031,13 +3031,17 @@ class ManagementStationActionViewTests(TestCase):
         self.assertIsNotNone(run.completed_at)
         self.assertEqual(other.status, IntegrationRun.STATUS_RUNNING)
 
-    def test_renormalize_view_succeeds(self):
+    def test_renormalize_view_starts_a_background_thread_and_returns(self):
+        """Renormalize rewrites every rule, address and profile for every in-scope enforcement
+        point. Held in the request the browser waited for all of it - a collection's work minus
+        the device contact - so it is a thread now, like the collection beside it.
+
+        The thread is not actually started: a real one opens its own database connection and
+        would not see this test's transaction. The work itself is covered by
+        `test_renormalize_completes_the_run_it_was_given`."""
         station = self._create_panorama_station("panorama-renorm.local")
 
-        with patch(
-            "optivedge_integrations.integrations.views.renormalize_in_scope_configuration",
-            return_value=_empty_renormalization_result(),
-        ):
+        with patch("optivedge_integrations.integrations.views.threading.Thread") as thread:
             response = self.client.post(
                 reverse("management_station_renormalize", kwargs={"pk": station.pk})
             )
@@ -3046,7 +3050,41 @@ class ManagementStationActionViewTests(TestCase):
         self.assertRedirects(
             response, reverse("management_station_detail", kwargs={"pk": station.pk}))
         run = IntegrationRun.objects.get(management_station=station)
+        # Opened in the REQUEST, so the page it redirects to always finds work in progress.
+        self.assertEqual(run.status, IntegrationRun.STATUS_RUNNING)
+        thread.assert_called_once()
+        self.assertEqual(thread.call_args.kwargs["args"], (station.pk, run.pk))
+        self.assertTrue(thread.call_args.kwargs["daemon"])
+        thread.return_value.start.assert_called_once()
+
+    def test_renormalize_completes_the_run_it_was_given(self):
+        """What the thread does, called directly."""
+        station = self._create_panorama_station("panorama-renorm-work.local")
+        run = views_module._open_renormalize_run(station)
+
+        with patch(
+            "optivedge_integrations.integrations.views.renormalize_in_scope_configuration",
+            return_value=_empty_renormalization_result(),
+        ):
+            views_module._renormalize_station_with_tracking(station, run)
+
+        run.refresh_from_db()
         self.assertEqual(run.status, IntegrationRun.STATUS_SUCCEEDED)
+
+    def test_renormalize_is_refused_while_a_collection_is_running(self):
+        """The two write the SAME ROWS - a collection normalizes what it collects, and a
+        renormalize rewrites exactly that - so running them together would interleave
+        delete-and-recreate on the same enforcement points."""
+        station = self._create_panorama_station("panorama-renorm-busy.local")
+        views_module._open_in_scope_refresh_run(station)
+
+        with patch("optivedge_integrations.integrations.views.threading.Thread") as thread:
+            self.client.post(
+                reverse("management_station_renormalize", kwargs={"pk": station.pk})
+            )
+
+        thread.assert_not_called()
+        self.assertFalse(views_module.renormalization_in_progress(station))
 
     def test_refresh_dynamic_content_view_succeeds(self):
         station = self._create_panorama_station("panorama-dynamic.local")
@@ -3365,6 +3403,45 @@ class ManagementStationWorkflowTests(TestCase):
         self.assertContains(response, "data-collection-in-progress")
         self.assertContains(response, "window.location.reload()")
         self.assertContains(response, "Collecting…")
+
+    def test_a_renormalize_in_progress_disables_both_buttons_and_refreshes(self):
+        """Both, not just its own: a collection normalizes what it collects and a renormalize
+        rewrites exactly that, so the two would interleave delete-and-recreate on the same
+        enforcement points."""
+        self.point.in_scope = True
+        self.point.save()
+        self._record_inventory(timezone.now())
+        self._record_collection(timezone.now())
+        views_module._open_renormalize_run(self.station)
+
+        response = self.client.get(self.detail_url)
+        workflow = response.context["workflow"]
+
+        self.assertTrue(workflow["renormalization_in_progress"])
+        self.assertTrue(workflow["work_in_progress"])
+        self.assertFalse(workflow["collection_in_progress"])
+        self.assertContains(response, "data-renormalization-in-progress")
+        self.assertContains(response, "window.location.reload()")
+        self.assertContains(response, "Renormalizing…")
+        # Step 3 is not "the next thing to do" while work is running, as with a collection.
+        self.assertIsNone(workflow["next_step"])
+
+    def test_a_finished_renormalize_reports_its_outcome_on_the_page(self):
+        """The counts were a Django message from the view, and the view no longer waits for the
+        work. The RUN carries the outcome now, and the Events tab carries the detail."""
+        self.point.in_scope = True
+        self.point.save()
+        self._record_inventory(timezone.now())
+        run = views_module._open_renormalize_run(self.station)
+        run.status = IntegrationRun.STATUS_SUCCEEDED
+        run.completed_at = timezone.now()
+        run.save(update_fields=["status", "completed_at"])
+
+        response = self.client.get(self.detail_url)
+
+        self.assertEqual(response.context["workflow"]["renormalize_run"], run)
+        self.assertContains(response, "Renormalize")
+        self.assertNotContains(response, "data-renormalization-in-progress")
 
     def test_an_idle_page_does_not_refresh_itself(self):
         response = self.client.get(self.detail_url)
