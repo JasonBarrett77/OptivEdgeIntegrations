@@ -8140,6 +8140,44 @@ class ManagementSshNormalizationTests(TestCase):
                 "profiles": {"mgmt-profiles": {"server-profiles": {"entry": [
                     {"@name": name, **profile}]}}}}
 
+    def test_a_configured_host_key_and_rekey_carry_their_marker(self):
+        """These three fields were stored with no provenance at all - read by raw dict access
+        rather than through `scalar_value`, so the marker was discarded. A control firing on
+        them could not say where to go and change them."""
+        self._normalize(self._bound(
+            "p",
+            **{"default-hostkey": {"key-type": {"RSA": {"@ptpl": "stack_x", "#text": "4096"}}},
+               "session-rekey": {"interval": {"@ptpl": "stack_x", "#text": "1800"}}}))
+        row = _ManagementSshSettings.objects.get(appliance=self.appliance)
+        rows = {r.field_name: r for r in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
+            object_id=row.pk)}
+
+        self.assertEqual(row.host_key_bits, 4096)
+        self.assertEqual(row.rekey_interval_seconds, 1800)
+        for field in ("host_key_type", "host_key_bits", "rekey_interval_seconds"):
+            with self.subTest(field):
+                self.assertEqual(rows[field].provenance_type, "template")
+                self.assertEqual(rows[field].raw_value, "stack_x")
+
+    def test_an_absent_host_key_claims_nothing(self):
+        """`_host_key` falls back to RSA 2048, and that fallback is MEASURED FALSE on a device
+        that has ever been set to `all` - the ECDSA keys it generated keep being served after
+        the setting is deleted (discovery-log, 2026-09-14). So no row is written: recording
+        `pan_os_default` would state a vendor fact that is wrong on such a device, and
+        `assumed_default` would still carry a value the device may not be serving. Deliberately
+        unresolved rather than quietly decided."""
+        self._normalize(self._bound("p", ciphers={"member": ["aes256-gcm"]}))
+        row = _ManagementSshSettings.objects.get(appliance=self.appliance)
+        written = set(FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
+            object_id=row.pk).values_list("field_name", flat=True))
+
+        self.assertEqual(row.host_key_type, "RSA")
+        self.assertEqual(row.host_key_bits, 2048)
+        self.assertNotIn("host_key_type", written)
+        self.assertNotIn("rekey_interval_seconds", written)
+
     def test_nothing_bound_offers_the_measured_default(self):
         row = self._normalize()
         self.assertEqual(row.profile_name, "")

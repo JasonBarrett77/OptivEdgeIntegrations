@@ -96,20 +96,40 @@ def _members(node: Any) -> list[str]:
     return [str(v).strip() for v, _prov in iter_member_values(members) if str(v).strip()]
 
 
-def _host_key(profile: dict[str, Any]) -> tuple[str, int]:
-    """(type, bits) from `default-hostkey/key-type`, a nested choice - RSA 2048 when unset."""
+def _host_key(profile: dict[str, Any]) -> tuple[str, int, Any, str | None]:
+    """(type, bits, raw_key, raw_value) from `default-hostkey/key-type`, a nested choice.
+
+    RSA 2048 when unset, and the provenance for that case is deliberately ABSENT rather than a
+    declared default. `discovery-log.md`, 2026-09-14: writing `<all/>` GENERATES ECDSA keys and
+    deleting the setting does not withdraw them, so "on a device that has ever been set to
+    `all`, an absent default-hostkey no longer means RSA 2048 only". Recording
+    `pan_os_default` would state a vendor fact that is measured FALSE on such a device, and
+    `assumed_default` would still carry a value the device may not be serving. Until that is
+    settled the stored value stays as it is and no row is written, so nothing claims to know
+    where it came from.
+
+    A value that IS configured carries its marker, which is pure gain: it says which template
+    or stack to change, and makes no claim about absence.
+    """
     key_type = (profile.get("default-hostkey") or {}).get("key-type")
     if isinstance(key_type, dict):
         for kind in ("ECDSA", "RSA", "all"):
             if kind in key_type:
-                bits, _, _ = scalar_value(key_type[kind])
-                return kind, int(bits) if str(bits).isdigit() else 0
-    return "RSA", 2048
+                bits, raw_key, raw_value = scalar_value(key_type[kind])
+                return (kind, int(bits) if str(bits).isdigit() else 0, raw_key, raw_value)
+    return "RSA", 2048, ABSENT, None
 
 
 def _int(node: Any) -> int:
     text, _, _ = scalar_value(node)
     return int(text) if str(text).isdigit() else 0
+
+
+def _int_with_provenance(node: Any) -> tuple[int, Any, str | None]:
+    """`_int`, keeping the marker. ABSENT when the key is not there: the rekey defaults are
+    unmeasured, and 0 is this module's own stand-in rather than a vendor fact."""
+    text, raw_key, raw_value = scalar_value(node)
+    return (int(text) if str(text).isdigit() else 0), raw_key, raw_value
 
 
 def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
@@ -140,8 +160,10 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
         offer[key] = configured or list(defaults[key])
         from_default[key] = not configured
 
-    key_type, key_bits = _host_key(profile) if profile else ("RSA", 2048)
+    key_type, key_bits, hostkey_rk, hostkey_rv = (
+        _host_key(profile) if profile else ("RSA", 2048, ABSENT, None))
     rekey = (profile or {}).get("session-rekey") or {}
+    rekey_seconds, rekey_rk, rekey_rv = _int_with_provenance(rekey.get("interval"))
     weak = [m for m in offer["macs"] if m not in STRONG_MACS]
     ciphers_below, beyond_ciphers = _preferred_state(
         offer["ciphers"], PREFERRED_CIPHERS, ALLOWED_CIPHERS)
@@ -180,7 +202,7 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
                                            for m in offer["macs"]),
                 "host_key_type": key_type,
                 "host_key_bits": key_bits,
-                "rekey_interval_seconds": _int(rekey.get("interval")),
+                "rekey_interval_seconds": rekey_seconds,
                 "rekey_data_mb": _int(rekey.get("data")),
                 "rekey_packets_exponent": _int(rekey.get("packets")),
             },
@@ -210,7 +232,16 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
                     None))
 
         FieldProvenance.objects.filter(content_type=content_type, object_id=row.pk).delete()
-        entries = [("profile_name", name_rk, name_rv), *list_rows]
+        entries = [
+            ("profile_name", name_rk, name_rv),
+            # Configured host key and rekey interval carry their marker, so a control firing on
+            # them can say which template or stack to change. ABSENT where the key is not
+            # there - see `_host_key` for why neither default is declared.
+            ("host_key_type", hostkey_rk, hostkey_rv),
+            ("host_key_bits", hostkey_rk, hostkey_rv),
+            ("rekey_interval_seconds", rekey_rk, rekey_rv),
+            *list_rows,
+        ]
         FieldProvenance.objects.bulk_create([
             FieldProvenance(
                 content_type=content_type, object_id=row.pk, field_name=field_name,
