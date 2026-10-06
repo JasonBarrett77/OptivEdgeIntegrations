@@ -117,7 +117,10 @@ def _host_key(profile: dict[str, Any]) -> tuple[str, int, Any, str | None]:
             if kind in key_type:
                 bits, raw_key, raw_value = scalar_value(key_type[kind])
                 return (kind, int(bits) if str(bits).isdigit() else 0, raw_key, raw_value)
-    return "RSA", 2048, ABSENT, None
+    return "", None, Implicit.not_assumed(
+        "Help p.904 gives the default as RSA 2048, and 2026-09-14 measured that false on a "
+        "device ever set to `all`: the ECDSA keys it generated are still served after the "
+        "setting is deleted. Only the live SSH offer can say what is presented."), None
 
 
 def _int(node: Any) -> int:
@@ -161,7 +164,7 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
         from_default[key] = not configured
 
     key_type, key_bits, hostkey_rk, hostkey_rv = (
-        _host_key(profile) if profile else ("RSA", 2048, ABSENT, None))
+        _host_key(profile) if profile else _host_key({}))
     rekey = (profile or {}).get("session-rekey") or {}
     rekey_seconds, rekey_rk, rekey_rv = _int_with_provenance(rekey.get("interval"))
     weak = [m for m in offer["macs"] if m not in STRONG_MACS]

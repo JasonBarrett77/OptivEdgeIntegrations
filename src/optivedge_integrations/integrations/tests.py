@@ -8160,23 +8160,28 @@ class ManagementSshNormalizationTests(TestCase):
                 self.assertEqual(rows[field].provenance_type, "template")
                 self.assertEqual(rows[field].raw_value, "stack_x")
 
-    def test_an_absent_host_key_claims_nothing(self):
-        """`_host_key` falls back to RSA 2048, and that fallback is MEASURED FALSE on a device
-        that has ever been set to `all` - the ECDSA keys it generated keep being served after
-        the setting is deleted (discovery-log, 2026-09-14). So no row is written: recording
-        `pan_os_default` would state a vendor fact that is wrong on such a device, and
-        `assumed_default` would still carry a value the device may not be serving. Deliberately
-        unresolved rather than quietly decided."""
+    def test_an_absent_host_key_stores_nothing_and_says_why(self):
+        """`_host_key` used to fall back to RSA 2048, and discovery-log 2026-09-14 measured that
+        false on a device ever set to `all`: the ECDSA keys it generated are still served after
+        the setting is deleted. So absence means RSA 2048 on most devices and something else on
+        an unknown subset, and only the live SSH offer can say which.
+
+        Resolved 2026-10-06 the way Jason framed it - the lack of an explicit value is itself the
+        finding, "an unknown risk, and likely weak" - so the field is null and the row says
+        `not_configured`. `pan_os_default` would be the false vendor fact; `assumed_default`
+        would still carry a value the device may not be serving."""
         self._normalize(self._bound("p", ciphers={"member": ["aes256-gcm"]}))
         row = _ManagementSshSettings.objects.get(appliance=self.appliance)
-        written = set(FieldProvenance.objects.filter(
+        rows = {r.field_name: r for r in FieldProvenance.objects.filter(
             content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
-            object_id=row.pk).values_list("field_name", flat=True))
+            object_id=row.pk)}
 
-        self.assertEqual(row.host_key_type, "RSA")
-        self.assertEqual(row.host_key_bits, 2048)
-        self.assertNotIn("host_key_type", written)
-        self.assertNotIn("rekey_interval_seconds", written)
+        self.assertEqual(row.host_key_type, "")
+        self.assertIsNone(row.host_key_bits)
+        self.assertEqual(rows["host_key_type"].provenance_type, "not_configured")
+        self.assertEqual(rows["host_key_bits"].provenance_type, "not_configured")
+        # Still fires: PAN-MCR-004's baseline is "not ECDSA", and blank is not ECDSA.
+        self.assertNotEqual(row.host_key_type.upper(), "ECDSA")
 
     def test_nothing_bound_offers_the_measured_default(self):
         row = self._normalize()
@@ -8189,7 +8194,9 @@ class ManagementSshNormalizationTests(TestCase):
         self.assertTrue(row.offers_sha1_kex)
         self.assertFalse(row.offers_cbc_cipher)
         self.assertFalse(row.offers_weak_kex)
-        self.assertEqual((row.host_key_type, row.host_key_bits), ("RSA", 2048))
+        # No profile bound, so no key type is configured - stored as absent rather than as the
+        # RSA 2048 the vendor guide gives, which 2026-09-14 measured unreliable.
+        self.assertEqual((row.host_key_type, row.host_key_bits), ("", None))
 
     def test_an_unset_list_in_a_bound_profile_is_the_default_not_empty(self):
         """tpa-a's ciphers-only profile narrowed the ciphers and left MACs at the default."""

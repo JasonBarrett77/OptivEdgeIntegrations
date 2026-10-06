@@ -135,12 +135,22 @@ class ManagementSshSettings(ProvenancedMixin, SyncTrackedModel):
     #: `hmac-sha2-256` (or its -etm form) is offered.
     offers_sha2_256_mac = models.BooleanField(default=False)
 
-    #: Effective host key. Help p.904: default RSA 2048. `all` is a type in its own right,
-    #: measured 2026-09-14: it takes no size (so `host_key_bits` is 0) and serves RSA AND all
-    #: three ECDSA curves at once, which is why PAN-MCR-004 fires on it - an RSA 2048 key is
-    #: still presented.
-    host_key_type = models.CharField(max_length=8, blank=True, default="RSA")
-    host_key_bits = models.PositiveIntegerField(default=2048)
+    #: Effective host key. `all` is a type in its own right, measured 2026-09-14: it takes no
+    #: size (so `host_key_bits` is 0) and serves RSA AND all three ECDSA curves at once, which
+    #: is why PAN-MCR-004 fires on it - an RSA 2048 key is still presented.
+    #:
+    #: BLANK AND NULL WHEN NO KEY TYPE IS CONFIGURED, since 2026-10-06. Help p.904 gives the
+    #: default as RSA 2048 and this stored it, but the same 2026-09-14 measurement found the
+    #: inference false on a device that has ever been set to `all`: the ECDSA keys it generated
+    #: are still served after the setting is deleted. So absence means RSA 2048 on most devices
+    #: and something else on an unknown subset, and only the live SSH offer can tell which.
+    #: Storing the guess made a finding name a key nobody read, so it is stored as absent and
+    #: the provenance row says `not_configured` - "the field is null and we say why".
+    #:
+    #: PAN-MCR-004 fires on exactly the same devices either way: its baseline is "not ECDSA",
+    #: and blank is not ECDSA.
+    host_key_type = models.CharField(max_length=8, blank=True, default="")
+    host_key_bits = models.PositiveIntegerField(null=True, blank=True, default=None)
     #: Session rekey triggers. 0 is the default for each: no time-based rekey, the cipher's own
     #: data limit, and 2^28 packets (Help p.905).
     rekey_interval_seconds = models.PositiveIntegerField(default=0)
