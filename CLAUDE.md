@@ -199,6 +199,31 @@ ManagementStation (Panorama or standalone firewall connection)
 (see `get_in_scope_*` helpers in `platforms/pan_os/flows.py`) — most of the domain model exists to support
 appliance-group HA topologies where a vsys-level enforcement point spans multiple physical nodes.
 
+**An appliance's group is chosen afresh on EVERY sync, so an enforcement point can be
+superseded.** `ha/peer/serial` decides it: no peer serial means `standalone-<serial>`, a peer
+serial means `ha-pair-<a>-<b>`. A pair still negotiating - recently powered on, auto-commit
+unfinished - reports no peer, so one sync builds standalone groups and the next builds the pair.
+Enforcement points are keyed on (station, GROUP, vsys), so the second sync creates NEW rows and
+the first set is left behind.
+
+That was a real defect until 2026-10-06, and the duplicate rows were the harmless half. Scope
+was recorded on the OLD row while collection reads `enforcement_points.filter(in_scope=True)` -
+so an operator who chose scope before the pair came up had it applied to a row nothing collects
+through, and the estate read as collected when nothing was.
+
+`normalization/panorama.py::retire_superseded_enforcement_points` sweeps after every device in
+the response is placed. A point is superseded when every appliance that reaches it THROUGH
+`EnforcementNode` now belongs to a different group and a point for the same vsys exists under
+one of those groups. The node linkage is the load-bearing part: matching on `vsys_name` would
+pair two appliances that both have a `vsys1`, which is most of them.
+
+**Retired, not deleted.** `is_missing`/`missing_since` is what `SyncTrackedModel` has for "was
+here, is not now"; deletion would cascade through the collected configuration to the findings
+recorded against it. `in_scope` is cleared as well - that, not `is_missing`, is what collection
+follows, and nothing reads `is_missing` for this model. The station tab marks such a row
+`Retired` rather than hiding it, or the duplicate reads as the retire having failed. A
+superseded estate heals itself on the next inventory sync.
+
 **`ApplianceGroup` models the HA/multi-appliance relationship, and nothing else.** `group_type` is
 standalone/ha_pair/cluster and `active_appliance` names the active node; it exists so several appliances can
 be managed as one unit. Nothing about it concerns Panorama.

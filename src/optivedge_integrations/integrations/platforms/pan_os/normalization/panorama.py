@@ -242,6 +242,68 @@ def normalize_managed_device_entry(
     )
 
 
+def retire_superseded_enforcement_points(management_station, seen_point_ids, normalized_at):
+    """Retire the enforcement points an appliance has moved away from, carrying scope with it.
+
+    THE BUG THIS FIXES. An appliance's group is chosen afresh on every sync from
+    `ha/peer/serial`: no peer serial means `standalone-<serial>`, a peer serial means
+    `ha-pair-<a>-<b>`. A pair that is still negotiating - firewalls recently powered on, auto-
+    commit not finished - reports no peer, so the first sync builds standalone groups and the
+    next builds the HA pair. Enforcement points are keyed on (station, GROUP, vsys), so the
+    second sync creates a NEW row per vsys and the first set was left behind: still present,
+    still `in_scope`, pointing at a group the appliance no longer belongs to.
+
+    Two consequences, and the second is the one that hurts. The station shows two rows per
+    vsys. And scope was recorded on the OLD row while collection reads
+    `enforcement_points.filter(in_scope=True)` - so an operator who chose scope before the pair
+    came up has their choice silently applied to a row nothing collects through, and the
+    estate looks collected when it is not.
+
+    THE RULE. An enforcement point is superseded when every appliance that reaches it - through
+    `EnforcementNode`, not by name - now belongs to a DIFFERENT group, and a point for the same
+    vsys exists under one of those groups. Matching on `vsys_name` alone would pair two
+    appliances that both have a `vsys1`, which is most of them.
+
+    MARKED MISSING, NOT DELETED. `SyncTrackedModel.is_missing` is what this model has for
+    "was here, is not now", deletion would cascade through the collected configuration to the
+    findings recorded against it, and a row that turns out to have been retired wrongly is
+    recoverable this way and not the other. `in_scope` is cleared as well, because that - not
+    `is_missing`, which nothing reads for this model - is what collection follows.
+    """
+    retired = []
+    stale = (EnforcementPoint.objects
+             .filter(management_station=management_station, appliance_group__isnull=False)
+             .exclude(pk__in=seen_point_ids)
+             .prefetch_related("nodes__appliance"))
+    for point in stale:
+        appliances = [node.appliance for node in point.nodes.all() if node.appliance_id]
+        if not appliances:
+            # Nothing reaches it, so nothing says where it moved TO. Left alone: an
+            # enforcement point for a device Panorama no longer manages is a different
+            # question, and guessing at it here would retire rows for the wrong reason.
+            continue
+        if any(a.appliance_group_id == point.appliance_group_id for a in appliances):
+            continue  # still served where it says it is
+        replacement = (EnforcementPoint.objects
+                       .filter(management_station=management_station,
+                               appliance_group_id__in={a.appliance_group_id for a in appliances},
+                               vsys_name=point.vsys_name)
+                       .exclude(pk=point.pk)
+                       .order_by("pk")
+                       .first())
+        if replacement is None:
+            continue
+        if point.in_scope and not replacement.in_scope:
+            replacement.in_scope = True
+            replacement.save(update_fields=["in_scope"])
+        point.in_scope = False
+        point.is_missing = True
+        point.missing_since = normalized_at
+        point.save(update_fields=["in_scope", "is_missing", "missing_since"])
+        retired.append(point)
+    return retired
+
+
 def normalize_show_managed_devices(
     management_station: ManagementStation,
     collected: PANOSCollectedResponse,
@@ -290,6 +352,11 @@ def normalize_show_managed_devices(
                 enforcement_node.last_synced_at = normalized_at
                 enforcement_node.save()
                 enforcement_nodes_by_id[enforcement_node.id] = enforcement_node
+
+        # After every device in the response has been placed, so a point confirmed by one
+        # appliance cannot be retired while iterating another.
+        retire_superseded_enforcement_points(
+            management_station, set(enforcement_points_by_id), normalized_at)
 
     return PANOSNormalizedCollection(
         address_objects=[],

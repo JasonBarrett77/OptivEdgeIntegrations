@@ -303,6 +303,19 @@
                                         {% if enforcement_point.vsys_display_name %}
                                             <span class="text-slate-500">/ {{ enforcement_point.vsys_display_name }}</span>
                                         {% endif %}
+                                        {% if enforcement_point.is_missing %}
+                                        {% comment %}
+                                        Retired: the appliance that served this vsys has moved to
+                                        another group, usually because an HA pair came up after
+                                        the first sync saw it as two standalones. Kept rather
+                                        than deleted - the collected configuration and the
+                                        findings recorded against it hang off this row - and
+                                        marked so the duplicate reads as history rather than as
+                                        the retire having failed.
+                                        {% endcomment %}
+                                        <span title="Superseded: this appliance now serves the vsys through a different appliance group"
+                                              class="ml-1 border border-slate-300 bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500">Retired</span>
+                                        {% endif %}
                                     </td>
                                     <td class="h-8 border-b border-slate-200 px-3 py-1.5 text-sm text-slate-800">
                                         {% if enforcement_point.last_synced_at %}

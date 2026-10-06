@@ -9482,3 +9482,132 @@ class SideNumHostsTests(TestCase):
         """Zero is the narrowest value there is. A side with nothing resolvable on it must not
         read as the tightest side on the device."""
         self.assertIsNone(side_num_hosts([], negated=False, complement_ref=None))
+
+
+class SupersededEnforcementPointTests(TestCase):
+    """An HA pair that is still coming up reports no peer, and the group it lands in changes.
+
+    Measured consequence, reported 2026-09-28 from a non-lab environment: two rows per vsys on
+    the station's Enforcement Points tab. The duplicate is the visible half. The half that
+    matters is that scope was recorded on the FIRST row and collection reads
+    `enforcement_points.filter(in_scope=True)`, so an operator who chose scope before the pair
+    came up has it applied to a row nothing collects through - and the estate reads as
+    collected when nothing was.
+    """
+
+    SERIAL_A = "001111111111"
+    SERIAL_B = "002222222222"
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname="panorama.ha-flap",
+        )
+
+    def _collected(self, entries):
+        from optivedge_integrations.integrations.platforms.pan_os.collectors.types import (
+            PANOSCollectedResponse,
+            PANOSOperationRequest,
+        )
+
+        return PANOSCollectedResponse(
+            source_type="show_managed_devices",
+            request=PANOSOperationRequest(command_xml="<show><devices><all/></devices></show>"),
+            response={"response": {"@status": "success",
+                                   "result": {"devices": {"entry": entries}}}},
+        )
+
+    @staticmethod
+    def _entry(serial, *, peer=None, state=""):
+        entry = {
+            "@name": serial,
+            "serial": serial,
+            "hostname": f"fw-{serial[-2:]}",
+            "vsys": {"entry": [{"@name": "vsys1", "display-name": "vsys1"}]},
+        }
+        if peer:
+            entry["ha"] = {"state": state, "peer": {"serial": peer}}
+        return entry
+
+    def _sync(self, entries):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.panorama import (
+            normalize_show_managed_devices,
+        )
+
+        return normalize_show_managed_devices(self.station, self._collected(entries))
+
+    def test_scope_follows_the_appliance_when_its_group_changes(self):
+        """The bug, end to end: sync with no peer, choose scope, sync again with the peer."""
+        self._sync([self._entry(self.SERIAL_A), self._entry(self.SERIAL_B)])
+        standalone_points = EnforcementPoint.objects.all()
+        self.assertEqual(standalone_points.count(), 2)
+        standalone_points.update(in_scope=True)
+
+        self._sync([
+            self._entry(self.SERIAL_A, peer=self.SERIAL_B, state="active"),
+            self._entry(self.SERIAL_B, peer=self.SERIAL_A, state="passive"),
+        ])
+
+        live = EnforcementPoint.objects.filter(is_missing=False)
+        self.assertEqual(live.count(), 1, "the HA pair serves one vsys1, not one per node")
+        self.assertEqual(live.get().appliance_group.group_type, ApplianceGroup.TYPE_HA_PAIR)
+        self.assertTrue(live.get().in_scope, "scope has to travel with the appliance")
+
+        retired = EnforcementPoint.objects.filter(is_missing=True)
+        self.assertEqual(retired.count(), 2)
+        self.assertFalse(any(p.in_scope for p in retired),
+                         "collection follows in_scope, so a retired row must not keep it")
+        self.assertTrue(all(p.missing_since for p in retired))
+
+    def test_collection_targets_one_row_per_vsys_afterwards(self):
+        """What the operator sees: the in-scope count stops double-counting, and the station's
+        collection has one enforcement point to walk rather than three."""
+        self._sync([self._entry(self.SERIAL_A), self._entry(self.SERIAL_B)])
+        EnforcementPoint.objects.update(in_scope=True)
+        self._sync([
+            self._entry(self.SERIAL_A, peer=self.SERIAL_B, state="active"),
+            self._entry(self.SERIAL_B, peer=self.SERIAL_A, state="passive"),
+        ])
+
+        self.assertEqual(
+            self.station.enforcement_points.filter(in_scope=True).count(), 1)
+
+    def test_the_station_page_marks_a_retired_point_rather_than_hiding_it(self):
+        """Kept, not deleted - the collected configuration and the findings recorded against it
+        hang off this row - so the tab has to say which of the two rows is history. Without the
+        marker the duplicate reads as the retire having failed."""
+        self._sync([self._entry(self.SERIAL_A), self._entry(self.SERIAL_B)])
+        self._sync([self._entry(self.SERIAL_A, peer=self.SERIAL_B, state="active"),
+                    self._entry(self.SERIAL_B, peer=self.SERIAL_A, state="passive")])
+
+        response = self.client.get(
+            reverse("management_station_detail", kwargs={"pk": self.station.pk}),
+            {"tab": "enforcement-points", "scope": "all"})
+
+        self.assertContains(response, "Retired")
+        self.assertEqual(EnforcementPoint.objects.filter(is_missing=True).count(), 2)
+
+    def test_a_point_still_served_where_it_says_it_is_survives(self):
+        """The guard against over-retiring: syncing the same shape twice must retire nothing."""
+        self._sync([self._entry(self.SERIAL_A, peer=self.SERIAL_B, state="active"),
+                    self._entry(self.SERIAL_B, peer=self.SERIAL_A, state="passive")])
+        EnforcementPoint.objects.update(in_scope=True)
+
+        self._sync([self._entry(self.SERIAL_A, peer=self.SERIAL_B, state="active"),
+                    self._entry(self.SERIAL_B, peer=self.SERIAL_A, state="passive")])
+
+        self.assertEqual(EnforcementPoint.objects.filter(is_missing=True).count(), 0)
+        self.assertEqual(EnforcementPoint.objects.filter(in_scope=True).count(), 1)
+
+    def test_two_appliances_with_the_same_vsys_name_are_not_paired(self):
+        """`vsys1` is on nearly every firewall, so matching on the name alone would retire one
+        appliance's point in favour of an unrelated appliance's. The link is the enforcement
+        NODE - which appliance actually reaches the point."""
+        self._sync([self._entry(self.SERIAL_A), self._entry(self.SERIAL_B)])
+        EnforcementPoint.objects.update(in_scope=True)
+
+        # Same shape again: both still standalone, both still vsys1.
+        self._sync([self._entry(self.SERIAL_A), self._entry(self.SERIAL_B)])
+
+        self.assertEqual(EnforcementPoint.objects.filter(is_missing=True).count(), 0)
+        self.assertEqual(EnforcementPoint.objects.filter(in_scope=True).count(), 2)
