@@ -40,20 +40,30 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.device_c
 ENTRY_FIELD = "__entry__"
 
 #: Attributes that state where an entry came from. Measured 2026-08-31: a template-pushed
-#: profile carries `@ptpl` on the entry AND on each service leaf; a locally-created one
-#: carries none, so LOCAL is the absence of a row rather than a row saying "local".
+#: profile carries `@ptpl` on the entry AND on each service leaf; a locally-created one carries
+#: none.
+#:
+#: LOCAL used to be the absence of a row. That made absence mean two things - "defined on the
+#: device" and "nothing tracks this" - and a consumer cannot tell them apart, so a locally
+#: defined profile was presented as unrecorded. Four of the lab's eight profiles are in that
+#: state. An unmarked entry now gets a row SAYING local, which is the same correction
+#: normalization made for FIELDS on 2026-09-21.
+#:
+#: An override also leaves an entry unmarked, and local is the right answer there too: the
+#: override replaced the object, so the device-side copy is what is in force and is where a
+#: change has to be made. What is lost is the history, not the destination.
 PROVENANCE_ATTRIBUTES = {
     "@ptpl": FieldProvenance.ProvenanceType.TEMPLATE,
     "@src": FieldProvenance.ProvenanceType.PANORAMA,
 }
 
 
-def _entry_provenance(entry: dict) -> tuple[str, str, str] | None:
+def _entry_provenance(entry: dict) -> tuple[str, str, str]:
     for attribute, provenance_type in PROVENANCE_ATTRIBUTES.items():
         value = entry.get(attribute)
         if value:
             return provenance_type, attribute, str(value)
-    return None
+    return FieldProvenance.ProvenanceType.LOCAL, "", ""
 
 
 def _profile_entries(device_entry: dict) -> list[dict]:
@@ -119,13 +129,11 @@ def normalize_interface_management_profiles(
                 bound_interface_names=bound,
                 bound_interface_count=len(bound),
             )
-            provenance = _entry_provenance(entry)
-            if provenance is not None:
-                provenance_type, raw_key, raw_value = provenance
-                FieldProvenance.objects.create(
-                    content_type=content_type, object_id=profile.pk,
-                    field_name=ENTRY_FIELD, provenance_type=provenance_type,
-                    raw_key=raw_key, raw_value=raw_value[:128],
-                )
+            provenance_type, raw_key, raw_value = _entry_provenance(entry)
+            FieldProvenance.objects.create(
+                content_type=content_type, object_id=profile.pk,
+                field_name=ENTRY_FIELD, provenance_type=provenance_type,
+                raw_key=raw_key, raw_value=raw_value[:128],
+            )
             written.append(profile)
     return written

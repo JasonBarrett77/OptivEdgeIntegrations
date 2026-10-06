@@ -65,7 +65,24 @@ class FieldProvenance(models.Model):
     absent means the service is ON, `enable-log-high-dp-load` absent means it is OFF.
 
     So an absent key now records a row too, and a missing row means only that the field is not
-    tracked. The five types that describe a value's origin:
+    tracked.
+
+    THE SAME CORRECTION REACHED `__entry__` ON 2026-10-05. An unmarked entry is a LOCALLY
+    DEFINED object, and some normalizers wrote nothing for it - so absence meant both "defined
+    on the device" and "nothing tracks this", which no consumer can tell apart. 25 of the lab's
+    26 administrator accounts and half its interface management profiles were local and recorded
+    nothing. An unmarked entry now records LOCAL. A missing `__entry__` row means only that the
+    model does not track entry provenance - true of the `deviceconfig/system` settings models,
+    which are nodes rather than named entries and carry their provenance per field.
+
+    An OVERRIDE also leaves an entry unmarked, and LOCAL is correct there: the override replaced
+    the object, so the device-side copy is what is in force and is where a change has to be
+    made. What is lost is the history, not the destination.
+
+    `@ptpl` names a template OR a template stack, and a stack has its own config layer that
+    overrides its templates - `raw_value` is stored as given and not disambiguated.
+
+    The five types that describe a value's origin:
 
       LOCAL / TEMPLATE / DEVICE_GROUP / PANORAMA   the key was PRESENT; this is where it came
                                                    from, read off the payload's own marker

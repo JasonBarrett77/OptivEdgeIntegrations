@@ -279,7 +279,12 @@ def normalize_admin_users(appliance: Appliance) -> dict[str, int]:
             # `"users": {"@ptpl": "shared"}` over three entries that are all device-local,
             # because a template named `shared` pushes an EMPTY users node.
             raw_key, raw_value = entry_provenance(entry)
-            if raw_key is not None:
+            # `is not ABSENT`, not `is not None`: no marker means LOCALLY DEFINED, and
+            # `classify_prov_type(None)` says so. Guarding on None instead wrote nothing for a
+            # local account, so absence had to carry the meaning - and absence already means
+            # "nothing tracks this" elsewhere, so it carried two. 25 of the lab's 26 accounts
+            # are local and every one of them read as unrecorded.
+            if raw_key is not ABSENT:
                 FieldProvenance.objects.create(
                     content_type=content_type, object_id=obj.pk, field_name="__entry__",
                     provenance_type=classify_prov_type(raw_key),

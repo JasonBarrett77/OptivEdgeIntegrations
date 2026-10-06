@@ -7136,9 +7136,13 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
             content_type=ct, object_id=profiles["from-template"].pk, field_name=ENTRY_FIELD)
         self.assertEqual(row.provenance_type, FieldProvenance.ProvenanceType.TEMPLATE)
         self.assertEqual(row.raw_value, "ptpl_fw-core-tpa")
-        self.assertFalse(FieldProvenance.objects.filter(
-            content_type=ct, object_id=profiles["from-local"].pk).exists(),
-            "local is the absence of a row, as FieldProvenance documents")
+        # Local is now a ROW SAYING LOCAL, not the absence of one. Until 2026-10-05 this
+        # asserted the absence, which is what made "defined on the device" and "nothing tracks
+        # this" indistinguishable to every consumer.
+        local_row = FieldProvenance.objects.get(
+            content_type=ct, object_id=profiles["from-local"].pk, field_name=ENTRY_FIELD)
+        self.assertEqual(local_row.provenance_type, FieldProvenance.ProvenanceType.LOCAL)
+        self.assertEqual(local_row.raw_key, "", "no payload key said local; its absence did")
 
     def test_counting_without_interfaces_raises_rather_than_reporting_all_unused(self):
         """With no interface rows every profile counts zero bindings.
@@ -7152,6 +7156,49 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
         with self.assertRaises(ValueError) as raised:
             normalize_interface_management_profiles(appliance)
         self.assertIn("no normalized interfaces", str(raised.exception))
+
+    def test_a_locally_defined_profile_says_local_rather_than_saying_nothing(self):
+        """LOCAL used to be the absence of a row, which made absence mean two things: defined on
+        the device, and nothing tracks this. A consumer cannot tell those apart, so every
+        locally defined profile was presented as unrecorded - four of the lab's eight.
+
+        This is the same correction normalization made for FIELDS on 2026-09-21, applied to the
+        entry. An override also leaves an entry unmarked and local is right there too: the
+        override replaced the object, so the device copy is in force and is where a change has
+        to be made."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": [
+                {"@name": "local-one", "https": "yes"},
+                {"@name": "pushed-one", "@ptpl": "stack_x", "ssh": "yes"},
+            ]}},
+            "interface": {"ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {}}}},
+        })
+        normalize_interfaces(appliance)
+        normalize_interface_management_profiles(appliance)
+
+        rows = {r.object_id: r for r in FieldProvenance.objects.filter(field_name="__entry__")}
+        by_name = {p.name: p for p in InterfaceManagementProfile.objects.all()}
+        self.assertEqual(rows[by_name["local-one"].pk].provenance_type, "local")
+        self.assertEqual(rows[by_name["pushed-one"].pk].provenance_type, "template")
+        self.assertEqual(rows[by_name["pushed-one"].pk].raw_value, "stack_x")
+
+    def test_every_profile_gets_an_entry_row(self):
+        """A profile is defined SOMEWHERE. Jason, 2026-10-05: "Everything should have
+        provenance. A management profile is defined *somewhere*." So the count of entry rows
+        equals the count of profiles, with no exceptions to remember."""
+        appliance = self._appliance()
+        self._snapshot(appliance, {
+            "profiles": {"interface-management-profile": {"entry": [
+                {"@name": f"p{i}"} for i in range(4)
+            ]}},
+            "interface": {"ethernet": {"entry": {"@name": "ethernet1/1", "layer3": {}}}},
+        })
+        normalize_interfaces(appliance)
+        profiles = normalize_interface_management_profiles(appliance)
+
+        self.assertEqual(
+            FieldProvenance.objects.filter(field_name="__entry__").count(), len(profiles))
 
     def test_the_binding_is_read_from_the_interface_row_not_a_second_walk(self):
         appliance = self._appliance()
@@ -7906,6 +7953,56 @@ class AuthenticationSequenceNormalizationTests(TestCase):
         _normalize_profiles(self.appliance)
         _normalize_sequences(self.appliance)
         _normalize_admins(self.appliance)
+
+    def test_an_admin_account_records_where_it_is_defined(self):
+        """Validated against the lab 2026-10-05, 26 accounts across three devices: an entry is
+        marked exactly when a template or STACK supplies it and has not been overridden, and
+        unmarked otherwise. Jason expected admin users to behave like any other named object,
+        and they do - the earlier doubt came from the CONTAINER marker, which says a template
+        contributes to `mgt-config/users` and nothing about which entries came from it.
+
+        So an unmarked entry means local, and now says so. Before this, 25 of the lab's 26
+        accounts recorded nothing at all.
+
+        `@ptpl` names a template OR a stack - `template_admin_user` on pan-fw-111 carries
+        `temp-stck-jb-rg`, defined in the stack's own config layer. Stored as given and not
+        disambiguated; Jason, 2026-10-05: "Treat stacks like templates... The engineer already
+        understands stacks and templates."
+        """
+        self._normalize([], users=[
+            {"@name": "local-admin",
+             "permissions": {"role-based": {"superuser": "yes"}}},
+            {"@name": "pushed-admin", "@ptpl": "temp-stck-jb-rg",
+             "permissions": {"role-based": {"superuser": "yes"}}},
+        ])
+
+        ct = ContentType.objects.get_for_model(_AdminUser)
+        by_name = {u.name: u for u in _AdminUser.objects.all()}
+        rows = {r.object_id: r for r in FieldProvenance.objects.filter(
+            content_type=ct, field_name="__entry__")}
+
+        self.assertEqual(len(rows), 2, "every account is defined somewhere and must say where")
+        self.assertEqual(rows[by_name["local-admin"].pk].provenance_type, "local")
+        pushed = rows[by_name["pushed-admin"].pk]
+        self.assertEqual(pushed.provenance_type, "template")
+        self.assertEqual(pushed.raw_value, "temp-stck-jb-rg")
+
+    def test_the_container_marker_is_not_read_as_the_entries_provenance(self):
+        """Measured on three devices: `shared-multi-vsys` pushes an EMPTY users node, which is
+        enough to mark the merged container over entries it contributed nothing to. Reading the
+        container would report every local account as template-pushed - and on the PA-5220 pair
+        that is all seventeen of them."""
+        self._normalize([], users=[
+            {"@name": "local-admin", "permissions": {"role-based": {"superuser": "yes"}}},
+        ])
+        # The container marker lives beside the entries, not on them.
+        snapshot = Snapshot.objects.filter(appliance=self.appliance).latest("collected_at")
+        self.assertNotIn("@ptpl", snapshot.payload["config"]["mgt-config"]["users"])
+
+        row = FieldProvenance.objects.get(
+            content_type=ContentType.objects.get_for_model(_AdminUser),
+            object_id=_AdminUser.objects.get().pk, field_name="__entry__")
+        self.assertEqual(row.provenance_type, "local")
 
     def _seq(self, name, *members, **flags):
         entry = {"@name": name, "authentication-profiles": {"member": list(members)}}
