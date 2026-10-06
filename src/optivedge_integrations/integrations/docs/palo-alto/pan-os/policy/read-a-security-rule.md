@@ -43,6 +43,20 @@ absent element is never "not set yet":
     negate-destination absent -> no
     disabled absent         -> no
 
+`[MEASURED 2026-10-05]` on pan-fw-111 (PA-VM, 11.2.3) for the last three. Four allow rules were
+written through the API carrying none of the keys, committed, and read back under **both**
+`action=get` and `action=show`: all three stay absent, so the running config fills in nothing
+here and is no better an oracle than the candidate. `disabled` was then toggled in the
+candidate - writing `<disabled>no</disabled>` stores it and it reads back explicitly, and
+deleting the node returns the rule to absent.
+
+**So absent and explicit `no` are two distinct wire representations of one behaviour.** Absence
+is not "the device cannot store no"; it means nobody wrote the key. Map it to `no`, not to
+unknown.
+
+`rule-type absent -> universal` is **not** covered by that measurement - it is unchanged from
+what this guide already said, and nothing has established it here.
+
 Treat `<rule-type>universal</rule-type>` and an absent `rule-type` as identical; the
 dataplane does.
 

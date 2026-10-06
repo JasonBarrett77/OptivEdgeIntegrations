@@ -286,7 +286,7 @@ def normalize_rule(
     disabled, disabled_rk, disabled_rv = parse_yes_no_field(
         rule.get("disabled"),
         implicit=Implicit.measured(
-            False, "read-a-security-rule.md: 'disabled absent -> no'"))
+            False, "read-a-security-rule.md: 'disabled absent -> no' [MEASURED 2026-10-05]"))
     rule_type, rule_type_rk, rule_type_rv = scalar_value(rule.get("rule-type"))
     description, description_rk, description_rv = scalar_value(rule.get("description"))
     log_start, log_start_rk, log_start_rv = parse_yes_no_field(
@@ -303,12 +303,12 @@ def normalize_rule(
     negate_source, negate_source_rk, negate_source_rv = parse_yes_no_field(
         rule.get("negate-source"),
         implicit=Implicit.measured(
-            False, "read-a-security-rule.md: 'negate-source absent -> no'")
+            False, "read-a-security-rule.md: 'negate-source absent -> no' [MEASURED 2026-10-05]")
     )
     negate_destination, negate_destination_rk, negate_destination_rv = parse_yes_no_field(
         rule.get("negate-destination"),
         implicit=Implicit.measured(
-            False, "read-a-security-rule.md: 'negate-destination absent -> no'")
+            False, "read-a-security-rule.md: 'negate-destination absent -> no' [MEASURED 2026-10-05]")
     )
 
     # Both flags now carry their MEASURED default when the key is absent, so neither is null any
