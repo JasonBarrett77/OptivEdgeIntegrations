@@ -199,6 +199,30 @@ ManagementStation (Panorama or standalone firewall connection)
 (see `get_in_scope_*` helpers in `platforms/pan_os/flows.py`) — most of the domain model exists to support
 appliance-group HA topologies where a vsys-level enforcement point spans multiple physical nodes.
 
+**The active member is preferred ONLY where it has been collected.**
+`normalization/snapshots.py::choose_local_appliance` picks whose merged config speaks for an
+enforcement point, and until 2026-10-07 it returned `active_appliance` before looking at any
+snapshot. `active_appliance` is set during an INVENTORY sync, from `ha/state` - a read of
+Panorama that contacts no firewall - so a failover followed by an inventory sync moved it to a
+node that had never been collected, and the next renormalize, which contacts nothing either,
+raised "missing merged config snapshot" for every vsys on the pair. Nothing was lost: the
+configuration was in the database the whole time under the other serial, and the recovery was a
+full re-collection of an estate that was already collected.
+
+It now prefers the active member that HAS a merged config, then any node that has one. Reading
+the peer is correct rather than a fudge - an HA pair's configuration is synchronised, which is
+the premise behind the device-wide models holding one row per appliance that are mostly
+identical across the pair. Genuine HA drift is the one case where it is not, and nothing
+detects that in either direction today; failing outright was strictly worse. A pair collected
+NOWHERE still resolves exactly as before and still raises, because that is a different problem
+and has to keep saying so.
+
+Only the six enforcement-point-scoped normalizers go through this - security rules, addresses,
+dynamic address content, zones, regions, security profiles. The device-wide settings use a
+different `latest_merged_snapshot` that takes an APPLIANCE and is called once per appliance, so
+each HA node reads its own snapshot and never consults `active_appliance`. That is why they
+produce two rows per pair.
+
 **An appliance's group is chosen afresh on EVERY sync, so an enforcement point can be
 superseded.** `ha/peer/serial` decides it: no peer serial means `standalone-<serial>`, a peer
 serial means `ha-pair-<a>-<b>`. A pair still negotiating - recently powered on, auto-commit

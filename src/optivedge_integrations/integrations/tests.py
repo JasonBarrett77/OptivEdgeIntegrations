@@ -9611,3 +9611,108 @@ class SupersededEnforcementPointTests(TestCase):
 
         self.assertEqual(EnforcementPoint.objects.filter(is_missing=True).count(), 0)
         self.assertEqual(EnforcementPoint.objects.filter(in_scope=True).count(), 2)
+
+
+class ChooseLocalApplianceTests(TestCase):
+    """Whose merged config speaks for an enforcement point on an HA pair.
+
+    The active member, PROVIDED IT HAS ONE. The two differ after a failover and the difference
+    used to fail the whole enforcement point: `active_appliance` is set during an inventory
+    sync from `ha/state`, which contacts Panorama and no firewall, so a failover plus an
+    inventory sync moves it to a node that has never been collected - and a renormalize, which
+    contacts nothing either, then raised "missing merged config snapshot" for every vsys on the
+    pair. The configuration was in the database the whole time, under the other serial.
+    """
+
+    def setUp(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
+            choose_local_appliance,
+        )
+
+        self.choose = choose_local_appliance
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.failover")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="ha-pair-A-B",
+            group_type=ApplianceGroup.TYPE_HA_PAIR)
+        self.a = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="SERIAL-A", hostname="fw-a")
+        self.b = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="SERIAL-B", hostname="fw-b")
+        self.point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance_group=self.group, vsys_name="vsys1")
+        for appliance in (self.a, self.b):
+            EnforcementNode.objects.create(
+                management_station=self.station, appliance=appliance,
+                enforcement_point=self.point)
+
+    def _collect(self, appliance):
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(), payload={})
+
+    def _set_active(self, appliance):
+        self.group.active_appliance = appliance
+        self.group.save(update_fields=["active_appliance"])
+
+    def test_the_active_member_wins_when_it_has_been_collected(self):
+        """Unchanged for a collected estate, which is most of the point: this must not start
+        preferring the peer."""
+        self._collect(self.a)
+        self._collect(self.b)
+        self._set_active(self.a)
+
+        self.assertEqual(self.choose(self.point), self.a)
+
+    def test_a_failover_does_not_strand_the_collected_configuration(self):
+        """The reported sequence. A collected while active; the pair fails over; an inventory
+        sync moves `active_appliance` to B, which has never been collected."""
+        self._collect(self.a)
+        self._set_active(self.b)
+
+        self.assertEqual(self.choose(self.point), self.a)
+
+    def test_the_enforcement_point_normalizes_after_a_failover(self):
+        """End of the chain, which is what actually broke: `latest_merged_snapshot` returning
+        None is what `security_rules` raises on."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
+            latest_merged_snapshot,
+        )
+
+        snapshot = self._collect(self.a)
+        self._set_active(self.b)
+
+        self.assertEqual(latest_merged_snapshot(self.point), snapshot)
+
+    def test_a_pair_collected_nowhere_still_reports_it(self):
+        """No invention. A pair that has never been collected is a different problem and has to
+        keep saying so, or the failure this fixes is replaced by a silent empty normalization."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
+            latest_merged_snapshot,
+        )
+
+        self._set_active(self.a)
+
+        self.assertEqual(self.choose(self.point), self.a)
+        self.assertIsNone(latest_merged_snapshot(self.point))
+
+    def test_the_choice_is_stable_when_neither_is_active(self):
+        """Ordered by hostname rather than row order, so two runs over the same data resolve
+        the same way."""
+        self._collect(self.b)
+        self._collect(self.a)
+
+        self.assertEqual(self.choose(self.point), self.a)
+
+    def test_a_snapshot_of_another_type_does_not_count_as_collected(self):
+        """`show_masterkey_properties` and the pushed-policy reads are attached to appliances
+        too. Only a merged config answers this question."""
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.b,
+            source_type="show_masterkey_properties", collected_at=timezone.now(), payload={})
+        self._collect(self.a)
+        self._set_active(self.b)
+
+        self.assertEqual(self.choose(self.point), self.a)
