@@ -28,6 +28,7 @@ from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
+from django.db.models import Q
 
 from optivedge_integrations.integrations.models import (
     ApplianceGroup,
@@ -61,6 +62,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_shared,
     pushed_vsys_panorama,
     scalar_value,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
+    effective_in_scope_order,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     choose_local_appliance,
@@ -632,3 +636,72 @@ def normalize_appliance_group_security_profiles(appliance_group: ApplianceGroup)
             appliance_group, list(shared_profiles.values()), list(shared_groups.values()), referrers)
         replace_normalization_issues(appliance_group, _own_issues(appliance_group, issues), kinds=ISSUE_KINDS)
     return {"security_profiles": len(profiles), "security_profile_groups": len(groups), "issues": len(issues)}
+
+
+# --------------------------------------------------------------------------------------------
+# Which threat profiles actually reach a rule
+# --------------------------------------------------------------------------------------------
+
+#: The config element names for the three types PAN-POL-008 asserts, mapped to the columns they
+#: set. These are PAN-OS's own names, the same vocabulary `profile-setting/profiles` uses and the
+#: same keys `SecurityProfileGroup.members` is keyed by, so no translation table is needed.
+PROFILE_COVERAGE_COLUMNS = {
+    "virus": "has_antivirus_profile",
+    "spyware": "has_spyware_profile",
+    "vulnerability": "has_vulnerability_profile",
+}
+
+
+def profile_types_in_force(rule, groups_by_name: dict[str, list]) -> set[str]:
+    """Every profile type protecting `rule`, from its own profiles AND through its group.
+
+    A rule names either individual profiles or one profile group. The group has to be RESOLVED -
+    looked up by name, by scope, and read for what it actually contains - because a group that
+    names nothing protects nothing. The lab's `default` group is exactly that, and 113 rules
+    point at it.
+    """
+    types: set[str] = set()
+    for direct in rule.securityruleprofiles.all():
+        if direct.profile_type:
+            types.add(direct.profile_type)
+    for reference in rule.securityruleprofilegroups.all():
+        group = effective_in_scope_order(
+            reference.value, groups_by_name, "security profile group")
+        if group is not None:
+            types.update(group.members or {})
+    return types
+
+
+def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint) -> dict:
+    """Set each rule's profile-coverage columns. Runs AFTER the profile groups are normalized.
+
+    A separate pass rather than part of rule normalization, because the groups it reads are
+    written later in the refresh - rules at flows.py normalize before profiles do. Computing
+    this inline would read the PREVIOUS run's groups, or none at all on a first collection,
+    and be wrong in a way nothing would report.
+    """
+    groups_by_name: dict[str, list] = {}
+    owner = Q(enforcement_point=enforcement_point)
+    if enforcement_point.appliance_group_id:
+        owner = owner | Q(appliance_group_id=enforcement_point.appliance_group_id)
+    for group in SecurityProfileGroup.objects.filter(owner):
+        groups_by_name.setdefault(group.name, []).append(group)
+
+    updated = 0
+    counts = {column: 0 for column in PROFILE_COVERAGE_COLUMNS.values()}
+    rules = (SecurityRule.objects.filter(enforcement_point=enforcement_point)
+             .prefetch_related("securityruleprofiles", "securityruleprofilegroups"))
+    for rule in rules:
+        types = profile_types_in_force(rule, groups_by_name)
+        changed = []
+        for element, column in PROFILE_COVERAGE_COLUMNS.items():
+            value = element in types
+            if value:
+                counts[column] += 1
+            if getattr(rule, column) != value:
+                setattr(rule, column, value)
+                changed.append(column)
+        if changed:
+            rule.save(update_fields=changed)
+            updated += 1
+    return {"rules": rules.count(), "updated": updated, **counts}

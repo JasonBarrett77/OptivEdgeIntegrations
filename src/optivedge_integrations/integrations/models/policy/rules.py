@@ -21,6 +21,9 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
         # side's address refs and merging their intervals; no payload key carries it.
         "source_num_hosts",
         "destination_num_hosts",
+        "has_antivirus_profile",
+        "has_spyware_profile",
+        "has_vulnerability_profile",
     )
     SOURCE_LOCAL = "local"
     SOURCE_PUSHED_PRE = "pushed_pre"
@@ -37,6 +40,21 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     #: failure direction a breadth control exists to prevent.
     source_num_hosts = models.BigIntegerField(null=True, blank=True)
     destination_num_hosts = models.BigIntegerField(null=True, blank=True)
+
+    #: Which threat profile types are IN FORCE on this rule, after resolving its profile group.
+    #:
+    #: A rule names either individual profiles or ONE profile group, and the group is the common
+    #: case - on the lab 113 rules reach their protection that way and none names a profile
+    #: directly. Resolving it is the whole point: the lab's `default` group NAMES NO PROFILES AT
+    #: ALL, so 113 rules that look protected inspect nothing. A control reading "does the rule
+    #: carry a profile group" would pass every one of them.
+    #:
+    #: Columns rather than a query, for the reason the breadth columns are columns: the search
+    #: layer compares a field to a literal and cannot follow a rule's group reference into that
+    #: group's member list, resolving the name by scope on the way.
+    has_antivirus_profile = models.BooleanField(default=False)
+    has_spyware_profile = models.BooleanField(default=False)
+    has_vulnerability_profile = models.BooleanField(default=False)
 
     @property
     def source_breadth_known(self) -> bool:

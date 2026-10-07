@@ -60,6 +60,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_security_rules,
     normalize_appliance_group_security_profiles,
     normalize_security_profiles,
+    normalize_security_rule_profile_coverage,
     normalize_appliance_admin_users,
     normalize_appliance_authentication_profiles,
     normalize_appliance_authentication_sequences,
@@ -933,6 +934,22 @@ def renormalize_in_scope_configuration(
         else:
             policy_object_normalizations.append(PANOSPolicyObjectNormalized(
                 kind="security profiles", enforcement_point=enforcement_point, counts=dict(counts or {})))
+
+    # AFTER the profile groups above, never before: this reads a rule's group reference and
+    # resolves it to the profile types that group actually names. Security rules normalize
+    # earlier in this function, so computing it there would read the PREVIOUS run's groups, or
+    # none at all on a first collection.
+    for enforcement_point in enforcement_points:
+        try:
+            counts = normalize_security_rule_profile_coverage(enforcement_point)
+        except Exception as exc:
+            policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                kind="rule profile coverage", enforcement_point=enforcement_point,
+                error_text=str(exc)))
+        else:
+            policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                kind="rule profile coverage", enforcement_point=enforcement_point,
+                counts=dict(counts or {})))
 
     return PANOSInScopeRenormalizationResult(
         appliances=appliances,

@@ -35,6 +35,55 @@ Entry shape:
 
 
 
+## 2026-10-07 — what an UNEDITED antivirus profile and service object contain
+
+**Did:**    Jason created two objects through the Panorama UI without touching any setting but
+the one that is mandatory — `antivirus_profile_defaults` in dg_fw-core-tpa-base-01, and
+`service_defaults` with only Destination Port = 44444 — and captured the create forms. Both read
+back from the config.
+
+**Found:**  Neither is an empty element. The antivirus profile writes all SEVEN decoders (ftp,
+http, http2, imap, pop3, smb, smtp) each with `action`/`wildfire-action`/`mlav-action` set to
+the literal `default`, and all EIGHT WildFire Inline ML models at `disable`. The literal
+`default` is a TWO-LEVEL default: the UI renders it as `default (reset-both)` for ftp/http/http2/
+smb and `default (alert)` for imap/pop3/smtp, so the stored value alone does not say whether
+anything is blocked. The predefined `default` profile has the ML models at `enable`, so a
+hand-made profile is WEAKER than the shipped one.
+
+The service object writes `<protocol><tcp><port>44444</port><override><no/></override></tcp>`.
+Protocol is the ELEMENT NAME, not a value; the destination port element is just `port`;
+source-port is absent; and "Inherit from application" is written as an explicit empty `<no/>`
+rather than omitted.
+
+**Landed:** `panos-payload-contract.json`, new `antivirus-profile` and `service-object` nodes.
+
+**Open:**   The service form contradicts itself on port 0 — both port fields carry the
+placeholder `[>= 0]` while the help text directly beneath says "range (1-65535)". No object with
+port 0 has been written. That is the open question in rule-permissiveness-scoring.md, and the
+screenshot shows it is a real ambiguity rather than a theoretical one.
+
+
+
+## 2026-10-07 — a profile group that names nothing
+
+**Did:**    Built PAN-POL-008 and read what the lab's rules actually resolve to.
+
+**Found:**  113 rules name a security profile group called `default`, and that group's member
+list is EMPTY. They inspect nothing while looking configured in any view that stops at the
+reference. Resolving the group across the whole lab: of 945 in-scope allow rules, **zero** carry
+an antivirus, anti-spyware or vulnerability profile.
+
+**Landed:** Nothing in a guide — it is an estate fact, not a PAN-OS one. The behaviour it turns
+on is in the contract already: a group's `members` is what protects a rule, not its name.
+
+**Open:**   Collecting predefined ANTIVIRUS profiles as objects, which Jason asked for, is not
+the one-line change it looks like. `SecurityProfile` is shaped for threat-rule profiles: its
+`critical_blocked` / `high_blocked` / `medium_blocked` fields are non-nullable booleans computed
+from a `rules` node, and an antivirus profile has no `rules` node — it has decoders. Adding
+`virus` to `PROFILE_KINDS` as it stands would emit rows asserting "critical not blocked" about
+profiles for which the statement is meaningless. It needs those verdict fields made nullable and
+the normalizer gated by kind first.
+
 ## 2026-10-05 — the negate/`any` refusal is a keyword check (corrects the entry below)
 
 **Did:**    The entry below left open whether the refusal was about the literal `any` or about

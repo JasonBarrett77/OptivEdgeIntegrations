@@ -53,6 +53,9 @@ from optivedge_integrations.integrations.models import (
     precedence_for,
     scope_for,
     SecurityRule,
+    SecurityRuleProfile,
+    SecurityRuleProfileGroup,
+    SecurityProfileGroup,
     SecurityRuleApplication,
     SecurityRuleSearchVocabularyEntry,
     SecurityRuleService,
@@ -73,6 +76,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.addresse
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.regions import (
     build_normalized_regions,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (
+    normalize_security_rule_profile_coverage,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     ISO_3166_1_ALPHA2_REGIONS,
@@ -9716,3 +9722,93 @@ class ChooseLocalApplianceTests(TestCase):
         self._set_active(self.b)
 
         self.assertEqual(self.choose(self.point), self.a)
+
+
+class SecurityRuleProfileCoverageTests(TestCase):
+    """Which threat profiles actually reach a rule - PAN-POL-008's subject.
+
+    The case this exists for is the lab's own: 113 rules name a profile group called `default`,
+    and that group NAMES NO PROFILES AT ALL. They look protected in every view that stops at
+    "does the rule carry a profile group", and they inspect nothing. A control written against
+    the reference rather than the resolved group would pass all 113.
+    """
+
+    def setUp(self):
+        self.station, self.appliance, self.point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-PROF-001", appliance_hostname="fw-prof-01")
+        self.snapshot = Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(), payload={})
+        self.rank = 0
+
+    def _group(self, name, members, namespace_type="panorama_shared"):
+        self.rank += 1
+        return SecurityProfileGroup.objects.create(
+            management_station=self.station, appliance_group=self.point.appliance_group,
+            source_snapshot=self.snapshot, config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name=name, namespace_type=namespace_type, namespace_value="shared",
+            precedence_rank=self.rank, members=members)
+
+    def _rule(self, name, *, group=None, profiles=()):
+        self.rank += 1
+        rule = SecurityRule.objects.create(
+            management_station=self.station, enforcement_point=self.point,
+            source_snapshot=self.snapshot, config_source=SecurityRule.SOURCE_LOCAL,
+            effective_order=self.rank, rule_position=self.rank, name=name, action="allow")
+        if group is not None:
+            SecurityRuleProfileGroup.objects.create(
+                security_rule=rule, value=group, prov="test", position=0)
+        for index, (profile_type, value) in enumerate(profiles):
+            SecurityRuleProfile.objects.create(
+                security_rule=rule, value=value, prov="test", position=index,
+                profile_type=profile_type)
+        return rule
+
+    def _coverage(self, rule):
+        normalize_security_rule_profile_coverage(self.point)
+        rule.refresh_from_db()
+        return (rule.has_antivirus_profile, rule.has_spyware_profile,
+                rule.has_vulnerability_profile)
+
+    def test_a_group_naming_nothing_protects_nothing(self):
+        """The lab's `default` group, and the reason this is a resolved column rather than a
+        query over the reference."""
+        self._group("default", {})
+        rule = self._rule("looks-protected", group="default")
+
+        self.assertEqual(self._coverage(rule), (False, False, False))
+
+    def test_a_group_naming_profiles_covers_those_types(self):
+        self._group("real", {"virus": ["default"], "vulnerability": ["default"]})
+        rule = self._rule("partly-protected", group="real")
+
+        self.assertEqual(self._coverage(rule), (True, False, True))
+
+    def test_profiles_named_directly_on_the_rule_count(self):
+        """A rule names either individual profiles or a group. Both reach the same columns."""
+        rule = self._rule("direct", profiles=(("virus", "av"), ("spyware", "as"),
+                                              ("vulnerability", "vp")))
+
+        self.assertEqual(self._coverage(rule), (True, True, True))
+
+    def test_a_rule_naming_no_protection_at_all_is_uncovered(self):
+        rule = self._rule("bare")
+
+        self.assertEqual(self._coverage(rule), (False, False, False))
+
+    def test_a_group_reference_that_resolves_to_nothing_is_uncovered(self):
+        """A name no group defines. Nothing to read, so nothing is in force - and the rule must
+        not inherit coverage from a group that is not there."""
+        rule = self._rule("dangling", group="no-such-group")
+
+        self.assertEqual(self._coverage(rule), (False, False, False))
+
+    def test_the_pass_is_idempotent(self):
+        self._group("real", {"virus": ["default"]})
+        rule = self._rule("stable", group="real")
+
+        first = self._coverage(rule)
+        second = normalize_security_rule_profile_coverage(self.point)
+
+        self.assertEqual(first, (True, False, False))
+        self.assertEqual(second["updated"], 0, "a second pass should change nothing")
