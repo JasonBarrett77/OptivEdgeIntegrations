@@ -38,6 +38,7 @@ from optivedge_integrations.integrations.models import (
     PolicyObjectScope,
     SecurityProfile,
     SecurityProfileGroup,
+    SecurityProfileSeverityVerdict,
     SecurityRule,
     Snapshot,
     precedence_for,
@@ -548,12 +549,16 @@ def replace_security_profiles(
             kind=normalized.kind, description=normalized.description,
             is_predefined=normalized.is_predefined, rule_count=normalized.rule_count,
             threat_exception_count=normalized.threat_exception_count,
-            critical_blocked=verdict["critical"][0], critical_detail=verdict["critical"][1],
-            high_blocked=verdict["high"][0], high_detail=verdict["high"][1],
-            medium_blocked=verdict["medium"][0], medium_detail=verdict["medium"][1],
             referrer_count=len(used_by), is_used=bool(used_by), referrers=used_by,
             raw_profile=normalized.raw_profile, last_synced_at=normalized.source_snapshot.collected_at,
         )
+        # One row per severity the profile actually answers for. A kind with no threat rules
+        # writes none, so "makes no claim" is the absence of a row rather than a `False`.
+        SecurityProfileSeverityVerdict.objects.bulk_create([
+            SecurityProfileSeverityVerdict(
+                security_profile=row, severity=severity, blocked=blocked, detail=detail)
+            for severity, (blocked, detail) in verdict.items()
+        ])
         provenance(profile_ct, row, normalized.field_provenance_data)
         created_profiles.append(row)
 

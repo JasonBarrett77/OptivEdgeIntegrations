@@ -19,7 +19,11 @@ from .objects import (
     Region,
     ScopedPolicyObject,
 )
-from .security_profiles import SecurityProfile, SecurityProfileGroup
+from .security_profiles import (
+    SecurityProfile,
+    SecurityProfileGroup,
+    SecurityProfileSeverityVerdict,
+)
 from .rules import (
     SecurityRule,
     SecurityRuleAddressRef,

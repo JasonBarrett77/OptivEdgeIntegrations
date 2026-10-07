@@ -42,12 +42,6 @@ class SecurityProfile(ScopedPolicyObject):
         "is_predefined",
         "rule_count",
         "threat_exception_count",
-        "critical_blocked",
-        "critical_detail",
-        "high_blocked",
-        "high_detail",
-        "medium_blocked",
-        "medium_detail",
         "referrer_count",
         "is_used",
     )
@@ -74,18 +68,6 @@ class SecurityProfile(ScopedPolicyObject):
     is_predefined = models.BooleanField(default=False)
     rule_count = models.PositiveIntegerField(default=0)
     threat_exception_count = models.PositiveIntegerField(default=0)
-
-    #: One verdict per severity the controls read, and the reason beside it - the tab has to be
-    #: able to say WHY a severity is not blocked, because two profiles failing the same severity
-    #: can fail it for different reasons (an alert rule, or no catch-all rule at all).
-    critical_blocked = models.BooleanField(default=False)
-    critical_detail = models.CharField(max_length=255, blank=True)
-    high_blocked = models.BooleanField(default=False)
-    high_detail = models.CharField(max_length=255, blank=True)
-    #: Medium is the corpus PREFERRED value, not its minimum. Carried for the tab and for an
-    #: assessor's own query; no control fires on it.
-    medium_blocked = models.BooleanField(default=False)
-    medium_detail = models.CharField(max_length=255, blank=True)
 
     #: Rules and profile groups that name this definition, resolved within their own scope
     #: first (vsys, then shared, then predefined). A count and a flag rather than the list,
@@ -114,8 +96,85 @@ class SecurityProfile(ScopedPolicyObject):
             ),
         ]
 
+    def verdict(self, severity: str) -> tuple[bool | None, str]:
+        """(blocked, detail) for one severity, or (None, "") where the profile makes no such
+        claim. Reads a prefetched `severity_verdicts` list without a query when one is loaded."""
+        for row in self.severity_verdicts.all():
+            if row.severity == severity:
+                return row.blocked, row.detail
+        return None, ""
+
+    @property
+    def critical_blocked(self) -> bool | None:
+        return self.verdict(SecurityProfileSeverityVerdict.CRITICAL)[0]
+
+    @property
+    def critical_detail(self) -> str:
+        return self.verdict(SecurityProfileSeverityVerdict.CRITICAL)[1]
+
+    @property
+    def high_blocked(self) -> bool | None:
+        return self.verdict(SecurityProfileSeverityVerdict.HIGH)[0]
+
+    @property
+    def high_detail(self) -> str:
+        return self.verdict(SecurityProfileSeverityVerdict.HIGH)[1]
+
+    @property
+    def medium_blocked(self) -> bool | None:
+        return self.verdict(SecurityProfileSeverityVerdict.MEDIUM)[0]
+
+    @property
+    def medium_detail(self) -> str:
+        return self.verdict(SecurityProfileSeverityVerdict.MEDIUM)[1]
+
     def __str__(self) -> str:
         return f"{self.owner} / {self.kind} / {self.namespace_key} / {self.name}"
+
+
+class SecurityProfileSeverityVerdict(models.Model):
+    """Whether one profile blocks one threat severity, and why not when it does not.
+
+    A SATELLITE rather than columns on the profile, because the verdict is the one part of a
+    security profile that is KIND-SPECIFIC. Anti-spyware and vulnerability profiles are an
+    ordered list of rules matching on severity, so "does this block critical" is a question they
+    answer. An antivirus profile has no such rules - it has per-protocol decoders - and a column
+    that can only say yes or no would have to say NO about it, which reads as "critical threats
+    are not blocked" when the truth is that the profile makes no claim in those terms.
+
+    With the verdict here, a profile that does not answer simply has no row, and
+    `SecurityProfile` is left holding only what every profile kind shares: a name, a scope, a
+    precedence, whether it is predefined, and who references it. That is what lets the other
+    seven profile kinds under /config/predefined/profiles - antivirus, URL filtering, file
+    blocking, WildFire analysis, decryption, SCTP and SD-WAN path quality - become rows without
+    a model each.
+
+    The verdict itself is unchanged and still order-independent: see SecurityProfile's docstring.
+    """
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    SEVERITY_CHOICES = [(CRITICAL, "Critical"), (HIGH, "High"), (MEDIUM, "Medium")]
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="severity_verdicts")
+    severity = models.CharField(max_length=16, choices=SEVERITY_CHOICES)
+    blocked = models.BooleanField()
+    #: WHY it is not blocked - the tab has to say so, because two profiles failing one severity
+    #: can fail it for different reasons (an alert rule, or no catch-all rule at all).
+    detail = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["security_profile", "severity"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "severity"],
+                name="integrations_unique_verdict_per_profile_severity"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.security_profile} / {self.severity}: {'blocked' if self.blocked else 'not blocked'}"
 
 
 class SecurityProfileGroup(ScopedPolicyObject):

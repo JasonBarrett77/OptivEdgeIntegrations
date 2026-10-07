@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.test import SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -55,7 +55,9 @@ from optivedge_integrations.integrations.models import (
     SecurityRule,
     SecurityRuleProfile,
     SecurityRuleProfileGroup,
+    SecurityProfile,
     SecurityProfileGroup,
+    SecurityProfileSeverityVerdict,
     SecurityRuleApplication,
     SecurityRuleSearchVocabularyEntry,
     SecurityRuleService,
@@ -9812,3 +9814,71 @@ class SecurityRuleProfileCoverageTests(TestCase):
 
         self.assertEqual(first, (True, False, False))
         self.assertEqual(second["updated"], 0, "a second pass should change nothing")
+
+
+class SecurityProfileVerdictSatelliteTests(TestCase):
+    """The verdicts are rows, so a profile kind that answers no severity question has none.
+
+    That is the whole reason they moved off `SecurityProfile`. The columns could say only yes or
+    no, so an antivirus profile - which has per-protocol decoders and no severity rules at all -
+    would have had to say "critical is not blocked", a claim it never makes. With rows, the
+    absence IS the answer.
+    """
+
+    def setUp(self):
+        self.station, self.appliance, self.point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-VERDICT-1", appliance_hostname="fw-verdict-01")
+        self.snapshot = Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="config_predefined_security_profiles", collected_at=timezone.now(),
+            payload={})
+
+    def _profile(self, name, kind):
+        return SecurityProfile.objects.create(
+            management_station=self.station, appliance_group=self.point.appliance_group,
+            source_snapshot=self.snapshot, config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name=name, namespace_type="panorama_shared", namespace_value="shared",
+            precedence_rank=10, kind=kind)
+
+    def test_a_profile_that_answers_reports_its_verdict_and_reason(self):
+        profile = self._profile("weak", SecurityProfile.KIND_SPYWARE)
+        SecurityProfileSeverityVerdict.objects.create(
+            security_profile=profile, severity="critical", blocked=False,
+            detail="alert by rule a")
+        SecurityProfileSeverityVerdict.objects.create(
+            security_profile=profile, severity="high", blocked=True, detail="reset-both")
+
+        self.assertIs(profile.critical_blocked, False)
+        self.assertEqual(profile.critical_detail, "alert by rule a")
+        self.assertIs(profile.high_blocked, True)
+
+    def test_a_profile_with_no_verdict_row_says_NONE_rather_than_False(self):
+        """An antivirus profile. `False` would read as "critical threats are not blocked"; None
+        reads as "this profile does not answer that question", which is the truth."""
+        profile = self._profile("default", SecurityProfile.KIND_SPYWARE)
+
+        self.assertIsNone(profile.critical_blocked)
+        self.assertIsNone(profile.high_blocked)
+        self.assertIsNone(profile.medium_blocked)
+        self.assertEqual(profile.critical_detail, "")
+
+    def test_one_verdict_per_profile_per_severity(self):
+        """Two verdicts for one severity would mean the normalizer ran twice or disagreed with
+        itself, and a reader would get whichever row came back first."""
+        profile = self._profile("dup", SecurityProfile.KIND_VULNERABILITY)
+        SecurityProfileSeverityVerdict.objects.create(
+            security_profile=profile, severity="critical", blocked=True, detail="")
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                SecurityProfileSeverityVerdict.objects.create(
+                    security_profile=profile, severity="critical", blocked=False, detail="x")
+
+    def test_the_verdicts_go_when_the_profile_does(self):
+        profile = self._profile("gone", SecurityProfile.KIND_SPYWARE)
+        SecurityProfileSeverityVerdict.objects.create(
+            security_profile=profile, severity="high", blocked=True, detail="")
+
+        profile.delete()
+
+        self.assertEqual(SecurityProfileSeverityVerdict.objects.count(), 0)
