@@ -21,6 +21,7 @@ from .objects import (
 )
 from .security_profiles import (
     SecurityProfile,
+    SecurityProfileDecoder,
     SecurityProfileGroup,
     SecurityProfileSeverityVerdict,
 )

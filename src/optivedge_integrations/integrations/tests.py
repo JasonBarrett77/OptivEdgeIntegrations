@@ -82,6 +82,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.regions 
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (
     PROFILE_KINDS,
     normalize_security_profile,
+    profile_decoders,
+    resolve_decoder_action,
     normalize_security_rule_profile_coverage,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
@@ -9940,3 +9942,82 @@ class AntivirusProfileNormalizationTests(TestCase):
     def test_virus_is_collected_but_is_not_a_threat_rule_kind(self):
         self.assertIn(SecurityProfile.KIND_VIRUS, PROFILE_KINDS)
         self.assertNotIn(SecurityProfile.KIND_VIRUS, SecurityProfile.THREAT_RULE_KINDS)
+
+
+class AntivirusDecoderResolutionTests(SimpleTestCase):
+    """`default` is a pointer, and what it points at differs per protocol.
+
+    Measured 2026-10-07, two profiles side by side in the Panorama UI - the predefined `default`
+    and one created without touching a setting. Both render http/http2/ftp/smb as reset-both and
+    smtp/imap/pop3 as alert. controls.json independently says the shipped profile "only alerts
+    on several decoders", and three is several.
+    """
+
+    def test_default_resolves_to_reset_both_on_the_file_transfer_decoders(self):
+        for protocol in ("http", "http2", "ftp", "smb"):
+            with self.subTest(protocol=protocol):
+                self.assertEqual(resolve_decoder_action(protocol, "default"), "reset-both")
+
+    def test_default_resolves_to_ALERT_on_the_mail_decoders(self):
+        """The whole reason this control exists: the shipped profile detects mail-borne malware
+        and does not stop it."""
+        for protocol in ("smtp", "imap", "pop3"):
+            with self.subTest(protocol=protocol):
+                self.assertEqual(resolve_decoder_action(protocol, "alert"), "alert")
+                self.assertEqual(resolve_decoder_action(protocol, "default"), "alert")
+
+    def test_an_explicit_action_is_taken_as_written(self):
+        self.assertEqual(resolve_decoder_action("smtp", "reset-both"), "reset-both")
+        self.assertEqual(resolve_decoder_action("http", "alert"), "alert")
+
+    def test_an_absent_action_reads_as_default(self):
+        self.assertEqual(resolve_decoder_action("http", ""), "reset-both")
+
+    def test_an_unknown_protocol_resolves_to_nothing_rather_than_guessing(self):
+        """A decoder PAN-OS adds in a later release. Better an empty effective action, which
+        reads as unestablished, than a guess that a control would score."""
+        self.assertEqual(resolve_decoder_action("quic", "default"), "")
+
+
+class AntivirusDecoderParsingTests(SimpleTestCase):
+    """The shape measured on the predefined `default` profile, 2026-10-07."""
+
+    PREDEFINED = {"@name": "default", "decoder": {"entry": [
+        {"@name": p, "action": "default", "wildfire-action": "default"}
+        for p in ("http", "http2", "smtp", "imap", "pop3", "ftp", "smb")]}}
+
+    def test_the_shipped_profile_leaves_three_decoders_not_blocking(self):
+        rows = {r[0]: r for r in profile_decoders(self.PREDEFINED)}
+
+        self.assertEqual(len(rows), 7)
+        not_blocking = sorted(p for p, r in rows.items() if not r[3])
+        self.assertEqual(not_blocking, ["imap", "pop3", "smtp"])
+
+    def test_it_keeps_the_configured_literal_beside_what_it_means(self):
+        """An engineer looking for the line to change needs `default`; a control needs
+        `alert`."""
+        smtp = next(r for r in profile_decoders(self.PREDEFINED) if r[0] == "smtp")
+
+        self.assertEqual(smtp[1], "default")
+        self.assertEqual(smtp[2], "alert")
+
+    def test_a_hardened_profile_blocks_on_every_decoder(self):
+        entry = {"@name": "hard", "decoder": {"entry": [
+            {"@name": p, "action": "reset-both", "wildfire-action": "reset-both"}
+            for p in ("http", "http2", "smtp", "imap", "pop3", "ftp", "smb")]}}
+
+        rows = profile_decoders(entry)
+
+        self.assertTrue(all(r[3] for r in rows))
+        self.assertTrue(all(r[6] for r in rows))
+
+    def test_drop_counts_as_blocking_though_the_corpus_names_reset_both(self):
+        """Same deviation PAN-SPY-001 makes: a profile that drops malware has not failed to
+        block it."""
+        entry = {"@name": "drops", "decoder": {"entry": [
+            {"@name": "smtp", "action": "drop"}]}}
+
+        self.assertTrue(profile_decoders(entry)[0][3])
+
+    def test_a_profile_with_no_decoder_node_yields_nothing(self):
+        self.assertEqual(profile_decoders({"@name": "bare"}), [])

@@ -35,6 +35,50 @@ Entry shape:
 
 
 
+## 2026-10-07 — what `default` means on an antivirus decoder
+
+**Did:**    Read `/config/predefined/profiles/virus/entry[@name='default']`, then had Jason open
+the predefined profile and a UI-created one side by side in the Panorama UI.
+
+**Found:**  The config says `action=default` on all seven decoders of both. The UI resolves it
+per protocol, identically for both profiles:
+
+    http, http2, ftp, smb   ->  reset-both
+    smtp, imap, pop3        ->  alert
+
+So the shipped profile DETECTS mail-borne malware and lets it through, on three of seven
+decoders, and nothing in the configuration says so. `wildfire-action` and `mlav-action` resolve
+the same way. controls.json independently describes the shipped profile as "only alerts on
+several decoders", which is the second source — neither is the device's own words, and the Help
+index has no page for that screen.
+
+**Landed:** `panos-payload-contract.json`, the `antivirus-profile` node, and
+`SecurityProfileDecoder.DEFAULT_RESOLUTION` in OptivEdgeIntegrations as the single table that
+encodes it. PAN-AVW-001 reads the resolved action.
+
+**Open:**   Whether the resolution is fixed by PAN-OS or arrives with a content release. It is
+recorded against 11.1.13-h3 / 11.2.3-h3 and one content version; if it ever differs, every
+antivirus finding moves with it, which is why it is one named table.
+
+
+
+## 2026-10-07 — a shared profile nothing references is never pushed
+
+**Did:**    Committed two antivirus profiles to Panorama `/config/shared/profiles/virus` as
+PAN-AVW-001 subjects, then ran a full in-scope refresh.
+
+**Found:**  Neither was collected. A security profile reaches this assessment through a DEVICE —
+the predefined ones from each appliance's `/config/predefined/profiles`, custom ones from the
+merged config or the pushed-shared-policy read — and PAN-OS pushes what a device needs. An
+unreferenced shared profile is needed nowhere, so it exists only on Panorama. Recreated local to
+pan-fw-111 vsys1 and both appeared.
+
+**Landed:** `panos-payload-contract.json`, the `antivirus-profile` node.
+
+**Open:**   Nothing. It also explains why `antivirus_profile_defaults` in
+dg_fw-core-tpa-base-01 is invisible: that device group has no devices assigned, so the same rule
+applies for the same reason.
+
 ## 2026-10-07 — what an UNEDITED antivirus profile and service object contain
 
 **Did:**    Jason created two objects through the Panorama UI without touching any setting but

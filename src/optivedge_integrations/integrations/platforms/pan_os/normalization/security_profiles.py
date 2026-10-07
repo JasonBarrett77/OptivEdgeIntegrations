@@ -37,6 +37,7 @@ from optivedge_integrations.integrations.models import (
     PolicyObjectNamespace,
     PolicyObjectScope,
     SecurityProfile,
+    SecurityProfileDecoder,
     SecurityProfileGroup,
     SecurityProfileSeverityVerdict,
     SecurityRule,
@@ -213,6 +214,9 @@ class NormalizedSecurityProfile:
     rule_count: int
     threat_exception_count: int
     verdicts: dict[str, tuple[bool, str]]
+    #: Antivirus only: (protocol, configured, effective, blocks, wf_configured, wf_effective,
+    #: wf_blocks) per decoder. Empty for every other kind.
+    decoders: list[tuple]
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
 
@@ -258,6 +262,40 @@ class SecurityProfileBuild:
     issues: list[PolicyObjectIssue] = field(default_factory=list)
 
 
+def resolve_decoder_action(protocol: str, configured: str) -> str:
+    """What a decoder action MEANS. `default` is a pointer, not a value.
+
+    Every decoder of every unedited antivirus profile stores `default` - measured on the
+    predefined profile and on a UI-created one, 2026-10-07 - so without this a control reading
+    the configured value learns nothing. See SecurityProfileDecoder's docstring for where the
+    resolution comes from and how well established it is.
+    """
+    if configured in ("", "default"):
+        return SecurityProfileDecoder.DEFAULT_RESOLUTION.get(protocol, "")
+    return configured
+
+
+def profile_decoders(entry: dict[str, Any]) -> list[tuple]:
+    """One tuple per protocol decoder, with both the configured literal and what it resolves to."""
+    node = entry.get("decoder")
+    rows = []
+    for decoder in ensure_list(node.get("entry") if isinstance(node, dict) else None):
+        if not isinstance(decoder, dict):
+            continue
+        protocol = str(decoder.get("@name") or "")
+        action = _text(decoder.get("action"))
+        wildfire = _text(decoder.get("wildfire-action"))
+        effective = resolve_decoder_action(protocol, action)
+        wf_effective = resolve_decoder_action(protocol, wildfire)
+        rows.append((
+            protocol, action, effective,
+            effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
+            wildfire, wf_effective,
+            wf_effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
+        ))
+    return rows
+
+
 def normalize_security_profile(
     *, kind: str, source_snapshot: Snapshot, config_source: str, namespace_type: str,
     namespace_value: str, entry: dict[str, Any],
@@ -266,6 +304,7 @@ def normalize_security_profile(
     description, description_rk, description_rv = scalar_value(entry.get("description"))
     rules = profile_rules(entry)
     exceptions = entry.get("threat-exception")
+    decoders = profile_decoders(entry) if kind == SecurityProfile.KIND_VIRUS else []
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -282,6 +321,7 @@ def normalize_security_profile(
         # (False, "no catch-all rule") for an antivirus profile - true of its rule list, which
         # does not exist, and read by a consumer as "critical threats are not blocked". A kind
         # that does not answer the question writes no rows at all.
+        decoders=decoders,
         verdicts=({severity: severity_verdict(kind, rules, severity)
                    for severity in ASSESSED_SEVERITIES}
                   if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
@@ -563,6 +603,15 @@ def replace_security_profiles(
         )
         # One row per severity the profile actually answers for. A kind with no threat rules
         # writes none, so "makes no claim" is the absence of a row rather than a `False`.
+        SecurityProfileDecoder.objects.bulk_create([
+            SecurityProfileDecoder(
+                security_profile=row, protocol=protocol, configured_action=configured,
+                effective_action=effective, blocks=blocks,
+                configured_wildfire_action=wf_configured,
+                effective_wildfire_action=wf_effective, wildfire_blocks=wf_blocks)
+            for (protocol, configured, effective, blocks,
+                 wf_configured, wf_effective, wf_blocks) in normalized.decoders
+        ])
         SecurityProfileSeverityVerdict.objects.bulk_create([
             SecurityProfileSeverityVerdict(
                 security_profile=row, severity=severity, blocked=blocked, detail=detail)

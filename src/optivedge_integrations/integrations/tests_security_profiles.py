@@ -112,7 +112,7 @@ def profile(name, namespace_type, kind=SPY):
     return NormalizedSecurityProfile(
         source_snapshot=None, config_source="local", kind=kind, name=name, namespace_type=namespace_type,
         namespace_value="x", precedence_rank=0, description="", rule_count=0, threat_exception_count=0,
-        verdicts={}, raw_profile={}, field_provenance_data=[])
+        verdicts={}, decoders=[], raw_profile={}, field_provenance_data=[])
 
 
 class ReferenceTests(SimpleTestCase):

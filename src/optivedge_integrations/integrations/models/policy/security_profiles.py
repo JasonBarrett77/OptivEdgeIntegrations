@@ -112,6 +112,19 @@ class SecurityProfile(ScopedPolicyObject):
             ),
         ]
 
+    @property
+    def non_blocking_decoders(self) -> list[str]:
+        """Protocols this antivirus profile detects malware on without stopping it.
+
+        Reads the resolved action, not the configured one: every decoder of an unedited profile
+        says `default`, and on smtp, imap and pop3 that means alert.
+        """
+        return sorted(d.protocol for d in self.decoders.all() if not d.blocks)
+
+    @property
+    def has_non_blocking_decoder(self) -> bool:
+        return bool(self.non_blocking_decoders)
+
     def verdict(self, severity: str) -> tuple[bool | None, str]:
         """(blocked, detail) for one severity, or (None, "") where the profile makes no such
         claim. Reads a prefetched `severity_verdicts` list without a query when one is loaded."""
@@ -146,6 +159,67 @@ class SecurityProfile(ScopedPolicyObject):
 
     def __str__(self) -> str:
         return f"{self.owner} / {self.kind} / {self.namespace_key} / {self.name}"
+
+
+class SecurityProfileDecoder(models.Model):
+    """One protocol decoder of an antivirus profile, and what it ACTUALLY does.
+
+    PAN-AVW-001's subject, and the reason it cannot be answered from the configuration alone:
+    every decoder of every unedited profile stores the literal `default`, including the shipped
+    one. Measured 2026-10-07 on the lab - `/config/predefined/profiles/virus/entry[@name='default']`
+    returns `action=default` on all seven decoders, and so does a profile created through the UI
+    without touching a setting.
+
+    What `default` RESOLVES to is per protocol, and the UI is the only thing that states it.
+    Jason captured both profiles side by side on 2026-10-07: the predefined `default` and a
+    UI-created one render identically -
+
+        http, http2, ftp, smb   ->  reset-both
+        smtp, imap, pop3        ->  alert
+
+    Three decoders alert, which is independently what controls.json says about the shipped
+    profile: "The shipped 'default' profile only alerts on several decoders - detection without
+    prevention." Two sources that agree, neither of them the device's own words, which is why
+    the resolution is a named table in this module rather than an assumption spread through it.
+
+    `configured_action` keeps what the config says and `effective_action` what it means. A
+    control reads the second; an engineer looking for the line to change needs the first.
+    """
+
+    #: What the literal `default` means, per protocol. The UI's rendering, confirmed on two
+    #: profiles. If a PAN-OS release changes this, every antivirus finding changes with it -
+    #: so it is one table, cited, and not a conditional somewhere in the normalizer.
+    DEFAULT_RESOLUTION = {
+        "http": "reset-both", "http2": "reset-both", "ftp": "reset-both", "smb": "reset-both",
+        "smtp": "alert", "imap": "alert", "pop3": "alert",
+    }
+    #: Actions that stop the transfer. Wider than the corpus's `reset-both`, the same deviation
+    #: PAN-SPY-001 makes and for the same reason: a profile that drops malware has not failed to
+    #: block it. Recorded in control-changes.json.
+    BLOCKING_ACTIONS = frozenset({"drop", "reset-client", "reset-server", "reset-both"})
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="decoders")
+    protocol = models.CharField(max_length=32)
+    #: What the config holds - usually the literal `default`.
+    configured_action = models.CharField(max_length=32)
+    #: What that means on this protocol, after DEFAULT_RESOLUTION.
+    effective_action = models.CharField(max_length=32)
+    blocks = models.BooleanField()
+    configured_wildfire_action = models.CharField(max_length=32, blank=True)
+    effective_wildfire_action = models.CharField(max_length=32, blank=True)
+    wildfire_blocks = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["security_profile", "protocol"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "protocol"],
+                name="integrations_unique_decoder_per_profile_protocol"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.security_profile} / {self.protocol}: {self.effective_action}"
 
 
 class SecurityProfileSeverityVerdict(models.Model):
