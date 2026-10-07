@@ -80,6 +80,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.regions 
     build_normalized_regions,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (
+    PROFILE_KINDS,
+    normalize_security_profile,
     normalize_security_rule_profile_coverage,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
@@ -9882,3 +9884,59 @@ class SecurityProfileVerdictSatelliteTests(TestCase):
         profile.delete()
 
         self.assertEqual(SecurityProfileSeverityVerdict.objects.count(), 0)
+
+
+class AntivirusProfileNormalizationTests(TestCase):
+    """Antivirus profiles become rows, and write NO severity verdicts.
+
+    `severity_verdict()` would happily return (False, "no catch-all rule") for one: the
+    statement is true of its rule list, which does not exist, and reads to any consumer as
+    "critical threats are not blocked". The gate is `SecurityProfile.THREAT_RULE_KINDS`.
+    """
+
+    #: The shape measured on Panorama 2026-10-07 from `antivirus_profile_defaults`, a profile
+    #: created through the UI without touching a setting: seven decoders, all written, all at
+    #: the literal `default`. No `rules` node anywhere.
+    AV_ENTRY = {
+        "@name": "default",
+        "decoder": {"entry": [
+            {"@name": name, "action": "default", "wildfire-action": "default"}
+            for name in ("ftp", "http", "http2", "imap", "pop3", "smb", "smtp")]},
+        "mlav-engine-filebased-enabled": {"entry": [
+            {"@name": "Windows Executables", "mlav-policy-action": "enable"}]},
+    }
+
+    def _normalized(self, kind, entry):
+        snapshot = Snapshot.objects.create(
+            source_type="config_predefined_security_profiles",
+            collected_at=timezone.now(), payload={})
+        return normalize_security_profile(
+            kind=kind, source_snapshot=snapshot, config_source=SecurityRule.SOURCE_LOCAL,
+            namespace_type="predefined", namespace_value="predefined", entry=entry)
+
+    def test_an_antivirus_profile_writes_no_verdicts(self):
+        normalized = self._normalized(SecurityProfile.KIND_VIRUS, self.AV_ENTRY)
+
+        self.assertEqual(normalized.verdicts, {})
+        self.assertEqual(normalized.name, "default")
+
+    def test_it_counts_no_threat_rules_which_is_TRUE_of_it(self):
+        """A count of zero threat rules is a true statement about an antivirus profile, where a
+        verdict of "not blocked" is a claim it never makes. That is why rule_count stayed on the
+        profile and the verdicts did not."""
+        normalized = self._normalized(SecurityProfile.KIND_VIRUS, self.AV_ENTRY)
+
+        self.assertEqual(normalized.rule_count, 0)
+        self.assertEqual(normalized.threat_exception_count, 0)
+
+    def test_a_threat_rule_kind_still_writes_all_three(self):
+        entry = {"@name": "weak", "rules": {"entry": [
+            {"@name": "alert-all", "severity": {"member": ["any"]}, "action": {"alert": None}}]}}
+
+        normalized = self._normalized(SecurityProfile.KIND_SPYWARE, entry)
+
+        self.assertEqual(set(normalized.verdicts), {"critical", "high", "medium"})
+
+    def test_virus_is_collected_but_is_not_a_threat_rule_kind(self):
+        self.assertIn(SecurityProfile.KIND_VIRUS, PROFILE_KINDS)
+        self.assertNotIn(SecurityProfile.KIND_VIRUS, SecurityProfile.THREAT_RULE_KINDS)

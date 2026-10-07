@@ -1,4 +1,4 @@
-"""Objects > Security Profiles (Anti-Spyware, Vulnerability Protection) and Security Profile Groups.
+"""Objects > Security Profiles (Anti-Spyware, Vulnerability Protection, Antivirus) and Groups.
 
 Subjects of PAN-SPY-001 and PAN-VLN-001. Both are policy objects in the PAN-OS sense - they live
 under `vsys/entry/profiles` or `shared/profiles`, arrive from Panorama through the pushed reads,
@@ -6,10 +6,20 @@ and a rule names them - so they scope exactly like address objects: vsys scope o
 enforcement point, shared scope on the appliance group, vendor scope synthesized per point. See
 `ScopedPolicyObject`.
 
-ONE MODEL FOR BOTH PROFILE TYPES, with `kind`. They are one shape - an ordered rule list whose
-entries match on severity and carry an action - and one verdict, computed the same way. The
+ONE MODEL FOR EVERY PROFILE KIND, with `kind`. This used to hold two kinds and said so, on the
+grounds that they are one shape - an ordered rule list whose entries match on severity. The
 vulnerability rule adds `host`, `cve` and `vendor-id`, which only change which rules can match,
-and that is decided in normalization, not stored as columns.
+and that is decided in normalization rather than stored as columns.
+
+ANTIVIRUS IS NOT THAT SHAPE, and it is here anyway. It has per-protocol decoders - ftp, http,
+http2, imap, pop3, smb, smtp - not severity rules. What made room for it was moving the severity
+verdict off this model onto `SecurityProfileSeverityVerdict`: what remains here is what every
+kind genuinely shares, which is a name, a scope, a precedence, whether it is predefined, and who
+references it. A kind that answers no severity question simply writes no verdict rows.
+
+That is the line to hold as the remaining kinds arrive - URL filtering, file blocking, WildFire
+analysis, decryption, SCTP, SD-WAN path quality, all of which the predefined collector already
+downloads. Shared identity belongs here; anything true of only one kind belongs beside it.
 
 THE VERDICT IS ORDER-INDEPENDENT (Jason, 2026-09-11). A severity is blocked only when a
 catch-all rule covers it - client AND server, for vulnerability - and every rule that can match
@@ -47,10 +57,16 @@ class SecurityProfile(ScopedPolicyObject):
     )
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
+    KIND_VIRUS = "virus"
     KIND_CHOICES = [
         (KIND_SPYWARE, "Anti-Spyware"),
         (KIND_VULNERABILITY, "Vulnerability Protection"),
+        (KIND_VIRUS, "Antivirus"),
     ]
+    #: Kinds built from an ordered rule list matching on SEVERITY, and so the only kinds for
+    #: which a severity verdict means anything. Antivirus is deliberately not here: it has
+    #: per-protocol decoders instead, and writes no verdict rows.
+    THREAT_RULE_KINDS = (KIND_SPYWARE, KIND_VULNERABILITY)
 
     management_station = models.ForeignKey(
         ManagementStation, on_delete=models.CASCADE, related_name="security_profiles")

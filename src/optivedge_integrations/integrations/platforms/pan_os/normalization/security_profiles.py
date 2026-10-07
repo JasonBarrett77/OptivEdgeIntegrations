@@ -78,7 +78,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.types im
     PolicyObjectIssue,
 )
 
-PROFILE_KINDS = (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY)
+#: Every profile kind normalized into rows. Antivirus is here for PAN-AVW-006 and so a rule's
+#: `virus` profile resolves to an object; it writes no severity verdicts - see below.
+PROFILE_KINDS = (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY,
+                SecurityProfile.KIND_VIRUS)
 
 #: What counts as blocking a threat. Jason, 2026-09-11: any blocking action passes - a deviation
 #: from the corpus minimum, which names reset-both alone. `default` is NOT here: a signature's
@@ -275,7 +278,13 @@ def normalize_security_profile(
         rule_count=len(rules),
         threat_exception_count=len([e for e in ensure_list(
             exceptions.get("entry") if isinstance(exceptions, dict) else None) if isinstance(e, dict)]),
-        verdicts={severity: severity_verdict(kind, rules, severity) for severity in ASSESSED_SEVERITIES},
+        # EMPTY for a kind with no severity rules. severity_verdict() would return
+        # (False, "no catch-all rule") for an antivirus profile - true of its rule list, which
+        # does not exist, and read by a consumer as "critical threats are not blocked". A kind
+        # that does not answer the question writes no rows at all.
+        verdicts=({severity: severity_verdict(kind, rules, severity)
+                   for severity in ASSESSED_SEVERITIES}
+                  if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
         raw_profile=entry,
         field_provenance_data=[
             ("__entry__", entry_rk, entry_rv),
