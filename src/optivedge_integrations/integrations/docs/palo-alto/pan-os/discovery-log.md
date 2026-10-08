@@ -35,6 +35,48 @@ Entry shape:
 
 
 
+## 2026-10-08 — an antivirus decoder action is not the last word
+
+**Did:**    Kept enumerating after the `mlav-policy-action` find, because the profile's key set
+had never been read from the device. Completed a MADE-UP profile entry — nothing in the answer
+can be local membership that way — and then wrote each candidate shape of the one node nothing
+in OEI looked at.
+
+**Found:**  `application` is a **per-application action override**: entry-keyed, one entry per
+application, each carrying the same seven actions as a decoder. **A profile can read
+`reset-both` on all seven decoders and still allow malware over a named application**, and
+PAN-AVW-001 reported such a profile as hardened. The node had been there since the control was
+built. No profile on the lab had one, so no amount of reading samples would have found it.
+
+What it accepts, each written to the device: the application key is a **reference and
+eligibility is enforced at the write** — 1454 of the device's 5552 predefined applications are
+offered and anything outside that set is refused, `ping 'ping' is not a valid reference`,
+code=12. An entry with **no action element is accepted** and stores an absent action; one with
+an **empty action element is refused**. So absent is reachable and reads as `allow` by the same
+rule as a decoder; empty is not a state to handle. The literal `default` is accepted and its
+resolution is **not established** — a decoder's `default` resolves per protocol, an override is
+not per-protocol, and no device oracle answers it.
+
+Also corrected a rule written earlier the same day. Completing a container does **not** always
+return nothing: it returns the KEY SPACE when the keys come from a closed set (`decoder` → the
+seven protocol names, on a profile that does not exist), the LOCAL MEMBERSHIP when the keys are
+operator-chosen (`profiles/virus` → five, `rules` → 114), and nothing when the container is
+EMPTY. Three answers, and the version recorded at midday collapsed them to one.
+
+**Landed:** `SecurityProfileApplicationOverride` + migration 0076, a satellite rather than a
+column — the checklist's rule is that a new derived column on a populated model reports a clean
+estate until re-normalization, and a new model has no rows to be stale. `blocks` is nullable so
+the unresolved `default` fires rather than passes. PAN-AVW-001 gained an OR clause, a column on
+both surfaces, and two lab subjects: one hardened everywhere and defeated only by overrides, one
+hardened with a BLOCKING override that must stay quiet. The payload contract's `application`
+entry and its container-completion convention were rewritten.
+
+**Open:** What rule produces the 1454-application filter. The names are weighted to
+upload/download/file-transfer variants, which suggests "what the antivirus decoders can
+inspect" and is not proof. `wfrt-hold-mode` is in the profile's key set with `complete`
+unimplemented for it and no lab instance. Three additions to `building-a-control.md` are staged
+for review in `OptivEdgeProbe/scratch/doc-drafts/`, not inserted.
+
 ## 2026-10-08 — `mlav-policy-action` has three values, and my `complete` parser was broken
 
 **Did:**    Asked whether every antivirus value and default had actually been *measured*, and

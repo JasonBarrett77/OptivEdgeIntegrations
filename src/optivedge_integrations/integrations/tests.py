@@ -84,6 +84,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     ml_model_catalogue,
     normalize_security_profile,
     profile_ml_models,
+    profile_application_overrides,
     profile_decoders,
     resolve_decoder_action,
     normalize_security_rule_profile_coverage,
@@ -10072,6 +10073,83 @@ class AntivirusDecoderParsingTests(SimpleTestCase):
 
         self.assertEqual(len(rows), 8)
         self.assertEqual(rows["quic"][2], "drop")
+
+
+class AntivirusApplicationOverrideTests(SimpleTestCase):
+    """The per-application action override, measured on pan-fw-111 2026-10-08.
+
+    Found by enumerating the profile's key set with `action=complete` rather than reading a
+    sample: the node was in the config all along and PAN-AVW-001 walked only the decoders, so a
+    profile with `reset-both` everywhere and one `allow` override reported as hardened.
+
+    Each shape below was written to a device and either accepted or refused, so none of these
+    inputs is invented.
+    """
+
+    def test_no_application_node_yields_no_rows(self):
+        """The normal case. UNLIKE the decoders, nothing is synthesized - an override is an
+        operator-added exception, so the absence of one is the absence of an override and not a
+        silent default. Synthesizing 1454 rows per profile would be the same bug inverted."""
+        self.assertEqual(profile_application_overrides({"@name": "plain"}), [])
+
+    def test_an_allow_override_does_not_block(self):
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": [
+                {"@name": "gmail-base", "action": "allow"}]}}),
+            [("gmail-base", "allow", False)])
+
+    def test_a_blocking_override_blocks(self):
+        """An override may TIGHTEN an action, so this must not read as a gap."""
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": [
+                {"@name": "gmail-base", "action": "reset-both"}]}}),
+            [("gmail-base", "reset-both", True)])
+
+    def test_an_override_with_no_action_allows(self):
+        """The device ACCEPTS an entry with no action and stores it absent - and refuses one
+        with an empty action element. So absence is reachable and is the permissive end, the
+        same rule as an absent decoder action."""
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": [
+                {"@name": "ftp"}]}}),
+            [("ftp", "", False)])
+
+    def test_default_is_UNESTABLISHED_rather_than_resolved(self):
+        """`default` is accepted on an override. A decoder's `default` resolves per protocol
+        and that was measured; an override is not per-protocol, so that table cannot answer it
+        and no device oracle was found that does. None, not False - which the control reports
+        rather than passes."""
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": [
+                {"@name": "web-browsing", "action": "default"}]}}),
+            [("web-browsing", "default", None)])
+
+    def test_alert_is_detection_without_prevention(self):
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": [
+                {"@name": "dropbox-base", "action": "alert"}]}})[0][2],
+            False)
+
+    def test_a_single_entry_arriving_unwrapped_is_still_read(self):
+        """PAN-OS returns a lone entry as a dict rather than a one-item list."""
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": {
+                "@name": "ftp", "action": "allow"}}}),
+            [("ftp", "allow", False)])
+
+    def test_a_pushed_override_carries_provenance_attributes(self):
+        """What a read actually returns: the action is a dict with the value under `#text`."""
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": [
+                {"@name": "ftp", "@loc": "shared",
+                 "action": {"@admin": "admin", "#text": "allow"}}]}}),
+            [("ftp", "allow", False)])
+
+    def test_an_entry_with_no_name_is_skipped_rather_than_crashing(self):
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": [
+                {"action": "allow"}, {"@name": "ftp", "action": "allow"}]}}),
+            [("ftp", "allow", False)])
 
 
 class AntivirusMlModelTests(SimpleTestCase):

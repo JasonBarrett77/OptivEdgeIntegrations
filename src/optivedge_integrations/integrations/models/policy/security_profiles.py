@@ -150,6 +150,19 @@ class SecurityProfile(ScopedPolicyObject):
     def has_non_blocking_decoder(self) -> bool:
         return bool(self.non_blocking_decoders)
 
+    @property
+    def non_blocking_application_overrides(self) -> list[str]:
+        """Per-application overrides that do not stop the transfer, as labelled strings.
+
+        `blocks is not True` rather than `not blocks`, so the unestablished `default` case is
+        reported rather than passed - see SecurityProfileApplicationOverride.blocks.
+        """
+        return sorted(o.label for o in self.application_overrides.all() if o.blocks is not True)
+
+    @property
+    def has_non_blocking_application_override(self) -> bool:
+        return bool(self.non_blocking_application_overrides)
+
     def verdict(self, severity: str) -> tuple[bool | None, str]:
         """(blocked, detail) for one severity, or (None, "") where the profile makes no such
         claim. Reads a prefetched `severity_verdicts` list without a query when one is loaded."""
@@ -263,6 +276,75 @@ class SecurityProfileDecoder(models.Model):
 
     def __str__(self) -> str:
         return f"{self.security_profile} / {self.protocol}: {self.effective_action}"
+
+
+class SecurityProfileApplicationOverride(models.Model):
+    """One per-application action override on an antivirus profile.
+
+    WHY THIS EXISTS. PAN-AVW-001 asserts that every decoder stops the transfer, and a decoder
+    action is NOT the last word: this node overrides it for a named application. A profile can
+    read `reset-both` on all seven decoders and still allow malware over a named application,
+    and a control that walked only `decoder` reported such a profile as hardened. Found
+    2026-10-08 by enumerating the profile's key set with `action=complete` rather than reading
+    a sample - the node was in the config all along and nothing looked at it.
+
+    Measured 2026-10-08 on pan-fw-111 by writing each candidate shape:
+
+    **The key is a REFERENCE to an application, and eligibility is ENFORCED at the write.**
+    The completion offers 1454 of the device's 5552 predefined applications, and an entry
+    naming one outside that set is refused - `ping 'ping' is not a valid reference`, code=12 -
+    as is an application that does not exist. So the offered set is the real set and not a UI
+    convenience, which is a stronger result than confirming a dropdown by clicking it.
+
+    **An entry with NO action is accepted and stores an absent action.** An entry with an
+    EMPTY action element is refused, `action is invalid`. So absent and empty are different
+    here, and only one of them is reachable.
+
+    **The literal `default` is accepted**, as it is on a decoder. What it RESOLVES to is not
+    established - see `blocks`.
+    """
+
+    #: The same seven values as a decoder's action, enumerated 2026-10-08, and enforced at the
+    #: write: `action 'wibble' is not an allowed keyword`, code=12.
+    ACTIONS = ("default", "allow", "alert", "drop", "reset-client", "reset-server",
+               "reset-both")
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="application_overrides")
+    #: As the config names it, which is a predefined application name.
+    application = models.CharField(max_length=128)
+    #: What the config holds. BLANK where the entry carries no action at all, which the device
+    #: accepts and which is read as `allow` - the same rule as an absent decoder action.
+    configured_action = models.CharField(max_length=32, blank=True)
+    #: Does this override stop the transfer?
+    #:
+    #: NULL means UNESTABLISHED, and it is reserved for the literal `default`. On a decoder,
+    #: `default` resolves per protocol and that resolution was measured; an override is not
+    #: per-protocol, so the same table cannot answer it and no device oracle was found that
+    #: does. A null therefore reports as a gap rather than as a pass: the control fails toward
+    #: FIRING, because "we could not establish it" must not render as "we checked and it was
+    #: fine". Over-reporting a rare node is the cheap error here.
+    blocks = models.BooleanField(null=True)
+
+    class Meta:
+        ordering = ["security_profile", "application"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "application"],
+                name="integrations_unique_app_override_per_profile_application"),
+        ]
+
+    @property
+    def label(self) -> str:
+        """`app (action)` for a finding row, naming the absent and unresolved cases."""
+        if not self.configured_action:
+            return f"{self.application} (no action set, which allows)"
+        if self.blocks is None:
+            return f"{self.application} (default, resolution not established)"
+        return f"{self.application} ({self.configured_action})"
+
+    def __str__(self) -> str:
+        return f"{self.security_profile} / {self.application}: {self.configured_action}"
 
 
 class SecurityProfileMlModel(models.Model):

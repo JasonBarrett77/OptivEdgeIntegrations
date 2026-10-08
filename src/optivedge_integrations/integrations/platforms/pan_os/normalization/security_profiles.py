@@ -37,6 +37,7 @@ from optivedge_integrations.integrations.models import (
     PolicyObjectNamespace,
     PolicyObjectScope,
     SecurityProfile,
+    SecurityProfileApplicationOverride,
     SecurityProfileDecoder,
     SecurityProfileGroup,
     SecurityProfileMlModel,
@@ -221,6 +222,9 @@ class NormalizedSecurityProfile:
     #: Antivirus only: {ml model name: configured action}, as the CONFIG holds it. Which models
     #: exist is settled against the catalogue at persist time.
     ml_models: dict[str, str]
+    #: Antivirus only: (application, configured action, blocks) per per-application override.
+    #: Only what the config names - see `profile_application_overrides`.
+    application_overrides: list[tuple]
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
 
@@ -318,6 +322,37 @@ def resolve_decoder_action(protocol: str, configured: str) -> str:
     return configured
 
 
+def profile_application_overrides(entry: dict[str, Any]) -> list[tuple]:
+    """(application, configured_action, blocks) per per-application override.
+
+    UNLIKE `profile_decoders`, this walks ONLY what the config names and synthesizes nothing.
+    A decoder is synthesized because PAN-OS evaluates all seven protocols whether the config
+    mentions them or not; an override is an exception the operator added, so the absence of one
+    is the absence of an override and not a silent default. Synthesizing 1454 rows per profile
+    for the applications nobody overrode would be the same bug in the other direction.
+
+    `blocks` is None for the literal `default`, whose resolution is not established here - an
+    override is not per-protocol, so the decoder's resolution table cannot answer it. An entry
+    with no action at all reads as `allow`, which is the same rule as an absent decoder action
+    and which the device permits: it accepts an action-less entry and refuses an empty one.
+    """
+    node = entry.get("application")
+    rows = []
+    for override in ensure_list(node.get("entry") if isinstance(node, dict) else None):
+        if not isinstance(override, dict) or not override.get("@name"):
+            continue
+        action = _text(override.get("action"))
+        if action == "default":
+            blocks = None
+        else:
+            # "" - no action element at all - falls here and resolves to ABSENT_ACTION, which
+            # is `allow`, which does not block.
+            effective = action or SecurityProfileDecoder.ABSENT_ACTION
+            blocks = effective in SecurityProfileDecoder.BLOCKING_ACTIONS
+        rows.append((str(override["@name"]), action, blocks))
+    return rows
+
+
 def profile_decoders(entry: dict[str, Any]) -> list[tuple]:
     """One tuple per protocol PAN-OS evaluates - ALL SEVEN, whatever the config names.
 
@@ -374,6 +409,8 @@ def normalize_security_profile(
     exceptions = entry.get("threat-exception")
     decoders = profile_decoders(entry) if kind == SecurityProfile.KIND_VIRUS else []
     ml_models = profile_ml_models(entry) if kind == SecurityProfile.KIND_VIRUS else {}
+    overrides = (profile_application_overrides(entry)
+                 if kind == SecurityProfile.KIND_VIRUS else [])
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -392,6 +429,7 @@ def normalize_security_profile(
         # that does not answer the question writes no rows at all.
         decoders=decoders,
         ml_models=ml_models,
+        application_overrides=overrides,
         verdicts=({severity: severity_verdict(kind, rules, severity)
                    for severity in ASSESSED_SEVERITIES}
                   if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
@@ -695,6 +733,15 @@ def replace_security_profiles(
                 effective_wildfire_action=wf_effective, wildfire_blocks=wf_blocks)
             for (protocol, configured, effective, blocks,
                  wf_configured, wf_effective, wf_blocks) in normalized.decoders
+        ])
+        # ONE ROW PER OVERRIDE THE CONFIG NAMES, and none otherwise - unlike the decoders
+        # above, where all seven are synthesized. An override is an operator-added exception,
+        # so no rows is the normal and correct state for almost every profile.
+        SecurityProfileApplicationOverride.objects.bulk_create([
+            SecurityProfileApplicationOverride(
+                security_profile=row, application=application,
+                configured_action=configured, blocks=blocks)
+            for application, configured, blocks in normalized.application_overrides
         ])
         SecurityProfileSeverityVerdict.objects.bulk_create([
             SecurityProfileSeverityVerdict(

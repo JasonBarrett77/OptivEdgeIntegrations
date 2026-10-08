@@ -22,6 +22,7 @@ from .objects import (
 from .security_profiles import (
     SecurityProfile,
     SecurityProfileDecoder,
+    SecurityProfileApplicationOverride,
     SecurityProfileMlModel,
     SecurityProfileGroup,
     SecurityProfileSeverityVerdict,
