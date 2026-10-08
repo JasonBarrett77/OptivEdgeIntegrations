@@ -35,6 +35,34 @@ Entry shape:
 
 
 
+## 2026-10-08 — the shipped antivirus profile is STRONGER than a hand-made one
+
+**Did:**    Built PAN-AVW-002 and read the WildFire Inline ML models off every antivirus profile
+the lab has.
+
+**Found:**  The predefined `default` profile enables all eight models. A profile created through
+the Panorama UI without touching a setting writes `disable` for all eight. So an administrator
+who builds their own profile to be careful ends up running LESS inline ML than one who left the
+shipped profile alone — the reverse of the usual direction, where the vendor default is the weak
+option.
+
+An absent model is **disabled**, the same rule as an absent decoder action meaning `allow`: a
+profile with no `mlav-engine-filebased-enabled` node renders every model as `disable (for all
+protocols)`.
+
+The model names come from the CONTENT release, which controls.json warns about explicitly. So
+the catalogue is read from the predefined profile — it carries every model the device knows
+about — rather than held as a list. A content update that adds a ninth model is assessed with no
+code change.
+
+**Landed:** `panos-payload-contract.json`, the `antivirus-profile` node, with `implicit:
+disable` on the field.
+
+**Open:**   Nothing. Worth noting the pattern though: this is the third time in two days that an
+absent element has turned out to mean the PERMISSIVE value on an antivirus profile — decoder
+action absent means allow, ML model absent means disabled, and both were initially assumed to
+inherit a vendor default. On this object, absence is never the safe reading.
+
 ## 2026-10-08 — an absent antivirus decoder action is `allow` (corrects 2026-10-07)
 
 **Did:**    Jason asked three things nobody had checked: is a profile with no decoder even valid

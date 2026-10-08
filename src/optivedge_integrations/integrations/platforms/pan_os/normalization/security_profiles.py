@@ -39,6 +39,7 @@ from optivedge_integrations.integrations.models import (
     SecurityProfile,
     SecurityProfileDecoder,
     SecurityProfileGroup,
+    SecurityProfileMlModel,
     SecurityProfileSeverityVerdict,
     SecurityRule,
     Snapshot,
@@ -217,6 +218,9 @@ class NormalizedSecurityProfile:
     #: Antivirus only: (protocol, configured, effective, blocks, wf_configured, wf_effective,
     #: wf_blocks) per decoder. Empty for every other kind.
     decoders: list[tuple]
+    #: Antivirus only: {ml model name: configured action}, as the CONFIG holds it. Which models
+    #: exist is settled against the catalogue at persist time.
+    ml_models: dict[str, str]
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
 
@@ -260,6 +264,39 @@ class SecurityProfileBuild:
     groups: list[NormalizedSecurityProfileGroup] = field(default_factory=list)
     references: list[ProfileReference] = field(default_factory=list)
     issues: list[PolicyObjectIssue] = field(default_factory=list)
+
+
+def profile_ml_models(entry: dict[str, Any]) -> dict[str, str]:
+    """{model name: configured action} for the models this profile's config names.
+
+    Only what the config holds. Which models EXIST is a content question answered by the
+    predefined profile, and the catalogue is applied at persist time - see
+    `ml_model_catalogue`.
+    """
+    node = entry.get("mlav-engine-filebased-enabled")
+    models = {}
+    for model in ensure_list(node.get("entry") if isinstance(node, dict) else None):
+        if isinstance(model, dict) and model.get("@name"):
+            models[str(model["@name"])] = _text(model.get("mlav-policy-action"))
+    return models
+
+
+def ml_model_catalogue(profiles: list) -> list[str]:
+    """Every WildFire Inline ML model the device knows about, from this build's own reads.
+
+    The PREDEFINED profile carries all of them, which is what makes this possible without
+    hardcoding names controls.json explicitly says come from the content release and must be
+    enumerated per version. Every virus profile in the build contributes, so a model named only
+    by a custom profile is still catalogued rather than dropped.
+    """
+    names: list[str] = []
+    for normalized in profiles:
+        if normalized.kind != SecurityProfile.KIND_VIRUS:
+            continue
+        for name in normalized.ml_models:
+            if name not in names:
+                names.append(name)
+    return sorted(names)
 
 
 def resolve_decoder_action(protocol: str, configured: str) -> str:
@@ -336,6 +373,7 @@ def normalize_security_profile(
     rules = profile_rules(entry)
     exceptions = entry.get("threat-exception")
     decoders = profile_decoders(entry) if kind == SecurityProfile.KIND_VIRUS else []
+    ml_models = profile_ml_models(entry) if kind == SecurityProfile.KIND_VIRUS else {}
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -353,6 +391,7 @@ def normalize_security_profile(
         # does not exist, and read by a consumer as "critical threats are not blocked". A kind
         # that does not answer the question writes no rows at all.
         decoders=decoders,
+        ml_models=ml_models,
         verdicts=({severity: severity_verdict(kind, rules, severity)
                    for severity in ASSESSED_SEVERITIES}
                   if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
@@ -618,6 +657,9 @@ def replace_security_profiles(
     profile_ct = ContentType.objects.get_for_model(SecurityProfile)
     group_ct = ContentType.objects.get_for_model(SecurityProfileGroup)
     created_profiles: list[SecurityProfile] = []
+    # From this build's own reads, before any row is written: the predefined profile carries
+    # every model the content release knows about.
+    catalogue = ml_model_catalogue(profiles)
     for normalized in (p for p in profiles if keep_here(p)):
         used_by = referrers.get(normalized.key, [])
         verdict = normalized.verdicts
@@ -634,6 +676,14 @@ def replace_security_profiles(
         )
         # One row per severity the profile actually answers for. A kind with no threat rules
         # writes none, so "makes no claim" is the absence of a row rather than a `False`.
+        SecurityProfileMlModel.objects.bulk_create([
+            SecurityProfileMlModel(
+                security_profile=row, name=model,
+                configured_action=normalized.ml_models.get(model, ""),
+                # Absent means DISABLED, the same way an absent decoder action means allow.
+                enabled=normalized.ml_models.get(model, "") == "enable")
+            for model in (catalogue if normalized.kind == SecurityProfile.KIND_VIRUS else [])
+        ])
         SecurityProfileDecoder.objects.bulk_create([
             SecurityProfileDecoder(
                 security_profile=row, protocol=protocol, configured_action=configured,

@@ -81,7 +81,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.regions 
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (
     PROFILE_KINDS,
+    ml_model_catalogue,
     normalize_security_profile,
+    profile_ml_models,
     profile_decoders,
     resolve_decoder_action,
     normalize_security_rule_profile_coverage,
@@ -10070,3 +10072,67 @@ class AntivirusDecoderParsingTests(SimpleTestCase):
 
         self.assertEqual(len(rows), 8)
         self.assertEqual(rows["quic"][2], "drop")
+
+
+class AntivirusMlModelTests(SimpleTestCase):
+    """The WildFire Inline ML models, whose names come from the CONTENT release.
+
+    controls.json says so and says to enumerate them on the target version before automating,
+    so nothing here hardcodes them - the catalogue comes from the predefined profile, which
+    carries every model the device knows about.
+    """
+
+    #: As the predefined profile carries them on the lab, 2026-10-07.
+    EIGHT = ("Windows Executables", "PowerShell Script 1", "PowerShell Script 2",
+             "Executable Linked Format", "MSOffice", "Shell", "OOXML", "MachO")
+
+    def _entry(self, name, actions):
+        return {"@name": name, "mlav-engine-filebased-enabled": {"entry": [
+            {"@name": model, "mlav-policy-action": action}
+            for model, action in actions.items()]}}
+
+    def test_it_reads_what_the_config_names(self):
+        entry = self._entry("p", {m: "enable" for m in self.EIGHT})
+
+        self.assertEqual(profile_ml_models(entry), {m: "enable" for m in self.EIGHT})
+
+    def test_a_profile_with_no_ml_node_names_nothing(self):
+        """And that is the finding, not an absence of one: the UI renders every model as
+        `disable` for such a profile. The catalogue puts the rows back at persist time."""
+        self.assertEqual(profile_ml_models({"@name": "bare"}), {})
+
+    def test_the_catalogue_comes_from_the_profiles_themselves(self):
+        """A content update that adds a ninth model adds it here with no code change, because
+        the predefined profile is read for the list rather than a constant."""
+        class N:
+            def __init__(self, kind, models):
+                self.kind = kind
+                self.ml_models = models
+
+        predefined = N("virus", {m: "enable" for m in self.EIGHT})
+        custom = N("virus", {"Windows Executables": "disable"})
+        spyware = N("spyware", {})
+
+        catalogue = ml_model_catalogue([predefined, custom, spyware])
+
+        self.assertEqual(set(catalogue), set(self.EIGHT))
+        self.assertEqual(catalogue, sorted(catalogue), "stable order, so rows do not churn")
+
+    def test_a_model_only_a_custom_profile_names_is_still_catalogued(self):
+        """Rather than dropped because the predefined profile has not heard of it."""
+        class N:
+            def __init__(self, kind, models):
+                self.kind, self.ml_models = kind, models
+
+        catalogue = ml_model_catalogue([
+            N("virus", {"Windows Executables": "enable"}),
+            N("virus", {"Some New Engine": "enable"})])
+
+        self.assertIn("Some New Engine", catalogue)
+
+    def test_a_non_virus_kind_contributes_nothing_to_the_catalogue(self):
+        class N:
+            def __init__(self, kind, models):
+                self.kind, self.ml_models = kind, models
+
+        self.assertEqual(ml_model_catalogue([N("spyware", {"Nonsense": "enable"})]), [])

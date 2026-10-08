@@ -113,6 +113,15 @@ class SecurityProfile(ScopedPolicyObject):
         ]
 
     @property
+    def disabled_ml_models(self) -> list[str]:
+        """WildFire Inline ML models this profile does not run. Absent counts as disabled."""
+        return sorted(m.name for m in self.ml_models.all() if not m.enabled)
+
+    @property
+    def has_disabled_ml_model(self) -> bool:
+        return bool(self.disabled_ml_models)
+
+    @property
     def non_blocking_decoders(self) -> list[str]:
         """Protocols this antivirus profile detects malware on without stopping it.
 
@@ -238,6 +247,52 @@ class SecurityProfileDecoder(models.Model):
 
     def __str__(self) -> str:
         return f"{self.security_profile} / {self.protocol}: {self.effective_action}"
+
+
+class SecurityProfileMlModel(models.Model):
+    """One WildFire Inline ML model of an antivirus profile, and whether it is on.
+
+    PAN-AVW-002's subject. Three things make it awkward, and all three are measured:
+
+    **The model names come from the CONTENT release, not from PAN-OS.** controls.json says so
+    and says to enumerate them on the target version before automating. So nothing here hardcodes
+    them: the catalogue is read from the PREDEFINED profile, which carries every model the
+    device knows about. On the lab that is eight - Windows Executables, PowerShell Script 1,
+    PowerShell Script 2, Executable Linked Format, MSOffice, Shell, OOXML, MachO - and a
+    content update that adds a ninth adds it here with no code change.
+
+    **An absent model means DISABLED**, the same way an absent decoder action means `allow`.
+    Measured 2026-10-07: a profile written with no `mlav-engine-filebased-enabled` node at all
+    renders every model as `disable (for all protocols)` in the UI. So a profile that says
+    nothing about ML does no ML, and a row is synthesized for every model in the catalogue
+    rather than only for the ones the config names.
+
+    **The shipped profile is STRONGER than a hand-made one here**, which is the reverse of the
+    usual direction: the predefined `default` enables every model, and a profile created through
+    the UI without touching anything writes `disable` for every one. An admin who builds their
+    own profile to be careful ends up with less inline ML than if they had left the shipped one
+    alone.
+    """
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="ml_models")
+    #: As the content release names it. Not an enum - see the class docstring.
+    name = models.CharField(max_length=128)
+    enabled = models.BooleanField()
+    #: What the config held, for an engineer looking for the line to change. Blank where the
+    #: profile does not mention this model at all, which is itself the finding.
+    configured_action = models.CharField(max_length=32, blank=True)
+
+    class Meta:
+        ordering = ["security_profile", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "name"],
+                name="integrations_unique_ml_model_per_profile"),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.security_profile} / {self.name}: {'on' if self.enabled else 'off'}"
 
 
 class SecurityProfileSeverityVerdict(models.Model):
