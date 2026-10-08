@@ -35,6 +35,38 @@ Entry shape:
 
 
 
+## 2026-10-08 — an absent antivirus decoder action is `allow` (corrects 2026-10-07)
+
+**Did:**    Jason asked three things nobody had checked: is a profile with no decoder even valid
+configuration, can `default` be set explicitly, and what do the other values look like. Wrote
+ten profiles — no decoder node, a decoder with no action, an explicit `default`, one per
+enumerated action, and one bogus — committed them, then Jason exported the UI's own view of the
+page.
+
+**Found:**  All three answers, and one of them overturns what this log recorded the day before.
+
+A profile with **no decoder node at all is valid** and commits cleanly. So is a decoder entry
+with no `action`. `default` **is** settable explicitly and reads back as written, so absence and
+`default` are two distinct legal states. The enum is `default | allow | alert | drop |
+reset-client | reset-server | reset-both`, and an unknown value is refused at the WRITE —
+"action 'wibble' is not an allowed keyword" — unlike the negate/`any` rule on a security rule,
+which passes the write and fails the commit.
+
+**And an absent action is `allow`, not `default`.** The UI export renders all seven protocols as
+`allow` for the profile with no decoder node, the same for the one with no action, and for the
+profile naming `default` on http alone it renders `default (reset-both)` on http and `allow` on
+the other six. Absence is the permissive end.
+
+**Landed:** `panos-payload-contract.json`, the `antivirus-profile` node — the enum, the
+`implicit: allow`, and the two-things-look-like-nothing warning. In OptivEdgeIntegrations,
+`resolve_decoder_action` now separates "" from "default", and `profile_decoders` synthesizes all
+seven protocols instead of walking only what the config names.
+
+**Open:**   Nothing on this. The cost of the original assumption is worth recording though: it
+read a profile that allows malware on http as one that resets both ends, and a profile naming
+nothing produced no decoder rows at all and so reported nothing. Both errors pointed the same
+way — toward calling an uninspected profile safe.
+
 ## 2026-10-07 — what `default` means on an antivirus decoder
 
 **Did:**    Read `/config/predefined/profiles/virus/entry[@name='default']`, then had Jason open

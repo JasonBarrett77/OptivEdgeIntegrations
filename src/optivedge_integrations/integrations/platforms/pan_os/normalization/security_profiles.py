@@ -263,26 +263,57 @@ class SecurityProfileBuild:
 
 
 def resolve_decoder_action(protocol: str, configured: str) -> str:
-    """What a decoder action MEANS. `default` is a pointer, not a value.
+    """What a decoder action MEANS. Two different things look like "nothing here".
 
-    Every decoder of every unedited antivirus profile stores `default` - measured on the
-    predefined profile and on a UI-created one, 2026-10-07 - so without this a control reading
-    the configured value learns nothing. See SecurityProfileDecoder's docstring for where the
-    resolution comes from and how well established it is.
+    `default` is a POINTER and resolves per protocol - reset-both on http/http2/ftp/smb, alert
+    on smtp/imap/pop3. Every decoder of every unedited profile stores it, the shipped one
+    included, so a consumer reading the configured value learns nothing.
+
+    ABSENT IS NOT `default`. It is `allow`. Measured 2026-10-07: a profile with no decoder node,
+    one with a decoder carrying no action, and one naming `default` on http alone all render
+    `allow` on every protocol the config does not give a value for. Conflating the two reports a
+    profile that allows malware as one that blocks it.
     """
-    if configured in ("", "default"):
+    if configured == "":
+        return SecurityProfileDecoder.ABSENT_ACTION
+    if configured == "default":
         return SecurityProfileDecoder.DEFAULT_RESOLUTION.get(protocol, "")
     return configured
 
 
 def profile_decoders(entry: dict[str, Any]) -> list[tuple]:
-    """One tuple per protocol decoder, with both the configured literal and what it resolves to."""
+    """One tuple per protocol PAN-OS evaluates - ALL SEVEN, whatever the config names.
+
+    The config may name fewer decoders, or none at all, and the device still inspects every
+    protocol: a profile with no decoder node renders seven rows of `allow` in the UI. Walking
+    only the configured entries would leave those protocols unrepresented, and a control that
+    sees no row cannot report a gap - which is how a profile that inspects nothing became
+    invisible to PAN-AVW-001 in its first version.
+    """
     node = entry.get("decoder")
-    rows = []
+    configured_by_protocol = {}
     for decoder in ensure_list(node.get("entry") if isinstance(node, dict) else None):
-        if not isinstance(decoder, dict):
+        if isinstance(decoder, dict) and decoder.get("@name"):
+            configured_by_protocol[str(decoder["@name"])] = decoder
+
+    rows = []
+    for protocol in SecurityProfileDecoder.PROTOCOLS:
+        decoder = configured_by_protocol.get(protocol, {})
+        action = _text(decoder.get("action"))
+        wildfire = _text(decoder.get("wildfire-action"))
+        effective = resolve_decoder_action(protocol, action)
+        wf_effective = resolve_decoder_action(protocol, wildfire)
+        rows.append((
+            protocol, action, effective,
+            effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
+            wildfire, wf_effective,
+            wf_effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
+        ))
+    # A protocol PAN-OS adds in a later release: present in the config, unknown to PROTOCOLS.
+    # Carried rather than dropped, so it is visible rather than silently unassessed.
+    for protocol, decoder in configured_by_protocol.items():
+        if protocol in SecurityProfileDecoder.PROTOCOLS:
             continue
-        protocol = str(decoder.get("@name") or "")
         action = _text(decoder.get("action"))
         wildfire = _text(decoder.get("wildfire-action"))
         effective = resolve_decoder_action(protocol, action)

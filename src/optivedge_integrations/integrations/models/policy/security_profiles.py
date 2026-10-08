@@ -186,13 +186,31 @@ class SecurityProfileDecoder(models.Model):
     control reads the second; an engineer looking for the line to change needs the first.
     """
 
-    #: What the literal `default` means, per protocol. The UI's rendering, confirmed on two
-    #: profiles. If a PAN-OS release changes this, every antivirus finding changes with it -
-    #: so it is one table, cited, and not a conditional somewhere in the normalizer.
+    #: Every decoder PAN-OS evaluates, in the order its UI lists them. The CONFIG may name
+    #: fewer - or none - and the device still inspects all seven. Measured 2026-10-07.
+    PROTOCOLS = ("http", "http2", "smtp", "imap", "pop3", "ftp", "smb")
+
+    #: What the literal `default` means, per protocol. The UI's rendering, confirmed on the
+    #: predefined profile, a UI-created one, and a profile written with an explicit `default`.
+    #: If a PAN-OS release changes this, every antivirus finding changes with it - so it is one
+    #: table, cited, and not a conditional somewhere in the normalizer.
     DEFAULT_RESOLUTION = {
         "http": "reset-both", "http2": "reset-both", "ftp": "reset-both", "smb": "reset-both",
         "smtp": "alert", "imap": "alert", "pop3": "alert",
     }
+
+    #: WHAT AN ABSENT ACTION MEANS, and it is NOT `default`.
+    #:
+    #: Measured 2026-10-07 by writing three profiles and exporting the UI's own view of them:
+    #: one with no decoder node at all, one with a decoder entry carrying no `action`, and one
+    #: naming `default` on http alone. All three render `allow` on every protocol the config
+    #: does not give a value for - including the six the third profile never mentions.
+    #:
+    #: So absence is the PERMISSIVE end, not the vendor default. A profile that names nothing
+    #: inspects nothing. Reading absence as `default` would report such a profile as blocking
+    #: malware on http when the device allows it, which is the one direction an inspection
+    #: control must never fail in.
+    ABSENT_ACTION = "allow"
     #: Actions that stop the transfer. Wider than the corpus's `reset-both`, the same deviation
     #: PAN-SPY-001 makes and for the same reason: a profile that drops malware has not failed to
     #: block it. Recorded in control-changes.json.

@@ -9970,8 +9970,19 @@ class AntivirusDecoderResolutionTests(SimpleTestCase):
         self.assertEqual(resolve_decoder_action("smtp", "reset-both"), "reset-both")
         self.assertEqual(resolve_decoder_action("http", "alert"), "alert")
 
-    def test_an_absent_action_reads_as_default(self):
-        self.assertEqual(resolve_decoder_action("http", ""), "reset-both")
+    def test_an_absent_action_is_ALLOW_and_not_default(self):
+        """The correction of 2026-10-08, and it was wrong in the dangerous direction.
+
+        Measured by exporting the UI's own view of three profiles: one with no decoder node,
+        one with a decoder carrying no action, and one naming `default` on http alone. All
+        render `allow` on every protocol the config does not give a value for - including the
+        six the third never mentions. Reading absence as `default` reported a profile that
+        allows malware on http as one that resets both ends of the connection.
+        """
+        self.assertEqual(resolve_decoder_action("http", ""), "allow")
+        self.assertEqual(resolve_decoder_action("smtp", ""), "allow")
+        self.assertNotEqual(resolve_decoder_action("http", ""),
+                            resolve_decoder_action("http", "default"))
 
     def test_an_unknown_protocol_resolves_to_nothing_rather_than_guessing(self):
         """A decoder PAN-OS adds in a later release. Better an empty effective action, which
@@ -10017,7 +10028,45 @@ class AntivirusDecoderParsingTests(SimpleTestCase):
         entry = {"@name": "drops", "decoder": {"entry": [
             {"@name": "smtp", "action": "drop"}]}}
 
-        self.assertTrue(profile_decoders(entry)[0][3])
+        # By protocol, not by position: the rows are in PAN-OS's own decoder order now, so the
+        # one the config names is not necessarily first.
+        smtp = next(r for r in profile_decoders(entry) if r[0] == "smtp")
 
-    def test_a_profile_with_no_decoder_node_yields_nothing(self):
-        self.assertEqual(profile_decoders({"@name": "bare"}), [])
+        self.assertTrue(smtp[3])
+
+    def test_a_profile_with_no_decoder_node_still_has_SEVEN_decoders(self):
+        """PAN-OS evaluates every protocol whether or not the config names it, and allows on
+        the ones it does not. Yielding nothing here made such a profile invisible to
+        PAN-AVW-001 - no rows, so no gap to report, so a profile inspecting nothing passed."""
+        rows = profile_decoders({"@name": "bare"})
+
+        self.assertEqual(len(rows), 7)
+        self.assertTrue(all(r[2] == "allow" for r in rows))
+        self.assertTrue(all(not r[3] for r in rows), "none of them block")
+
+    def test_the_protocols_the_config_omits_are_allow(self):
+        """`oep-avp-xdefault` on the lab: `default` on http alone. The UI renders
+        `default (reset-both)` for http and `allow` for the other six."""
+        rows = {r[0]: r for r in profile_decoders(
+            {"@name": "one", "decoder": {"entry": [{"@name": "http", "action": "default"}]}})}
+
+        self.assertEqual(rows["http"][2], "reset-both")
+        self.assertTrue(rows["http"][3])
+        for protocol in ("http2", "smtp", "imap", "pop3", "ftp", "smb"):
+            self.assertEqual(rows[protocol][2], "allow", protocol)
+            self.assertFalse(rows[protocol][3], protocol)
+
+    def test_a_decoder_entry_with_no_action_allows(self):
+        rows = {r[0]: r for r in profile_decoders(
+            {"@name": "empty", "decoder": {"entry": [{"@name": "http"}]}})}
+
+        self.assertEqual(rows["http"][1], "")
+        self.assertEqual(rows["http"][2], "allow")
+        self.assertFalse(rows["http"][3])
+
+    def test_a_protocol_PAN_OS_adds_later_is_carried_rather_than_dropped(self):
+        rows = {r[0]: r for r in profile_decoders(
+            {"@name": "future", "decoder": {"entry": [{"@name": "quic", "action": "drop"}]}})}
+
+        self.assertEqual(len(rows), 8)
+        self.assertEqual(rows["quic"][2], "drop")
