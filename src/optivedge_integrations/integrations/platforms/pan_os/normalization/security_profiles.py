@@ -216,8 +216,9 @@ class NormalizedSecurityProfile:
     rule_count: int
     threat_exception_count: int
     verdicts: dict[str, tuple[bool, str]]
-    #: Antivirus only: (protocol, configured, effective, blocks, wf_configured, wf_effective,
-    #: wf_blocks) per decoder. Empty for every other kind.
+    #: Antivirus only, one tuple per decoder, THREE action columns each:
+    #: (protocol, configured, effective, blocks, wf_configured, wf_effective, wf_blocks,
+    #:  ml_configured, ml_effective, ml_blocks). Empty for every other kind.
     decoders: list[tuple]
     #: Antivirus only: {ml model name: configured action}, as the CONFIG holds it. Which models
     #: exist is settled against the catalogue at persist time.
@@ -354,7 +355,8 @@ def profile_application_overrides(entry: dict[str, Any]) -> list[tuple]:
 
 
 def profile_decoders(entry: dict[str, Any]) -> list[tuple]:
-    """One tuple per protocol PAN-OS evaluates - ALL SEVEN, whatever the config names.
+    """One tuple per protocol PAN-OS evaluates - ALL SEVEN, whatever the config names,
+    carrying ALL THREE action columns.
 
     The config may name fewer decoders, or none at all, and the device still inspects every
     protocol: a profile with no decoder node renders seven rows of `allow` in the UI. Walking
@@ -373,13 +375,20 @@ def profile_decoders(entry: dict[str, Any]) -> list[tuple]:
         decoder = configured_by_protocol.get(protocol, {})
         action = _text(decoder.get("action"))
         wildfire = _text(decoder.get("wildfire-action"))
+        # The THIRD column, WILDFIRE INLINE ML ACTION. Same enum, same per-protocol
+        # resolution of `default`, same absent-means-allow rule - measured 2026-10-07 from the
+        # create form, which renders all three columns identically row for row.
+        mlav = _text(decoder.get("mlav-action"))
         effective = resolve_decoder_action(protocol, action)
         wf_effective = resolve_decoder_action(protocol, wildfire)
+        ml_effective = resolve_decoder_action(protocol, mlav)
         rows.append((
             protocol, action, effective,
             effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
             wildfire, wf_effective,
             wf_effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
+            mlav, ml_effective,
+            ml_effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
         ))
     # A protocol PAN-OS adds in a later release: present in the config, unknown to PROTOCOLS.
     # Carried rather than dropped, so it is visible rather than silently unassessed.
@@ -388,13 +397,20 @@ def profile_decoders(entry: dict[str, Any]) -> list[tuple]:
             continue
         action = _text(decoder.get("action"))
         wildfire = _text(decoder.get("wildfire-action"))
+        # The THIRD column, WILDFIRE INLINE ML ACTION. Same enum, same per-protocol
+        # resolution of `default`, same absent-means-allow rule - measured 2026-10-07 from the
+        # create form, which renders all three columns identically row for row.
+        mlav = _text(decoder.get("mlav-action"))
         effective = resolve_decoder_action(protocol, action)
         wf_effective = resolve_decoder_action(protocol, wildfire)
+        ml_effective = resolve_decoder_action(protocol, mlav)
         rows.append((
             protocol, action, effective,
             effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
             wildfire, wf_effective,
             wf_effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
+            mlav, ml_effective,
+            ml_effective in SecurityProfileDecoder.BLOCKING_ACTIONS,
         ))
     return rows
 
@@ -730,9 +746,12 @@ def replace_security_profiles(
                 security_profile=row, protocol=protocol, configured_action=configured,
                 effective_action=effective, blocks=blocks,
                 configured_wildfire_action=wf_configured,
-                effective_wildfire_action=wf_effective, wildfire_blocks=wf_blocks)
+                effective_wildfire_action=wf_effective, wildfire_blocks=wf_blocks,
+                configured_mlav_action=ml_configured,
+                effective_mlav_action=ml_effective, mlav_blocks=ml_blocks)
             for (protocol, configured, effective, blocks,
-                 wf_configured, wf_effective, wf_blocks) in normalized.decoders
+                 wf_configured, wf_effective, wf_blocks,
+                 ml_configured, ml_effective, ml_blocks) in normalized.decoders
         ])
         # ONE ROW PER OVERRIDE THE CONFIG NAMES, and none otherwise - unlike the decoders
         # above, where all seven are synthesized. An override is an operator-added exception,

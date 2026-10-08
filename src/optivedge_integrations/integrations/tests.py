@@ -10075,6 +10075,69 @@ class AntivirusDecoderParsingTests(SimpleTestCase):
         self.assertEqual(rows["quic"][2], "drop")
 
 
+class AntivirusThirdActionColumnTests(SimpleTestCase):
+    """WILDFIRE INLINE ML ACTION - the decoder's third action field, read from 2026-10-08.
+
+    All three columns share the enum, the per-protocol resolution of `default`, and the
+    absent-means-allow rule. Measured 2026-10-07 from the create-form capture, which renders
+    every decoder row identically across the three columns.
+    """
+
+    def _rows(self, entry):
+        return {r[0]: r for r in profile_decoders(entry)}
+
+    def test_all_three_columns_are_read_and_resolved_per_protocol(self):
+        rows = self._rows({"@name": "p", "decoder": {"entry": [
+            {"@name": "smtp", "action": "default", "wildfire-action": "default",
+             "mlav-action": "default"}]}})
+
+        # smtp resolves to alert in every column, so nothing blocks on it.
+        self.assertEqual(rows["smtp"][2], "alert")
+        self.assertEqual(rows["smtp"][5], "alert")
+        self.assertEqual(rows["smtp"][8], "alert")
+        self.assertEqual((rows["smtp"][3], rows["smtp"][6], rows["smtp"][9]),
+                         (False, False, False))
+
+    def test_http_default_blocks_in_every_column(self):
+        rows = self._rows({"@name": "p", "decoder": {"entry": [
+            {"@name": "http", "action": "default", "wildfire-action": "default",
+             "mlav-action": "default"}]}})
+
+        self.assertEqual((rows["http"][2], rows["http"][5], rows["http"][8]),
+                         ("reset-both", "reset-both", "reset-both"))
+        self.assertEqual((rows["http"][3], rows["http"][6], rows["http"][9]),
+                         (True, True, True))
+
+    def test_the_columns_resolve_INDEPENDENTLY(self):
+        """The shape that passed PAN-AVW-001 until 2026-10-08: hard on signature action, open
+        on the other two."""
+        rows = self._rows({"@name": "p", "decoder": {"entry": [
+            {"@name": "http", "action": "reset-both", "wildfire-action": "allow",
+             "mlav-action": "alert"}]}})
+
+        self.assertEqual((rows["http"][3], rows["http"][6], rows["http"][9]),
+                         (True, False, False))
+
+    def test_an_absent_mlav_action_allows_like_the_others(self):
+        """The column a profile written with only `action` and `wildfire-action` leaves open -
+        the mistake that made an `oep-avw-hardened` subject not hardened."""
+        rows = self._rows({"@name": "p", "decoder": {"entry": [
+            {"@name": "http", "action": "reset-both", "wildfire-action": "reset-both"}]}})
+
+        self.assertEqual(rows["http"][7], "")
+        self.assertEqual(rows["http"][8], "allow")
+        self.assertFalse(rows["http"][9])
+
+    def test_a_synthesized_protocol_carries_all_three_columns(self):
+        """A profile with no decoder node inspects nothing on any protocol in any column."""
+        rows = self._rows({"@name": "bare"})
+
+        self.assertEqual(len(rows), 7)
+        for protocol, row in rows.items():
+            self.assertEqual((row[2], row[5], row[8]), ("allow", "allow", "allow"), protocol)
+            self.assertEqual((row[3], row[6], row[9]), (False, False, False), protocol)
+
+
 class AntivirusApplicationOverrideTests(SimpleTestCase):
     """The per-application action override, measured on pan-fw-111 2026-10-08.
 

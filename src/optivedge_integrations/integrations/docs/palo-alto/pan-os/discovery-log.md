@@ -35,6 +35,48 @@ Entry shape:
 
 
 
+## 2026-10-08 — a decoder has three action columns, and two of them went nowhere
+
+**Did:**    Jason asked whether I had picked up that decoders have different default actions
+per protocol. I had — it is `DEFAULT_RESOLUTION` and it is the reason PAN-AVW-001 exists — but
+re-opened his create-form capture to answer properly, then read the code against it.
+
+**Found:**  The capture shows **three** action columns per decoder — SIGNATURE ACTION,
+WILDFIRE SIGNATURE ACTION, WILDFIRE INLINE ML ACTION — and `default` resolves by the **same**
+per-protocol table in all three: `default (reset-both)` on ftp/http/http2/smb and
+`default (alert)` on imap/pop3/smtp, row for row across the columns. So applying the table to
+`wildfire-action` was right, and I had recorded that as an assumption that "held" when the
+evidence had been in hand since 2026-10-07.
+
+The problem was downstream. `wildfire-action` was normalized and **read by no control**;
+`mlav-action` **was not read at all**. So a profile `reset-both` on signature action and
+`allow` on both WildFire columns passed PAN-AVW-001 while delivering anything WildFire or
+inline ML caught. Fourth time on that control that the error pointed the same way.
+
+And the finding sentence was worse than wrong by omission. `_subject` read the critical/high
+severity verdicts, which an antivirus profile **does not have** — None, so `_gaps` came back
+empty and the else-branch asserted the profile **"blocks critical and high threats"**. That
+printed on every antivirus finding, the predefined `default` included — the reassuring
+sentence on the finding reporting the profile as failing. Found by building the sentence
+against real collected profiles rather than reading the code and assuming.
+
+**Landed:** `configured_mlav_action` / `effective_mlav_action` / `mlav_blocks` on
+`SecurityProfileDecoder`, migration 0077, with `mlav_blocks` **nullable and not backfilled** —
+nothing can backfill a field that was never collected, and a guess made at migration time
+would be scored by a control. Null reports as "not yet computed". PAN-AVW-001 now ORs four
+clauses. `_subject` branches on kind and names the verdict source as the UI column names it.
+Columns on both surfaces renamed to the vendor's words — PAN-OS calls that tab **Application
+Exceptions**. Lab subject `oep-avw-sig-only`, the shape that passed until today.
+
+Three items promoted into `building-a-control.md`: the container-completion rule has three
+answers not one; reach for `schema_introspection.complete` rather than a fresh parser; and ask
+what **sibling node** can undo an assertion, because the key set is what finds it.
+
+**Open:** Nothing covers an antivirus profile's `threat-exception` or `mlav-exception` nodes.
+PAN-SPY-005 and PAN-VLN-004 are the corpus's exception-hygiene controls and both are unbuilt;
+whoever builds them should decide whether they span antivirus profiles, since the
+`threat-exception` node exists on all three kinds.
+
 ## 2026-10-08 — an antivirus decoder action is not the last word
 
 **Did:**    Kept enumerating after the `mlav-policy-action` find, because the profile's key set

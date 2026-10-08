@@ -151,6 +151,34 @@ class SecurityProfile(ScopedPolicyObject):
         return bool(self.non_blocking_decoders)
 
     @property
+    def non_blocking_wildfire_decoders(self) -> list[str]:
+        """Protocols whose WILDFIRE SIGNATURE ACTION does not stop the transfer.
+
+        A separate question from `non_blocking_decoders`: the two columns are independent
+        verdict sources and a profile can be hard on one and open on the other.
+        """
+        return sorted(d.protocol for d in self.decoders.all() if not d.wildfire_blocks)
+
+    @property
+    def has_non_blocking_wildfire_decoder(self) -> bool:
+        return bool(self.non_blocking_wildfire_decoders)
+
+    @property
+    def non_blocking_mlav_decoders(self) -> list[str]:
+        """Protocols whose WILDFIRE INLINE ML ACTION does not stop the transfer.
+
+        `blocks is not True` rather than `not blocks`, so a row predating the column - a null,
+        meaning not computed - is reported rather than passed. The label says which it is.
+        """
+        return sorted(f"{d.protocol} (not yet computed)" if d.mlav_blocks is None
+                      else d.protocol
+                      for d in self.decoders.all() if d.mlav_blocks is not True)
+
+    @property
+    def has_non_blocking_mlav_decoder(self) -> bool:
+        return bool(self.non_blocking_mlav_decoders)
+
+    @property
     def non_blocking_application_overrides(self) -> list[str]:
         """Per-application overrides that do not stop the transfer, as labelled strings.
 
@@ -262,9 +290,30 @@ class SecurityProfileDecoder(models.Model):
     #: What that means on this protocol, after DEFAULT_RESOLUTION.
     effective_action = models.CharField(max_length=32)
     blocks = models.BooleanField()
+    #: THREE ACTION COLUMNS, NOT ONE. The UI's decoder table has SIGNATURE ACTION, WILDFIRE
+    #: SIGNATURE ACTION and WILDFIRE INLINE ML ACTION per protocol, and `default` resolves by
+    #: the SAME per-protocol table in all three - measured 2026-10-07, the create-form capture
+    #: in OptivEdgeProbe scratch/jason/ showing every row rendering identically across the
+    #: three columns.
+    #:
+    #: They are three VERDICT SOURCES on one protocol: a signature hit, a WildFire-derived
+    #: signature hit, and an inline ML verdict. A profile can reset-both on the first and allow
+    #: the other two, and malware caught by WildFire is then delivered. PAN-AVW-001 read only
+    #: the first until 2026-10-08.
     configured_wildfire_action = models.CharField(max_length=32, blank=True)
     effective_wildfire_action = models.CharField(max_length=32, blank=True)
     wildfire_blocks = models.BooleanField(default=False)
+    configured_mlav_action = models.CharField(max_length=32, blank=True)
+    effective_mlav_action = models.CharField(max_length=32, blank=True)
+    #: NULLABLE, and a null means NOT COMPUTED - a row written before this column existed.
+    #:
+    #: The checklist's rule is that a new derived column on an already-populated model must not
+    #: default to the compliant side, because the gap between migrating and re-normalizing then
+    #: reads as a hardened estate. `False` here already means "does not block", which fires -
+    #: but it is indistinguishable from a measured `allow`. A null fires AND says why, so
+    #: "nobody has computed this yet" cannot be read as "we checked and it allows". Same
+    #: obligation MasterKey's `undetermined` carries.
+    mlav_blocks = models.BooleanField(null=True)
 
     class Meta:
         ordering = ["security_profile", "protocol"]
