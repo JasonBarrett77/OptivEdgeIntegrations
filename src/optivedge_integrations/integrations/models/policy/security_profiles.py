@@ -116,12 +116,26 @@ class SecurityProfile(ScopedPolicyObject):
 
     @property
     def disabled_ml_models(self) -> list[str]:
-        """WildFire Inline ML models this profile does not run. Absent counts as disabled."""
+        """Models this profile does not run at all. Absent counts as disabled."""
         return sorted(m.name for m in self.ml_models.all() if not m.enabled)
+
+    @property
+    def non_blocking_ml_models(self) -> list[str]:
+        """Models that do not STOP a file - off, or running in alert-only.
+
+        What PAN-AVW-002 reports. A model set to `enable(alert-only)` is not a model doing
+        nothing, but it is a model that lets the file through, which is the same outcome for
+        the control's purpose and a different remediation for the engineer - hence both lists.
+        """
+        return sorted(m.name for m in self.ml_models.all() if not m.blocks)
 
     @property
     def has_disabled_ml_model(self) -> bool:
         return bool(self.disabled_ml_models)
+
+    @property
+    def has_non_blocking_ml_model(self) -> bool:
+        return bool(self.non_blocking_ml_models)
 
     @property
     def non_blocking_decoders(self) -> list[str]:
@@ -278,9 +292,21 @@ class SecurityProfileMlModel(models.Model):
 
     security_profile = models.ForeignKey(
         SecurityProfile, on_delete=models.CASCADE, related_name="ml_models")
+    #: THREE values, enumerated from the device with action=complete on 2026-10-08:
+    #: `enable`, `enable(alert-only)` and `disable`. The middle one is why this model carries
+    #: two booleans rather than one - a model set to alert-only RUNS, and does not BLOCK, and a
+    #: single `enabled` flag has to misreport one of those.
+    ACTIONS = ("enable", "enable(alert-only)", "disable")
+    RUNS = ("enable", "enable(alert-only)")
+    BLOCKS = "enable"
+
     #: As the content release names it. Not an enum - see the class docstring.
     name = models.CharField(max_length=128)
+    #: The engine runs at all: `enable` or `enable(alert-only)`.
     enabled = models.BooleanField()
+    #: It stops the file rather than logging it: `enable` alone. What PAN-AVW-002 asserts, and
+    #: what the corpus names for both its minimum and its preferred value.
+    blocks = models.BooleanField(default=False)
     #: What the config held, for an engineer looking for the line to change. Blank where the
     #: profile does not mention this model at all, which is itself the finding.
     configured_action = models.CharField(max_length=32, blank=True)

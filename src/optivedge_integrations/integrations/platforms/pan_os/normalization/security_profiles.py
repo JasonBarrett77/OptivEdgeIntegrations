@@ -681,7 +681,10 @@ def replace_security_profiles(
                 security_profile=row, name=model,
                 configured_action=normalized.ml_models.get(model, ""),
                 # Absent means DISABLED, the same way an absent decoder action means allow.
-                enabled=normalized.ml_models.get(model, "") == "enable")
+                # `enable(alert-only)` RUNS but does not BLOCK - enumerated from the device
+                # 2026-10-08, and the reason these are two flags rather than one.
+                enabled=normalized.ml_models.get(model, "") in SecurityProfileMlModel.RUNS,
+                blocks=normalized.ml_models.get(model, "") == SecurityProfileMlModel.BLOCKS)
             for model in (catalogue if normalized.kind == SecurityProfile.KIND_VIRUS else [])
         ])
         SecurityProfileDecoder.objects.bulk_create([

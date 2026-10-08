@@ -35,6 +35,48 @@ Entry shape:
 
 
 
+## 2026-10-08 — `mlav-policy-action` has three values, and my `complete` parser was broken
+
+**Did:**    Asked whether every antivirus value and default had actually been *measured*, and
+found three of the four action fields had not — `action` was enumerated by writing all seven
+values plus a bogus one, while `wildfire-action`, `mlav-action` and `mlav-policy-action` were
+read and written on the assumption that they mirrored it. Enumerated all four with
+`action=complete`, plus the profile and decoder key sets, against `oep-avw-hardened` on
+pan-fw-111. Method: OptivEdgeProbe `scratch/lab_complete_av_schema.py`.
+
+**Found:**  `wildfire-action` and `mlav-action` do mirror `action` — same seven values.
+`mlav-policy-action` does NOT: it has **three** values, `enable`, `enable(alert-only)` and
+`disable`. The normalizer tested `== "enable"`, so an alert-only model recorded as *disabled* —
+wrong about what the device does, because the model runs and alerts, it just does not stop the
+file. Running and blocking are two questions and now have two columns, `enabled` and `blocks`.
+
+A first pass had concluded `complete` returned nothing on antivirus profiles at all. **That was
+my own parser.** Completions are at `response.completions.completion`, not
+`response.result.completions` where every other config action puts its payload. Reading the
+wrong path is indistinguishable from a device with nothing to say — which is how an unmeasured
+assumption got written down as if it had been checked. The probe now tries both paths and
+reports which answered.
+
+Also enumerated, since the oracle was working: the profile has eight child keys and a decoder
+has exactly three, so the UI's three action columns are the whole of it. `application` is an
+entry-keyed **per-application action override** carrying the same seven actions — settled by
+writing both candidate forms, the `<member>` form refused with code=12 — so a profile can read
+`reset-both` on all seven decoders and still allow a named application through. `complete` is
+explicitly unimplemented (code=2) for `packet-capture` and `wfrt-hold-mode`.
+
+**Landed:** OptivEdgeProbe's payload contract — the three action-field enums, the key sets, the
+`application` node, the response-path note, and a new `wildfire-analysis-profile` node
+(`rules[].direction`: upload/download/both; `rules[].analysis`: public-cloud/private-cloud; no
+action field anywhere in the kind). OEI: `SecurityProfileMlModel.blocks`, migration 0075 with
+an exact backfill, PAN-AVW-002 repointed to `has_non_blocking_ml_model`. A fourth lab subject,
+`oep-avw-ml-alert`, so the third value is exercised against a device and not only a unit test.
+
+**Open:** Nothing reads the `application` override, so **PAN-AVW-001 reports a profile with a
+permissive per-application exception as hardened.** Real gap, not yet scoped.
+`wfrt-hold-mode`, `mica-engine-wildfire-rules` and `cloud-inline-analysis` are in their key
+sets with shapes unestablished — no profile on the lab carries one. The 1454-of-5552
+application filter is observed, not confirmed: nothing was clicked to check what the rule is.
+
 ## 2026-10-08 — the shipped antivirus profile is STRONGER than a hand-made one
 
 **Did:**    Built PAN-AVW-002 and read the WildFire Inline ML models off every antivirus profile
