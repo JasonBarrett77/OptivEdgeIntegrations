@@ -83,7 +83,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.types im
 #: Every profile kind normalized into rows. Antivirus is here for PAN-AVW-006 and so a rule's
 #: `virus` profile resolves to an object; it writes no severity verdicts - see below.
 PROFILE_KINDS = (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY,
-                SecurityProfile.KIND_VIRUS)
+                SecurityProfile.KIND_VIRUS, SecurityProfile.KIND_WILDFIRE_ANALYSIS)
 
 #: What counts as blocking a threat. Jason, 2026-09-11: any blocking action passes - a deviation
 #: from the corpus minimum, which names reset-both alone. `default` is NOT here: a signature's

@@ -58,10 +58,12 @@ class SecurityProfile(ScopedPolicyObject):
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
     KIND_VIRUS = "virus"
+    KIND_WILDFIRE_ANALYSIS = "wildfire-analysis"
     KIND_CHOICES = [
         (KIND_SPYWARE, "Anti-Spyware"),
         (KIND_VULNERABILITY, "Vulnerability Protection"),
         (KIND_VIRUS, "Antivirus"),
+        (KIND_WILDFIRE_ANALYSIS, "WildFire Analysis"),
     ]
     #: Kinds built from an ordered rule list matching on SEVERITY, and so the only kinds for
     #: which a severity verdict means anything. Antivirus is deliberately not here: it has
@@ -79,7 +81,7 @@ class SecurityProfile(ScopedPolicyObject):
     source_snapshot = models.ForeignKey(
         "integrations.Snapshot", on_delete=models.CASCADE, related_name="security_profiles")
 
-    kind = models.CharField(max_length=16, choices=KIND_CHOICES)
+    kind = models.CharField(max_length=32, choices=KIND_CHOICES)
     description = models.TextField(blank=True)
     is_predefined = models.BooleanField(default=False)
     rule_count = models.PositiveIntegerField(default=0)
