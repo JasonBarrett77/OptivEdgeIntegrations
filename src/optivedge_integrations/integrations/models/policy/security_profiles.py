@@ -367,12 +367,19 @@ class SecurityProfileApplicationOverride(models.Model):
     configured_action = models.CharField(max_length=32, blank=True)
     #: Does this override stop the transfer?
     #:
-    #: NULL means UNESTABLISHED, and it is reserved for the literal `default`. On a decoder,
-    #: `default` resolves per protocol and that resolution was measured; an override is not
-    #: per-protocol, so the same table cannot answer it and no device oracle was found that
-    #: does. A null therefore reports as a gap rather than as a pass: the control fails toward
-    #: FIRING, because "we could not establish it" must not render as "we checked and it was
-    #: fine". Over-reporting a rare node is the cheap error here.
+    #: NULL means UNESTABLISHED, and it is reserved for the literal `default`.
+    #:
+    #: A decoder's `default` is NOT ONE ACTION - it resolves per protocol, reset-both on
+    #: http/http2/ftp/smb and alert on smtp/imap/pop3. An exception's `default` has no reason
+    #: to be uniform when the decoder's is not, and the likely mechanism says it is not: an
+    #: application rides a protocol, so `default` here plausibly resolves through that
+    #: application's own decoder. A single resolved value stored in this column would bake in
+    #: a uniformity assumption nothing supports, which is why it stays null rather than being
+    #: resolved optimistically.
+    #:
+    #: A null reports as a gap rather than a pass: the control fails toward FIRING, because
+    #: "we could not establish it" must not render as "we checked and it was fine".
+    #: Over-reporting a rare node is the cheap error here.
     blocks = models.BooleanField(null=True)
 
     class Meta:
