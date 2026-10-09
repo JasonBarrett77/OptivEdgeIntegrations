@@ -18,6 +18,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
+    WildfireSettings,
     ServerProfile,
     Interface,
     FieldProvenance,
@@ -10137,6 +10138,86 @@ class AntivirusThirdActionColumnTests(SimpleTestCase):
         for protocol, row in rows.items():
             self.assertEqual((row[2], row[5], row[8]), ("allow", "allow", "allow"), protocol)
             self.assertEqual((row[3], row[6], row[9]), (False, False, False), protocol)
+
+
+from optivedge_integrations.integrations.platforms.pan_os.normalization.wildfire_settings import (  # noqa: E402
+    exclusions,
+    size_limits,
+    untuned,
+)
+
+
+class WildfireDeviceSettingsTests(SimpleTestCase):
+    """deviceconfig/setting/wildfire. PAN-AVW-004 and PAN-AVW-005, measured 2026-10-09.
+
+    The two things most easily got wrong are both here: session information is stored as
+    EXCLUSIONS, so empty is the good state; and a size limit equal to its default was set by
+    nobody, which is what makes the tuning check possible.
+    """
+
+    def test_session_information_is_stored_as_EXCLUSIONS_so_empty_is_good(self):
+        """The twelve enum members are all `exclude-*`. A ticked UI checkbox means the
+        exclusion is ABSENT, so an empty list is FULL sharing - the opposite of this
+        codebase's usual rule that an absent key is the weaker end."""
+        self.assertEqual(exclusions({}, "session-info-select"), [])
+        self.assertEqual(
+            exclusions({"session-info-select": {"member": ["exclude-url",
+                                                           "exclude-username"]}},
+                       "session-info-select"),
+            ["exclude-url", "exclude-username"])
+
+    def test_a_single_exclusion_arriving_unwrapped_is_still_read(self):
+        self.assertEqual(
+            exclusions({"session-info-select": {"member": "exclude-filename"}},
+                       "session-info-select"),
+            ["exclude-filename"])
+
+    def test_the_inline_block_is_read_separately(self):
+        node = {"session-info-select": {"member": ["exclude-url"]},
+                "cloud-inline-wf-session-info-select": {"member": ["exclude-src-ip"]}}
+
+        self.assertEqual(exclusions(node, "session-info-select"), ["exclude-url"])
+        self.assertEqual(exclusions(node, "cloud-inline-wf-session-info-select"),
+                         ["exclude-src-ip"])
+
+    def test_size_limits_read_only_what_the_config_names(self):
+        node = {"file-size-limit": {"entry": [
+            {"@name": "pe", "size-limit": "50"},
+            {"@name": "pdf", "size-limit": {"#text": "4096"}}]}}
+
+        self.assertEqual(size_limits(node), {"pe": 50, "pdf": 4096})
+
+    def test_a_device_that_configures_NOTHING_is_entirely_untuned(self):
+        """The clearest case, and the one walking only configured entries would miss: no
+        file-size-limit node at all means every type is still at its default."""
+        self.assertEqual(sorted(untuned({})),
+                         sorted(WildfireSettings.DEFAULT_SIZE_LIMITS))
+
+    def test_a_type_set_to_its_own_default_counts_as_untuned(self):
+        """PAN-AVW-004 is a TUNING check (Jason, 2026-10-09): the question is whether anyone
+        sized this for the estate, and a value equal to the default answers no however it
+        got there."""
+        self.assertIn("pe", untuned({"pe": WildfireSettings.DEFAULT_SIZE_LIMITS["pe"]}))
+
+    def test_a_type_moved_off_its_default_is_tuned_either_way(self):
+        """Up or down. The vendor advises tuning DOWN against buffer space - Help p.774 -
+        so a lowered limit is evidence of tuning exactly as a raised one is."""
+        self.assertNotIn("pe", untuned({"pe": 50}))
+        self.assertNotIn("pe", untuned({"pe": 1}))
+
+    def test_the_lab_values_are_all_defaults(self):
+        """What pan-fw-111 actually holds, 2026-10-09. Ten entries, every one at its default,
+        and `eml` absent - so the device is entirely untuned and PAN-AVW-004 fires on all
+        eleven types."""
+        lab = {"pe": 16, "apk": 10, "pdf": 3072, "ms-office": 16385, "jar": 5, "flash": 5,
+               "MacOSX": 10, "archive": 50, "linux": 50, "script": 20}
+
+        self.assertEqual(sorted(untuned(lab)),
+                         sorted(WildfireSettings.DEFAULT_SIZE_LIMITS))
+
+    def test_a_non_numeric_limit_is_skipped_rather_than_crashing(self):
+        self.assertEqual(size_limits(
+            {"file-size-limit": {"entry": [{"@name": "pe", "size-limit": ""}]}}), {})
 
 
 class WildfireAnalysisRuleTests(SimpleTestCase):

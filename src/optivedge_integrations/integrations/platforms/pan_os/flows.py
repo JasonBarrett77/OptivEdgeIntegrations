@@ -72,6 +72,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_management_ssh,
     normalize_appliance_master_key,
     normalize_appliance_services_settings,
+    normalize_appliance_wildfire_settings,
     normalize_appliance_device_services,
     normalize_appliance_password_complexity,
     normalize_appliance_password_profiles,
@@ -708,6 +709,9 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     ("login banner", normalize_appliance_login_banner),
     ("master key", normalize_appliance_master_key),
     ("services settings", normalize_appliance_services_settings),
+    # Device > Setup > WildFire. Reads the same device entry as its neighbours and
+    # depends on nothing else in this tuple.
+    ("wildfire settings", normalize_appliance_wildfire_settings),
     # Reads the same device entry as its neighbour above, and additionally resolves whether SNMP
     # is REACHABLE over the ManagementService rows. Those are written before this loop starts,
     # by normalize_appliance_management_interfaces - so the dependency is on the surrounding

@@ -37,6 +37,7 @@ from .login_banner import LoginBanner
 from .management_tls import ManagementTlsBinding
 from .management_ssh import ManagementSshSettings
 from .master_key import MasterKey
+from .wildfire_settings import WildfireSettings
 from .services_settings import LoggingSettings, UpdateServerSettings
 from .device_services import NtpSettings, SnmpSettings, SystemIdentity
 from .password_complexity import PasswordComplexityPolicy
@@ -148,6 +149,7 @@ __all__ = [
     "SecurityProfileApplicationOverride",
     "SecurityProfileMlModel",
     "SecurityProfileWildfireRule",
+    "WildfireSettings",
     "SecurityProfileGroup",
     "SecurityProfileSeverityVerdict",
     "SecurityRule",

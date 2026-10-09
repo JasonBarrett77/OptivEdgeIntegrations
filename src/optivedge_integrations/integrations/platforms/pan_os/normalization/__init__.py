@@ -48,6 +48,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.manageme
 from optivedge_integrations.integrations.platforms.pan_os.normalization.master_key import (
     normalize_master_key,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.wildfire_settings import (
+    normalize_wildfire_settings,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.services_settings import (
     normalize_services_settings,
 )
@@ -146,6 +149,15 @@ def normalize_appliance_master_key(appliance: Appliance) -> dict:
 def normalize_appliance_services_settings(appliance: Appliance) -> dict:
     """Update server verification and the high-DP-load logging setting. PAN-MGT-009 and 011."""
     return normalize_services_settings(appliance)
+
+
+def normalize_appliance_wildfire_settings(appliance: Appliance) -> dict:
+    """Device > Setup > WildFire, the device-wide settings. PAN-AVW-004 and PAN-AVW-005.
+
+    Distinct from the WildFire ANALYSIS PROFILE that PAN-AVW-003 reads: a profile decides what
+    is asked for, this decides what the platform forwards.
+    """
+    return normalize_wildfire_settings(appliance)
 
 
 def normalize_appliance_device_services(appliance: Appliance) -> dict:

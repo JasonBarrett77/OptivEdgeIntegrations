@@ -35,6 +35,48 @@ Entry shape:
 
 
 
+## 2026-10-09 — the device-wide WildFire settings, and two controls redefined
+
+**Did:**    Measured `deviceconfig/setting/wildfire` after Jason flagged that some WildFire
+settings are device-wide, then built PAN-AVW-004 and PAN-AVW-005 once he answered the two
+questions the measurement raised.
+
+**Found:**  **The UI is inverted relative to the config.** `session-info-select` holds twelve
+`exclude-*` members, so the config stores what is WITHHELD and a ticked checkbox means the
+exclusion is absent. An empty list is FULL sharing — the desirable state, and the opposite of
+this project's usual rule that an absent key is the weaker end. Reading it the other way round
+would have inverted PAN-AVW-005 completely.
+
+**The size limits look configured and are not.** Every entry on pan-fw-111 reports
+`@src: tpl`, but `temp-stck-jb-rg` is a template STACK and none of the six templates holds a
+wildfire node. I verified the read path rather than trusting it — wrote `pe: 7` into a
+template, watched it appear, deleted it, watched it vanish — because two malformed xpaths had
+already produced false negatives the same day. So nothing sets them. `eml` is the proof they
+are defaults: absent from config entirely, and the UI still shows 5 MB.
+
+Also: the per-type limits cover **eleven** types where a profile has thirteen, so `email-link`
+and `any` are not gated at all; and the units are not uniform — pe renders MB, pdf renders KB.
+
+**Two controls changed shape, both on Jason's call.** PAN-AVW-004 is now a TUNING check rather
+than a maximisation one: the corpus asks for the platform maximum and Help p.774 advises the
+opposite in the paragraph describing the field, so asserting the maximum would call the
+vendor's own advice a finding. The answerable question is whether anybody sized them at all.
+PAN-AVW-005's corpus entry named two different nodes — session sharing in its title,
+`report-grayware-file` in its xpath — in opposite states on the lab; it now asserts both.
+
+**Landed:** `WildfireSettings`, migrations 0079 and 0080, wired into the appliance normalizer
+tuple and confirmed reached by a real refresh rather than by reading the call graph. Both
+controls, a results page, an artifact domain, and the finding model.
+
+The suite caught two things worth recording. A control may not rest on a JSON column — the
+guard is behavioural, it compiles every registered field and walks the query — so
+`shares_full_session_info` became a stored boolean beside the list it summarises. And the
+findings page could not take a new column, because it must match the rules page's column set.
+
+**Open:** The defaults are not confirmed on a second platform. Both PA-5220s carry no
+file-size-limit node at all, which makes them untuned by the same reading but does not confirm
+the VALUES. If a platform with different defaults appears, the table becomes one per platform.
+
 ## 2026-10-09 — PAN-AVW-003, and why the profile models stay one model
 
 **Did:**    Built PAN-AVW-003 end to end. Measured the `wildfire-analysis` node first: key
