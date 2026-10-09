@@ -24,6 +24,8 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
         "has_antivirus_profile",
         "has_spyware_profile",
         "has_vulnerability_profile",
+        "wildfire_analysis_submits_all",
+        "wildfire_analysis_detail",
     )
     SOURCE_LOCAL = "local"
     SOURCE_PUSHED_PRE = "pushed_pre"
@@ -55,6 +57,26 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     has_antivirus_profile = models.BooleanField(default=False)
     has_spyware_profile = models.BooleanField(default=False)
     has_vulnerability_profile = models.BooleanField(default=False)
+
+    #: Does the WildFire analysis profile in force on this rule send EVERY file type for
+    #: sandbox analysis? PAN-AVW-003 asks this per RULE rather than per profile, because a
+    #: profile nothing uses endangers nothing and a rule is what carries traffic.
+    #:
+    #: THREE STATES, and the middle one is why this is nullable rather than a boolean:
+    #:
+    #:   True   a profile is in force and some rule in it covers `any` file type
+    #:   False  a profile is in force and none of its rules does - including a profile with
+    #:          no rules at all, which is valid configuration and submits nothing
+    #:   NULL   no WildFire analysis profile reaches this rule, or this row predates the
+    #:          column and nothing has re-normalized it
+    #:
+    #: NULL and False both produce a finding and `wildfire_analysis_detail` says which. Null
+    #: is the firing side deliberately: a new column on an already-populated model defaults
+    #: to its empty value, and a column whose empty value meant "fine" would report a clean
+    #: estate for the whole window between migrating and re-normalizing.
+    wildfire_analysis_submits_all = models.BooleanField(null=True)
+    #: Why, in words, for the finding and the row. Empty only when the answer is True.
+    wildfire_analysis_detail = models.CharField(max_length=255, blank=True)
 
     @property
     def source_breadth_known(self) -> bool:

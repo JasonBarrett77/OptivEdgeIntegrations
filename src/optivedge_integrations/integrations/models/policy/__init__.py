@@ -24,6 +24,7 @@ from .security_profiles import (
     SecurityProfileDecoder,
     SecurityProfileApplicationOverride,
     SecurityProfileMlModel,
+    SecurityProfileWildfireRule,
     SecurityProfileGroup,
     SecurityProfileSeverityVerdict,
 )

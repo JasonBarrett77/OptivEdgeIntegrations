@@ -85,6 +85,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     normalize_security_profile,
     profile_ml_models,
     profile_application_overrides,
+    profile_wildfire_rules,
     profile_decoders,
     resolve_decoder_action,
     normalize_security_rule_profile_coverage,
@@ -10136,6 +10137,85 @@ class AntivirusThirdActionColumnTests(SimpleTestCase):
         for protocol, row in rows.items():
             self.assertEqual((row[2], row[5], row[8]), ("allow", "allow", "allow"), protocol)
             self.assertEqual((row[3], row[6], row[9]), (False, False, False), protocol)
+
+
+class WildfireAnalysisRuleTests(SimpleTestCase):
+    """The WildFire analysis profile's match rules, measured on pan-fw-111 2026-10-09.
+
+    The kind has NO ACTION ANYWHERE - a rule carries exactly application, file-type,
+    direction and analysis, enumerated against a profile that does not exist so the answer is
+    schema rather than membership. It decides what is SENT for analysis, never what happens
+    to it, which is why PAN-AVW-003 asks about coverage rather than about blocking.
+    """
+
+    def test_a_profile_with_no_rules_node_submits_nothing(self):
+        """Valid configuration, measured by writing it - and the state the control exists to
+        find. Synthesizing a permissive row here would hide exactly that profile."""
+        self.assertEqual(profile_wildfire_rules({"@name": "empty"}), [])
+
+    def test_an_empty_rules_node_is_the_same_state(self):
+        self.assertEqual(profile_wildfire_rules({"@name": "e", "rules": {}}), [])
+
+    def test_the_shipped_default_submits_everything(self):
+        """The predefined profile, read off the device: file-type any, application any,
+        direction both, analysis public-cloud. The REVERSE of the antivirus kind, where the
+        shipped profile fails its control - so this one is the passing case."""
+        rows = profile_wildfire_rules({"@name": "default", "rules": {"entry": [
+            {"@name": "default", "analysis": "public-cloud", "direction": "both",
+             "file-type": {"member": ["any"]}, "application": {"member": ["any"]}}]}})
+
+        name, apps, types, direction, analysis, all_ft, all_app, both = rows[0]
+        self.assertEqual((name, apps, types), ("default", ["any"], ["any"]))
+        self.assertEqual((direction, analysis), ("both", "public-cloud"))
+        self.assertEqual((all_ft, all_app, both), (True, True, True))
+
+    def test_a_named_file_type_is_not_every_file_type(self):
+        rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": [
+            {"@name": "r", "file-type": {"member": ["pe", "pdf"]},
+             "application": {"member": ["any"]}, "direction": "both"}]}})
+
+        self.assertEqual(rows[0][2], ["pe", "pdf"])
+        self.assertFalse(rows[0][5])
+        self.assertTrue(rows[0][6])
+
+    def test_an_absent_direction_is_UNESTABLISHED_rather_than_false(self):
+        """The device accepts a rule with no direction and stores none - measured 2026-10-09.
+        The UI writes `both` when a rule is added through the form, so no instance of the
+        absent case exists to read and nothing establishes what the device then does."""
+        rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": [
+            {"@name": "r", "file-type": {"member": ["any"]},
+             "application": {"member": ["any"]}}]}})
+
+        self.assertEqual(rows[0][3], "")
+        self.assertIsNone(rows[0][7])
+
+    def test_upload_only_does_not_cover_both_directions(self):
+        rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": [
+            {"@name": "r", "file-type": {"member": ["any"]},
+             "application": {"member": ["any"]}, "direction": "upload"}]}})
+
+        self.assertFalse(rows[0][7])
+
+    def test_a_rule_carrying_only_a_name_is_kept(self):
+        """The device accepts it, so dropping it would lose a rule that exists."""
+        rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": [{"@name": "r"}]}})
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0][1], rows[0][2]), ([], []))
+        self.assertEqual((rows[0][5], rows[0][6], rows[0][7]), (False, False, None))
+
+    def test_a_single_rule_arriving_unwrapped_is_still_read(self):
+        rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": {
+            "@name": "r", "file-type": {"member": ["any"]}}}})
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0][5])
+
+    def test_a_rule_with_no_name_is_skipped_rather_than_crashing(self):
+        rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": [
+            {"file-type": {"member": ["any"]}}, {"@name": "r"}]}})
+
+        self.assertEqual([r[0] for r in rows], ["r"])
 
 
 class AntivirusApplicationOverrideTests(SimpleTestCase):

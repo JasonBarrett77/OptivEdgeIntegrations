@@ -41,6 +41,7 @@ from optivedge_integrations.integrations.models import (
     SecurityProfileDecoder,
     SecurityProfileGroup,
     SecurityProfileMlModel,
+    SecurityProfileWildfireRule,
     SecurityProfileSeverityVerdict,
     SecurityRule,
     Snapshot,
@@ -226,6 +227,9 @@ class NormalizedSecurityProfile:
     #: Antivirus only: (application, configured action, blocks) per per-application override.
     #: Only what the config names - see `profile_application_overrides`.
     application_overrides: list[tuple]
+    #: WildFire-analysis only: one tuple per match rule. Empty for every other kind, AND for a
+    #: wildfire-analysis profile that has no rules - which is a real state, not a missing one.
+    wildfire_rules: list[tuple]
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
 
@@ -321,6 +325,37 @@ def resolve_decoder_action(protocol: str, configured: str) -> str:
     if configured == "default":
         return SecurityProfileDecoder.DEFAULT_RESOLUTION.get(protocol, "")
     return configured
+
+
+def profile_wildfire_rules(entry: dict[str, Any]) -> list[tuple]:
+    """(name, applications, file_types, direction, analysis, all_ft, all_app, both) per rule.
+
+    ONLY what the config names, and nothing synthesized. A WildFire analysis profile with no
+    rules is valid configuration and submits nothing - measured 2026-10-09 by writing a
+    profile with no `rules` node, one with an empty node, and a rule carrying only a name, all
+    three accepted. So an empty list is a real answer meaning "analyses nothing", and inventing
+    a permissive default row would hide exactly the profile the control exists to find.
+
+    `covers_both_directions` is None where `direction` is absent. The device stores nothing and
+    no oracle establishes what it then does: the UI writes `both` when a rule is added through
+    the form, so no instance of the absent case exists to read. Unestablished, not false.
+    """
+    node = entry.get("rules")
+    rows = []
+    for rule in ensure_list(node.get("entry") if isinstance(node, dict) else None):
+        if not isinstance(rule, dict) or not rule.get("@name"):
+            continue
+        applications = _members(rule.get("application"))
+        file_types = _members(rule.get("file-type"))
+        direction = _text(rule.get("direction"))
+        rows.append((
+            str(rule["@name"]), applications, file_types, direction,
+            _text(rule.get("analysis")),
+            SecurityProfileWildfireRule.ANY in file_types,
+            SecurityProfileWildfireRule.ANY in applications,
+            None if not direction else direction == "both",
+        ))
+    return rows
 
 
 def profile_application_overrides(entry: dict[str, Any]) -> list[tuple]:
@@ -427,6 +462,8 @@ def normalize_security_profile(
     ml_models = profile_ml_models(entry) if kind == SecurityProfile.KIND_VIRUS else {}
     overrides = (profile_application_overrides(entry)
                  if kind == SecurityProfile.KIND_VIRUS else [])
+    wildfire = (profile_wildfire_rules(entry)
+                if kind == SecurityProfile.KIND_WILDFIRE_ANALYSIS else [])
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -446,6 +483,7 @@ def normalize_security_profile(
         decoders=decoders,
         ml_models=ml_models,
         application_overrides=overrides,
+        wildfire_rules=wildfire,
         verdicts=({severity: severity_verdict(kind, rules, severity)
                    for severity in ASSESSED_SEVERITIES}
                   if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
@@ -762,6 +800,15 @@ def replace_security_profiles(
                 configured_action=configured, blocks=blocks)
             for application, configured, blocks in normalized.application_overrides
         ])
+        SecurityProfileWildfireRule.objects.bulk_create([
+            SecurityProfileWildfireRule(
+                security_profile=row, name=name, applications=applications,
+                file_types=file_types, direction=direction, analysis=analysis,
+                covers_all_file_types=all_ft, covers_all_applications=all_app,
+                covers_both_directions=both)
+            for (name, applications, file_types, direction, analysis,
+                 all_ft, all_app, both) in normalized.wildfire_rules
+        ])
         SecurityProfileSeverityVerdict.objects.bulk_create([
             SecurityProfileSeverityVerdict(
                 security_profile=row, severity=severity, blocked=blocked, detail=detail)
@@ -885,6 +932,59 @@ def profile_types_in_force(rule, groups_by_name: dict[str, list]) -> set[str]:
     return types
 
 
+def profile_names_in_force(rule, groups_by_name: dict[str, list]) -> dict[str, str]:
+    """{profile type: name} for `rule`, from its own profiles AND through its group.
+
+    The sibling of `profile_types_in_force`, which answers only WHETHER a type is covered.
+    PAN-AVW-003 needs the profile ITSELF - a rule can name a WildFire analysis profile that
+    sends nothing, which is indistinguishable from a good one until you read its rules.
+
+    A direct profile beats the group: PAN-OS takes one or the other per rule, and a rule that
+    names both is resolved toward what it names explicitly.
+    """
+    names: dict[str, str] = {}
+    for reference in rule.securityruleprofilegroups.all():
+        group = effective_in_scope_order(
+            reference.value, groups_by_name, "security profile group")
+        if group is None:
+            continue
+        for profile_type, members in (group.members or {}).items():
+            if members:
+                names[profile_type] = members[0]
+    for direct in rule.securityruleprofiles.all():
+        if direct.profile_type and direct.value:
+            names[direct.profile_type] = direct.value
+    return names
+
+
+def wildfire_analysis_verdict(rule, groups_by_name, profiles_by_name) -> tuple:
+    """(submits_all, detail) for one rule. PAN-AVW-003's whole question.
+
+    THREE OUTCOMES, and keeping them apart is the point - they have different fixes:
+
+        None   no WildFire analysis profile reaches this rule at all. Attach one.
+        False  one does and it does not send every file type. Fix the profile.
+        True   one does and it does.
+
+    The profile is RESOLVED by name and scope, not merely named: a rule pointing at a group
+    that names a profile which does not exist in scope is protected by nothing, and so is a
+    rule whose group names no WildFire profile at all. The lab's `default` group is that
+    second case for every profile type, which is why this is resolved rather than assumed.
+    """
+    name = profile_names_in_force(rule, groups_by_name).get(
+        SecurityProfile.KIND_WILDFIRE_ANALYSIS)
+    if not name:
+        return None, "no WildFire analysis profile is in force on this rule"
+    profile = effective_in_scope_order(
+        name, profiles_by_name, "wildfire analysis profile")
+    if profile is None:
+        return None, f"names WildFire analysis profile {name!r}, which resolves to nothing"
+    gaps = profile.wildfire_coverage_gaps
+    if not gaps:
+        return True, ""
+    return False, f"{name}: {'; '.join(gaps)}"[:255]
+
+
 def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint) -> dict:
     """Set each rule's profile-coverage columns. Runs AFTER the profile groups are normalized.
 
@@ -900,8 +1000,17 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
     for group in SecurityProfileGroup.objects.filter(owner):
         groups_by_name.setdefault(group.name, []).append(group)
 
+    # The WildFire analysis profiles reachable from here, by name, for the same scope
+    # resolution the groups get. Prefetched because the verdict reads each one's rules.
+    profiles_by_name: dict[str, list] = {}
+    for profile in SecurityProfile.objects.filter(
+            owner, kind=SecurityProfile.KIND_WILDFIRE_ANALYSIS).prefetch_related(
+            "wildfire_rules"):
+        profiles_by_name.setdefault(profile.name, []).append(profile)
+
     updated = 0
     counts = {column: 0 for column in PROFILE_COVERAGE_COLUMNS.values()}
+    counts["wildfire_analysis_gap"] = 0
     rules = (SecurityRule.objects.filter(enforcement_point=enforcement_point)
              .prefetch_related("securityruleprofiles", "securityruleprofilegroups"))
     for rule in rules:
@@ -914,6 +1023,16 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
             if getattr(rule, column) != value:
                 setattr(rule, column, value)
                 changed.append(column)
+        submits_all, detail = wildfire_analysis_verdict(
+            rule, groups_by_name, profiles_by_name)
+        if submits_all is not True:
+            counts["wildfire_analysis_gap"] += 1
+        if rule.wildfire_analysis_submits_all != submits_all:
+            rule.wildfire_analysis_submits_all = submits_all
+            changed.append("wildfire_analysis_submits_all")
+        if rule.wildfire_analysis_detail != detail:
+            rule.wildfire_analysis_detail = detail
+            changed.append("wildfire_analysis_detail")
         if changed:
             rule.save(update_fields=changed)
             updated += 1

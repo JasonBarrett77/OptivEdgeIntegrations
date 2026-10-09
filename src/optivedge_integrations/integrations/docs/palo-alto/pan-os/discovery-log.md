@@ -35,6 +35,50 @@ Entry shape:
 
 
 
+## 2026-10-09 — PAN-AVW-003, and why the profile models stay one model
+
+**Did:**    Built PAN-AVW-003 end to end. Measured the `wildfire-analysis` node first: key
+sets completed against a profile that DOES NOT EXIST so nothing returned could be membership,
+and the member-list enums established by writing every candidate.
+
+**Found:**  A rule has exactly four keys and **no action anywhere in the kind** — it decides
+what is SENT, never what happens to it. The file-type enum is thirteen values (`any` plus
+twelve types), enforced at the write. **A profile that analyses nothing is valid
+configuration**: no `rules` node, an empty one, and a rule carrying only a name are all
+accepted, so a consumer must not synthesize a permissive default row. `direction` and
+`analysis` stay absent when unwritten and nothing establishes what the device then does.
+
+The Inline Cloud Analysis table is a **different shape** from the Rules table on the same
+screen — it HAS an action (alert/allow/block) and its direction offers only `both` and
+`download`, no `upload`.
+
+**The shipped profile PASSES this control**, which is the reverse of PAN-AVW-001 and 002: the
+predefined `default` carries file-type any, application any, direction both.
+
+**Landed:** `SecurityProfileWildfireRule` satellite and two derived columns on `SecurityRule`,
+migration 0078. The finding is **per rule**, not per profile (Jason): a profile nothing uses
+endangers nothing. Three outcomes kept apart because the fix differs — no profile reaches the
+rule (null), the profile sends nothing or too little (false), it sends everything (true). On
+the lab 1004 rules are the first case, through a profile group that names nothing.
+
+**On the strategy question.** Jason asked whether one `SecurityProfile` with a `kind` still
+makes sense now three kinds have turned out structurally unalike. Kept, and the reason is that
+what is shared is not the CONTENT — which does diverge, and is already satellite-shaped — but
+the IDENTITY and REFERENCE record: name, namespace, precedence, scope resolution,
+is_predefined, referrers, is_used, provenance. That core is exactly what the cross-kind
+consumers need: PAN-AVW-006 queries unused profiles across kinds, and PAN-POL-008 and this
+control resolve a rule to profiles of several kinds through one group. Splitting would
+duplicate scoping, precedence, the reference collector, provenance, findings plumbing, the
+search registry and the presentation spec five times, and turn the unused-profile control into
+a union across five models. The thing to stop doing is putting kind-specific SCALARS on the
+parent — `threat_exception_count` is one, left alone here as unrelated churn.
+
+**Open:** Help p.308 says a WildFire **private cloud** does not analyse APK, Mac OS X, archive
+or linux files, so `file-type any` at `private-cloud` still leaves four types unanalysed. The
+control does not fire on it — the corpus permits private-cloud for data residency and the
+claim is documentation, not measurement; there is no WF-500 on the lab. `mica-engine-wildfire-rules`
+and `cloud-inline-analysis` are measured and unmodelled, because no control asks for them yet.
+
 ## 2026-10-09 — `default` on an application exception is per SIGNATURE
 
 **Did:**    Jason asked whether the per-application variation risk had been recorded — a

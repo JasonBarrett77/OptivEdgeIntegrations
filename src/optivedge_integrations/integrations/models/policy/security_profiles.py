@@ -179,6 +179,36 @@ class SecurityProfile(ScopedPolicyObject):
         return bool(self.non_blocking_mlav_decoders)
 
     @property
+    def wildfire_submits_all_file_types(self) -> bool:
+        """Does this WildFire analysis profile send EVERY file type for analysis?
+
+        True only when some rule covers `any` file type. A profile with no rules submits
+        nothing and is False - not None: that is a measured state, not an unknown.
+        """
+        return any(r.covers_all_file_types for r in self.wildfire_rules.all())
+
+    @property
+    def wildfire_coverage_gaps(self) -> list[str]:
+        """Why this profile does not submit everything, in the UI's column order.
+
+        Empty when a rule covers `any` file type, `any` application and both directions.
+        """
+        rules = list(self.wildfire_rules.all())
+        if not rules:
+            return ["no rules at all, so nothing is sent for analysis"]
+        gaps = []
+        if not any(r.covers_all_file_types for r in rules):
+            gaps.append("no rule covers every file type")
+        if not any(r.covers_all_applications for r in rules):
+            gaps.append("no rule covers every application")
+        if not any(r.covers_both_directions for r in rules):
+            unset = [r.name for r in rules if r.covers_both_directions is None]
+            gaps.append(f"no rule covers both directions (direction not set on: "
+                        f"{', '.join(unset)})" if unset
+                        else "no rule covers both directions")
+        return gaps
+
+    @property
     def non_blocking_application_overrides(self) -> list[str]:
         """Per-application overrides that do not stop the transfer, as labelled strings.
 
@@ -407,6 +437,80 @@ class SecurityProfileApplicationOverride(models.Model):
 
     def __str__(self) -> str:
         return f"{self.security_profile} / {self.application}: {self.configured_action}"
+
+
+class SecurityProfileWildfireRule(models.Model):
+    """One match rule of a WildFire analysis profile - what gets sent for sandbox analysis.
+
+    PAN-AVW-003's content. Measured 2026-10-09 on pan-fw-111 (PA-VM 11.2.3).
+
+    **The kind has NO ACTION ANYWHERE.** A rule has exactly four keys - `application`,
+    `file-type`, `direction`, `analysis` - enumerated against a profile that does not exist, so
+    the answer is schema rather than local membership. Nothing decides what HAPPENS to a file;
+    the rules decide only whether it is sent and where. So the allow/alert/reset-both vocabulary
+    every antivirus question is phrased in does not apply here at all, and a control that
+    assumed a shared shape across profile kinds would be asking a question this node cannot
+    answer.
+
+    **A profile that analyses NOTHING is valid configuration.** Measured by writing each shape:
+    a profile with no `rules` node, one with an empty `rules` node, and a rule carrying only a
+    name are all accepted. So no rows is a real state and it means nothing is submitted - the
+    same trap as an antivirus profile with no decoder node, and the reason the control asks
+    about the rule rather than only about the rules it finds.
+
+    **`direction` and `analysis` stay ABSENT when not written.** The UI fills `both` and
+    `public-cloud` when a rule is added through the form, so an operator-created rule always
+    carries them, but the API accepts a rule with neither and stores neither. What the device
+    DOES with an absent direction is NOT established - no instance exists to read and the UI
+    cannot show a value that is not there - so `covers_both_directions` is null in that case
+    rather than guessed.
+    """
+
+    #: Measured 2026-10-09 by writing each one: 12 real types plus `any`. The device refuses
+    #: anything else - `file-type 'x' is not a valid reference`, code=12 - so this is the whole
+    #: set on 11.2.3. It comes from the content release, so a consumer reads what is stored
+    #: rather than validating against this tuple.
+    FILE_TYPES = ("apk", "archive", "email-link", "eml", "flash", "jar", "linux", "MacOSX",
+                  "ms-office", "pdf", "pe", "script")
+    ANY = "any"
+    DIRECTIONS = ("upload", "download", "both")
+    ANALYSIS = ("public-cloud", "private-cloud")
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="wildfire_rules")
+    name = models.CharField(max_length=64)
+    #: Member lists, stored as given. `["any"]` is the passing case and is NOT normalized away
+    #: - an engineer looking at a finding needs to see what the rule actually says.
+    applications = models.JSONField(default=list, blank=True)
+    file_types = models.JSONField(default=list, blank=True)
+    direction = models.CharField(max_length=16, blank=True)
+    analysis = models.CharField(max_length=16, blank=True)
+
+    #: Derived at normalization because the search layer cannot look inside a JSON list.
+    covers_all_file_types = models.BooleanField(default=False)
+    covers_all_applications = models.BooleanField(default=False)
+    #: NULL where `direction` is absent: the device stores nothing and nothing establishes what
+    #: it then does, so this is unestablished rather than false.
+    covers_both_directions = models.BooleanField(null=True)
+
+    class Meta:
+        ordering = ["security_profile", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "name"],
+                name="integrations_unique_wildfire_rule_per_profile"),
+        ]
+
+    @property
+    def label(self) -> str:
+        """What a finding says about this rule, in the UI's own column order."""
+        types = ", ".join(self.file_types) or "(none)"
+        apps = ", ".join(self.applications) or "(none)"
+        where = self.direction or "(direction not set)"
+        return f"{self.name}: {types} / {apps} / {where}"
+
+    def __str__(self) -> str:
+        return f"{self.security_profile} / {self.name}"
 
 
 class SecurityProfileMlModel(models.Model):
