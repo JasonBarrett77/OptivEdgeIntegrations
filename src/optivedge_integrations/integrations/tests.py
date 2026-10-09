@@ -10189,9 +10189,24 @@ class WildfireDeviceSettingsTests(SimpleTestCase):
 
     def test_a_device_that_configures_NOTHING_is_entirely_untuned(self):
         """The clearest case, and the one walking only configured entries would miss: no
-        file-size-limit node at all means every type is still at its default."""
+        file-size-limit node at all means every type is still at its default.
+
+        ASSERTED, not DEFAULT: `eml` is excluded because a template cannot set it."""
         self.assertEqual(sorted(untuned({})),
-                         sorted(WildfireSettings.DEFAULT_SIZE_LIMITS))
+                         sorted(WildfireSettings.ASSERTED_SIZE_LIMITS))
+
+    def test_eml_is_excluded_because_a_TEMPLATE_cannot_set_it(self):
+        """Measured 2026-10-09 by trying: the write is refused with `eml 'eml' is not a valid
+        reference`, and completing a template's file-size-limit returns ten keys where the
+        DEVICE's returns eleven.
+
+        Asserting it would make the control unsatisfiable on every Panorama-managed device -
+        the only remediation being a device-local override, which is the thing this project
+        treats as a defect elsewhere.
+        """
+        self.assertIn("eml", WildfireSettings.DEFAULT_SIZE_LIMITS)
+        self.assertNotIn("eml", WildfireSettings.ASSERTED_SIZE_LIMITS)
+        self.assertNotIn("eml", untuned({}))
 
     def test_a_type_set_to_its_own_default_counts_as_untuned(self):
         """PAN-AVW-004 is a TUNING check (Jason, 2026-10-09): the question is whether anyone
@@ -10213,7 +10228,7 @@ class WildfireDeviceSettingsTests(SimpleTestCase):
                "MacOSX": 10, "archive": 50, "linux": 50, "script": 20}
 
         self.assertEqual(sorted(untuned(lab)),
-                         sorted(WildfireSettings.DEFAULT_SIZE_LIMITS))
+                         sorted(WildfireSettings.ASSERTED_SIZE_LIMITS))
 
     def test_a_non_numeric_limit_is_skipped_rather_than_crashing(self):
         self.assertEqual(size_limits(

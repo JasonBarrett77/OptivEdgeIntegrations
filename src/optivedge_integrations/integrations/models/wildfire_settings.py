@@ -30,6 +30,32 @@ from .base import SyncTrackedModel
 from .provenance import ProvenancedMixin
 
 
+DEFAULT_SIZE_LIMITS = {
+    "pe": 16, "apk": 10, "pdf": 3072, "ms-office": 16385, "jar": 5, "flash": 5,
+    "MacOSX": 10, "archive": 50, "linux": 50, "script": 20, "eml": 5,
+}
+#: `eml` CANNOT BE SET FROM A TEMPLATE, measured 2026-10-09 by trying: the write is
+#: refused with `eml 'eml' is not a valid reference`, code=12, and completing the
+#: template's file-size-limit returns ten keys where the DEVICE's returns eleven. Checked
+#: on two templates, ptpl-pan-fw-111 and shared-base, with the same answer.
+#:
+#: SO IT IS EXCLUDED FROM THE ASSERTION. On a Panorama-managed estate the only way to
+#: move `eml` off its default is a device-local write, which becomes an OVERRIDE - and a
+#: control whose sole remediation is to create an override is asking for the thing this
+#: project treats as a defect elsewhere. Left in the assertion it would also make the
+#: control unsatisfiable: every managed device would report forever, with nothing an
+#: engineer could do about it, which is worse than not asking.
+#:
+#: It stays in DEFAULT_SIZE_LIMITS because it is still a real default worth showing, and
+#: because a standalone firewall CAN set it - the device's own key set has eleven.
+TEMPLATE_UNSETTABLE = ("eml",)
+#: What PAN-AVW-004 actually asserts: the ten a template can reach.
+ASSERTED_SIZE_LIMITS = {
+    file_type: default for file_type, default in DEFAULT_SIZE_LIMITS.items()
+    if file_type not in TEMPLATE_UNSETTABLE
+}
+
+
 class WildfireSettings(ProvenancedMixin, SyncTrackedModel):
     """`deviceconfig/setting/wildfire`, per appliance."""
 
@@ -45,10 +71,13 @@ class WildfireSettings(ProvenancedMixin, SyncTrackedModel):
     #: measured and they sit behind a different template stack. If their values differ, either
     #: these are not defaults or the defaults are platform-dependent, and this table would
     #: have to become one table per platform.
-    DEFAULT_SIZE_LIMITS = {
-        "pe": 16, "apk": 10, "pdf": 3072, "ms-office": 16385, "jar": 5, "flash": 5,
-        "MacOSX": 10, "archive": 50, "linux": 50, "script": 20, "eml": 5,
-    }
+    #: Module-level constants, re-exported here. They live outside the class because a
+    #: comprehension in a class body cannot see the class's other attributes - the condition
+    #: raised NameError on TEMPLATE_UNSETTABLE.
+    DEFAULT_SIZE_LIMITS = DEFAULT_SIZE_LIMITS
+    TEMPLATE_UNSETTABLE = TEMPLATE_UNSETTABLE
+    ASSERTED_SIZE_LIMITS = ASSERTED_SIZE_LIMITS
+
     #: The twelve exclusions PAN-OS offers, enumerated 2026-10-09. A profile's file types are a
     #: different and larger set; these are session ATTRIBUTES.
     SESSION_INFO_EXCLUSIONS = (

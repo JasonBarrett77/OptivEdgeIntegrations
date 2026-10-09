@@ -77,9 +77,14 @@ def untuned(limits: dict[str, int]) -> list[str]:
     Every type PAN-OS has a default for is checked, not only the ones the config names - an
     absent entry is the clearest case of untouched there is, and walking only what is present
     would report a device that configures nothing as fully tuned.
+
+    EXCEPT `eml`, which a template cannot set at all - measured 2026-10-09, the write refused
+    and the template's key set ten where the device's is eleven. Asserting it would make the
+    control unsatisfiable on every Panorama-managed device, with the only remediation being a
+    device-local override. See WildfireSettings.TEMPLATE_UNSETTABLE.
     """
     return sorted(
-        file_type for file_type, default in WildfireSettings.DEFAULT_SIZE_LIMITS.items()
+        file_type for file_type, default in WildfireSettings.ASSERTED_SIZE_LIMITS.items()
         if limits.get(file_type, default) == default)
 
 
