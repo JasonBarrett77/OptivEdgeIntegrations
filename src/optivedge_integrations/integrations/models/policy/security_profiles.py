@@ -349,8 +349,9 @@ class SecurityProfileApplicationOverride(models.Model):
     EMPTY action element is refused, `action is invalid`. So absent and empty are different
     here, and only one of them is reachable.
 
-    **The literal `default` is accepted**, as it is on a decoder. What it RESOLVES to is not
-    established - see `blocks`.
+    **The literal `default` is accepted**, as it is on a decoder - but it does NOT mean the
+    same thing. A decoder's `default` resolves to one action per protocol; an exception's
+    resolves per SIGNATURE. Measured 2026-10-09 - see `blocks`.
     """
 
     #: The same seven values as a decoder's action, enumerated 2026-10-08, and enforced at the
@@ -367,19 +368,24 @@ class SecurityProfileApplicationOverride(models.Model):
     configured_action = models.CharField(max_length=32, blank=True)
     #: Does this override stop the transfer?
     #:
-    #: NULL means UNESTABLISHED, and it is reserved for the literal `default`.
+    #: NULL means NO SINGLE BOOLEAN IS TRUE OF IT, and it is reserved for the literal
+    #: `default`, whose meaning here was MEASURED 2026-10-09.
     #:
-    #: A decoder's `default` is NOT ONE ACTION - it resolves per protocol, reset-both on
-    #: http/http2/ftp/smb and alert on smtp/imap/pop3. An exception's `default` has no reason
-    #: to be uniform when the decoder's is not, and the likely mechanism says it is not: an
-    #: application rides a protocol, so `default` here plausibly resolves through that
-    #: application's own decoder. A single resolved value stored in this column would bake in
-    #: a uniformity assumption nothing supports, which is why it stays null rather than being
-    #: resolved optimistically.
+    #: An exception's `default` resolves PER SIGNATURE. Two profiles carrying the same eleven
+    #: `default` exceptions and differing only in their decoders - one at `default`, one
+    #: explicitly INVERTED - render the bare word on all 22 rows and agree with each other.
+    #: That rules out inheriting the decoder (they would disagree), the per-protocol table and
+    #: a single fixed value (either would bracket). The same export brackets the decoder
+    #: column in the same row, so the absence is real and not a rendering limit. Help p.272
+    #: says the same: a signature's default action is the one it ships with.
     #:
-    #: A null reports as a gap rather than a pass: the control fails toward FIRING, because
-    #: "we could not establish it" must not render as "we checked and it was fine".
-    #: Over-reporting a rare node is the cheap error here.
+    #: NOT the same mechanism as a DECODER's `default`, which does resolve to one action per
+    #: protocol. Same word, same screen, two behaviours - carrying the decoder's resolution
+    #: across would have been wrong.
+    #:
+    #: It stays null and the control REPORTS it, for a better reason than not knowing: a
+    #: signature's own default is typically alert or reset-both, so an exception left at
+    #: `default` lets whatever the alerting signatures catch through.
     blocks = models.BooleanField(null=True)
 
     class Meta:
@@ -396,7 +402,7 @@ class SecurityProfileApplicationOverride(models.Model):
         if not self.configured_action:
             return f"{self.application} (no action set, which allows)"
         if self.blocks is None:
-            return f"{self.application} (default, resolution not established)"
+            return f"{self.application} (default - each signature's own action)"
         return f"{self.application} ({self.configured_action})"
 
     def __str__(self) -> str:

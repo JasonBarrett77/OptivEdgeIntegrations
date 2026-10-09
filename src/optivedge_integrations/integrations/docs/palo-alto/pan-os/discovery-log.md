@@ -35,6 +35,51 @@ Entry shape:
 
 
 
+## 2026-10-09 — `default` on an application exception is per SIGNATURE
+
+**Did:**    Jason asked whether the per-application variation risk had been recorded — a
+decoder's `default` is not one action, so why would an exception's be? It had not been, and
+the note I had written actively pointed away from it: "an override is not per-protocol, so
+that table cannot answer it". Built the experiment, then had to rebuild it.
+
+**Found:**  **The first design could not have answered the question.** It was one profile with
+every decoder set to an explicit `reset-both`, on the reasoning that a uniform decoder table
+isolated the exception node. Backwards — if an exception inherits its decoder, uniform
+decoders force uniform exceptions and the result is indistinguishable from a single fixed
+value. Caught before the screenshot, not after.
+
+The working design is two profiles with the SAME eleven `default` exceptions, differing only
+in their decoders: one left at `default`, one set explicitly and **inverted**. All 22 rows
+render the **bare word** `default`, and the two profiles **agree** despite opposite decoder
+actions. That rules out three readings at once — inheriting the decoder (they would disagree),
+the per-protocol table and a single fixed value (either would bracket). What remains is **per
+signature**.
+
+The negative is trustworthy because the export carries its own control: the same row brackets
+the decoder column, `default (reset-both)` on http and `default (alert)` on smtp. The surface
+brackets wherever there is one value to render.
+
+And it is what the vendor says. Help **p.272**, the page **p.277** points to for this field:
+"Every threat or virus signature that is defined by Palo Alto Networks includes a default
+action, which is typically either set to Alert ... or to Reset Both." Documentation was the
+lead; the device settled it.
+
+**So there are two mechanisms behind one word on one screen.** A DECODER's `default` resolves
+to one action per protocol and the UI brackets it. An EXCEPTION's passes through to each
+signature and it cannot. Carrying the decoder's measured resolution across to the exception —
+which is what the discarded note invited — would have been wrong.
+
+**Landed:** `SecurityProfileApplicationOverride.blocks` stays NULL and PAN-AVW-001 still
+reports, both already correct; what changed is the reason and the label. NULL now means "no
+single boolean is true of it" rather than "unestablished", and the finding reads
+`web-browsing (default - each signature's own action)`. Contract, control description and
+tests updated. Both measurement profiles deleted from the lab — scaffolding, not subjects.
+
+**Also:** the payload contract had claimed the Web Interface Help has no page for the
+Antivirus screen, and rested `DEFAULT_RESOLUTION` on two non-device sources partly on that
+basis. There are two pages. Found only because this question sent someone back to the doc
+index. p.277 independently confirms the three action columns.
+
 ## 2026-10-08 — a decoder has three action columns, and two of them went nowhere
 
 **Did:**    Jason asked whether I had picked up that decoders have different default actions
