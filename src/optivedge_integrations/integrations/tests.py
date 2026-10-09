@@ -10208,6 +10208,20 @@ class AntivirusApplicationOverrideTests(SimpleTestCase):
                  "action": {"@admin": "admin", "#text": "allow"}}]}}),
             [("ftp", "allow", False)])
 
+    def test_an_UNRECOGNISED_action_does_not_block(self):
+        """A value the enum does not have today.
+
+        The write gate refuses one now - `action 'wibble' is not an allowed keyword`, code=12 -
+        so this cannot arrive from a normal write. It can arrive from a PAN-OS release that
+        ADDS a member: the config would then hold a value this code has never seen. Treating
+        an unknown action as blocking would silently pass whatever the new value means, so the
+        row is kept, reported, and the label carries the literal for someone to look up.
+        """
+        self.assertEqual(
+            profile_application_overrides({"@name": "p", "application": {"entry": [
+                {"@name": "ftp", "action": "quarantine-to-sandbox"}]}}),
+            [("ftp", "quarantine-to-sandbox", False)])
+
     def test_an_entry_with_no_name_is_skipped_rather_than_crashing(self):
         self.assertEqual(
             profile_application_overrides({"@name": "p", "application": {"entry": [
