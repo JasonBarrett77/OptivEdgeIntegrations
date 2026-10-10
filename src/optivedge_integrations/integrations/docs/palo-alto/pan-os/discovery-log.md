@@ -35,6 +35,51 @@ Entry shape:
 
 
 
+## 2026-10-09 — a template stack is not a template, and PAN-AVW-004 was wrong
+
+**Did:**    Built the lab subject for PAN-AVW-004/005 by writing to template
+`ptpl-pan-fw-111` and pushing the stack. The subject is what caught the control.
+
+**Found:**  The push succeeded. `report-benign-file` and `report-grayware-file` arrived on
+pan-fw-111. **The file size limits did not move.** The template held `pe: 8`; the device kept
+reporting 16.
+
+The attributes separated them. `report-*` carried `@ptpl: ptpl-pan-fw-111` — the template
+that set them. The limits carried `@ptpl: temp-stck-jb-rg` — the **stack**. The stack holds
+its own `file-size-limit` configuration, that configuration overrides its member templates,
+and **I had never queried it**.
+
+So the ten values I recorded as PAN-OS defaults are not defaults. They are one lab stack's
+configuration, and PAN-AVW-004 was comparing every estate against it.
+
+**How the error was made, which is the part worth keeping.** Every entry reports `@src: tpl`,
+so something template-ish supplied them. I completed the node on all six TEMPLATES and found
+none. I then *verified that read path* — wrote a value into a template, watched it appear,
+deleted it, watched it vanish — precisely because two malformed xpaths had produced false
+negatives the same day. Having proved the method, I trusted the negative and concluded
+"nothing sets them, therefore PAN-OS supplies them."
+
+Verifying the instrument made the answer feel earned and hid the question I had not asked.
+The negative was sound; the inference from it was not. "No template sets it" does not mean
+"nothing sets it" when a stack can.
+
+`@src` is useless as a discriminator here — it reads `tpl` for a member template, for the
+stack, and I had assumed for a default too. **`@ptpl` names the actual source.**
+
+**Landed:** The defaults claim is retracted in the payload contract and the model, both with
+the reasoning rather than just the correction. PAN-AVW-004 is DEACTIVATED the day it was
+built; its shape is still right, only its reference table is wrong, so returning is one edit
+plus reactivating. The OEA test now asserts it is inactive and why, so reactivating without
+fixing the table fails. The computation and its tests stay in OEI.
+
+PAN-AVW-005's subject DID land — both report flags are now `yes` on pan-fw-111 from the
+template, so it has a device that is silent and two that still fire.
+
+**Open:** the real per-type defaults. A device where nothing sets them shows no node in
+configuration at all — both PA-5220s are in that state — so they are invisible to the API and
+the UI is the only oracle. `eml` is the one already established that way: set by nothing
+anywhere, and the UI shows 5 MB.
+
 ## 2026-10-09 — the device-wide WildFire settings, and two controls redefined
 
 **Did:**    Measured `deviceconfig/setting/wildfire` after Jason flagged that some WildFire

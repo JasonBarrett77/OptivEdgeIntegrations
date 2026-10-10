@@ -1,3 +1,25 @@
+#: RETRACTED 2026-10-09. These were recorded as the PAN-OS defaults and they are NOT: they
+#: are configuration held by the template STACK `temp-stck-jb-rg` on the lab.
+#:
+#: The error is worth keeping because the reasoning looked careful. Every entry on the device
+#: reports `@src: tpl`, so something template-ish supplied them; all six TEMPLATES were
+#: completed and none held a wildfire node; that read path was itself verified by writing a
+#: value into a template and watching it appear and vanish. The conclusion - nothing sets
+#: them, so they are what PAN-OS supplies - skipped one thing. A TEMPLATE STACK IS NOT A
+#: TEMPLATE. It holds its own configuration, that configuration overrides its member
+#: templates, and it was never queried.
+#:
+#: It surfaced when a member template set `pe: 8` and pushed: the report flags arrived on the
+#: device and the limits did not move. `@ptpl` then separated them - the flags carry the
+#: TEMPLATE's name, the limits carry the STACK's.
+#:
+#: ONLY `eml` IS ESTABLISHED. Nothing sets it anywhere and the UI shows 5 MB. The other ten
+#: are unknown, and a device where nothing sets them shows no node at all, so the UI is the
+#: only oracle.
+#:
+#: PAN-AVW-004 IS DEACTIVATED until they are measured. The table is left here rather than
+#: emptied so the fix is one edit, and so the next reader sees what was wrong rather than a
+#: blank.
 """Device > Setup > WildFire. The device-wide settings. PAN-AVW-004 and PAN-AVW-005.
 
 ONE MODEL, TWO CONTROLS, because they are one screen and one config node - and because the
