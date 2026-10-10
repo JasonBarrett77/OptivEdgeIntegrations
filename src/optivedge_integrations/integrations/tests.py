@@ -10140,6 +10140,9 @@ class AntivirusThirdActionColumnTests(SimpleTestCase):
             self.assertEqual((row[3], row[6], row[9]), (False, False, False), protocol)
 
 
+from optivedge_integrations.integrations.models.wildfire_settings import (  # noqa: E402
+    defaults_for_version,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.wildfire_settings import (  # noqa: E402
     exclusions,
     size_limits,
@@ -10187,48 +10190,48 @@ class WildfireDeviceSettingsTests(SimpleTestCase):
 
         self.assertEqual(size_limits(node), {"pe": 50, "pdf": 4096})
 
+    #: The 11.1 defaults, established 2026-10-10 from a PA-5220 whose stack sets nothing -
+    #: the only oracle, since such a device shows no node at all in configuration.
+    V11_1 = defaults_for_version("11.1.13-h3")
+
     def test_a_device_that_configures_NOTHING_is_entirely_untuned(self):
         """The clearest case, and the one walking only configured entries would miss: no
-        file-size-limit node at all means every type is still at its default.
+        file-size-limit node at all means every type is still at its default."""
+        self.assertEqual(sorted(untuned({}, self.V11_1)), sorted(self.V11_1))
 
-        ASSERTED, not DEFAULT: `eml` is excluded because a template cannot set it."""
-        self.assertEqual(sorted(untuned({})),
-                         sorted(WildfireSettings.ASSERTED_SIZE_LIMITS))
+    def test_the_defaults_are_PER_RELEASE(self):
+        """11.2 added `eml` - the key set is ten on 11.1 and eleven on 11.2 - so a table
+        keyed by nothing would assert a file type half the estate does not have."""
+        self.assertIsNotNone(defaults_for_version("11.1.13-h3"))
+        self.assertEqual(len(self.V11_1), 10)
 
-    def test_eml_is_excluded_because_a_TEMPLATE_cannot_set_it(self):
-        """Measured 2026-10-09 by trying: the write is refused with `eml 'eml' is not a valid
-        reference`, and completing a template's file-size-limit returns ten keys where the
-        DEVICE's returns eleven.
-
-        Asserting it would make the control unsatisfiable on every Panorama-managed device -
-        the only remediation being a device-local override, which is the thing this project
-        treats as a defect elsewhere.
-        """
-        self.assertIn("eml", WildfireSettings.DEFAULT_SIZE_LIMITS)
-        self.assertNotIn("eml", WildfireSettings.ASSERTED_SIZE_LIMITS)
-        self.assertNotIn("eml", untuned({}))
+    def test_an_UNESTABLISHED_release_reports_rather_than_passing(self):
+        """`untuned` returns nothing for an unknown release, and the caller must not read
+        that as "fully tuned" - which is why normalization sets the verdict true when the
+        table is missing. "We have no table for this one" is not "nothing to tune here"."""
+        self.assertIsNone(defaults_for_version("11.2.3-h3"))
+        self.assertIsNone(defaults_for_version(""))
+        self.assertEqual(untuned({"pe": 16}, None), [])
 
     def test_a_type_set_to_its_own_default_counts_as_untuned(self):
         """PAN-AVW-004 is a TUNING check (Jason, 2026-10-09): the question is whether anyone
         sized this for the estate, and a value equal to the default answers no however it
         got there."""
-        self.assertIn("pe", untuned({"pe": WildfireSettings.DEFAULT_SIZE_LIMITS["pe"]}))
+        self.assertIn("pe", untuned({"pe": self.V11_1["pe"]}, self.V11_1))
 
     def test_a_type_moved_off_its_default_is_tuned_either_way(self):
         """Up or down. The vendor advises tuning DOWN against buffer space - Help p.774 -
         so a lowered limit is evidence of tuning exactly as a raised one is."""
-        self.assertNotIn("pe", untuned({"pe": 50}))
-        self.assertNotIn("pe", untuned({"pe": 1}))
+        self.assertNotIn("pe", untuned({"pe": 50}, self.V11_1))
+        self.assertNotIn("pe", untuned({"pe": 1}, self.V11_1))
 
-    def test_the_lab_values_are_all_defaults(self):
-        """What pan-fw-111 actually holds, 2026-10-09. Ten entries, every one at its default,
-        and `eml` absent - so the device is entirely untuned and PAN-AVW-004 fires on all
-        eleven types."""
-        lab = {"pe": 16, "apk": 10, "pdf": 3072, "ms-office": 16385, "jar": 5, "flash": 5,
-               "MacOSX": 10, "archive": 50, "linux": 50, "script": 20}
-
-        self.assertEqual(sorted(untuned(lab)),
-                         sorted(WildfireSettings.ASSERTED_SIZE_LIMITS))
+    def test_eml_is_excluded_because_a_TEMPLATE_cannot_set_it(self):
+        """Measured 2026-10-09 by trying: the write is refused with `eml 'eml' is not a valid
+        reference`. On a Panorama-managed estate its only remediation is a device-local
+        override, so asserting it would make the control unsatisfiable. It is absent from
+        11.1 entirely and excluded from 11.2 when that table arrives."""
+        self.assertIn("eml", WildfireSettings.TEMPLATE_UNSETTABLE)
+        self.assertNotIn("eml", self.V11_1)
 
     def test_a_non_numeric_limit_is_skipped_rather_than_crashing(self):
         self.assertEqual(size_limits(

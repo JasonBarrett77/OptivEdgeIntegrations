@@ -1,25 +1,3 @@
-#: RETRACTED 2026-10-09. These were recorded as the PAN-OS defaults and they are NOT: they
-#: are configuration held by the template STACK `temp-stck-jb-rg` on the lab.
-#:
-#: The error is worth keeping because the reasoning looked careful. Every entry on the device
-#: reports `@src: tpl`, so something template-ish supplied them; all six TEMPLATES were
-#: completed and none held a wildfire node; that read path was itself verified by writing a
-#: value into a template and watching it appear and vanish. The conclusion - nothing sets
-#: them, so they are what PAN-OS supplies - skipped one thing. A TEMPLATE STACK IS NOT A
-#: TEMPLATE. It holds its own configuration, that configuration overrides its member
-#: templates, and it was never queried.
-#:
-#: It surfaced when a member template set `pe: 8` and pushed: the report flags arrived on the
-#: device and the limits did not move. `@ptpl` then separated them - the flags carry the
-#: TEMPLATE's name, the limits carry the STACK's.
-#:
-#: ONLY `eml` IS ESTABLISHED. Nothing sets it anywhere and the UI shows 5 MB. The other ten
-#: are unknown, and a device where nothing sets them shows no node at all, so the UI is the
-#: only oracle.
-#:
-#: PAN-AVW-004 IS DEACTIVATED until they are measured. The table is left here rather than
-#: emptied so the fix is one edit, and so the next reader sees what was wrong rather than a
-#: blank.
 """Device > Setup > WildFire. The device-wide settings. PAN-AVW-004 and PAN-AVW-005.
 
 ONE MODEL, TWO CONTROLS, because they are one screen and one config node - and because the
@@ -29,7 +7,7 @@ forwards. A file type a profile names is never analysed if it exceeds its per-ty
 here, which is why PAN-AVW-003's description points at this node rather than claiming more
 than it can.
 
-Measured on pan-fw-111 (PA-VM 11.2.3), 2026-10-09.
+Measured on the lab 2026-10-09 and 2026-10-10.
 
 **The UI is INVERTED relative to the config on session information**, and reading it the
 other way round gets PAN-AVW-005 exactly backwards. `session-info-select` holds twelve
@@ -37,11 +15,10 @@ other way round gets PAN-AVW-005 exactly backwards. `session-info-select` holds 
 exclusion is ABSENT. An empty list is FULL sharing and the desirable state - the opposite of
 this codebase's usual rule that an absent key is the weaker end.
 
-**The size limits look configured and are not.** Every entry on pan-fw-111 reports
-`@src: tpl`, but `temp-stck-jb-rg` is a template STACK and none of the six templates holds a
-wildfire node - verified by writing a value into one and watching it appear and vanish, after
-two malformed xpaths had already produced false negatives that day. So nothing sets them and
-they are what PAN-OS supplies.
+**The size limits look configured and mostly are not what they appear.** A value can come
+from a member template, from the template STACK, or from the platform, and all three report
+`@src: tpl`. Only `@ptpl` names the source. Getting that wrong produced a wrong defaults
+table that shipped for a day - see the comments on the version table below.
 """
 
 from __future__ import annotations
@@ -52,30 +29,61 @@ from .base import SyncTrackedModel
 from .provenance import ProvenancedMixin
 
 
-DEFAULT_SIZE_LIMITS = {
-    "pe": 16, "apk": 10, "pdf": 3072, "ms-office": 16385, "jar": 5, "flash": 5,
-    "MacOSX": 10, "archive": 50, "linux": 50, "script": 20, "eml": 5,
+#: THE DEFAULTS ARE PER PAN-OS VERSION, which a single table could never have expressed.
+#:
+#: Established 2026-10-10 from a device where NOTHING sets them - the only oracle, since such
+#: a device shows no node at all in configuration and the UI is the only place the values
+#: appear. A PA-5220 on 11.1.13-h3, whose template stack holds no wildfire node, gave the
+#: 11.1 table.
+#:
+#: 11.2 ADDED `eml`: the key set is ten on 11.1 and eleven on 11.2, confirmed by completing
+#: the node on all three lab appliances. So a table keyed by nothing would assert a file type
+#: that does not exist on half the estate.
+#:
+#: HOW THIS REPLACED A WRONG TABLE. An earlier version recorded ten values as "the" defaults.
+#: They were the template STACK's configuration on one lab - found when a member template set
+#: `pe: 8`, the push succeeded, and the limits did not move because stack config overrides
+#: member templates. `@src` reads `tpl` for both, so it cannot tell them apart; `@ptpl` names
+#: the source. See the payload contract's wildfire-device-settings node.
+DEFAULT_SIZE_LIMITS_BY_VERSION = {
+    "11.1": {"pe": 16, "apk": 10, "pdf": 3072, "ms-office": 16384, "jar": 5, "flash": 5,
+             "MacOSX": 10, "archive": 50, "linux": 50, "script": 20},
 }
-#: `eml` CANNOT BE SET FROM A TEMPLATE, measured 2026-10-09 by trying: the write is
-#: refused with `eml 'eml' is not a valid reference`, code=12, and completing the
-#: template's file-size-limit returns ten keys where the DEVICE's returns eleven. Checked
-#: on two templates, ptpl-pan-fw-111 and shared-base, with the same answer.
+
+#: 11.2 IS NOT IN THE TABLE, deliberately. Only `eml` is established there - set by nothing on
+#: pan-fw-111 and the UI shows 5 MB. The other ten are supplied by that device's template
+#: stack, which re-asserts the 11.1 values EXCEPT ms-office, where it holds 16385 against
+#: 11.1's 16384. That one difference cannot be read: either 11.2's default is 16385 and the
+#: stack asserts defaults, or it is 16384 and someone moved it by 1 KB. Settling it needs an
+#: 11.2 device with nothing set, and the lab has none.
 #:
-#: SO IT IS EXCLUDED FROM THE ASSERTION. On a Panorama-managed estate the only way to
-#: move `eml` off its default is a device-local write, which becomes an OVERRIDE - and a
-#: control whose sole remediation is to create an override is asking for the thing this
-#: project treats as a defect elsewhere. Left in the assertion it would also make the
-#: control unsatisfiable: every managed device would report forever, with nothing an
-#: engineer could do about it, which is worse than not asking.
-#:
-#: It stays in DEFAULT_SIZE_LIMITS because it is still a real default worth showing, and
-#: because a standalone firewall CAN set it - the device's own key set has eleven.
+#: A device whose version is absent here REPORTS, naming the version, rather than passing.
+#: "We have no table for this release" must not render as "nothing to tune here".
+VERSIONS_NOT_ESTABLISHED_NOTE = (
+    "the PAN-OS defaults for this release are not established, so whether these limits were "
+    "sized for the estate cannot be decided")
+
+#: `eml` cannot be set from a TEMPLATE even on 11.2 - measured 2026-10-09, the write refused
+#: with `eml 'eml' is not a valid reference` and a template's key set is ten where the
+#: device's is eleven. On a Panorama-managed estate its only remediation is a device-local
+#: override, so asserting it would make the control unsatisfiable.
 TEMPLATE_UNSETTABLE = ("eml",)
-#: What PAN-AVW-004 actually asserts: the ten a template can reach.
-ASSERTED_SIZE_LIMITS = {
-    file_type: default for file_type, default in DEFAULT_SIZE_LIMITS.items()
-    if file_type not in TEMPLATE_UNSETTABLE
-}
+
+
+def defaults_for_version(software_version: str) -> dict[str, int] | None:
+    """The per-type defaults for this release, or None where none is established.
+
+    Matches on major.minor: PAN-OS ships these in the platform, and a maintenance release
+    has never been observed to change them. A release this does not know returns None, which
+    the caller reports rather than treats as "nothing is untuned".
+    """
+    parts = (software_version or "").split(".")
+    if len(parts) < 2:
+        return None
+    table = DEFAULT_SIZE_LIMITS_BY_VERSION.get(f"{parts[0]}.{parts[1]}")
+    if table is None:
+        return None
+    return {k: v for k, v in table.items() if k not in TEMPLATE_UNSETTABLE}
 
 
 class WildfireSettings(ProvenancedMixin, SyncTrackedModel):
@@ -93,12 +101,9 @@ class WildfireSettings(ProvenancedMixin, SyncTrackedModel):
     #: measured and they sit behind a different template stack. If their values differ, either
     #: these are not defaults or the defaults are platform-dependent, and this table would
     #: have to become one table per platform.
-    #: Module-level constants, re-exported here. They live outside the class because a
-    #: comprehension in a class body cannot see the class's other attributes - the condition
-    #: raised NameError on TEMPLATE_UNSETTABLE.
-    DEFAULT_SIZE_LIMITS = DEFAULT_SIZE_LIMITS
+    #: Re-exported from module level; see the comments there.
+    DEFAULT_SIZE_LIMITS_BY_VERSION = DEFAULT_SIZE_LIMITS_BY_VERSION
     TEMPLATE_UNSETTABLE = TEMPLATE_UNSETTABLE
-    ASSERTED_SIZE_LIMITS = ASSERTED_SIZE_LIMITS
 
     #: The twelve exclusions PAN-OS offers, enumerated 2026-10-09. A profile's file types are a
     #: different and larger set; these are session ATTRIBUTES.
@@ -177,12 +182,27 @@ class WildfireSettings(ProvenancedMixin, SyncTrackedModel):
 
     @property
     def tuning_detail(self) -> str:
-        """What PAN-AVW-004 has to say: which types nobody has sized for this estate."""
+        """What PAN-AVW-004 has to say: which types nobody has sized for this estate.
+
+        Two different findings share this column and the text separates them. A release with
+        no established table cannot be assessed at all, which is not the same as being
+        untuned - and saying so is the difference between "nobody sized this" and "we cannot
+        tell", which have different next steps.
+        """
+        defaults = defaults_for_version(self.appliance.software_version)
+        if defaults is None:
+            return (f"PAN-OS {self.appliance.software_version or 'unknown'}: "
+                    f"{VERSIONS_NOT_ESTABLISHED_NOTE}")
         if not self.untuned_file_types:
             return ""
         return ("still at the PAN-OS default: "
-                + ", ".join(f"{t} ({self.DEFAULT_SIZE_LIMITS.get(t, '?')})"
+                + ", ".join(f"{t} ({defaults.get(t, '?')})"
                             for t in self.untuned_file_types))
+
+    @property
+    def defaults_established(self) -> bool:
+        """Is there a measured defaults table for this appliance's release?"""
+        return defaults_for_version(self.appliance.software_version) is not None
 
     def __str__(self) -> str:
         return f"{self.appliance} WildFire settings"

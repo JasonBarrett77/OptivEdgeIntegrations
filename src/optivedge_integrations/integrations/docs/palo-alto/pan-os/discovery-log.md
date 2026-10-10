@@ -35,6 +35,37 @@ Entry shape:
 
 
 
+## 2026-10-10 — the WildFire file size defaults are per RELEASE
+
+**Did:**    Jason screenshotted Device > Setup > WildFire on a PA-5220 — a device whose
+template stack holds no wildfire node, so the UI there shows defaults and nothing else. That
+is the only oracle: such a device shows no node at all in configuration.
+
+**Found:**  The 11.1 defaults, and two differences from pan-fw-111 that both matter.
+
+**`ms-office` is 16384 here and 16385 on pan-fw-111.** **`eml` is absent here entirely.**
+Completing the node on all three appliances settled why: ten keys on 11.1.13-h3, eleven on
+11.2.3-h3. **`eml` arrived in 11.2.** So the defaults are not one table — they are per
+release, and a single table would assert a file type half an estate does not have.
+
+The ms-office difference cannot be read. Either 11.2's default is 16385 and pan-fw-111's
+stack is asserting defaults, or it is 16384 and somebody moved it by 1 KB. Settling it needs
+an 11.2 device with nothing set, and the lab has none.
+
+**Landed:** `DEFAULT_SIZE_LIMITS_BY_VERSION`, keyed on major.minor, with 11.1 established and
+11.2 deliberately absent. PAN-AVW-004 is reactivated. A device on a release with no table
+**reports, naming the release**, rather than passing — "we have no table for this one" must
+not render as "nothing to tune here", which is the same failure direction every other
+nullable verdict in this domain guards against.
+
+Verified across both releases: the PA-5220s fire with "has not sized ANY", pan-fw-111 fires
+with "the defaults for this release are not established". Both fire, for different reasons,
+with different next steps.
+
+**Open:** 11.2's table. One screenshot of an 11.2 device with nothing setting the limits
+would give it — or deleting the stack's `file-size-limit` node on `temp-stck-jb-rg`, pushing,
+and reading pan-fw-111's UI, which would also confirm the ms-office question.
+
 ## 2026-10-09 — a template stack is not a template, and PAN-AVW-004 was wrong
 
 **Did:**    Built the lab subject for PAN-AVW-004/005 by writing to template
