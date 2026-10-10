@@ -74,19 +74,16 @@ def size_limits(node: dict) -> dict[str, int]:
     return limits
 
 
-def untuned(limits: dict[str, int], defaults: dict[str, int] | None) -> list[str]:
+def untuned(limits: dict[str, int], defaults: dict[str, int]) -> list[str]:
     """Which file types nobody has sized for this estate.
 
     Every type the release has a default for, not only the ones the config names - an absent
     entry is the clearest case of untouched there is, and walking only what is present would
     report a device that configures nothing as fully tuned.
 
-    `defaults` is PER RELEASE and may be None. A release with no established table cannot be
-    assessed: the caller reports that separately rather than letting an empty list read as
-    "fully tuned", which is the direction this control must never fail in.
+    `defaults` comes from PAN-OS's own declared values, read off Panorama's tooltip, rather
+    than inferred from a device - which is what two earlier readings got wrong.
     """
-    if not defaults:
-        return []
     return sorted(
         file_type for file_type, default in defaults.items()
         if limits.get(file_type, default) == default)
@@ -122,8 +119,8 @@ def normalize_wildfire_settings(appliance: Appliance) -> dict[str, int]:
             "absent on pan-fw-111 and the box renders unticked, measured 2026-10-09"))
 
     limits = size_limits(node)
-    # The defaults are per PAN-OS release - 11.2 added `eml`, and a table keyed by nothing
-    # would assert a file type half the estate does not have.
+    # PAN-OS's own declared defaults. Release-invariant for what this asserts: the only
+    # per-release difference is `eml`, which 11.2 adds and which is excluded anyway.
     defaults = defaults_for_version(appliance.software_version)
     still_default = untuned(limits, defaults)
     withheld = exclusions(node, "session-info-select")
@@ -138,9 +135,7 @@ def normalize_wildfire_settings(appliance: Appliance) -> dict[str, int]:
                 "source_snapshot": snapshot,
                 "size_limits": limits,
                 "untuned_file_types": still_default,
-                # A release with no established table REPORTS, rather than passing: "we
-                # have no table for this one" must not render as "nothing to tune here".
-                "size_limits_untuned": bool(still_default) or defaults is None,
+                "size_limits_untuned": bool(still_default),
                 "session_info_excluded": withheld,
                 # The searchable form of the line above: a control may not rest on a JSON
                 # column, so the boolean is stored beside the list it summarises.

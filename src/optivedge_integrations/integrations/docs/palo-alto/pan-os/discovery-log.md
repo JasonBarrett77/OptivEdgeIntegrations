@@ -35,6 +35,44 @@ Entry shape:
 
 
 
+## 2026-10-10 — PAN-OS declares its own defaults, in a tooltip (corrects the entry below)
+
+**Did:**    Asked what the template stack actually held for `ms-office`, to settle whether
+16385 was an 11.2 default or somebody's edit. Jason sent a Panorama screenshot with the Size
+Limit field's tooltip open.
+
+**Found:**  The tooltip states `name, unit, MAX, MIN, DEFAULT` for every type:
+
+    pe 16 MB (1-50) · apk 10 MB (1-50) · pdf 3072 KB (100-51200)
+    ms-office 16384 KB (200-51200) · jar 5 MB (1-20) · flash 5 MB (1-10)
+    MacOSX 10 MB (1-50) · archive 50 MB (1-50) · linux 50 MB (1-50) · script 20 KB (10-4096)
+
+**ms-office defaults to 16384.** The lab stack held 16385, so that kilobyte was an edit on
+this estate — not the release difference the previous entry could not read.
+
+**It also gave the MAXIMA**, which this project twice recorded as not discoverable. A write
+probe cannot yield them: an absurd value is refused with `size-limit '999999999' is invalid.
+Invalid limit` and no range. The UI states them outright. That is the corpus's existing
+lesson about the Help being a shape oracle, applied to a tooltip — when the API will not say,
+look at the screen.
+
+**And it is fatal to the reading this control does not take.** `archive` and `linux` default
+to their maximum, so a check asserting limits "raised to the platform maximum" — which is
+what the corpus asks for — could never fire on those two however an estate was configured.
+That is a second, independent reason the tuning reading was right.
+
+**Landed:** One table, sourced from the vendor rather than inferred from a device, which is
+what both earlier readings got wrong. The per-release keying is gone: 11.2 adds only `eml`,
+which is excluded on two counts, so what the control asserts is release-invariant. The
+permitted ranges are recorded alongside, and the remediation text now quotes them.
+
+At Jason's request the stack's `file-size-limit` was deleted and pushed, so pan-fw-111
+reports no node at all — the same state as both PA-5220s, and the state in which its UI shows
+pure defaults. The ten removed values are in the commit message for restore.
+
+**Open:** nothing on this control. Three sources were tried and the vendor's own declaration
+is the one that holds.
+
 ## 2026-10-10 — the WildFire file size defaults are per RELEASE
 
 **Did:**    Jason screenshotted Device > Setup > WildFire on a PA-5220 — a device whose

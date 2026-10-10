@@ -10190,8 +10190,7 @@ class WildfireDeviceSettingsTests(SimpleTestCase):
 
         self.assertEqual(size_limits(node), {"pe": 50, "pdf": 4096})
 
-    #: The 11.1 defaults, established 2026-10-10 from a PA-5220 whose stack sets nothing -
-    #: the only oracle, since such a device shows no node at all in configuration.
+    #: PAN-OS's own declared defaults, read off Panorama's Size Limit tooltip 2026-10-10.
     V11_1 = defaults_for_version("11.1.13-h3")
 
     def test_a_device_that_configures_NOTHING_is_entirely_untuned(self):
@@ -10199,19 +10198,28 @@ class WildfireDeviceSettingsTests(SimpleTestCase):
         file-size-limit node at all means every type is still at its default."""
         self.assertEqual(sorted(untuned({}, self.V11_1)), sorted(self.V11_1))
 
-    def test_the_defaults_are_PER_RELEASE(self):
-        """11.2 added `eml` - the key set is ten on 11.1 and eleven on 11.2 - so a table
-        keyed by nothing would assert a file type half the estate does not have."""
-        self.assertIsNotNone(defaults_for_version("11.1.13-h3"))
+    def test_the_asserted_set_is_the_same_on_both_releases(self):
+        """11.2 adds `eml` - ten keys on 11.1, eleven on 11.2 - but `eml` is excluded on two
+        counts, so what the control asserts does not vary by release and needs no version
+        key. The argument is kept for the day a release does diverge."""
+        self.assertEqual(defaults_for_version("11.1.13-h3"),
+                         defaults_for_version("11.2.3-h3"))
         self.assertEqual(len(self.V11_1), 10)
+        self.assertNotIn("eml", self.V11_1)
 
-    def test_an_UNESTABLISHED_release_reports_rather_than_passing(self):
-        """`untuned` returns nothing for an unknown release, and the caller must not read
-        that as "fully tuned" - which is why normalization sets the verdict true when the
-        table is missing. "We have no table for this one" is not "nothing to tune here"."""
-        self.assertIsNone(defaults_for_version("11.2.3-h3"))
-        self.assertIsNone(defaults_for_version(""))
-        self.assertEqual(untuned({"pe": 16}, None), [])
+    def test_ms_office_defaults_to_16384_not_16385(self):
+        """The lab's template stack held 16385, and an earlier table in this project recorded
+        that as the default. Panorama's own tooltip says 16384, so the extra kilobyte was
+        somebody's edit."""
+        self.assertEqual(self.V11_1["ms-office"], 16384)
+
+    def test_two_types_default_to_their_MAXIMUM(self):
+        """archive and linux. Worth knowing for the reading of PAN-AVW-004 that was NOT
+        taken: a check asserting "raised to the platform maximum" could never fire on these
+        however an estate was configured."""
+        for file_type in ("archive", "linux"):
+            low, high = WildfireSettings.SIZE_LIMIT_RANGE[file_type]
+            self.assertEqual(self.V11_1[file_type], high)
 
     def test_a_type_set_to_its_own_default_counts_as_untuned(self):
         """PAN-AVW-004 is a TUNING check (Jason, 2026-10-09): the question is whether anyone
