@@ -35,6 +35,50 @@ Entry shape:
 
 
 
+## 2026-10-10 — it was all on the next page (corrects three entries below)
+
+**Did:**    Jason pasted the Help's File Size Limits section. Checked it against our own doc
+index.
+
+**Found:**  **p.775 has had every range and every default the whole time**, and it matches
+Panorama's tooltip exactly — two agreeing vendor sources, one of them already indexed here.
+
+I searched for this. The search returned **p.774**, I read p.774 in full, and I recorded —
+twice — that the Help gave advice but no numbers and that the maxima were undiscoverable.
+p.774 ends `"...If more"`. p.775 opens `"buffer space is available"` and lists everything.
+p.776 carries the last type. All three share the section path.
+
+**The index returns pages, not sections.** The existing rule is *read the section a sentence
+sits in*; the failure mode this adds is that a page ending mid-sentence is a section
+continuing, and a negative drawn from one page is not a negative about the document.
+
+**The cost was not the wasted write probe.** p.775 states the DEFAULTS, which were the thing
+I was actually hunting. Without them I inferred defaults from a device — twice — shipped a
+wrong table, built PAN-AVW-004 on it, deactivated it the next day and rebuilt it twice.
+Reading one more page would have prevented all of that.
+
+**And the Help changes what the control MEANS.** The default *is* the vendor's best-practice
+recommendation for nine of the ten types — each bullet restates its own default. So an estate
+at defaults is **at** the recommended starting point, not below it. p.775 calls them "a good
+starting place... that don't overtax firewall resources" and says to increase them "if more
+buffer space is available". PAN-AVW-004 therefore reports that nobody has evaluated this
+platform's headroom, not that the limits are too low — the description now says so, because
+letting the finding read as "below best practice" would be false.
+
+`MacOSX` is the one place the vendor disagrees with itself: default 10 MB, recommendation
+1 MB. Every other bullet restates its default and 1 MB is the range minimum, so it reads like
+a doc error. Recorded, not acted on.
+
+p.776 also says the values "might differ based on the current version of PAN-OS **or the
+content release**" and that the tooltip is the live authority — so a hardcoded table is a
+snapshot by the vendor's own account, and a content update can move it.
+
+**Landed:** the ranges, the best-practice column and the MacOSX discrepancy in the payload
+contract; the control's description and audit text rewritten so the finding is not misread;
+`Report Benign Files` independently confirmed as disabled by default, which had been measured.
+A checklist addition is staged in `OptivEdgeProbe/scratch/doc-drafts/`, filed next to the rule
+it extends rather than as a new one.
+
 ## 2026-10-10 — PAN-OS declares its own defaults, in a tooltip (corrects the entry below)
 
 **Did:**    Asked what the template stack actually held for `ms-office`, to settle whether

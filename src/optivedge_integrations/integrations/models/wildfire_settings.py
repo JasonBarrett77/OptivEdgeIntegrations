@@ -29,50 +29,58 @@ from .base import SyncTrackedModel
 from .provenance import ProvenancedMixin
 
 
-#: PAN-OS's OWN DECLARED DEFAULTS, read from Panorama 2026-10-10. The Size Limit field's
-#: tooltip on Device > Setup > WildFire states them, together with the permitted range, as
-#: `name, unit, MAX, MIN, DEFAULT`:
+#: PAN-OS'S OWN DECLARED DEFAULTS, from two agreeing vendor sources: Help pages 774-776 and
+#: Panorama's Size Limit tooltip, which state identical ranges and defaults.
 #:
-#:     pe         MB     1 - 50       default 16
-#:     apk        MB     1 - 50       default 10
-#:     pdf        KB   100 - 51200    default 3072
-#:     ms-office  KB   200 - 51200    default 16384
-#:     jar        MB     1 - 20       default 5
-#:     flash      MB     1 - 10       default 5
-#:     MacOSX     MB     1 - 50       default 10
-#:     archive    MB     1 - 50       default 50     <- default IS the maximum
-#:     linux      MB     1 - 50       default 50     <- default IS the maximum
-#:     script     KB    10 - 4096     default 20
+#:     type        range            default    Help's best-practice recommendation
+#:     pe          1 - 50 MB        16 MB      16 MB
+#:     apk         1 - 50 MB        10 MB      10 MB
+#:     pdf         100 - 51200 KB   3072 KB    3072 KB
+#:     ms-office   200 - 51200 KB   16384 KB   16384 KB
+#:     jar         1 - 20 MB        5 MB       5 MB
+#:     flash       1 - 10 MB        5 MB       5 MB
+#:     MacOSX      1 - 50 MB        10 MB      1 MB   <- the only disagreement
+#:     archive     1 - 50 MB        50 MB      50 MB  <- default IS the maximum
+#:     linux       1 - 50 MB        50 MB      50 MB  <- default IS the maximum
+#:     script      10 - 4096 KB     20 KB      20 KB
 #:
-#: Jason, 2026-10-10: "we should probably just use the defaults from panorama. I'll let the
-#: engineer adjust as necessary." This is the vendor declaring its own values rather than us
-#: inferring them from a device, which is a better source than either of the two readings it
-#: replaced.
+#: THE DEFAULT IS THE VENDOR'S BEST PRACTICE for nine of ten, which decides what a finding
+#: about them MEANS. An estate at defaults is at the recommended STARTING POINT, not below
+#: it - Help p.775 calls them "a good starting place for setting effective limits that don't
+#: overtax firewall resources" and says to increase them "if more buffer space is available".
+#: So PAN-AVW-004 reports that nobody has evaluated this platform's headroom, NOT that the
+#: estate is below best practice. Saying otherwise in a finding would be false.
 #:
-#: IT ALSO SETTLED A QUESTION AND CORRECTED A VALUE. `ms-office` defaults to 16384; the lab's
-#: template stack held 16385, so that one KB was somebody's edit and not a release
-#: difference. An earlier table here recorded 16385 as the default.
+#: THE VENDOR SAYS THESE MOVE. p.776: the values "might differ based on the current version
+#: of PAN-OS or the content release", and the tooltip is the live authority. A CONTENT
+#: release can change them, not just a PAN-OS version - so this table is a snapshot by the
+#: vendor's own account, which is why `defaults_for_version` keeps its argument.
 #:
-#: THE UNITS ARE NOT UNIFORM and the number alone does not say which, so a value is compared
-#: only against its own default.
-#:
-#: TWO TYPES DEFAULT TO THEIR MAXIMUM - archive and linux. Worth knowing for the reading of
-#: this control that was NOT taken: a check asserting "raised to the platform maximum" could
-#: never fire on those two however the estate was configured.
+#: TWO EARLIER TABLES HERE WERE WRONG and both inferred defaults from a DEVICE - one took a
+#: template stack's configuration for the platform's, the other read one device and covered
+#: one release. Both were avoidable: p.775 states the defaults outright and was in this
+#: project's own doc index the whole time. The search returned p.774, p.774 was read, and
+#: p.774 ends mid-sentence.
 DEFAULT_SIZE_LIMITS = {
     "pe": 16, "apk": 10, "pdf": 3072, "ms-office": 16384, "jar": 5, "flash": 5,
     "MacOSX": 10, "archive": 50, "linux": 50, "script": 20,
 }
 
-#: The permitted range per type, from the same tooltip. Recorded because this project twice
-#: wrote that the maxima were not discoverable: an absurd value is refused with `size-limit
-#: '999999999' is invalid. Invalid limit` and NO range, so a write probe never yields them.
-#: The UI states them outright.
+#: The permitted range per type. This project twice recorded that the maxima were not
+#: discoverable, because an absurd value is refused with `size-limit '999999999' is invalid.
+#: Invalid limit` and no range. True of the write probe, false of the question: Help p.775
+#: lists every one.
 SIZE_LIMIT_RANGE = {
     "pe": (1, 50), "apk": (1, 50), "pdf": (100, 51200), "ms-office": (200, 51200),
     "jar": (1, 20), "flash": (1, 10), "MacOSX": (1, 50), "archive": (1, 50),
     "linux": (1, 50), "script": (10, 4096),
 }
+
+#: The Help's own best-practice recommendation per type. Identical to the default for nine of
+#: ten; MacOSX is the exception, recommended at 1 MB against a default of 10 MB. Every other
+#: bullet restates its own default and 1 MB is also the range minimum, so that reads like a
+#: documentation error - recorded as the Help states it, and not acted on.
+BEST_PRACTICE_SIZE_LIMITS = dict(DEFAULT_SIZE_LIMITS, MacOSX=1)
 
 #: `eml` EXISTS ONLY ON 11.2+ and is not in the declared set above - the key set is ten on
 #: 11.1.13-h3 and eleven on 11.2.3-h3, completed on all three lab appliances. It is also
