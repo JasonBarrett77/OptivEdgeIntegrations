@@ -86,6 +86,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     normalize_security_profile,
     profile_ml_models,
     profile_application_overrides,
+    exception_surfaces,
     inline_detector_catalogue,
     profile_inline_detectors,
     profile_wildfire_rules,
@@ -10155,6 +10156,71 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.wildfire
 from optivedge_integrations.integrations.models import (  # noqa: E402
     SecurityProfileInlineDetector,
 )
+
+
+class ExceptionSurfaceTests(SimpleTestCase):
+    """PAN-SPY-005 and PAN-VLN-004. Measured 2026-10-10.
+
+    An anti-spyware profile can hold exceptions in FOUR places and controls.json names one.
+    Counting only the named one meant a profile exempting half an estate through
+    `inline-exception-ip-address` counted zero.
+    """
+
+    def test_a_profile_with_no_exceptions_anywhere_counts_nothing(self):
+        self.assertEqual(exception_surfaces({"@name": "clean"}), {})
+
+    def test_the_surface_controls_json_names(self):
+        got = exception_surfaces({"threat-exception": {"entry": [
+            {"@name": "12345"}, {"@name": "67890"}]}})
+
+        self.assertEqual(got, {"threat-exception": 2})
+
+    def test_the_three_surfaces_it_does_NOT_name(self):
+        """Each of these disables a protection as surely as a signature exception, and each
+        was invisible to the count before."""
+        got = exception_surfaces({
+            "botnet-domains": {
+                "threat-exception": {"entry": [{"@name": "dns-sig"}]},
+                "whitelist": {"entry": [{"@name": "example.com"}, {"@name": "b.test"}]},
+            },
+            "inline-exception-ip-address": {"member": ["10.0.0.1", "10.0.0.2", "10.0.0.3"]},
+            "inline-exception-edl-url": {"member": ["my-edl"]},
+        })
+
+        self.assertEqual(got, {"botnet-threat-exception": 1, "botnet-whitelist": 2,
+                               "inline-exception-ip-address": 3,
+                               "inline-exception-edl-url": 1})
+
+    def test_only_surfaces_that_hold_something_are_reported(self):
+        """An empty surface is not a finding and must not clutter the detail."""
+        got = exception_surfaces({"threat-exception": {"entry": []},
+                                  "inline-exception-ip-address": {"member": []}})
+
+        self.assertEqual(got, {})
+
+    def test_a_vulnerability_profile_has_no_botnet_surfaces(self):
+        """It has no botnet tree at all, so two of the four cannot exist there. That is a
+        real difference rather than a gap - what exists is counted."""
+        got = exception_surfaces({"threat-exception": {"entry": [{"@name": "1"}]},
+                                  "inline-exception-ip-address": {"member": ["10.0.0.1"]}})
+
+        self.assertNotIn("botnet-threat-exception", got)
+        self.assertEqual(sum(got.values()), 2)
+
+    def test_a_single_member_arriving_unwrapped_is_still_counted(self):
+        got = exception_surfaces({"inline-exception-ip-address": {"member": "10.0.0.1"}})
+
+        self.assertEqual(got, {"inline-exception-ip-address": 1})
+
+    def test_the_total_is_what_the_column_stores(self):
+        """`threat_exception_count` keeps its name because every consumer reads it; what
+        changed is that it no longer under-counts."""
+        got = exception_surfaces({
+            "threat-exception": {"entry": [{"@name": "a"}]},
+            "botnet-domains": {"whitelist": {"entry": [{"@name": "b"}]}},
+            "inline-exception-ip-address": {"member": ["10.0.0.1", "10.0.0.2"]}})
+
+        self.assertEqual(sum(got.values()), 4)
 
 
 class InlineCloudDetectorTests(SimpleTestCase):

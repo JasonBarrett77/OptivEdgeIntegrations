@@ -217,6 +217,9 @@ class NormalizedSecurityProfile:
     description: str
     rule_count: int
     threat_exception_count: int
+    #: {surface: count} for the surfaces that hold any. The total is what the column stores;
+    #: this says WHERE, which is what a hygiene finding has to name.
+    exception_surfaces: dict[str, int]
     verdicts: dict[str, tuple[bool, str]]
     #: Antivirus only, one tuple per decoder, THREE action columns each:
     #: (protocol, configured, effective, blocks, wf_configured, wf_effective, wf_blocks,
@@ -338,6 +341,42 @@ INLINE_DETECTOR_NODE = {
     SecurityProfile.KIND_SPYWARE: "mica-engine-spyware-enabled",
     SecurityProfile.KIND_VULNERABILITY: "mica-engine-vulnerability-enabled",
 }
+
+
+def exception_surfaces(entry: dict[str, Any]) -> dict[str, int]:
+    """How many exceptions this profile holds, per SURFACE. PAN-SPY-005 and PAN-VLN-004.
+
+    FOUR PLACES, not one. Measured 2026-10-10 on an anti-spyware profile:
+
+        threat-exception                  signature exceptions
+        botnet-domains/threat-exception   DNS signature exceptions
+        botnet-domains/whitelist          a DNS allow-list
+        inline-exception-ip-address       addresses exempt from inline cloud analysis
+        inline-exception-edl-url          the EDL equivalent
+
+    controls.json names only the first, and `threat_exception_count` counted only the first -
+    so a profile exempting half an estate through `inline-exception-ip-address` counted ZERO
+    exceptions. A hygiene control asking whether exceptions are minimal has to see all of
+    them, which is the same reasoning that folded the application override into PAN-AVW-001.
+
+    A vulnerability profile has no botnet tree, so two of these are always zero there. That
+    is a real difference rather than a gap: the surfaces that exist are counted and the ones
+    that cannot exist contribute nothing.
+    """
+    counts: dict[str, int] = {}
+
+    def entries(node: Any) -> int:
+        return len([e for e in ensure_list(
+            node.get("entry") if isinstance(node, dict) else None) if isinstance(e, dict)])
+
+    counts["threat-exception"] = entries(entry.get("threat-exception"))
+    botnet = entry.get("botnet-domains")
+    botnet = botnet if isinstance(botnet, dict) else {}
+    counts["botnet-threat-exception"] = entries(botnet.get("threat-exception"))
+    counts["botnet-whitelist"] = entries(botnet.get("whitelist"))
+    for key in ("inline-exception-ip-address", "inline-exception-edl-url"):
+        counts[key] = len([m for m in _members(entry.get(key)) if m])
+    return {surface: n for surface, n in counts.items() if n}
 
 
 def profile_inline_detectors(kind: str, entry: dict[str, Any]) -> dict[str, str]:
@@ -511,7 +550,7 @@ def normalize_security_profile(
     entry_rk, entry_rv = entry_provenance(entry)
     description, description_rk, description_rv = scalar_value(entry.get("description"))
     rules = profile_rules(entry)
-    exceptions = entry.get("threat-exception")
+    surfaces = exception_surfaces(entry)
     decoders = profile_decoders(entry) if kind == SecurityProfile.KIND_VIRUS else []
     ml_models = profile_ml_models(entry) if kind == SecurityProfile.KIND_VIRUS else {}
     overrides = (profile_application_overrides(entry)
@@ -530,8 +569,11 @@ def normalize_security_profile(
         precedence_rank=precedence_for(namespace_type),
         description=description,
         rule_count=len(rules),
-        threat_exception_count=len([e for e in ensure_list(
-            exceptions.get("entry") if isinstance(exceptions, dict) else None) if isinstance(e, dict)]),
+        # Every surface, not just the top-level node - see `exception_surfaces`. The column
+        # keeps its name because it is what every consumer already reads; what changed is
+        # that it no longer under-counts a profile exempting things somewhere else.
+        threat_exception_count=sum(surfaces.values()),
+        exception_surfaces=surfaces,
         # EMPTY for a kind with no severity rules. severity_verdict() would return
         # (False, "no catch-all rule") for an antivirus profile - true of its rule list, which
         # does not exist, and read by a consumer as "critical threats are not blocked". A kind
@@ -825,6 +867,7 @@ def replace_security_profiles(
             kind=normalized.kind, description=normalized.description,
             is_predefined=normalized.is_predefined, rule_count=normalized.rule_count,
             threat_exception_count=normalized.threat_exception_count,
+            exception_surfaces=normalized.exception_surfaces,
             referrer_count=len(used_by), is_used=bool(used_by), referrers=used_by,
             raw_profile=normalized.raw_profile, last_synced_at=normalized.source_snapshot.collected_at,
         )

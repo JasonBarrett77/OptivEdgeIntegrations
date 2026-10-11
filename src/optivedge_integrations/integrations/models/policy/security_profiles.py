@@ -94,6 +94,14 @@ class SecurityProfile(ScopedPolicyObject):
     is_used = models.BooleanField(default=False)
     referrers = models.JSONField(default=list, blank=True)
 
+    #: {surface: count} for every exception surface that holds any. The COUNT is in
+    #: `threat_exception_count`; this says WHERE, which is what a hygiene finding names and
+    #: what an engineer needs to find them. Detail only - a control rests on the count.
+    #:
+    #: Four surfaces exist on an anti-spyware profile and controls.json names one. See
+    #: `exception_surfaces` in the normalizer.
+    exception_surfaces = models.JSONField(default=dict, blank=True)
+
     raw_profile = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -136,6 +144,19 @@ class SecurityProfile(ScopedPolicyObject):
     @property
     def has_non_blocking_ml_model(self) -> bool:
         return bool(self.non_blocking_ml_models)
+
+    @property
+    def exception_detail(self) -> str:
+        """Where this profile's exceptions live, for a hygiene finding.
+
+        Names the surface because the remediation differs: a signature exception is removed
+        in one place, an inline-analysis IP exemption in another, and a DNS allow-list entry
+        in a third.
+        """
+        if not self.exception_surfaces:
+            return ""
+        return ", ".join(f"{n} in {surface}"
+                         for surface, n in sorted(self.exception_surfaces.items()))
 
     @property
     def inline_detectors_not_blocking(self) -> list[str]:
