@@ -20,6 +20,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     profile_rules,
     rule_action,
     category_verdict,
+    dns_security_categories,
     dns_signature_sources,
     dns_sinkhole_address,
     severity_verdict,
@@ -119,7 +120,8 @@ def profile(name, namespace_type, kind=SPY):
         exception_surfaces={},
         inline_detectors={},
         category_verdicts={},
-        dns_signature_sources=[], dns_sinkhole_ipv4='', dns_sinkhole_ipv6='',
+        dns_signature_sources=[], dns_categories=[],
+        dns_sinkhole_ipv4='', dns_sinkhole_ipv6='',
         raw_profile={},
         field_provenance_data=[])
 
@@ -361,25 +363,26 @@ class DnsSignatureSourceTests(SimpleTestCase):
         rows = dns_signature_sources(spy_profile_entry(
             "strict", lists=[("default-paloalto-dns", "sinkhole")],
             sinkhole={"ipv4-address": "pan-sinkhole-default-ip", "ipv6-address": "::1"}))
-        self.assertEqual(rows, [("default-paloalto-dns", True, "sinkhole", "sinkhole",
-                                 True, False)])
+        self.assertEqual(rows, [("default-paloalto-dns", True, "paloalto-content",
+                                 "sinkhole", "sinkhole", True, True, False)])
 
     def test_the_predefined_default_shape_does_NOT_sinkhole(self):
         # Measured 2026-10-11: `default` ships with ALERT, not sinkhole. The payload contract
         # said both predefined profiles sinkholed, from reading `strict` and generalising.
         rows = dns_signature_sources(spy_profile_entry(
             "default", lists=[("default-paloalto-dns", "alert")]))
-        self.assertEqual(rows[0][3:], ("alert", False, False))
+        self.assertEqual(rows[0][3:], ("alert", "alert", False, False, False))
 
     def test_an_absent_source_is_synthesized_and_flagged_implicit(self):
         rows = dns_signature_sources(spy_profile_entry("bare"))
-        self.assertEqual(rows, [("default-paloalto-dns", True, "", "sinkhole", True, True)])
+        self.assertEqual(rows, [("default-paloalto-dns", True, "paloalto-content", "",
+                                 "sinkhole", True, True, True)])
 
     def test_block_does_not_count_as_sinkholing(self):
         # It breaks C2 resolution and loses the infected client, which is half the control.
         rows = dns_signature_sources(spy_profile_entry(
             "blocked", lists=[("default-paloalto-dns", "block")]))
-        self.assertFalse(rows[0][4])
+        self.assertFalse(rows[0][5])
 
     def test_an_edl_gets_a_row_and_is_not_the_asserted_source(self):
         rows = dns_signature_sources(spy_profile_entry(
@@ -394,7 +397,7 @@ class DnsSignatureSourceTests(SimpleTestCase):
             "edl-only", lists=[("corp-dns-allow", "alert")]))
         self.assertEqual(len(rows), 2)
         content = [r for r in rows if r[1]][0]
-        self.assertEqual(content[2:], ("", "sinkhole", True, True))
+        self.assertEqual(content[3:], ("", "sinkhole", True, True, True))
 
     def test_the_sinkhole_address_is_read_and_ipv4_is_the_one_that_matters(self):
         self.assertEqual(
@@ -411,3 +414,90 @@ class DnsSignatureSourceTests(SimpleTestCase):
         self.assertEqual(
             dns_sinkhole_address(spy_profile_entry("v6", sinkhole={"ipv6-address": "::1"})),
             ("", "::1"))
+
+
+def spy_categories_entry(name, *, categories=None, advanced=None):
+    """An anti-spyware profile carrying DNS Security category entries."""
+    botnet = {}
+    if categories is not None:
+        botnet["dns-security-categories"] = {"entry": [
+            {"@name": n, "action": a} for n, a in categories]}
+    if advanced is not None:
+        botnet["advanced-dns-security-categories"] = {"entry": [
+            {"@name": n, "action": a} for n, a in advanced]}
+    entry = {"@name": name}
+    if botnet:
+        entry["botnet-domains"] = botnet
+    return entry
+
+
+CC = "pan-dns-sec-cc"
+MALWARE = "pan-dns-sec-malware"
+PHISHING = "pan-dns-sec-phishing"
+ASSERTED = (CC, MALWARE, PHISHING)
+
+
+class DnsSecurityCategoryTests(SimpleTestCase):
+    """PAN-SPY-003. Absence FIRES here and PASSES for the list on the same screen."""
+
+    def rows(self, entry):
+        return {r[0]: r for r in dns_security_categories(entry)}
+
+    def test_the_predefined_shape_leaves_every_category_at_default(self):
+        rows = self.rows(spy_categories_entry(
+            "strict", categories=[(n, "default") for n in
+                                  ("pan-dns-sec-benign", CC, MALWARE, PHISHING)]))
+        for name in ASSERTED:
+            # enforces False, sinkholes False - `default` is a pointer, not an action.
+            self.assertEqual(rows[name][5:7], (False, False), name)
+
+    def test_sinkhole_enforces_and_sinkholes(self):
+        rows = self.rows(spy_categories_entry("s", categories=[(CC, "sinkhole")]))
+        self.assertEqual(rows[CC][5:7], (True, True))
+
+    def test_block_enforces_without_sinkholing(self):
+        # controls.json for PAN-SPY-003 says "must sinkhole/block", so block passes HERE -
+        # unlike PAN-SPY-002, whose corpus entry asks for sinkhole alone.
+        rows = self.rows(spy_categories_entry("b", categories=[(CC, "block")]))
+        self.assertEqual(rows[CC][5:7], (False, True))
+
+    def test_allow_does_neither(self):
+        rows = self.rows(spy_categories_entry("a", categories=[(CC, "allow")]))
+        self.assertEqual(rows[CC][5:7], (False, False))
+
+    def test_an_unconfigured_profile_gets_the_asserted_rows_synthesized(self):
+        # The whole reason absence can report: Help p.284 says DNS Security defaults to allow.
+        rows = self.rows(spy_categories_entry("bare"))
+        self.assertEqual(sorted(rows), sorted(ASSERTED))
+        for name in ASSERTED:
+            self.assertEqual(rows[name][3:], ("", "default", False, False, True), name)
+
+    def test_a_partially_configured_profile_synthesizes_only_what_is_missing(self):
+        rows = self.rows(spy_categories_entry("part", categories=[(CC, "sinkhole")]))
+        self.assertFalse(rows[CC][7], "cc is configured, so not implicit")
+        self.assertTrue(rows[MALWARE][7], "malware is absent, so synthesized")
+
+    def test_categories_the_corpus_leaves_to_risk_tolerance_are_not_synthesized(self):
+        # `recent` and `parked` are "sinkhole or alert per risk tolerance" in controls.json,
+        # and benign must never be asserted at all.
+        rows = self.rows(spy_categories_entry("bare"))
+        for name in ("pan-dns-sec-recent", "pan-dns-sec-parked", "pan-dns-sec-benign"):
+            self.assertNotIn(name, rows)
+
+    def test_a_configured_non_asserted_category_still_gets_a_row(self):
+        # Visible in the tab, just not asserted.
+        rows = self.rows(spy_categories_entry(
+            "x", categories=[("pan-dns-sec-recent", "alert")]))
+        self.assertIn("pan-dns-sec-recent", rows)
+
+    def test_the_advanced_categories_are_recorded_and_marked_as_their_own_source(self):
+        rows = self.rows(spy_categories_entry(
+            "adv", advanced=[("pan-adns-sec-hijacking", "default")]))
+        self.assertEqual(rows["pan-adns-sec-hijacking"][2],
+                         "advanced-dns-security-category")
+
+    def test_category_rows_are_never_the_paloalto_content_list(self):
+        # PAN-SPY-002's query filters on that flag, so a category leaking into it would make
+        # one control answer the other's question.
+        for row in dns_security_categories(spy_categories_entry("bare")).__iter__():
+            self.assertFalse(row[1])

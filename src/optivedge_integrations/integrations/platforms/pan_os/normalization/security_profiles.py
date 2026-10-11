@@ -349,6 +349,7 @@ def dns_signature_sources(entry: dict[str, Any]) -> list[tuple]:
     Content list sinkholes. It is flagged `action_is_implicit` so the claim is visible as
     documentation rather than measurement - see the model's docstring.
     """
+    src = SecurityProfileDnsSignatureSource
     botnet = entry.get("botnet-domains")
     lists = (botnet or {}).get("lists") if isinstance(botnet, dict) else None
     rows, seen_content = [], False
@@ -357,13 +358,69 @@ def dns_signature_sources(entry: dict[str, Any]) -> list[tuple]:
             continue
         name = str(item.get("@name") or "")
         action = _choice(item.get("action"))
-        is_content = name == SecurityProfileDnsSignatureSource.PALOALTO_CONTENT
+        is_content = name == src.PALOALTO_CONTENT
         seen_content = seen_content or is_content
-        rows.append((name, is_content, action, action, action == "sinkhole", False))
+        rows.append((name, is_content,
+                     src.TYPE_PALOALTO_CONTENT if is_content else src.TYPE_EDL,
+                     action, action, action == "sinkhole",
+                     action in src.ENFORCING_ACTIONS, False))
     if not seen_content:
-        implicit = SecurityProfileDnsSignatureSource.DOCUMENTED_IMPLICIT_ACTION
-        rows.append((SecurityProfileDnsSignatureSource.PALOALTO_CONTENT, True, "",
-                     implicit, implicit == "sinkhole", True))
+        implicit = src.DOCUMENTED_IMPLICIT_ACTION
+        rows.append((src.PALOALTO_CONTENT, True, src.TYPE_PALOALTO_CONTENT, "", implicit,
+                     implicit == "sinkhole", implicit in src.ENFORCING_ACTIONS, True))
+    return rows
+
+
+def dns_security_categories(entry: dict[str, Any]) -> list[tuple]:
+    """PAN-SPY-003: one row per DNS Security category, and per Advanced DNS Security category.
+
+    **ABSENCE FIRES HERE, and absence PASSES for the Palo Alto Networks Content list on the
+    same screen.** Both readings come from one sentence of Help p.284 - "the locally-accessed
+    Palo Alto Networks Content DNS signatures are sinkholed, while the cloud-based DNS Security
+    is set to allow" - reinforced by "If you want to enable sinkholing using DNS Security, you
+    must configure the action on DNS queries to sinkhole". So a category nobody configured is
+    not enforcing, and a row is synthesized saying so rather than left absent.
+
+    `default` IS A POINTER, not an action, and it resolves per signature (p.280). The stored
+    `effective_action` therefore stays `default` rather than being resolved to `allow`: the
+    config genuinely says `default`, and what that resolves to for a DNS Security category is
+    the vendor's documented `allow` rather than something measured here. `enforces` is False
+    either way, which is what a control needs.
+
+    BOTH PREDEFINED PROFILES LEAVE ALL TWELVE AT `default`, so every profile inheriting one
+    reports - which is the corpus's own claim: "leaving them at default allows resolution of
+    known-bad infrastructure".
+    """
+    src = SecurityProfileDnsSignatureSource
+    botnet = entry.get("botnet-domains") if isinstance(entry.get("botnet-domains"), dict) else {}
+    rows, seen = [], set()
+    for node_key, source_type in (
+            ("dns-security-categories", src.TYPE_DNS_SECURITY),
+            ("advanced-dns-security-categories", src.TYPE_ADVANCED_DNS_SECURITY)):
+        node = botnet.get(node_key) if isinstance(botnet, dict) else None
+        for item in ensure_list(node.get("entry") if isinstance(node, dict) else None):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("@name") or "")
+            action = scalar_value(item.get("action"))[0] or _choice(item.get("action"))
+            seen.add(name)
+            rows.append((name, False, source_type, action, action, action == "sinkhole",
+                         action in src.ENFORCING_ACTIONS, False))
+    # SYNTHESIZE THE ASSERTED ONES so a profile that never opened the tab still reports. Only
+    # the categories a control asks about - writing all ten would bury the three that matter
+    # under seven nobody asserts, and the corpus marks several as a risk-tolerance choice.
+    #
+    # NO BUILD-DERIVED CATALOGUE, unlike the ML models and the inline detectors. One was
+    # written and removed: because synthesis covers only the asserted set, a catalogue read
+    # from the predefined profiles could add nothing it did not already contain, and dead
+    # machinery that looks load-bearing is worse than none. A content release that RENAMES a
+    # category breaks the constant, which is why it is named in the model beside its
+    # measurement date.
+    implicit = src.CATEGORY_IMPLICIT_ACTION
+    for name in src.ASSERTED_MALICIOUS_CATEGORIES:
+        if name in seen:
+            continue
+        rows.append((name, False, src.TYPE_DNS_SECURITY, "", implicit, False, False, True))
     return rows
 
 
@@ -420,6 +477,9 @@ class NormalizedSecurityProfile:
     #: Anti-spyware only: one tuple per DNS signature source, including a
     #: synthesized row for the Palo Alto Networks Content list when absent.
     dns_signature_sources: list[tuple]
+    #: Anti-spyware only: the DNS Security and Advanced DNS Security category
+    #: rows, including synthesized ones for the categories a control asserts.
+    dns_categories: list[tuple]
     dns_sinkhole_ipv4: str
     dns_sinkhole_ipv6: str
     raw_profile: dict[str, Any]
@@ -779,6 +839,8 @@ def normalize_security_profile(
         # DNS sinkholing.
         dns_signature_sources=(dns_signature_sources(entry)
                                if kind == SecurityProfile.KIND_SPYWARE else []),
+        dns_categories=(dns_security_categories(entry)
+                        if kind == SecurityProfile.KIND_SPYWARE else []),
         dns_sinkhole_ipv4=(dns_sinkhole_address(entry)[0]
                            if kind == SecurityProfile.KIND_SPYWARE else ""),
         dns_sinkhole_ipv6=(dns_sinkhole_address(entry)[1]
@@ -1137,10 +1199,11 @@ def replace_security_profiles(
         SecurityProfileDnsSignatureSource.objects.bulk_create([
             SecurityProfileDnsSignatureSource(
                 security_profile=row, name=name, is_paloalto_content=is_content,
-                configured_action=configured, effective_action=effective,
-                sinkholes=sinkholes, action_is_implicit=implicit)
-            for name, is_content, configured, effective, sinkholes, implicit
-            in normalized.dns_signature_sources
+                source_type=source_type, configured_action=configured,
+                effective_action=effective, sinkholes=sinkholes, enforces=enforces,
+                action_is_implicit=implicit)
+            for name, is_content, source_type, configured, effective, sinkholes, enforces,
+            implicit in (normalized.dns_signature_sources + normalized.dns_categories)
         ])
         SecurityProfileCategoryVerdict.objects.bulk_create([
             SecurityProfileCategoryVerdict(

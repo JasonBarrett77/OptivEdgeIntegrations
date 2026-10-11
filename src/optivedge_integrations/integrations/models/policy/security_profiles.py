@@ -329,6 +329,51 @@ class SecurityProfile(ScopedPolicyObject):
         return row.sinkholes if row else None
 
     @property
+    def dns_security_categories_not_enforcing(self) -> list[str]:
+        """The asserted malicious DNS Security categories that do not block or sinkhole.
+
+        PAN-SPY-003. Names only - the action is on the row, and the finding sentence needs
+        both.
+        """
+        src = SecurityProfileDnsSignatureSource
+        return sorted(
+            row.name for row in self.dns_signature_sources.all()
+            if row.source_type == src.TYPE_DNS_SECURITY
+            and row.name in src.ASSERTED_MALICIOUS_CATEGORIES and not row.enforces)
+
+    @property
+    def dns_security_categories_enforced(self) -> bool | None:
+        """PAN-SPY-003. None = this kind has no DNS tree and makes no claim."""
+        src = SecurityProfileDnsSignatureSource
+        rows = [row for row in self.dns_signature_sources.all()
+                if row.source_type == src.TYPE_DNS_SECURITY
+                and row.name in src.ASSERTED_MALICIOUS_CATEGORIES]
+        if not rows:
+            return None
+        return all(row.enforces for row in rows)
+
+    @property
+    def dns_security_category_detail(self) -> str:
+        """What an engineer has to change, naming each category and its action.
+
+        `default` is reported as itself rather than as `allow`, because that is what the
+        config says and the resolution to allow is the vendor's documented behaviour (Help
+        p.284) rather than something measured here.
+        """
+        src = SecurityProfileDnsSignatureSource
+        parts = []
+        for row in sorted(self.dns_signature_sources.all(), key=lambda r: r.name):
+            if (row.source_type != src.TYPE_DNS_SECURITY
+                    or row.name not in src.ASSERTED_MALICIOUS_CATEGORIES or row.enforces):
+                continue
+            short = row.name.replace("pan-dns-sec-", "")
+            if row.action_is_implicit:
+                parts.append(f"{short} is not configured")
+            else:
+                parts.append(f"{short} is {row.configured_action}")
+        return ", ".join(parts)
+
+    @property
     def dns_sinkhole_action_is_implicit(self) -> bool:
         """Is the verdict resting on the Help's documented default rather than on config?"""
         row = self.paloalto_dns_source
@@ -948,12 +993,77 @@ class SecurityProfileDnsSignatureSource(models.Model):
     #: What the Help says an unconfigured Palo Alto Networks Content list does (p.284).
     DOCUMENTED_IMPLICIT_ACTION = "sinkhole"
 
+    #: Which of the Help's four signature sources this row is. They share a screen and almost
+    #: nothing else: three different action enums, two different child key sets, and opposite
+    #: meanings for absence.
+    TYPE_PALOALTO_CONTENT = "paloalto-content"
+    TYPE_EDL = "edl"
+    TYPE_DNS_SECURITY = "dns-security-category"
+    TYPE_ADVANCED_DNS_SECURITY = "advanced-dns-security-category"
+    SOURCE_TYPE_CHOICES = [
+        (TYPE_PALOALTO_CONTENT, "Palo Alto Networks Content"),
+        (TYPE_EDL, "External Dynamic List"),
+        (TYPE_DNS_SECURITY, "DNS Security category"),
+        (TYPE_ADVANCED_DNS_SECURITY, "Advanced DNS Security category"),
+    ]
+
+    #: PAN-SPY-003's subject. TEN, read from the predefined profiles 2026-10-10 and confirmed
+    #: 2026-10-11, because the names track content releases and the container's completion
+    #: returns an entry's CHILDREN rather than the name space - so membership is the only
+    #: oracle, the same position the antivirus ML catalogue is in.
+    DNS_SECURITY_CATEGORY_NAMES = (
+        "pan-dns-sec-adtracking", "pan-dns-sec-benign", "pan-dns-sec-cc", "pan-dns-sec-ddns",
+        "pan-dns-sec-grayware", "pan-dns-sec-malware", "pan-dns-sec-parked",
+        "pan-dns-sec-phishing", "pan-dns-sec-proxy", "pan-dns-sec-recent",
+    )
+    #: TWO, and 11.2-ONLY: completing the node on a PA-5220 running 11.1.13-h3 answers
+    #: `Invalid sequence`. In no corpus control at all.
+    ADVANCED_CATEGORY_NAMES = ("pan-adns-sec-dnsmisconfig", "pan-adns-sec-hijacking")
+
+    #: THE CATEGORIES PAN-SPY-003 ASSERTS, and only these.
+    #:
+    #: controls.json's minimum names "the C2 and malware DNS Security categories" and its
+    #: preferred extends the same action to "phishing and DNS-tunneling categories, with DGA,
+    #: newly-registered, and parked at sinkhole or alert per risk tolerance". The checklist
+    #: says assert the preferred, so C2, malware and phishing - and the ones the corpus itself
+    #: marks as a risk-tolerance judgement are deliberately NOT asserted, because an estate
+    #: can reasonably leave newly-registered domains alerting.
+    #:
+    #: NEITHER A DGA NOR A DNS-TUNNELING CATEGORY EXISTS on this content release, in either
+    #: node, so two of the names the corpus reasons about cannot be asserted at all.
+    #: `pan-dns-sec-benign`, -adtracking, -grayware, -proxy and -ddns are not named by the
+    #: corpus and are not asserted; sinkholing benign domains would be a defect, not a finding.
+    ASSERTED_MALICIOUS_CATEGORIES = (
+        "pan-dns-sec-cc", "pan-dns-sec-malware", "pan-dns-sec-phishing",
+    )
+    #: `default`, `allow`, `block`, `sinkhole` - FOUR, measured on both platforms. No `alert`,
+    #: which the Palo Alto Networks Content list has and the ADVANCED node also has.
+    CATEGORY_ACTIONS = ("default", "allow", "block", "sinkhole")
+    #: FIVE: the four above plus `alert`. A third action enum on the same screen.
+    ADVANCED_CATEGORY_ACTIONS = ("default", "allow", "alert", "block", "sinkhole")
+    #: What counts as enforcing a malicious category. controls.json's description says
+    #: "Malicious categories must sinkhole/block", so BLOCK PASSES HERE - unlike PAN-SPY-002,
+    #: where the corpus asks for sinkhole alone and blocking loses the infected client. The two
+    #: controls differ because their corpus entries differ, not by oversight; `sinkholes`
+    #: records the stricter reading beside this one.
+    ENFORCING_ACTIONS = frozenset({"block", "sinkhole"})
+    #: What a DNS Security category does when left at `default`. Help p.284 is explicit and
+    #: parallel: "the locally-accessed Palo Alto Networks Content DNS signatures are sinkholed,
+    #: while the cloud-based DNS Security is set to allow", and "If you want to enable
+    #: sinkholing using DNS Security, you must configure the action on DNS queries to sinkhole".
+    #: So `default` does not enforce, and BOTH predefined profiles leave all twelve categories
+    #: there.
+    CATEGORY_IMPLICIT_ACTION = "default"
+
     security_profile = models.ForeignKey(
         SecurityProfile, on_delete=models.CASCADE, related_name="dns_signature_sources")
     #: As the config names it - `default-paloalto-dns`, or an EDL's own name.
     name = models.CharField(max_length=128)
-    #: Is this THE Palo Alto Networks Content list, the only source this control asserts?
+    #: Is this THE Palo Alto Networks Content list? Kept as its own column because
+    #: PAN-SPY-002's query names it, and a control's query is a contract.
     is_paloalto_content = models.BooleanField(default=False)
+    source_type = models.CharField(
+        max_length=40, choices=SOURCE_TYPE_CHOICES, default=TYPE_PALOALTO_CONTENT)
     #: What the config holds. BLANK means the config does not name this source at all.
     configured_action = models.CharField(max_length=32, blank=True)
     #: What it therefore does - the configured action, or the documented implicit one.
@@ -963,6 +1073,11 @@ class SecurityProfileDnsSignatureSource(models.Model):
     #: here. Help p.285 offers it as the fallback - "If you can't sinkhole the traffic, block
     #: it" - and controls.json sets both minimum and preferred to `sinkhole`.
     sinkholes = models.BooleanField(default=False)
+    #: Does it stop the resolution AT ALL - block or sinkhole? What PAN-SPY-003 asserts for a
+    #: malicious DNS Security category, because that corpus entry says "sinkhole/block". For
+    #: the Palo Alto Networks Content list this is true of `block` as well, and PAN-SPY-002
+    #: still reports it: two booleans, two controls, one row.
+    enforces = models.BooleanField(default=False)
     #: True when nothing in the config said so and the effective action came from the Help.
     action_is_implicit = models.BooleanField(default=False)
 
