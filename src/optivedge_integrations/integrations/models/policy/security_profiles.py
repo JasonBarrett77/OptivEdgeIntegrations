@@ -973,8 +973,12 @@ class SecurityProfileDnsSignatureSource(models.Model):
     EXPLICITLY - which it would not need to do if alert were the default. Against it: `strict`
     writes `sinkhole` explicitly too. `action_is_implicit` exists so the undecided case is
     visible rather than silently folded into a pass, and so a second query can report it
-    without a schema change if the measurement comes out the other way. One click in the UI
-    settles it; see in-flight.json.
+    without a schema change if the measurement comes out the other way.
+
+    DECIDED 2026-10-11, Jason: assume the documentation is right. The pass stands, and what it
+    rests on is recorded here rather than left as an open question - a UI click would still
+    settle it, and `action_is_implicit` is how the affected profiles would be found if it ever
+    does. See PAN-SPY-002 in control-changes.json.
 
     **The two predefined profiles DISAGREE**, measured 2026-10-11 on a PA-VM 11.2.3-h3:
 
