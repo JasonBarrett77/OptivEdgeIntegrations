@@ -113,6 +113,7 @@ def profile(name, namespace_type, kind=SPY):
         source_snapshot=None, config_source="local", kind=kind, name=name, namespace_type=namespace_type,
         namespace_value="x", precedence_rank=0, description="", rule_count=0, threat_exception_count=0,
         verdicts={}, decoders=[], ml_models={}, application_overrides=[], wildfire_rules=[],
+        inline_detectors={},
         raw_profile={},
         field_provenance_data=[])
 

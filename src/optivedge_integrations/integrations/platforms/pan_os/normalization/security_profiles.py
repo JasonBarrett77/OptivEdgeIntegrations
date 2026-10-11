@@ -41,6 +41,7 @@ from optivedge_integrations.integrations.models import (
     SecurityProfileDecoder,
     SecurityProfileGroup,
     SecurityProfileMlModel,
+    SecurityProfileInlineDetector,
     SecurityProfileWildfireRule,
     SecurityProfileSeverityVerdict,
     SecurityRule,
@@ -230,6 +231,10 @@ class NormalizedSecurityProfile:
     #: WildFire-analysis only: one tuple per match rule. Empty for every other kind, AND for a
     #: wildfire-analysis profile that has no rules - which is a real state, not a missing one.
     wildfire_rules: list[tuple]
+    #: Spyware and vulnerability only: {detector name: configured inline-policy-action}, as
+    #: the CONFIG holds it. Which detectors exist is settled against the catalogue at persist
+    #: time, the same way the antivirus ML models are.
+    inline_detectors: dict[str, str]
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
 
@@ -325,6 +330,55 @@ def resolve_decoder_action(protocol: str, configured: str) -> str:
     if configured == "default":
         return SecurityProfileDecoder.DEFAULT_RESOLUTION.get(protocol, "")
     return configured
+
+
+#: Where each kind keeps its inline cloud-analysis detectors. NOT `cloud-inline-analysis`,
+#: which controls.json names and which the device refuses - see SecurityProfileInlineDetector.
+INLINE_DETECTOR_NODE = {
+    SecurityProfile.KIND_SPYWARE: "mica-engine-spyware-enabled",
+    SecurityProfile.KIND_VULNERABILITY: "mica-engine-vulnerability-enabled",
+}
+
+
+def profile_inline_detectors(kind: str, entry: dict[str, Any]) -> dict[str, str]:
+    """{detector name: configured inline-policy-action} for what the config names.
+
+    Only what is present. Which detectors EXIST is a content question answered the same way
+    the antivirus ML models answer it - catalogued across the build at persist time, so a
+    detector a later content release adds is assessed without a code change.
+    """
+    node = entry.get(INLINE_DETECTOR_NODE.get(kind, ""))
+    detectors = {}
+    for detector in ensure_list(node.get("entry") if isinstance(node, dict) else None):
+        if isinstance(detector, dict) and detector.get("@name"):
+            detectors[str(detector["@name"])] = _text(detector.get("inline-policy-action"))
+    return detectors
+
+
+def inline_detector_catalogue(profiles: list, kind: str) -> list[str]:
+    """Every detector of this kind seen anywhere in the build, plus the measured key space.
+
+    UNLIKE the ML model catalogue, this falls back to a measured constant when the build
+    names none. The antivirus case could rely on the predefined profile carrying every model;
+    a predefined spyware profile need not mention the inline engine at all, and an empty
+    catalogue would write no rows - which reads as "nothing is unprotected" and is the
+    direction these controls must never fail in.
+
+    The constant is the key SPACE, completed against a profile that does not exist, so it is
+    schema rather than one device's membership. A content release that adds a detector is
+    still picked up from the build.
+    """
+    names: list[str] = []
+    for normalized in profiles:
+        if normalized.kind != kind:
+            continue
+        for name in normalized.inline_detectors:
+            if name not in names:
+                names.append(name)
+    for name in SecurityProfileInlineDetector.detectors_for(kind):
+        if name not in names:
+            names.append(name)
+    return sorted(names)
 
 
 def profile_wildfire_rules(entry: dict[str, Any]) -> list[tuple]:
@@ -464,6 +518,8 @@ def normalize_security_profile(
                  if kind == SecurityProfile.KIND_VIRUS else [])
     wildfire = (profile_wildfire_rules(entry)
                 if kind == SecurityProfile.KIND_WILDFIRE_ANALYSIS else [])
+    detectors = (profile_inline_detectors(kind, entry)
+                 if kind in INLINE_DETECTOR_NODE else {})
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -484,6 +540,7 @@ def normalize_security_profile(
         ml_models=ml_models,
         application_overrides=overrides,
         wildfire_rules=wildfire,
+        inline_detectors=detectors,
         verdicts=({severity: severity_verdict(kind, rules, severity)
                    for severity in ASSESSED_SEVERITIES}
                   if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
@@ -752,6 +809,11 @@ def replace_security_profiles(
     # From this build's own reads, before any row is written: the predefined profile carries
     # every model the content release knows about.
     catalogue = ml_model_catalogue(profiles)
+    # One catalogue per kind: the two engines have different detectors, and a vulnerability
+    # profile must not be given the spyware ones.
+    inline_catalogues = {
+        kind: inline_detector_catalogue(profiles, kind) for kind in INLINE_DETECTOR_NODE
+    }
     for normalized in (p for p in profiles if keep_here(p)):
         used_by = referrers.get(normalized.key, [])
         verdict = normalized.verdicts
@@ -799,6 +861,18 @@ def replace_security_profiles(
                 security_profile=row, application=application,
                 configured_action=configured, blocks=blocks)
             for application, configured, blocks in normalized.application_overrides
+        ])
+        SecurityProfileInlineDetector.objects.bulk_create([
+            SecurityProfileInlineDetector(
+                security_profile=row, name=detector,
+                configured_action=normalized.inline_detectors.get(detector, ""),
+                # An unmentioned detector does not run, the same rule as an unmentioned
+                # antivirus ML model. `alert` RUNS and does not block - the
+                # `enable(alert-only)` case under another name.
+                enabled=bool(normalized.inline_detectors.get(detector, "")),
+                blocks=normalized.inline_detectors.get(detector, "")
+                in SecurityProfileInlineDetector.BLOCKING_ACTIONS)
+            for detector in inline_catalogues.get(normalized.kind, [])
         ])
         SecurityProfileWildfireRule.objects.bulk_create([
             SecurityProfileWildfireRule(

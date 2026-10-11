@@ -23,6 +23,7 @@ from .security_profiles import (
     SecurityProfile,
     SecurityProfileDecoder,
     SecurityProfileApplicationOverride,
+    SecurityProfileInlineDetector,
     SecurityProfileMlModel,
     SecurityProfileWildfireRule,
     SecurityProfileGroup,

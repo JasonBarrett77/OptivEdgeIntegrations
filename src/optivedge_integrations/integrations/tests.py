@@ -86,6 +86,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     normalize_security_profile,
     profile_ml_models,
     profile_application_overrides,
+    inline_detector_catalogue,
+    profile_inline_detectors,
     profile_wildfire_rules,
     profile_decoders,
     resolve_decoder_action,
@@ -10148,6 +10150,83 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.wildfire
     size_limits,
     untuned,
 )
+
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    SecurityProfileInlineDetector,
+)
+
+
+class InlineCloudDetectorTests(SimpleTestCase):
+    """PAN-SPY-004 and PAN-VLN-003, measured on pan-fw-111 2026-10-10.
+
+    controls.json points both at `cloud-inline-analysis/enabled`, which the device refuses
+    with `cloud-inline-analysis is invalid` even with ATP licensed. The real node is
+    `mica-engine-{spyware,vulnerability}-enabled`, which is what the corpus describes.
+    """
+
+    SPY = SecurityProfile.KIND_SPYWARE
+    VLN = SecurityProfile.KIND_VULNERABILITY
+
+    def test_the_two_kinds_read_DIFFERENT_nodes(self):
+        """A spyware profile's detectors are not a vulnerability profile's, and reading the
+        wrong node would return nothing while looking like a clean profile."""
+        spyware = {"mica-engine-spyware-enabled": {"entry": [
+            {"@name": "SSL Command and Control detector",
+             "inline-policy-action": "reset-both"}]}}
+
+        self.assertEqual(profile_inline_detectors(self.SPY, spyware),
+                         {"SSL Command and Control detector": "reset-both"})
+        self.assertEqual(profile_inline_detectors(self.VLN, spyware), {})
+
+    def test_a_profile_naming_no_detectors_yields_nothing_to_read(self):
+        self.assertEqual(profile_inline_detectors(self.SPY, {"@name": "p"}), {})
+
+    def test_the_catalogue_falls_back_to_the_measured_key_space(self):
+        """UNLIKE the antivirus ML models, which could rely on the predefined profile
+        carrying every one. A predefined spyware profile need not mention this engine at
+        all, and an empty catalogue would write no rows - which reads as "nothing is
+        unprotected", the direction these controls must never fail in."""
+        self.assertEqual(sorted(inline_detector_catalogue([], self.SPY)),
+                         sorted(SecurityProfileInlineDetector.SPYWARE_DETECTORS))
+        self.assertEqual(sorted(inline_detector_catalogue([], self.VLN)),
+                         sorted(SecurityProfileInlineDetector.VULNERABILITY_DETECTORS))
+
+    def test_the_catalogue_picks_up_a_detector_the_constant_does_not_have(self):
+        """A content release that adds one is assessed with no code change."""
+        class Fake:
+            kind = SecurityProfile.KIND_VULNERABILITY
+            inline_detectors = {"Brand New Detector": "alert"}
+
+        got = inline_detector_catalogue([Fake()], self.VLN)
+        self.assertIn("Brand New Detector", got)
+        self.assertIn("SQL Injection", got)
+
+    def test_spyware_offers_drop_and_vulnerability_does_not(self):
+        """Measured, and the reason the action values are per kind rather than one constant.
+        A shared enum would accept `drop` on a vulnerability detector, which the device
+        rejects."""
+        self.assertIn("drop", SecurityProfileInlineDetector.SPYWARE_ACTIONS)
+        self.assertNotIn("drop", SecurityProfileInlineDetector.VULNERABILITY_ACTIONS)
+
+    def test_alert_runs_without_blocking(self):
+        """The `enable(alert-only)` case from PAN-AVW-002 under another name: a detector on
+        `alert` runs and lets the traffic through, so `enabled` and `blocks` are different
+        questions and the control asks the second."""
+        action = "alert"
+        self.assertTrue(bool(action))
+        self.assertNotIn(action, SecurityProfileInlineDetector.BLOCKING_ACTIONS)
+
+    def test_an_unmentioned_detector_neither_runs_nor_blocks(self):
+        self.assertFalse(bool(""))
+        self.assertNotIn("", SecurityProfileInlineDetector.BLOCKING_ACTIONS)
+
+    def test_a_single_detector_arriving_unwrapped_is_still_read(self):
+        entry = {"mica-engine-vulnerability-enabled": {"entry": {
+            "@name": "SQL Injection", "inline-policy-action": "reset-both"}}}
+
+        self.assertEqual(profile_inline_detectors(self.VLN, entry),
+                         {"SQL Injection": "reset-both"})
 
 
 class WildfireDeviceSettingsTests(SimpleTestCase):

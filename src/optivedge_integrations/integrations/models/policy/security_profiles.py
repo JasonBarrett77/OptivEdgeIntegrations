@@ -138,6 +138,22 @@ class SecurityProfile(ScopedPolicyObject):
         return bool(self.non_blocking_ml_models)
 
     @property
+    def inline_detectors_not_blocking(self) -> list[str]:
+        """Inline cloud-analysis detectors that do not stop the traffic.
+
+        PAN-SPY-004 and PAN-VLN-003. Covers both ways of not blocking - a detector the
+        profile never mentions, which does not run at all, and one set to `alert`, which runs
+        and lets the traffic through. The second is the `enable(alert-only)` case from
+        PAN-AVW-002 wearing a different name, and reading it as "enabled" would pass a
+        profile that only watches.
+        """
+        return sorted(d.name for d in self.inline_detectors.all() if not d.blocks)
+
+    @property
+    def has_inline_detector_not_blocking(self) -> bool:
+        return bool(self.inline_detectors_not_blocking)
+
+    @property
     def non_blocking_decoders(self) -> list[str]:
         """Protocols this antivirus profile detects malware on without stopping it.
 
@@ -511,6 +527,79 @@ class SecurityProfileWildfireRule(models.Model):
 
     def __str__(self) -> str:
         return f"{self.security_profile} / {self.name}"
+
+
+class SecurityProfileInlineDetector(models.Model):
+    """One inline cloud-analysis detector on an anti-spyware or vulnerability profile.
+
+    PAN-SPY-004 and PAN-VLN-003. Advanced Threat Prevention's deep-learning engines, which
+    judge live traffic rather than waiting for a signature.
+
+    **controls.json POINTS BOTH CONTROLS AT THE WRONG NODE.** It names
+    `cloud-inline-analysis/enabled`; writing that is refused with `cloud-inline-analysis is
+    invalid` (code=12) on 11.2.3-h3 with ATP licensed - measured 2026-10-10. The real node is
+    `mica-engine-spyware-enabled` / `mica-engine-vulnerability-enabled`, entry-keyed by
+    detector. That is what the corpus DESCRIBES - "unknown C2 (Cobalt Strike, Empire-style
+    beacons)" and "SQLi, command injection" - just not where it points. Deviation recorded in
+    control-changes.json; Jason approved building against the real node 2026-10-10.
+
+    **THE TWO KINDS ARE NOT ONE SHAPE**, which is why `action_values` is per kind rather than
+    a single constant:
+
+        spyware         5 detectors   action has SIX values, including `drop`
+        vulnerability   2 detectors   action has FIVE, no `drop`
+
+    Spyware entries also carry `local-deep-learning`, which vulnerability entries do not.
+
+    **The detector names come from the CONTENT release**, the same rule as the antivirus ML
+    models, so nothing here hardcodes them - the catalogue is read from the profiles in the
+    build.
+    """
+
+    #: Measured 2026-10-10 by completing the container on a profile that does not exist, so
+    #: these are the key SPACE rather than one device's membership.
+    SPYWARE_DETECTORS = (
+        "HTTP Command and Control detector", "HTTP2 Command and Control detector",
+        "SSL Command and Control detector", "Unknown-TCP Command and Control detector",
+        "Unknown-UDP Command and Control detector",
+    )
+    VULNERABILITY_DETECTORS = ("SQL Injection", "Command Injection")
+    #: `drop` is spyware-only.
+    SPYWARE_ACTIONS = ("alert", "allow", "drop", "reset-both", "reset-client", "reset-server")
+    VULNERABILITY_ACTIONS = ("alert", "allow", "reset-both", "reset-client", "reset-server")
+    #: Actions that stop the traffic rather than logging it. Same set the decoders use, minus
+    #: `block-ip` which this node does not offer.
+    BLOCKING_ACTIONS = frozenset({"drop", "reset-client", "reset-server", "reset-both"})
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="inline_detectors")
+    #: As the content release names it.
+    name = models.CharField(max_length=128)
+    #: What the config holds. BLANK where the profile does not mention this detector, which
+    #: is itself the finding - the same rule as an unmentioned antivirus ML model.
+    configured_action = models.CharField(max_length=32, blank=True)
+    #: Does the detector run at all? An unmentioned detector does not.
+    enabled = models.BooleanField(default=False)
+    #: Does it STOP the traffic, or only log it? `alert` runs and does not block, exactly as
+    #: `enable(alert-only)` does on an antivirus ML model - and that distinction is why these
+    #: are two booleans rather than one.
+    blocks = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["security_profile", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "name"],
+                name="integrations_unique_inline_detector_per_profile"),
+        ]
+
+    @classmethod
+    def detectors_for(cls, kind: str) -> tuple[str, ...]:
+        return {SecurityProfile.KIND_SPYWARE: cls.SPYWARE_DETECTORS,
+                SecurityProfile.KIND_VULNERABILITY: cls.VULNERABILITY_DETECTORS}.get(kind, ())
+
+    def __str__(self) -> str:
+        return f"{self.security_profile} / {self.name}: {self.configured_action or '(unset)'}"
 
 
 class SecurityProfileMlModel(models.Model):
