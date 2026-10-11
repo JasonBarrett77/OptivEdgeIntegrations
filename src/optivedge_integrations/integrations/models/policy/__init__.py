@@ -27,6 +27,7 @@ from .security_profiles import (
     SecurityProfileMlModel,
     SecurityProfileWildfireRule,
     SecurityProfileGroup,
+    SecurityProfileCategoryVerdict,
     SecurityProfileSeverityVerdict,
 )
 from .rules import (

@@ -290,6 +290,41 @@ class SecurityProfile(ScopedPolicyObject):
     def medium_detail(self) -> str:
         return self.verdict(SecurityProfileSeverityVerdict.MEDIUM)[1]
 
+    def category_verdict_row(self, category: str):
+        """The row for one threat category, or None when this profile does not answer.
+
+        Only vulnerability profiles get rows - see SecurityProfileCategoryVerdict. Walks the
+        prefetched set rather than filtering, so a prefetch covers it in one query.
+        """
+        for row in self.category_verdicts.all():
+            if row.category == category:
+                return row
+        return None
+
+    @property
+    def brute_force_blocked_by_source(self) -> bool | None:
+        """Is the SOURCE of a brute-force attempt blocked? None = this kind does not answer.
+
+        PAN-VLN-002. Distinct from `critical_blocked`: a `reset-both` rule blocks the threat
+        and leaves the source free to try again, so it answers True there and False here.
+        """
+        row = self.category_verdict_row(SecurityProfileCategoryVerdict.BRUTE_FORCE)
+        return row.blocks_source if row else None
+
+    @property
+    def brute_force_detail(self) -> str:
+        row = self.category_verdict_row(SecurityProfileCategoryVerdict.BRUTE_FORCE)
+        return row.detail if row else ""
+
+    @property
+    def brute_force_block_duration(self) -> int | None:
+        """Seconds the source stays blocked, or None when the config does not say.
+
+        NOT the same as zero, and the implicit value is unmeasured - see the verdict model.
+        """
+        row = self.category_verdict_row(SecurityProfileCategoryVerdict.BRUTE_FORCE)
+        return row.duration if row else None
+
     def __str__(self) -> str:
         return f"{self.owner} / {self.kind} / {self.namespace_key} / {self.name}"
 
@@ -724,6 +759,81 @@ class SecurityProfileSeverityVerdict(models.Model):
 
     def __str__(self) -> str:
         return f"{self.security_profile} / {self.severity}: {'blocked' if self.blocked else 'not blocked'}"
+
+
+class SecurityProfileCategoryVerdict(models.Model):
+    """Whether one profile blocks one threat CATEGORY by blocking the source, and why not.
+
+    PAN-VLN-002's subject: brute-force signatures. A sibling of `SecurityProfileSeverityVerdict`
+    and deliberately a second model rather than a column on it, because the two ask different
+    questions of the same rule list. A severity verdict asks *is this threat stopped*, and any
+    blocking action answers yes. This asks *is the SOURCE stopped*, which only `block-ip`
+    answers - password spraying is a thousand attempts from one host, and resetting each
+    connection individually leaves the attacker free to make the next attempt.
+
+    **So `reset-both` satisfies PAN-VLN-001 and fails this control, on the same rule.** That is
+    not an inconsistency: the vendor recommends reset-both for severity rules (Help p.291) and
+    `block-ip` is what stops a source. A profile can be entirely correct by PAN-VLN-001 and
+    still report here.
+
+    **`block-ip` is a CHOICE NODE with children, which no other action has.** Measured
+    2026-10-11 on a PA-VM 11.2.3-h3 and a PA-5220 11.1.13-h3, identically:
+
+        track-by    REQUIRED. `source` or `source-and-destination`. Accepted at the write and
+                    rejected at COMMIT when omitted - "block-ip is missing 'track-by'" - so a
+                    write probe alone reports success. Established with `validate full`, which
+                    runs the commit-time checks as a job without leaving an invalid candidate.
+        duration    OPTIONAL, 1 to 3600 seconds, enforced at the WRITE with code=12
+                    ("value=3601 should be equal to or between 1 and 3600").
+
+    **`duration`'s implicit value is NOT established**, so nothing here asserts it. It is
+    optional, the Help documents a Block Duration default for DoS profiles (p.314) and not for
+    this node, and the UI tooltip was not read. The column records what the config holds and
+    `None` means the config does not say - NOT that blocking is instantaneous.
+
+    **The Block IP List is a different thing from the action.** Help p.97 says it "is supported
+    on PA-3200 Series, PA-5200 Series, and PA-7000 Series firewalls", which is about the
+    Monitor > Block IP List page and the hardware offload behind it - the same section
+    documents software blocking as the fallback when hardware capacity is exceeded. The action
+    itself completes in the PA-VM's schema, so that sentence is not a reason to scope this
+    control by platform. Whether a PA-VM enforces it in software was NOT measured here.
+    """
+
+    #: One of sixteen, enumerated from both platforms 2026-10-11. Only brute-force is written
+    #: today, because only PAN-VLN-002 asks - but a category is the key so the second one costs
+    #: a row rather than a model.
+    BRUTE_FORCE = "brute-force"
+    TRACK_BY_SOURCE = "source"
+    TRACK_BY_SOURCE_AND_DESTINATION = "source-and-destination"
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="category_verdicts")
+    category = models.CharField(max_length=64)
+    #: Is the SOURCE stopped for this category - `block-ip` with a `track-by`, across every
+    #: assessed severity and both host sides. Order-independent, like the severity verdict.
+    blocks_source = models.BooleanField()
+    #: The weakest action found on a rule covering this category, or blank when no rule covers
+    #: it. What the engineer has to change.
+    weakest_action = models.CharField(max_length=32, blank=True)
+    #: From the covering `block-ip` rule, when there is one. Blank/None otherwise, and None
+    #: means the CONFIG IS SILENT rather than zero - see the class docstring.
+    track_by = models.CharField(max_length=32, blank=True)
+    duration = models.PositiveIntegerField(null=True, blank=True)
+    #: WHY it is not blocked. Two profiles can fail for different reasons - no rule covering
+    #: the category at all, or a covering rule whose action only resets the connection.
+    detail = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["security_profile", "category"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "category"],
+                name="integrations_unique_category_verdict_per_profile"),
+        ]
+
+    def __str__(self) -> str:
+        state = "source blocked" if self.blocks_source else (self.detail or "not blocked")
+        return f"{self.security_profile} / {self.category}: {state}"
 
 
 class SecurityProfileGroup(ScopedPolicyObject):

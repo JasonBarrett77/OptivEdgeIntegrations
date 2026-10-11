@@ -43,6 +43,7 @@ from optivedge_integrations.integrations.models import (
     SecurityProfileMlModel,
     SecurityProfileInlineDetector,
     SecurityProfileWildfireRule,
+    SecurityProfileCategoryVerdict,
     SecurityProfileSeverityVerdict,
     SecurityRule,
     Snapshot,
@@ -202,6 +203,129 @@ def severity_verdict(kind: str, rules: list[dict[str, Any]], severity: str) -> t
                             for side, reason in failures.items())[:_DETAIL_MAX]
 
 
+def _narrows_beyond_category(kind: str, rule: dict[str, Any]) -> bool:
+    """Does this rule pick out particular signatures, rather than a whole category?
+
+    `is_catch_all` cannot be reused: it requires `category any`, and a rule naming exactly the
+    category being asked about is the BEST case here, not a disqualifying one.
+    """
+    if not _is_any_text(_text(rule.get("threat-name"))):
+        return True
+    if kind == SecurityProfile.KIND_VULNERABILITY:
+        return not (_is_any_members(_members(rule.get("cve")))
+                    and _is_any_members(_members(rule.get("vendor-id"))))
+    return False
+
+
+def _blocks_source(rule: dict[str, Any]) -> bool:
+    """`block-ip` WITH a `track-by`. Anything else lets the next attempt through.
+
+    `track-by` is required at commit, so a rule without one cannot be running - but it can sit
+    in a candidate, and a profile read from one should not be credited with blocking.
+    """
+    if rule_action(rule) != "block-ip":
+        return False
+    node = rule.get("action")
+    block = node.get("block-ip") if isinstance(node, dict) else None
+    return bool(_text(block.get("track-by")) if isinstance(block, dict) else "")
+
+
+def _block_ip_settings(rule: dict[str, Any]) -> tuple[str, int | None]:
+    """(track_by, duration) off a `block-ip` rule. duration None means the config is SILENT."""
+    node = rule.get("action")
+    block = node.get("block-ip") if isinstance(node, dict) else None
+    if not isinstance(block, dict):
+        return "", None
+    raw = _text(block.get("duration"))
+    return _text(block.get("track-by")), (int(raw) if raw.isdigit() else None)
+
+
+def category_verdict(
+    kind: str, rules: list[dict[str, Any]], category: str,
+) -> tuple[bool, str, str, int | None, str]:
+    """(blocks_source, weakest_action, track_by, duration, detail) for one threat category.
+
+    PAN-VLN-002. Order-independent and conservative in the same way `severity_verdict` is: the
+    WEAKEST rule covering the category decides, because which rule a given signature hits is
+    not knowable from the config alone.
+
+    **A rule NAMING the category establishes coverage; a `category any` rule can only ADD
+    coverage, never remove it.** That is a deliberate asymmetry, and the one place this differs
+    from `severity_verdict`'s weakest-wins. Without it the two vulnerability controls are
+    mutually unsatisfiable in practice: PAN-VLN-001 wants a catch-all rule blocking critical,
+    high and medium, the vendor says that action should be `reset-both` (Help p.291), and any
+    such rule also matches brute-force signatures - so weakest-wins let it defeat a dedicated
+    `block-ip` rule and the only profile that could pass both controls was one using `block-ip`
+    as its catch-all action for every severity. Measured against the lab 2026-10-11: a profile
+    written exactly as the corpus's own remediation describes failed this control.
+
+    **RULE ORDER IS NOT READ, and whether it matters here is NOT established.** PAN-OS
+    evaluates a profile's rules top-down, so a `category any` reset-both rule sitting ABOVE a
+    `brute-force` block-ip rule may well take precedence and leave the source unblocked. This
+    reads the config as a set and credits the specific rule wherever it sits, because the
+    alternative - reporting a profile whose rules express the right intent - is a false
+    positive on a correct configuration, and because settling it needs brute-force traffic
+    against both orderings rather than another read. See in-flight.json.
+
+    A rule covers the category when it does not narrow to particular signatures by name, CVE or
+    vendor id. Coverage is then required across ASSESSED_SEVERITIES and both host sides - the
+    same two dimensions the severity verdict walks, reused rather than re-decided, so a rule
+    blocking only critical brute-force does not read as blocking brute-force.
+    """
+    sides = ("client", "server") if kind == SecurityProfile.KIND_VULNERABILITY else (None,)
+    weakest, track_by, duration = "", "", None
+    failure = ""
+    for side in sides:
+        for severity in ASSESSED_SEVERITIES:
+            named, broad = [], []
+            for rule in rules:
+                severities = _members(rule.get("severity"))
+                if severity not in severities and not _is_any_members(severities):
+                    continue
+                if side is not None and (_text(rule.get("host")) or "any") not in ("any", side):
+                    continue
+                rule_category = _text(rule.get("category"))
+                if rule_category not in ("", "any", category):
+                    continue
+                if _narrows_beyond_category(kind, rule):
+                    continue
+                (named if rule_category == category else broad).append(rule)
+
+            # A broad rule counts only when it blocks the source - it can ADD coverage and
+            # never take it away. See the asymmetry in the docstring.
+            covering = named or [r for r in broad if _blocks_source(r)]
+            if not covering:
+                weak = [r for r in broad if not _blocks_source(r)]
+                if weak:
+                    action = rule_action(weak[0]) or "no action"
+                    weakest = weakest or action
+                    failure = failure or (
+                        f"{action} by rule {weak[0].get('@name')}"
+                        + (f" ({severity}, {side} side)" if side else f" ({severity})"))
+                else:
+                    failure = failure or (
+                        f"no rule covers {category} for {severity}"
+                        + (f" on the {side} side" if side else ""))
+                continue
+
+            weak = [r for r in covering if not _blocks_source(r)]
+            if weak:
+                action = rule_action(weak[0]) or "no action"
+                weakest = weakest or action
+                failure = failure or (
+                    f"{action} by rule {weak[0].get('@name')}"
+                    + (f" ({severity}, {side} side)" if side else f" ({severity})"))
+                continue
+            for rule in covering:
+                found_track, found_duration = _block_ip_settings(rule)
+                if found_track and not track_by:
+                    track_by, duration = found_track, found_duration
+            weakest = weakest or "block-ip"
+    if failure:
+        return False, weakest, track_by, duration, failure[:_DETAIL_MAX]
+    return True, "block-ip", track_by, duration, ""
+
+
 # --------------------------------------------------------------------------- normalized forms
 
 
@@ -238,6 +362,7 @@ class NormalizedSecurityProfile:
     #: the CONFIG holds it. Which detectors exist is settled against the catalogue at persist
     #: time, the same way the antivirus ML models are.
     inline_detectors: dict[str, str]
+    category_verdicts: dict[str, tuple[bool, str, str, int | None, str]]
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
 
@@ -586,6 +711,14 @@ def normalize_security_profile(
         verdicts=({severity: severity_verdict(kind, rules, severity)
                    for severity in ASSESSED_SEVERITIES}
                   if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
+        # VULNERABILITY ONLY, because `brute-force` is a member of the vulnerability rule's
+        # category set and PAN-VLN-002 is the only control asking. A kind that does not answer
+        # writes no row, the same rule as the severity verdict - so an antivirus profile is
+        # absent here rather than recorded as failing to block brute force.
+        category_verdicts=({SecurityProfileCategoryVerdict.BRUTE_FORCE:
+                            category_verdict(kind, rules,
+                                             SecurityProfileCategoryVerdict.BRUTE_FORCE)}
+                           if kind == SecurityProfile.KIND_VULNERABILITY else {}),
         raw_profile=entry,
         field_provenance_data=[
             ("__entry__", entry_rk, entry_rv),
@@ -930,6 +1063,13 @@ def replace_security_profiles(
             SecurityProfileSeverityVerdict(
                 security_profile=row, severity=severity, blocked=blocked, detail=detail)
             for severity, (blocked, detail) in verdict.items()
+        ])
+        SecurityProfileCategoryVerdict.objects.bulk_create([
+            SecurityProfileCategoryVerdict(
+                security_profile=row, category=category, blocks_source=blocks,
+                weakest_action=weakest, track_by=track_by, duration=duration, detail=detail)
+            for category, (blocks, weakest, track_by, duration, detail)
+            in normalized.category_verdicts.items()
         ])
         provenance(profile_ct, row, normalized.field_provenance_data)
         created_profiles.append(row)

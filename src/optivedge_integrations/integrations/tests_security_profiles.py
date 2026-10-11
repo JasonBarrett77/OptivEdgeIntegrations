@@ -19,6 +19,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     collect_references,
     profile_rules,
     rule_action,
+    category_verdict,
     severity_verdict,
 )
 
@@ -115,6 +116,7 @@ def profile(name, namespace_type, kind=SPY):
         verdicts={}, decoders=[], ml_models={}, application_overrides=[], wildfire_rules=[],
         exception_surfaces={},
         inline_detectors={},
+        category_verdicts={},
         raw_profile={},
         field_provenance_data=[])
 
@@ -164,3 +166,172 @@ class ReferenceTests(SimpleTestCase):
         refs = [ProfileReference(SPY, "strict", "pushed profile-group/g", False)] * 2
         attributed, _ = attribute_references(refs, [profile("strict", PolicyObjectNamespace.PREDEFINED)])
         self.assertEqual(list(attributed.values()), [["pushed profile-group/g"]])
+
+
+def bf_rule(name, severities, action, *, category="brute-force", host="any",
+            track_by="source", duration=300, threat_name="any", cve=("any",)):
+    """A vulnerability rule, with `block-ip`'s children when the action is block-ip."""
+    if action == "block-ip":
+        inner = {}
+        if track_by:
+            inner["track-by"] = track_by
+        if duration is not None:
+            inner["duration"] = str(duration)
+        node = {"block-ip": inner or None}
+    else:
+        node = {action: None}
+    return {"@name": name, "threat-name": threat_name, "category": category, "host": host,
+            "cve": {"member": list(cve)}, "vendor-id": {"member": ["any"]},
+            "severity": {"member": severities}, "action": node}
+
+
+ALL_SEV = ["critical", "high", "medium"]
+
+
+class CategoryVerdictTests(SimpleTestCase):
+    """PAN-VLN-002: is the SOURCE of a brute-force attempt blocked?"""
+
+    def verdict(self, rules):
+        return category_verdict(VLN, rules, "brute-force")
+
+    def test_a_block_ip_rule_on_the_category_blocks_the_source(self):
+        blocks, weakest, track_by, duration, detail = self.verdict(
+            [bf_rule("bf", ALL_SEV, "block-ip")])
+        self.assertTrue(blocks)
+        self.assertEqual((weakest, track_by, duration, detail),
+                         ("block-ip", "source", 300, ""))
+
+    def test_a_category_any_rule_also_covers_brute_force(self):
+        # A rule not narrowing by category covers every category, including this one.
+        self.assertTrue(self.verdict([bf_rule("all", ALL_SEV, "block-ip", category="any")])[0])
+
+    def test_reset_both_blocks_the_threat_and_not_the_source(self):
+        # The distinction the whole control rests on: this rule PASSES PAN-VLN-001.
+        blocks, weakest, _, _, detail = self.verdict([bf_rule("rb", ALL_SEV, "reset-both")])
+        self.assertFalse(blocks)
+        self.assertEqual(weakest, "reset-both")
+        self.assertIn("reset-both by rule rb", detail)
+
+    def test_no_rule_covering_the_category_at_all(self):
+        blocks, weakest, _, _, detail = self.verdict([])
+        self.assertFalse(blocks)
+        self.assertEqual(weakest, "")
+        self.assertIn("no rule covers brute-force", detail)
+
+    def test_block_ip_without_track_by_is_not_credited(self):
+        # `track-by` is required at COMMIT, so such a rule cannot be running - but it can sit
+        # in a candidate, and a profile read from one is not blocking anything yet.
+        blocks, _, _, _, detail = self.verdict(
+            [bf_rule("bf", ALL_SEV, "block-ip", track_by="")])
+        self.assertFalse(blocks)
+        self.assertIn("block-ip by rule bf", detail)
+
+    def test_covering_only_critical_does_not_cover_the_category(self):
+        blocks, _, _, _, detail = self.verdict([bf_rule("bf", ["critical"], "block-ip")])
+        self.assertFalse(blocks)
+        self.assertIn("high", detail)
+
+    def test_a_client_only_rule_leaves_the_server_side_open(self):
+        blocks, _, _, _, detail = self.verdict(
+            [bf_rule("bf", ALL_SEV, "block-ip", host="client")])
+        self.assertFalse(blocks)
+        self.assertIn("server side", detail)
+
+    def test_a_signature_narrowed_rule_does_not_cover_the_category(self):
+        # It can only open a hole, never establish coverage - the same reading `is_catch_all`
+        # applies to a severity.
+        blocks, _, _, _, detail = self.verdict(
+            [bf_rule("one", ALL_SEV, "block-ip", threat_name="RDP")])
+        self.assertFalse(blocks)
+        self.assertIn("no rule covers", detail)
+
+    def test_a_weak_rule_fails_whichever_order_it_sits_in(self):
+        strong = bf_rule("strong", ALL_SEV, "block-ip")
+        weak = bf_rule("weak", ALL_SEV, "alert")
+        self.assertFalse(self.verdict([strong, weak])[0])
+        self.assertFalse(self.verdict([weak, strong])[0])
+
+    def test_duration_absent_reads_as_None_not_zero(self):
+        # The implicit value was NOT established, so None means the config is silent.
+        blocks, _, track_by, duration, _ = self.verdict(
+            [bf_rule("bf", ALL_SEV, "block-ip", duration=None)])
+        self.assertTrue(blocks)
+        self.assertEqual((track_by, duration), ("source", None))
+
+    def test_source_and_destination_tracking_also_blocks(self):
+        blocks, _, track_by, _, _ = self.verdict(
+            [bf_rule("bf", ALL_SEV, "block-ip", track_by="source-and-destination")])
+        self.assertTrue(blocks)
+        self.assertEqual(track_by, "source-and-destination")
+
+    def test_a_spyware_profile_is_judged_on_one_side_only(self):
+        # Spyware rules carry no `host`, so there is no client/server split to fail on.
+        self.assertTrue(category_verdict(
+            SPY, [bf_rule("bf", ALL_SEV, "block-ip")], "brute-force")[0])
+
+
+class CategoryCoverageAsymmetryTests(SimpleTestCase):
+    """A rule NAMING the category governs; a `category any` rule can only ADD coverage.
+
+    Every case here was reachable on the lab, and the first one was a real false positive:
+    a profile written exactly as PAN-VLN-002's own remediation describes reported as failing,
+    because the catch-all rule PAN-VLN-001 requires also matches brute-force signatures.
+    """
+
+    def verdict(self, rules):
+        return category_verdict(VLN, rules, "brute-force")
+
+    def test_a_dedicated_rule_survives_a_weaker_catch_all(self):
+        # The lab's oep-vln-bf-blocked, and the configuration the corpus tells engineers to
+        # build. Weakest-wins judged this as not blocking.
+        blocks, weakest, track_by, duration, detail = self.verdict([
+            bf_rule("block-severity", ALL_SEV, "reset-both", category="any"),
+            bf_rule("bf", ALL_SEV, "block-ip"),
+        ])
+        self.assertTrue(blocks, detail)
+        self.assertEqual((weakest, track_by, duration), ("block-ip", "source", 300))
+
+    def test_the_catch_all_cannot_be_credited_when_it_does_not_block_the_source(self):
+        blocks, weakest, _, _, detail = self.verdict(
+            [bf_rule("block-severity", ALL_SEV, "reset-both", category="any")])
+        self.assertFalse(blocks)
+        self.assertEqual(weakest, "reset-both")
+        self.assertIn("reset-both by rule block-severity", detail)
+
+    def test_a_catch_all_that_does_block_the_source_is_enough_on_its_own(self):
+        # It genuinely blocks the source of every category, brute force among them.
+        blocks, _, track_by, _, detail = self.verdict(
+            [bf_rule("all-block", ALL_SEV, "block-ip", category="any")])
+        self.assertTrue(blocks, detail)
+        self.assertEqual(track_by, "source")
+
+    def test_a_weak_rule_NAMING_the_category_is_not_rescued_by_a_strong_catch_all(self):
+        # The direction that must stay strict: an explicit brute-force exception to an
+        # otherwise source-blocking profile is exactly what this control should report.
+        blocks, weakest, _, _, detail = self.verdict([
+            bf_rule("all-block", ALL_SEV, "block-ip", category="any"),
+            bf_rule("bf-alert", ALL_SEV, "alert"),
+        ])
+        self.assertFalse(blocks)
+        self.assertEqual(weakest, "alert")
+        self.assertIn("alert by rule bf-alert", detail)
+
+    def test_a_dedicated_rule_covering_one_severity_does_not_cover_the_rest(self):
+        # The lab's oep-vln-bf-critical: high and medium fall through to the catch-all, and a
+        # catch-all that does not block the source cannot cover them.
+        blocks, _, _, _, detail = self.verdict([
+            bf_rule("block-severity", ALL_SEV, "reset-both", category="any"),
+            bf_rule("bf", ["critical"], "block-ip"),
+        ])
+        self.assertFalse(blocks)
+        self.assertIn("reset-both by rule block-severity", detail)
+        self.assertIn("high", detail)
+
+    def test_a_dedicated_rule_on_one_host_side_leaves_the_other_to_the_catch_all(self):
+        # The lab's oep-vln-bf-client.
+        blocks, _, _, _, detail = self.verdict([
+            bf_rule("block-severity", ALL_SEV, "reset-both", category="any"),
+            bf_rule("bf", ALL_SEV, "block-ip", host="client"),
+        ])
+        self.assertFalse(blocks)
+        self.assertIn("server side", detail)
