@@ -39,6 +39,7 @@ from optivedge_integrations.integrations.models import (
     SecurityProfile,
     SecurityProfileApplicationOverride,
     SecurityProfileDecoder,
+    SecurityProfileDnsSignatureSource,
     SecurityProfileGroup,
     SecurityProfileMlModel,
     SecurityProfileInlineDetector,
@@ -326,6 +327,59 @@ def category_verdict(
     return True, "block-ip", track_by, duration, ""
 
 
+def _choice(node: Any) -> str:
+    """The selected member of a PAN-OS choice element, e.g. `{"sinkhole": None}` -> "sinkhole"."""
+    if isinstance(node, dict):
+        chosen = [k for k in node if not k.startswith("@") and k != "#text"]
+        if len(chosen) == 1:
+            return chosen[0]
+        return str(node.get("#text") or "").strip() or ",".join(chosen)
+    return node.strip() if isinstance(node, str) else ""
+
+
+def dns_signature_sources(entry: dict[str, Any]) -> list[tuple]:
+    """(name, is_paloalto_content, configured, effective, sinkholes, implicit) per source.
+
+    PAN-SPY-002. One row per entry under `botnet-domains/lists`, PLUS a synthesized row for the
+    Palo Alto Networks Content list when the config does not name it - the same synthesis the
+    antivirus decoders get, and for the same reason: a source that is absent still has an
+    effective action, and only a row can carry it.
+
+    THE SYNTHESIZED ROW PASSES, because Help p.284 says an unconfigured Palo Alto Networks
+    Content list sinkholes. It is flagged `action_is_implicit` so the claim is visible as
+    documentation rather than measurement - see the model's docstring.
+    """
+    botnet = entry.get("botnet-domains")
+    lists = (botnet or {}).get("lists") if isinstance(botnet, dict) else None
+    rows, seen_content = [], False
+    for item in ensure_list(lists.get("entry") if isinstance(lists, dict) else None):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("@name") or "")
+        action = _choice(item.get("action"))
+        is_content = name == SecurityProfileDnsSignatureSource.PALOALTO_CONTENT
+        seen_content = seen_content or is_content
+        rows.append((name, is_content, action, action, action == "sinkhole", False))
+    if not seen_content:
+        implicit = SecurityProfileDnsSignatureSource.DOCUMENTED_IMPLICIT_ACTION
+        rows.append((SecurityProfileDnsSignatureSource.PALOALTO_CONTENT, True, "",
+                     implicit, implicit == "sinkhole", True))
+    return rows
+
+
+def dns_sinkhole_address(entry: dict[str, Any]) -> tuple[str, str]:
+    """(ipv4, ipv6) from `botnet-domains/sinkhole`. A PREREQUISITE, not a setting.
+
+    IPv4 is the one the device demands - measured 2026-10-11, setting only the IPv6 address
+    leaves `sinkhole IPv4 information is missing` unchanged.
+    """
+    botnet = entry.get("botnet-domains")
+    node = (botnet or {}).get("sinkhole") if isinstance(botnet, dict) else None
+    if not isinstance(node, dict):
+        return "", ""
+    return scalar_value(node.get("ipv4-address"))[0], scalar_value(node.get("ipv6-address"))[0]
+
+
 # --------------------------------------------------------------------------- normalized forms
 
 
@@ -363,6 +417,11 @@ class NormalizedSecurityProfile:
     #: time, the same way the antivirus ML models are.
     inline_detectors: dict[str, str]
     category_verdicts: dict[str, tuple[bool, str, str, int | None, str]]
+    #: Anti-spyware only: one tuple per DNS signature source, including a
+    #: synthesized row for the Palo Alto Networks Content list when absent.
+    dns_signature_sources: list[tuple]
+    dns_sinkhole_ipv4: str
+    dns_sinkhole_ipv6: str
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
 
@@ -715,6 +774,15 @@ def normalize_security_profile(
         # category set and PAN-VLN-002 is the only control asking. A kind that does not answer
         # writes no row, the same rule as the severity verdict - so an antivirus profile is
         # absent here rather than recorded as failing to block brute force.
+        # ANTI-SPYWARE ONLY. The DNS tree does not exist on any other kind, so no row and
+        # no address rather than an empty one - a vulnerability profile makes no claim about
+        # DNS sinkholing.
+        dns_signature_sources=(dns_signature_sources(entry)
+                               if kind == SecurityProfile.KIND_SPYWARE else []),
+        dns_sinkhole_ipv4=(dns_sinkhole_address(entry)[0]
+                           if kind == SecurityProfile.KIND_SPYWARE else ""),
+        dns_sinkhole_ipv6=(dns_sinkhole_address(entry)[1]
+                           if kind == SecurityProfile.KIND_SPYWARE else ""),
         category_verdicts=({SecurityProfileCategoryVerdict.BRUTE_FORCE:
                             category_verdict(kind, rules,
                                              SecurityProfileCategoryVerdict.BRUTE_FORCE)}
@@ -1001,6 +1069,8 @@ def replace_security_profiles(
             is_predefined=normalized.is_predefined, rule_count=normalized.rule_count,
             threat_exception_count=normalized.threat_exception_count,
             exception_surfaces=normalized.exception_surfaces,
+            dns_sinkhole_ipv4=normalized.dns_sinkhole_ipv4,
+            dns_sinkhole_ipv6=normalized.dns_sinkhole_ipv6,
             referrer_count=len(used_by), is_used=bool(used_by), referrers=used_by,
             raw_profile=normalized.raw_profile, last_synced_at=normalized.source_snapshot.collected_at,
         )
@@ -1063,6 +1133,14 @@ def replace_security_profiles(
             SecurityProfileSeverityVerdict(
                 security_profile=row, severity=severity, blocked=blocked, detail=detail)
             for severity, (blocked, detail) in verdict.items()
+        ])
+        SecurityProfileDnsSignatureSource.objects.bulk_create([
+            SecurityProfileDnsSignatureSource(
+                security_profile=row, name=name, is_paloalto_content=is_content,
+                configured_action=configured, effective_action=effective,
+                sinkholes=sinkholes, action_is_implicit=implicit)
+            for name, is_content, configured, effective, sinkholes, implicit
+            in normalized.dns_signature_sources
         ])
         SecurityProfileCategoryVerdict.objects.bulk_create([
             SecurityProfileCategoryVerdict(

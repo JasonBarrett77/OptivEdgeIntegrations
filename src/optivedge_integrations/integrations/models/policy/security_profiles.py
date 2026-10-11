@@ -94,6 +94,23 @@ class SecurityProfile(ScopedPolicyObject):
     is_used = models.BooleanField(default=False)
     referrers = models.JSONField(default=list, blank=True)
 
+    #: ANTI-SPYWARE ONLY, and blank on every other kind. The sinkhole destination is a
+    #: PROFILE-level prerequisite rather than a property of a signature source: measured
+    #: 2026-10-11, a `sinkhole` action is refused with `sinkhole IPv4 information is missing`
+    #: (code=12) until `botnet-domains/sinkhole/ipv4-address` exists, and AN IPv6 ADDRESS ALONE
+    #: DOES NOT SATISFY IT - the refusal is unchanged with ipv6 set.
+    #:
+    #: `pan-sinkhole-default-ip` is the vendor's symbolic default and what predefined `strict`
+    #: carries; the node also accepts an FQDN or any IPv4 address. Blank means the config does
+    #: not say, which for a profile whose action is `sinkhole` should be impossible - the device
+    #: refuses that combination - and is the normal state everywhere else.
+    #:
+    #: WHICH address is not assertable. controls.json's preferred value wants "an internal
+    #: sinkhole address inside a monitored zone", and no configuration states which zone is
+    #: monitored - so the column is detail for the tab, not a control's subject.
+    dns_sinkhole_ipv4 = models.CharField(max_length=128, blank=True)
+    dns_sinkhole_ipv6 = models.CharField(max_length=128, blank=True)
+
     #: {surface: count} for every exception surface that holds any. The COUNT is in
     #: `threat_exception_count`; this says WHERE, which is what a hygiene finding names and
     #: what an engineer needs to find them. Detail only - a control rests on the count.
@@ -289,6 +306,48 @@ class SecurityProfile(ScopedPolicyObject):
     @property
     def medium_detail(self) -> str:
         return self.verdict(SecurityProfileSeverityVerdict.MEDIUM)[1]
+
+    @property
+    def paloalto_dns_source(self):
+        """The Palo Alto Networks Content DNS row, or None for a kind that has no DNS tree.
+
+        Always present for an anti-spyware profile, synthesized when the config is silent.
+        """
+        for row in self.dns_signature_sources.all():
+            if row.is_paloalto_content:
+                return row
+        return None
+
+    @property
+    def dns_sinkholes_malicious_queries(self) -> bool | None:
+        """PAN-SPY-002. None = this kind makes no claim about DNS sinkholing.
+
+        `block` reads False: it breaks C2 resolution and does NOT identify the infected client
+        behind an internal resolver, which is the other half of what the control is for.
+        """
+        row = self.paloalto_dns_source
+        return row.sinkholes if row else None
+
+    @property
+    def dns_sinkhole_action_is_implicit(self) -> bool:
+        """Is the verdict resting on the Help's documented default rather than on config?"""
+        row = self.paloalto_dns_source
+        return bool(row and row.action_is_implicit)
+
+    @property
+    def dns_sinkhole_detail(self) -> str:
+        """What an engineer has to change, or where the value came from when nothing is set."""
+        row = self.paloalto_dns_source
+        if row is None:
+            return ""
+        if row.action_is_implicit:
+            return ("no DNS signature source is configured; PAN-OS Web Interface Help 11.2 "
+                    "p.284 says an unconfigured Palo Alto Networks Content list sinkholes")
+        detail = f"Palo Alto Networks Content action is {row.configured_action or 'unset'}"
+        if row.sinkholes and not self.dns_sinkhole_ipv4:
+            # The device refuses this combination, so seeing it means something else wrote it.
+            return detail + ", and no sinkhole IPv4 address is set"
+        return detail
 
     def category_verdict_row(self, category: str):
         """The row for one threat category, or None when this profile does not answer.
@@ -834,6 +893,90 @@ class SecurityProfileCategoryVerdict(models.Model):
     def __str__(self) -> str:
         state = "source blocked" if self.blocks_source else (self.detail or "not blocked")
         return f"{self.security_profile} / {self.category}: {state}"
+
+
+class SecurityProfileDnsSignatureSource(models.Model):
+    """One DNS signature source of an anti-spyware profile, and whether it sinkholes.
+
+    PAN-SPY-002's subject. The Help names four sources on the DNS Policies tab (p.283) and they
+    are not interchangeable:
+
+        Palo Alto Networks Content   the `lists` node, included with Threat Prevention. This
+                                     control's subject, stored as `default-paloalto-dns`.
+        DNS Security                 a LICENSED cloud service, the `dns-security-categories`
+                                     node - PAN-SPY-003, and a different action enum.
+        Advanced DNS Security        a third licensed service, absent from the corpus entirely.
+        External Dynamic Lists       operator-added domain lists, also under `lists`.
+
+    **An EDL is NOT asserted.** Help p.284: "By default, policy actions for domain lists are
+    configured to Allow", and an EDL with an `alert` action is the documented way to express a
+    DNS exception. Firing on one would report a deliberate allow-list as a failure. Rows are
+    written for EDLs so the tab can show them, with `is_paloalto_content` false, and the control
+    filters on that flag.
+
+    **ABSENCE IS DOCUMENTED AS PASSING here, which inverts almost every other control in this
+    domain.** Help p.284 says it twice - "By default, the locally-accessed Palo Alto Networks
+    Content DNS signatures are sinkholed" and "The default action for Palo Alto Networks DNS
+    signatures is sinkhole". So a profile with no `botnet-domains` node at all gets a
+    synthesized row with `action_is_implicit` set, an effective action of `sinkhole`, and no
+    finding.
+
+    **THAT IMPLICIT VALUE IS DOCUMENTED AND NOT MEASURED**, and it is the one thing here a read
+    cannot settle: PAN-OS omits an element matching its default, so an absent action and a
+    default action look identical in the config. The evidence is two sentences of vendor
+    documentation plus the fact that the predefined `default` profile writes `alert`
+    EXPLICITLY - which it would not need to do if alert were the default. Against it: `strict`
+    writes `sinkhole` explicitly too. `action_is_implicit` exists so the undecided case is
+    visible rather than silently folded into a pass, and so a second query can report it
+    without a schema change if the measurement comes out the other way. One click in the UI
+    settles it; see in-flight.json.
+
+    **The two predefined profiles DISAGREE**, measured 2026-10-11 on a PA-VM 11.2.3-h3:
+
+        strict    lists/default-paloalto-dns action sinkhole, sinkhole/ipv4-address
+                  `pan-sinkhole-default-ip`, ipv6-address `::1`
+        default   lists/default-paloalto-dns action ALERT, and no sinkhole node at all
+
+    So this control is NOT satisfied by the shipped `default` profile, and the payload contract
+    said it was until 2026-10-11 - a fact recorded from reading `strict` and generalised to
+    both.
+    """
+
+    PALOALTO_CONTENT = "default-paloalto-dns"
+    #: Measured on both platforms 2026-10-11. A CHOICE node: `{"sinkhole": null}`, not text.
+    ACTIONS = ("alert", "allow", "block", "sinkhole")
+    #: What the Help says an unconfigured Palo Alto Networks Content list does (p.284).
+    DOCUMENTED_IMPLICIT_ACTION = "sinkhole"
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="dns_signature_sources")
+    #: As the config names it - `default-paloalto-dns`, or an EDL's own name.
+    name = models.CharField(max_length=128)
+    #: Is this THE Palo Alto Networks Content list, the only source this control asserts?
+    is_paloalto_content = models.BooleanField(default=False)
+    #: What the config holds. BLANK means the config does not name this source at all.
+    configured_action = models.CharField(max_length=32, blank=True)
+    #: What it therefore does - the configured action, or the documented implicit one.
+    effective_action = models.CharField(max_length=32, blank=True)
+    #: Does it sinkhole? `block` stops C2 resolution and does NOT identify the infected client
+    #: behind an internal resolver, which is half of what the control is for, so it is false
+    #: here. Help p.285 offers it as the fallback - "If you can't sinkhole the traffic, block
+    #: it" - and controls.json sets both minimum and preferred to `sinkhole`.
+    sinkholes = models.BooleanField(default=False)
+    #: True when nothing in the config said so and the effective action came from the Help.
+    action_is_implicit = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["security_profile", "-is_paloalto_content", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "name"],
+                name="integrations_unique_dns_source_per_profile"),
+        ]
+
+    def __str__(self) -> str:
+        how = " (implicit)" if self.action_is_implicit else ""
+        return f"{self.security_profile} / {self.name}: {self.effective_action}{how}"
 
 
 class SecurityProfileGroup(ScopedPolicyObject):

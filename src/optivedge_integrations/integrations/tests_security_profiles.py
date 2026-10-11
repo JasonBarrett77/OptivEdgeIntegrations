@@ -20,6 +20,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     profile_rules,
     rule_action,
     category_verdict,
+    dns_signature_sources,
+    dns_sinkhole_address,
     severity_verdict,
 )
 
@@ -117,6 +119,7 @@ def profile(name, namespace_type, kind=SPY):
         exception_surfaces={},
         inline_detectors={},
         category_verdicts={},
+        dns_signature_sources=[], dns_sinkhole_ipv4='', dns_sinkhole_ipv6='',
         raw_profile={},
         field_provenance_data=[])
 
@@ -335,3 +338,76 @@ class CategoryCoverageAsymmetryTests(SimpleTestCase):
         ])
         self.assertFalse(blocks)
         self.assertIn("server side", detail)
+
+
+def spy_profile_entry(name, *, lists=None, sinkhole=None):
+    """An anti-spyware profile entry as `show config` returns it."""
+    entry = {"@name": name}
+    botnet = {}
+    if lists is not None:
+        botnet["lists"] = {"entry": [
+            {"@name": n, "action": {a: None}} for n, a in lists]}
+    if sinkhole is not None:
+        botnet["sinkhole"] = {k: v for k, v in sinkhole.items()}
+    if botnet:
+        entry["botnet-domains"] = botnet
+    return entry
+
+
+class DnsSignatureSourceTests(SimpleTestCase):
+    """PAN-SPY-002: which DNS source sinkholes, and what absence means."""
+
+    def test_the_predefined_strict_shape_sinkholes(self):
+        rows = dns_signature_sources(spy_profile_entry(
+            "strict", lists=[("default-paloalto-dns", "sinkhole")],
+            sinkhole={"ipv4-address": "pan-sinkhole-default-ip", "ipv6-address": "::1"}))
+        self.assertEqual(rows, [("default-paloalto-dns", True, "sinkhole", "sinkhole",
+                                 True, False)])
+
+    def test_the_predefined_default_shape_does_NOT_sinkhole(self):
+        # Measured 2026-10-11: `default` ships with ALERT, not sinkhole. The payload contract
+        # said both predefined profiles sinkholed, from reading `strict` and generalising.
+        rows = dns_signature_sources(spy_profile_entry(
+            "default", lists=[("default-paloalto-dns", "alert")]))
+        self.assertEqual(rows[0][3:], ("alert", False, False))
+
+    def test_an_absent_source_is_synthesized_and_flagged_implicit(self):
+        rows = dns_signature_sources(spy_profile_entry("bare"))
+        self.assertEqual(rows, [("default-paloalto-dns", True, "", "sinkhole", True, True)])
+
+    def test_block_does_not_count_as_sinkholing(self):
+        # It breaks C2 resolution and loses the infected client, which is half the control.
+        rows = dns_signature_sources(spy_profile_entry(
+            "blocked", lists=[("default-paloalto-dns", "block")]))
+        self.assertFalse(rows[0][4])
+
+    def test_an_edl_gets_a_row_and_is_not_the_asserted_source(self):
+        rows = dns_signature_sources(spy_profile_entry(
+            "edl", lists=[("corp-dns-allow", "allow"),
+                          ("default-paloalto-dns", "sinkhole")]))
+        by_name = {r[0]: r for r in rows}
+        self.assertFalse(by_name["corp-dns-allow"][1])
+        self.assertTrue(by_name["default-paloalto-dns"][1])
+
+    def test_an_edl_only_profile_still_gets_the_synthesized_content_row(self):
+        rows = dns_signature_sources(spy_profile_entry(
+            "edl-only", lists=[("corp-dns-allow", "alert")]))
+        self.assertEqual(len(rows), 2)
+        content = [r for r in rows if r[1]][0]
+        self.assertEqual(content[2:], ("", "sinkhole", True, True))
+
+    def test_the_sinkhole_address_is_read_and_ipv4_is_the_one_that_matters(self):
+        self.assertEqual(
+            dns_sinkhole_address(spy_profile_entry(
+                "s", sinkhole={"ipv4-address": "10.9.9.9", "ipv6-address": "::1"})),
+            ("10.9.9.9", "::1"))
+
+    def test_no_sinkhole_node_reads_as_two_blanks(self):
+        self.assertEqual(dns_sinkhole_address(spy_profile_entry("none")), ("", ""))
+
+    def test_an_ipv6_only_address_leaves_ipv4_blank(self):
+        # Measured: ipv6 alone does NOT satisfy the device's constraint, so the blank ipv4 is
+        # the field that tells a reader the prerequisite is unmet.
+        self.assertEqual(
+            dns_sinkhole_address(spy_profile_entry("v6", sinkhole={"ipv6-address": "::1"})),
+            ("", "::1"))
