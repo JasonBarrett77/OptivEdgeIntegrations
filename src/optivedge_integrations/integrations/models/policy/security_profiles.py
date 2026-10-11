@@ -1011,10 +1011,17 @@ class SecurityProfileDnsSignatureSource(models.Model):
         (TYPE_ADVANCED_DNS_SECURITY, "Advanced DNS Security category"),
     ]
 
-    #: PAN-SPY-003's subject. TEN, read from the predefined profiles 2026-10-10 and confirmed
-    #: 2026-10-11, because the names track content releases and the container's completion
-    #: returns an entry's CHILDREN rather than the name space - so membership is the only
-    #: oracle, the same position the antivirus ML catalogue is in.
+    #: PAN-SPY-003's subject. TEN, and now PROVED COMPLETE rather than read off a sample.
+    #:
+    #: Completing the container returns an entry's CHILDREN, not the name space, so these were
+    #: first read from the predefined profiles' membership - weaker evidence, since membership
+    #: says what those profiles happen to name. On 2026-10-11 a write probe settled it: PAN-OS
+    #: validates a category name as a REFERENCE, so `pan-dns-sec-dga` is refused with
+    #: "'pan-dns-sec-dga' is not a valid reference" (code=12) while the ten are accepted.
+    #: A refused name therefore proves non-existence.
+    #:
+    #: Measured on pan-fw-201, PA-VM 11.2.5, content 9157-10279, WITH a DNS Security licence -
+    #: the combination that rules out both licence-gating and content-staleness.
     DNS_SECURITY_CATEGORY_NAMES = (
         "pan-dns-sec-adtracking", "pan-dns-sec-benign", "pan-dns-sec-cc", "pan-dns-sec-ddns",
         "pan-dns-sec-grayware", "pan-dns-sec-malware", "pan-dns-sec-parked",
@@ -1033,8 +1040,14 @@ class SecurityProfileDnsSignatureSource(models.Model):
     #: marks as a risk-tolerance judgement are deliberately NOT asserted, because an estate
     #: can reasonably leave newly-registered domains alerting.
     #:
-    #: NEITHER A DGA NOR A DNS-TUNNELING CATEGORY EXISTS on this content release, in either
-    #: node, so two of the names the corpus reasons about cannot be asserted at all.
+    #: NEITHER A DGA NOR A DNS-TUNNELING CATEGORY EXISTS, and that is proved rather than
+    #: unfound: `pan-dns-sec-dga`, `-dns-tunnel`, `-tunneling` and `-dnstunnel` are all refused
+    #: as invalid references on a licensed device running current content. So two of the names
+    #: the corpus's preferred value reasons about cannot be asserted at all.
+    #:
+    #: Its "newly-registered" DOES exist, as `pan-dns-sec-recent` - `pan-dns-sec-newly-registered`
+    #: is refused. That one is a naming difference, not a missing feature, and it is still not
+    #: asserted because the corpus leaves it to risk tolerance.
     #: `pan-dns-sec-benign`, -adtracking, -grayware, -proxy and -ddns are not named by the
     #: corpus and are not asserted; sinkholing benign domains would be a defect, not a finding.
     ASSERTED_MALICIOUS_CATEGORIES = (
