@@ -302,19 +302,26 @@ class SecurityRuleProfileVerdict(models.Model):
 
         True   a profile of the right kind is in force on this rule and it satisfies the
                assertion
-        False  one is in force and it does NOT - the finding, and the only firing state
-        NULL   no profile of that kind reaches this rule, so this assertion makes no claim
-               about it
+        False  one is in force and it does NOT
+        NULL   no profile of that kind reaches this rule at all
 
-    **NULL DOES NOT FIRE HERE, and that is a deliberate break from PAN-AVW-003**, whose
-    compiler matches NULL on `false` so that a rule with no WildFire profile reports. That is
-    right for one control and wrong for nine: 962 of the lab's 966 allow rules have no
-    anti-spyware profile in force, so matching NULL would raise nine findings on each of them -
-    about 8,600 - and bury the one finding that actually describes the problem. PAN-POL-008
-    exists to say "this allow rule has no security profile", and it says it once.
+    **BOTH False AND NULL FIRE.** Jason, 2026-10-12: "The absence of a profile should create the
+    finding for that profile. This is a rule across all rule security profiles."
 
-    So the division is: PAN-POL-008 owns "a profile is attached", these own "the profile that
-    is attached is configured correctly", and nothing is reported twice.
+    These shipped the other way for a few hours, on the argument that eleven controls matching
+    NULL would raise roughly 8,600 findings on the lab and duplicate PAN-POL-008. That argued
+    VOLUME, which is not the same thing as correctness: a rule with no anti-spyware profile is
+    not getting anti-spyware inspection, so the absence is each control's own finding.
+    PAN-AVW-003 had it this way from the day it was built, and was right.
+
+    So the overlap with PAN-POL-008 is deliberate and the two say different things. PAN-POL-008
+    says "this allow rule carries no security profiles at all", once. Each of these says "this
+    rule gets no antivirus / anti-spyware / vulnerability inspection", and `detail` carries
+    which case it is - `no <kind> profile is in force on this rule`, or the specific gap in the
+    profile that IS there. They are different fixes: attach a profile, or repair one.
+
+    NULL is still kept distinct from False rather than collapsed into it, because that
+    distinction is the only thing telling a reader which fix applies.
     """
 
     #: One per assertion, and STABLE - a control's query names these, so they are a contract.
