@@ -59,6 +59,7 @@ from optivedge_integrations.integrations.models import (
     SecurityProfile,
     SecurityProfileGroup,
     SecurityProfileSeverityVerdict,
+    SecurityRuleProfileVerdict,
     SecurityRuleApplication,
     SecurityRuleSearchVocabularyEntry,
     SecurityRuleService,
@@ -9826,6 +9827,111 @@ class SecurityRuleProfileCoverageTests(TestCase):
 
         self.assertEqual(first, (True, False, False))
         self.assertEqual(second["updated"], 0, "a second pass should change nothing")
+
+    # --- the nine per-rule threat-profile verdicts -------------------------------------------
+
+    def _spy_profile(self, name, *, critical=True, high=True, exceptions=0):
+        """An anti-spyware profile with the satellites a verdict reads."""
+        self.rank += 1
+        profile = SecurityProfile.objects.create(
+            management_station=self.station, appliance_group=self.point.appliance_group,
+            source_snapshot=self.snapshot, config_source="local", name=name,
+            namespace_type="panorama_shared", namespace_value="shared",
+            precedence_rank=self.rank, kind=SecurityProfile.KIND_SPYWARE,
+            threat_exception_count=exceptions,
+            exception_surfaces={"threat-exception": exceptions} if exceptions else {})
+        for severity, blocked in (("critical", critical), ("high", high), ("medium", True)):
+            SecurityProfileSeverityVerdict.objects.create(
+                security_profile=profile, severity=severity, blocked=blocked,
+                detail="" if blocked else "alert by rule a")
+        return profile
+
+    def _verdicts(self, rule):
+        normalize_security_rule_profile_coverage(self.point)
+        return {row.assertion: row for row in rule.profile_verdicts.all()}
+
+    def test_every_assertion_gets_a_row_for_every_rule(self):
+        """A row even when nothing reaches the rule, so "makes no claim" is stored with a
+        reason rather than being an absent row that could mean nobody normalized yet."""
+        rule = self._rule("bare")
+
+        rows = self._verdicts(rule)
+        self.assertEqual(len(rows), len(dict(SecurityRuleProfileVerdict.ASSERTION_CHOICES)))
+        self.assertTrue(all(row.satisfied is None for row in rows.values()))
+        self.assertIn("no spyware profile is in force",
+                      rows[SecurityRuleProfileVerdict.SPYWARE_SEVERITIES].detail)
+
+    def test_a_failing_profile_reached_through_a_group_gives_a_False_verdict(self):
+        self._spy_profile("weak", critical=False)
+        self._group("g", {"spyware": ["weak"]})
+        rule = self._rule("covered", group="g")
+
+        row = self._verdicts(rule)[SecurityRuleProfileVerdict.SPYWARE_SEVERITIES]
+        self.assertIs(row.satisfied, False)
+        self.assertEqual(row.profile_name, "weak")
+        self.assertIn("alert by rule a", row.detail)
+
+    def test_a_satisfying_profile_gives_True_and_no_detail(self):
+        self._spy_profile("hard")
+        self._group("g", {"spyware": ["hard"]})
+        rule = self._rule("covered", group="g")
+
+        row = self._verdicts(rule)[SecurityRuleProfileVerdict.SPYWARE_SEVERITIES]
+        self.assertIs(row.satisfied, True)
+        self.assertEqual(row.detail, "")
+
+    def test_a_group_naming_a_profile_that_does_not_exist_makes_no_claim(self):
+        """Protected by nothing - but that is PAN-POL-008's finding, not a pass or a fire."""
+        self._group("g", {"spyware": ["ghost"]})
+        rule = self._rule("dangling", group="g")
+
+        row = self._verdicts(rule)[SecurityRuleProfileVerdict.SPYWARE_SEVERITIES]
+        self.assertIsNone(row.satisfied)
+        self.assertIn("resolves to nothing", row.detail)
+        self.assertEqual(row.profile_name, "ghost")
+
+    def test_a_directly_named_profile_beats_the_group(self):
+        self._spy_profile("weak", critical=False)
+        self._spy_profile("hard")
+        self._group("g", {"spyware": ["weak"]})
+        rule = self._rule("direct", group="g", profiles=(("spyware", "hard"),))
+
+        row = self._verdicts(rule)[SecurityRuleProfileVerdict.SPYWARE_SEVERITIES]
+        self.assertEqual(row.profile_name, "hard")
+        self.assertIs(row.satisfied, True)
+
+    def test_the_exception_verdict_reads_every_surface(self):
+        self._spy_profile("exempting", exceptions=3)
+        self._group("g", {"spyware": ["exempting"]})
+        rule = self._rule("hygiene", group="g")
+
+        row = self._verdicts(rule)[SecurityRuleProfileVerdict.SPYWARE_EXCEPTIONS]
+        self.assertIs(row.satisfied, False)
+        self.assertIn("3 exception", row.detail)
+
+    def test_a_vulnerability_assertion_stays_null_when_only_spyware_is_in_force(self):
+        self._spy_profile("hard")
+        self._group("g", {"spyware": ["hard"]})
+        rule = self._rule("spy-only", group="g")
+
+        rows = self._verdicts(rule)
+        self.assertIs(rows[SecurityRuleProfileVerdict.SPYWARE_SEVERITIES].satisfied, True)
+        self.assertIsNone(
+            rows[SecurityRuleProfileVerdict.VULNERABILITY_SEVERITIES].satisfied)
+
+    def test_the_rows_are_replaced_rather_than_duplicated_on_a_second_pass(self):
+        """A verdict is derived from the profile set as it is NOW. A rule whose profile was
+        detached must lose its verdict, not keep a stale True."""
+        self._spy_profile("hard")
+        self._group("g", {"spyware": ["hard"]})
+        rule = self._rule("twice", group="g")
+
+        self._verdicts(rule)
+        rows = self._verdicts(rule)
+
+        self.assertEqual(len(rows), len(dict(SecurityRuleProfileVerdict.ASSERTION_CHOICES)))
+        self.assertEqual(
+            SecurityRuleProfileVerdict.objects.filter(security_rule=rule).count(), len(rows))
 
 
 class SecurityProfileVerdictSatelliteTests(TestCase):

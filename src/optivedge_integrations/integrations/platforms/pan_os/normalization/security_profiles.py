@@ -46,6 +46,7 @@ from optivedge_integrations.integrations.models import (
     SecurityProfileWildfireRule,
     SecurityProfileCategoryVerdict,
     SecurityProfileSeverityVerdict,
+    SecurityRuleProfileVerdict,
     SecurityRule,
     Snapshot,
     precedence_for,
@@ -1383,6 +1384,103 @@ def wildfire_analysis_verdict(rule, groups_by_name, profiles_by_name) -> tuple:
     return False, f"{name}: {'; '.join(gaps)}"[:255]
 
 
+def _severity_verdict_for_rule(profile) -> tuple[bool, str]:
+    """Does this profile block critical AND high? PAN-SPY-001 / PAN-VLN-001, per rule."""
+    gaps = [f"{severity}: {detail}" for severity, blocked, detail in (
+        ("critical", profile.critical_blocked, profile.critical_detail),
+        ("high", profile.high_blocked, profile.high_detail)) if blocked is False]
+    return (not gaps), "; ".join(gaps)
+
+
+def _exceptions_verdict_for_rule(profile) -> tuple[bool, str]:
+    """PAN-SPY-005 / PAN-VLN-004, per rule. Counts EVERY exception surface, as the column does."""
+    count = profile.threat_exception_count
+    if not count:
+        return True, ""
+    return False, f"{count} exception(s): {profile.exception_detail}"
+
+
+def _inline_verdict_for_rule(profile) -> tuple[bool, str]:
+    """PAN-SPY-004 / PAN-VLN-003, per rule."""
+    not_blocking = profile.inline_detectors_not_blocking
+    if not not_blocking:
+        return True, ""
+    return False, f"inline detectors not blocking: {', '.join(not_blocking)}"
+
+
+def _dns_sinkhole_verdict_for_rule(profile) -> tuple[bool, str]:
+    """PAN-SPY-002, per rule."""
+    if profile.dns_sinkholes_malicious_queries:
+        return True, ""
+    return False, profile.dns_sinkhole_detail
+
+
+def _dns_categories_verdict_for_rule(profile) -> tuple[bool, str]:
+    """PAN-SPY-003, per rule."""
+    if profile.dns_security_categories_enforced:
+        return True, ""
+    return False, profile.dns_security_category_detail
+
+
+#: assertion -> (profile kind, verdict function). The ONE place an assertion is tied to what
+#: it reads, so adding a tenth is a row here plus a constant on the model.
+_V = SecurityRuleProfileVerdict
+RULE_PROFILE_ASSERTIONS = {
+    _V.SPYWARE_SEVERITIES: (SecurityProfile.KIND_SPYWARE, _severity_verdict_for_rule),
+    _V.SPYWARE_DNS_SINKHOLE: (SecurityProfile.KIND_SPYWARE, _dns_sinkhole_verdict_for_rule),
+    _V.SPYWARE_DNS_CATEGORIES: (SecurityProfile.KIND_SPYWARE, _dns_categories_verdict_for_rule),
+    _V.SPYWARE_INLINE: (SecurityProfile.KIND_SPYWARE, _inline_verdict_for_rule),
+    _V.SPYWARE_EXCEPTIONS: (SecurityProfile.KIND_SPYWARE, _exceptions_verdict_for_rule),
+    _V.VULNERABILITY_SEVERITIES: (SecurityProfile.KIND_VULNERABILITY, _severity_verdict_for_rule),
+    _V.VULNERABILITY_BRUTE_FORCE: (
+        SecurityProfile.KIND_VULNERABILITY,
+        lambda profile: (True, "") if profile.brute_force_blocked_by_source
+        else (False, profile.brute_force_detail)),
+    _V.VULNERABILITY_INLINE: (SecurityProfile.KIND_VULNERABILITY, _inline_verdict_for_rule),
+    _V.VULNERABILITY_EXCEPTIONS: (
+        SecurityProfile.KIND_VULNERABILITY, _exceptions_verdict_for_rule),
+}
+
+
+def rule_profile_verdicts(rule, groups_by_name, profiles_by_kind_and_name) -> list[tuple]:
+    """(assertion, profile_name, satisfied, detail) for every assertion, for ONE rule.
+
+    A row is written for every assertion even when no profile reaches the rule, with
+    `satisfied` NULL - so "this rule makes no claim" is a stored fact with a reason rather
+    than a missing row that could equally mean nobody has normalized yet.
+
+    The profile is RESOLVED by name and scope, exactly as PAN-AVW-003 resolves its own: a rule
+    whose group names a profile that does not exist in scope is protected by nothing, and so is
+    a rule whose group names no profile of that kind. The lab's `default` group is the second
+    case for every kind.
+    """
+    names = profile_names_in_force(rule, groups_by_name)
+    resolved: dict[str, object] = {}
+    reasons: dict[str, str] = {}
+    for kind in (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY):
+        name = names.get(kind)
+        if not name:
+            reasons[kind] = f"no {kind} profile is in force on this rule"
+            continue
+        profile = effective_in_scope_order(
+            name, profiles_by_kind_and_name.get(kind, {}), f"{kind} profile")
+        if profile is None:
+            reasons[kind] = f"names {kind} profile {name!r}, which resolves to nothing"
+            continue
+        resolved[kind] = profile
+
+    rows = []
+    for assertion, (kind, verdict) in RULE_PROFILE_ASSERTIONS.items():
+        profile = resolved.get(kind)
+        if profile is None:
+            rows.append((assertion, names.get(kind, ""), None, reasons.get(kind, "")[:255]))
+            continue
+        satisfied, detail = verdict(profile)
+        rows.append((assertion, profile.name, satisfied,
+                     (detail if not satisfied else "")[:255]))
+    return rows
+
+
 def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint) -> dict:
     """Set each rule's profile-coverage columns. Runs AFTER the profile groups are normalized.
 
@@ -1406,9 +1504,23 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
             "wildfire_rules"):
         profiles_by_name.setdefault(profile.name, []).append(profile)
 
+    # The anti-spyware and vulnerability profiles, same resolution, for the nine per-rule
+    # assertions. Every satellite a verdict reads is prefetched here rather than per rule:
+    # without this the pass issues a handful of queries for each of a thousand rules.
+    profiles_by_kind_and_name: dict[str, dict[str, list]] = {}
+    for profile in SecurityProfile.objects.filter(
+            owner, kind__in=(SecurityProfile.KIND_SPYWARE,
+                             SecurityProfile.KIND_VULNERABILITY)).prefetch_related(
+            "severity_verdicts", "category_verdicts", "inline_detectors",
+            "dns_signature_sources"):
+        profiles_by_kind_and_name.setdefault(profile.kind, {}).setdefault(
+            profile.name, []).append(profile)
+
     updated = 0
     counts = {column: 0 for column in PROFILE_COVERAGE_COLUMNS.values()}
     counts["wildfire_analysis_gap"] = 0
+    counts["profile_verdict_failures"] = 0
+    verdict_rows: list[SecurityRuleProfileVerdict] = []
     rules = (SecurityRule.objects.filter(enforcement_point=enforcement_point)
              .prefetch_related("securityruleprofiles", "securityruleprofilegroups"))
     for rule in rules:
@@ -1434,4 +1546,19 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
         if changed:
             rule.save(update_fields=changed)
             updated += 1
+        for assertion, profile_name, satisfied, detail in rule_profile_verdicts(
+                rule, groups_by_name, profiles_by_kind_and_name):
+            verdict_rows.append(SecurityRuleProfileVerdict(
+                security_rule=rule, assertion=assertion, profile_name=profile_name,
+                satisfied=satisfied, detail=detail))
+            if satisfied is False:
+                counts["profile_verdict_failures"] += 1
+
+    # REPLACED WHOLESALE, not updated in place: a verdict is derived from the profile set as
+    # it is now, and a rule whose profile was detached must lose its rows rather than keep a
+    # stale True. Same reasoning as the profile satellites being rebuilt on each collection.
+    SecurityRuleProfileVerdict.objects.filter(
+        security_rule__enforcement_point=enforcement_point).delete()
+    SecurityRuleProfileVerdict.objects.bulk_create(verdict_rows, batch_size=2000)
+    counts["profile_verdicts"] = len(verdict_rows)
     return {"rules": rules.count(), "updated": updated, **counts}

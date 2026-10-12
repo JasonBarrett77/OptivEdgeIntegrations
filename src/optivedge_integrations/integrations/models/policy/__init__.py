@@ -42,6 +42,7 @@ from .rules import (
     SecurityRuleProfile,
     SecurityRuleProfileGroup,
     SecurityRuleSaasTenant,
+    SecurityRuleProfileVerdict,
     SecurityRuleSaasUser,
     SecurityRuleService,
     SecurityRuleSourceAddressRef,

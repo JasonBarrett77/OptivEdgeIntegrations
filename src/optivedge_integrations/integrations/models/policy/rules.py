@@ -78,6 +78,112 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     #: Why, in words, for the finding and the row. Empty only when the answer is True.
     wildfire_analysis_detail = models.CharField(max_length=255, blank=True)
 
+    def profile_verdict(self, assertion):
+        """The verdict row for one assertion, or None when nothing has normalized yet.
+
+        Walks the prefetched set rather than filtering, so one `prefetch_related` covers every
+        property below - the finding sentence reads several per rule.
+        """
+        for row in self.profile_verdicts.all():
+            if row.assertion == assertion:
+                return row
+        return None
+
+    def _verdict_value(self, assertion):
+        row = self.profile_verdict(assertion)
+        return row.satisfied if row else None
+
+    def _verdict_detail(self, assertion):
+        row = self.profile_verdict(assertion)
+        return row.detail if row else ""
+
+    #: THE NINE PER-RULE THREAT-PROFILE VERDICTS, named exactly as the control queries name
+    #: them. Each reads a `SecurityRuleProfileVerdict` row; see that model for why they are a
+    #: satellite and why None does not fire.
+    #:
+    #: They exist as PROPERTIES, not only as search fields, because the artifact layer resolves
+    #: a control's tested fields against the subject model and accepts a name the model either
+    #: stores or COMPUTES - so a search field with no matching attribute fails the workbook
+    #: build for the whole domain. The security-profile verdicts are properties for the same
+    #: reason.
+    @property
+    def spyware_blocks_critical_high(self):
+        return self._verdict_value("spyware_blocks_critical_high")
+
+    @property
+    def spyware_blocks_critical_high_detail(self):
+        return self._verdict_detail("spyware_blocks_critical_high")
+
+    @property
+    def spyware_dns_sinkholes(self):
+        return self._verdict_value("spyware_dns_sinkholes")
+
+    @property
+    def spyware_dns_sinkholes_detail(self):
+        return self._verdict_detail("spyware_dns_sinkholes")
+
+    @property
+    def spyware_dns_categories_enforced(self):
+        return self._verdict_value("spyware_dns_categories_enforced")
+
+    @property
+    def spyware_dns_categories_enforced_detail(self):
+        return self._verdict_detail("spyware_dns_categories_enforced")
+
+    @property
+    def spyware_inline_analysis_blocks(self):
+        return self._verdict_value("spyware_inline_analysis_blocks")
+
+    @property
+    def spyware_inline_analysis_blocks_detail(self):
+        return self._verdict_detail("spyware_inline_analysis_blocks")
+
+    @property
+    def spyware_exceptions_minimal(self):
+        return self._verdict_value("spyware_exceptions_minimal")
+
+    @property
+    def spyware_exceptions_minimal_detail(self):
+        return self._verdict_detail("spyware_exceptions_minimal")
+
+    @property
+    def vulnerability_blocks_critical_high(self):
+        return self._verdict_value("vulnerability_blocks_critical_high")
+
+    @property
+    def vulnerability_blocks_critical_high_detail(self):
+        return self._verdict_detail("vulnerability_blocks_critical_high")
+
+    @property
+    def vulnerability_blocks_brute_force(self):
+        return self._verdict_value("vulnerability_blocks_brute_force")
+
+    @property
+    def vulnerability_blocks_brute_force_detail(self):
+        return self._verdict_detail("vulnerability_blocks_brute_force")
+
+    @property
+    def vulnerability_inline_analysis_blocks(self):
+        return self._verdict_value("vulnerability_inline_analysis_blocks")
+
+    @property
+    def vulnerability_inline_analysis_blocks_detail(self):
+        return self._verdict_detail("vulnerability_inline_analysis_blocks")
+
+    @property
+    def vulnerability_exceptions_minimal(self):
+        return self._verdict_value("vulnerability_exceptions_minimal")
+
+    @property
+    def vulnerability_exceptions_minimal_detail(self):
+        return self._verdict_detail("vulnerability_exceptions_minimal")
+
+    @property
+    def threat_profile_in_force(self) -> dict:
+        """{assertion: profile name} for the rules a finding has to name."""
+        return {row.assertion: row.profile_name
+                for row in self.profile_verdicts.all() if row.profile_name}
+
     @property
     def source_breadth_known(self) -> bool:
         """Whether the source side's breadth was established at all.
@@ -155,6 +261,99 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
         )
         if snapshot_station_id != self.management_station_id:
             raise ValidationError("Security rule source snapshot must belong to the same management station.")
+
+
+class SecurityRuleProfileVerdict(models.Model):
+    """Whether the threat profile in force on ONE RULE satisfies ONE assertion.
+
+    The anti-spyware and vulnerability-protection controls were profile-based until
+    2026-10-12: one finding per SecurityProfile. Jason asked them to report per rule, the way
+    PAN-AVW-003 already does, and for the same reason that control gives - "a profile nothing
+    uses endangers nothing and a rule is what carries traffic".
+
+    **A SATELLITE RATHER THAN COLUMNS**, which is where this diverges from PAN-AVW-003's
+    `wildfire_analysis_submits_all`. Nine assertions need a verdict and a reason each, and
+    eighteen columns on the busiest model in the schema - growing by two every time a profile
+    control is added - is not a shape to commit to. The severity verdicts moved from columns
+    to a satellite for the same reason and kept their search field names, which is the
+    precedent being followed.
+    
+    That leaves TWO mechanisms for one idea, with PAN-AVW-003 still on columns. Recorded as an
+    open question rather than fixed here: it belongs to the av-wildfire domain and this change
+    was scoped to the other two.
+
+    **THE THREE STATES ARE THE POINT, and `satisfied` is nullable to carry them:**
+
+        True   a profile of the right kind is in force on this rule and it satisfies the
+               assertion
+        False  one is in force and it does NOT - the finding, and the only firing state
+        NULL   no profile of that kind reaches this rule, so this assertion makes no claim
+               about it
+
+    **NULL DOES NOT FIRE HERE, and that is a deliberate break from PAN-AVW-003**, whose
+    compiler matches NULL on `false` so that a rule with no WildFire profile reports. That is
+    right for one control and wrong for nine: 962 of the lab's 966 allow rules have no
+    anti-spyware profile in force, so matching NULL would raise nine findings on each of them -
+    about 8,600 - and bury the one finding that actually describes the problem. PAN-POL-008
+    exists to say "this allow rule has no security profile", and it says it once.
+
+    So the division is: PAN-POL-008 owns "a profile is attached", these own "the profile that
+    is attached is configured correctly", and nothing is reported twice.
+    """
+
+    #: One per assertion, and STABLE - a control's query names these, so they are a contract.
+    #: Keyed by the control that asks, in the comment, because the name alone does not say.
+    SPYWARE_SEVERITIES = "spyware_blocks_critical_high"              # PAN-SPY-001
+    SPYWARE_DNS_SINKHOLE = "spyware_dns_sinkholes"                   # PAN-SPY-002
+    SPYWARE_DNS_CATEGORIES = "spyware_dns_categories_enforced"       # PAN-SPY-003
+    SPYWARE_INLINE = "spyware_inline_analysis_blocks"                # PAN-SPY-004
+    SPYWARE_EXCEPTIONS = "spyware_exceptions_minimal"                # PAN-SPY-005
+    VULNERABILITY_SEVERITIES = "vulnerability_blocks_critical_high"  # PAN-VLN-001
+    VULNERABILITY_BRUTE_FORCE = "vulnerability_blocks_brute_force"   # PAN-VLN-002
+    VULNERABILITY_INLINE = "vulnerability_inline_analysis_blocks"    # PAN-VLN-003
+    VULNERABILITY_EXCEPTIONS = "vulnerability_exceptions_minimal"    # PAN-VLN-004
+
+    ASSERTION_CHOICES = [
+        (SPYWARE_SEVERITIES, "Anti-spyware blocks critical and high severity"),
+        (SPYWARE_DNS_SINKHOLE, "Anti-spyware sinkholes malicious DNS"),
+        (SPYWARE_DNS_CATEGORIES, "Anti-spyware enforces malicious DNS Security categories"),
+        (SPYWARE_INLINE, "Anti-spyware inline cloud analysis blocks"),
+        (SPYWARE_EXCEPTIONS, "Anti-spyware threat exceptions minimal"),
+        (VULNERABILITY_SEVERITIES, "Vulnerability protection blocks critical and high severity"),
+        (VULNERABILITY_BRUTE_FORCE, "Vulnerability protection blocks brute-force sources"),
+        (VULNERABILITY_INLINE, "Vulnerability protection inline cloud analysis blocks"),
+        (VULNERABILITY_EXCEPTIONS, "Vulnerability protection exceptions minimal"),
+    ]
+
+    #: Which profile kind each assertion reads, so the normalizer resolves once per kind.
+    SPYWARE_ASSERTIONS = (SPYWARE_SEVERITIES, SPYWARE_DNS_SINKHOLE, SPYWARE_DNS_CATEGORIES,
+                          SPYWARE_INLINE, SPYWARE_EXCEPTIONS)
+    VULNERABILITY_ASSERTIONS = (VULNERABILITY_SEVERITIES, VULNERABILITY_BRUTE_FORCE,
+                                VULNERABILITY_INLINE, VULNERABILITY_EXCEPTIONS)
+
+    security_rule = models.ForeignKey(
+        SecurityRule, on_delete=models.CASCADE, related_name="profile_verdicts")
+    assertion = models.CharField(max_length=64, choices=ASSERTION_CHOICES)
+    #: The profile the verdict was read from, resolved by name AND scope - blank when none
+    #: reaches this rule. Carried so a finding can name what to go and fix, and so the same
+    #: profile appearing behind forty rules is recognisable as one object.
+    profile_name = models.CharField(max_length=128, blank=True)
+    satisfied = models.BooleanField(null=True)
+    #: Why, in words. Empty only when `satisfied` is True.
+    detail = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        ordering = ["security_rule", "assertion"]
+        indexes = [models.Index(fields=["assertion", "satisfied"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_rule", "assertion"],
+                name="integrations_unique_profile_verdict_per_rule"),
+        ]
+
+    def __str__(self) -> str:
+        state = {True: "satisfied", False: "FAILED", None: "no claim"}[self.satisfied]
+        return f"{self.security_rule} / {self.assertion}: {state}"
 
 
 class SecurityRuleValue(models.Model):
