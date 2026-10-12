@@ -107,6 +107,22 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     #: build for the whole domain. The security-profile verdicts are properties for the same
     #: reason.
     @property
+    def antivirus_blocks_malware(self):
+        return self._verdict_value("antivirus_blocks_malware")
+
+    @property
+    def antivirus_blocks_malware_detail(self):
+        return self._verdict_detail("antivirus_blocks_malware")
+
+    @property
+    def antivirus_inline_ml_blocks(self):
+        return self._verdict_value("antivirus_inline_ml_blocks")
+
+    @property
+    def antivirus_inline_ml_blocks_detail(self):
+        return self._verdict_detail("antivirus_inline_ml_blocks")
+
+    @property
     def spyware_blocks_critical_high(self):
         return self._verdict_value("spyware_blocks_critical_high")
 
@@ -303,6 +319,8 @@ class SecurityRuleProfileVerdict(models.Model):
 
     #: One per assertion, and STABLE - a control's query names these, so they are a contract.
     #: Keyed by the control that asks, in the comment, because the name alone does not say.
+    ANTIVIRUS_BLOCKS_MALWARE = "antivirus_blocks_malware"            # PAN-AVW-001
+    ANTIVIRUS_INLINE_ML = "antivirus_inline_ml_blocks"               # PAN-AVW-002
     SPYWARE_SEVERITIES = "spyware_blocks_critical_high"              # PAN-SPY-001
     SPYWARE_DNS_SINKHOLE = "spyware_dns_sinkholes"                   # PAN-SPY-002
     SPYWARE_DNS_CATEGORIES = "spyware_dns_categories_enforced"       # PAN-SPY-003
@@ -314,6 +332,8 @@ class SecurityRuleProfileVerdict(models.Model):
     VULNERABILITY_EXCEPTIONS = "vulnerability_exceptions_minimal"    # PAN-VLN-004
 
     ASSERTION_CHOICES = [
+        (ANTIVIRUS_BLOCKS_MALWARE, "Antivirus blocks malware on every decoder"),
+        (ANTIVIRUS_INLINE_ML, "Antivirus WildFire inline ML blocks"),
         (SPYWARE_SEVERITIES, "Anti-spyware blocks critical and high severity"),
         (SPYWARE_DNS_SINKHOLE, "Anti-spyware sinkholes malicious DNS"),
         (SPYWARE_DNS_CATEGORIES, "Anti-spyware enforces malicious DNS Security categories"),
@@ -326,6 +346,7 @@ class SecurityRuleProfileVerdict(models.Model):
     ]
 
     #: Which profile kind each assertion reads, so the normalizer resolves once per kind.
+    ANTIVIRUS_ASSERTIONS = (ANTIVIRUS_BLOCKS_MALWARE, ANTIVIRUS_INLINE_ML)
     SPYWARE_ASSERTIONS = (SPYWARE_SEVERITIES, SPYWARE_DNS_SINKHOLE, SPYWARE_DNS_CATEGORIES,
                           SPYWARE_INLINE, SPYWARE_EXCEPTIONS)
     VULNERABILITY_ASSERTIONS = (VULNERABILITY_SEVERITIES, VULNERABILITY_BRUTE_FORCE,

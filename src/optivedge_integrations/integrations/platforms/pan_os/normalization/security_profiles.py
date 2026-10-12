@@ -1422,10 +1422,44 @@ def _dns_categories_verdict_for_rule(profile) -> tuple[bool, str]:
     return False, profile.dns_security_category_detail
 
 
+def _antivirus_malware_verdict_for_rule(profile) -> tuple[bool, str]:
+    """PAN-AVW-001, per rule. FOUR independent ways an antivirus profile lets malware through.
+
+    The decoder has three action columns that resolve independently - Signature, WildFire
+    Signature, WildFire Inline ML - and the profile's `application` node overrides all three
+    per application. A profile hardened in one column delivers everything the others catch,
+    which is what made this control's first version wrong.
+    """
+    gaps = []
+    if profile.non_blocking_decoders:
+        gaps.append(f"signature action allows on {', '.join(profile.non_blocking_decoders)}")
+    if profile.non_blocking_wildfire_decoders:
+        gaps.append("WildFire signature action allows on "
+                    f"{', '.join(profile.non_blocking_wildfire_decoders)}")
+    if profile.non_blocking_mlav_decoders:
+        gaps.append("WildFire inline ML action allows on "
+                    f"{', '.join(profile.non_blocking_mlav_decoders)}")
+    if profile.non_blocking_application_overrides:
+        gaps.append("application exceptions override the decoder for "
+                    f"{', '.join(profile.non_blocking_application_overrides)}")
+    return (not gaps), "; ".join(gaps)
+
+
+def _antivirus_ml_verdict_for_rule(profile) -> tuple[bool, str]:
+    """PAN-AVW-002, per rule. `enable(alert-only)` RUNS a model and lets the file through."""
+    not_blocking = profile.non_blocking_ml_models
+    if not not_blocking:
+        return True, ""
+    return False, f"inline ML models not blocking: {', '.join(not_blocking)}"
+
+
 #: assertion -> (profile kind, verdict function). The ONE place an assertion is tied to what
 #: it reads, so adding a tenth is a row here plus a constant on the model.
 _V = SecurityRuleProfileVerdict
 RULE_PROFILE_ASSERTIONS = {
+    _V.ANTIVIRUS_BLOCKS_MALWARE: (SecurityProfile.KIND_VIRUS,
+                                  _antivirus_malware_verdict_for_rule),
+    _V.ANTIVIRUS_INLINE_ML: (SecurityProfile.KIND_VIRUS, _antivirus_ml_verdict_for_rule),
     _V.SPYWARE_SEVERITIES: (SecurityProfile.KIND_SPYWARE, _severity_verdict_for_rule),
     _V.SPYWARE_DNS_SINKHOLE: (SecurityProfile.KIND_SPYWARE, _dns_sinkhole_verdict_for_rule),
     _V.SPYWARE_DNS_CATEGORIES: (SecurityProfile.KIND_SPYWARE, _dns_categories_verdict_for_rule),
@@ -1457,7 +1491,8 @@ def rule_profile_verdicts(rule, groups_by_name, profiles_by_kind_and_name) -> li
     names = profile_names_in_force(rule, groups_by_name)
     resolved: dict[str, object] = {}
     reasons: dict[str, str] = {}
-    for kind in (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY):
+    for kind in (SecurityProfile.KIND_VIRUS, SecurityProfile.KIND_SPYWARE,
+                 SecurityProfile.KIND_VULNERABILITY):
         name = names.get(kind)
         if not name:
             reasons[kind] = f"no {kind} profile is in force on this rule"
@@ -1509,10 +1544,11 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
     # without this the pass issues a handful of queries for each of a thousand rules.
     profiles_by_kind_and_name: dict[str, dict[str, list]] = {}
     for profile in SecurityProfile.objects.filter(
-            owner, kind__in=(SecurityProfile.KIND_SPYWARE,
+            owner, kind__in=(SecurityProfile.KIND_VIRUS,
+                             SecurityProfile.KIND_SPYWARE,
                              SecurityProfile.KIND_VULNERABILITY)).prefetch_related(
             "severity_verdicts", "category_verdicts", "inline_detectors",
-            "dns_signature_sources"):
+            "dns_signature_sources", "decoders", "ml_models", "application_overrides"):
         profiles_by_kind_and_name.setdefault(profile.kind, {}).setdefault(
             profile.name, []).append(profile)
 
