@@ -8,7 +8,6 @@ import json
 import logging
 import threading
 from dataclasses import dataclass
-from datetime import timedelta
 
 from django.contrib import messages
 from django.core.paginator import Paginator
@@ -70,6 +69,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.managed_dev
     MANAGED_DEVICES_SOURCE_TYPE,
 )
 from optivedge_integrations.integrations.device_group_bindings import rebuild_device_group_bindings
+from optivedge_integrations.integrations.lifecycle import NormalizationRefused, begin_normalization
 from optivedge_integrations.integrations.search_vocabulary import (
     rebuild_all_security_rule_search_vocabulary,
     rebuild_security_rule_search_vocabulary,
@@ -683,6 +683,9 @@ class ManagementStationSyncView(View):
             messages.error(request, "Sync is currently only supported for Panorama management stations.")
             return HttpResponseRedirect(detail_url)
 
+        if refused := normalization_refused(request, management_station, detail_url):
+            return refused
+
         run = IntegrationRun.objects.create(
             management_station=management_station,
             run_scope=IntegrationRun.SCOPE_STATION,
@@ -970,19 +973,30 @@ def _refresh_station_in_scope_tracked(
     )
 
 
-#: A RUNNING collection younger than this blocks starting another. Older ones are taken to
-#: be orphans - the thread is a daemon, so a server restart mid-collection kills it and
-#: leaves its run RUNNING for ever, and without an age limit that would lock the button
-#: permanently. Collections take minutes; this is far outside any real one.
-COLLECTION_LOCK_MAX_AGE = timedelta(hours=2)
+def normalization_refused(request, management_station: ManagementStation, url: str):
+    """Announce a normalization; the redirect to return if something refused it, else None.
+
+    Called after a view's own checks and before anything is written or a run is opened, so a
+    refused attempt leaves nothing behind. See `lifecycle.normalization_starting`.
+    """
+    try:
+        begin_normalization(management_station)
+    except NormalizationRefused as exc:
+        messages.error(request, str(exc))
+        return HttpResponseRedirect(url)
+    return None
+
+
+#: A RUNNING run is a live one. A restart used to leave a dead thread's run RUNNING, and an
+#: age limit of two hours told the two apart - locking the buttons for up to two hours after a
+#: crash. `lifecycle.close_interrupted_runs` closes them when the next server process starts.
 
 
 def renormalization_in_progress(management_station: ManagementStation) -> bool:
-    """Whether a renormalize is running for this station, orphans aside."""
+    """Whether a renormalize is running for this station."""
     return IntegrationRun.objects.filter(
         management_station=management_station,
         status=IntegrationRun.STATUS_RUNNING,
-        started_at__gte=timezone.now() - COLLECTION_LOCK_MAX_AGE,
         events__reason=_RENORMALIZE_RUN_REASON,
     ).exists()
 
@@ -1000,11 +1014,10 @@ def station_work_in_progress(management_station: ManagementStation) -> bool:
 
 def collection_in_progress(management_station: ManagementStation) -> bool:
     """Whether step 3 is running for this station: either half of it, configuration or
-    EDL/FQDN, holds a RUNNING run recent enough not to be an orphan."""
+    EDL/FQDN, holds a RUNNING run."""
     return IntegrationRun.objects.filter(
         management_station=management_station,
         status=IntegrationRun.STATUS_RUNNING,
-        started_at__gte=timezone.now() - COLLECTION_LOCK_MAX_AGE,
         events__reason__in=(_COLLECTION_RUN_REASON, _DYNAMIC_CONTENT_RUN_REASON),
     ).exists()
 
@@ -1034,7 +1047,7 @@ def _run_station_collection_in_background(management_station_pk: int, run_pk: in
     Takes primary keys rather than instances: the thread has its own database connection
     and reads its own rows. Nothing it raises reaches a user, so it is logged, and a run
     that the failure left open is closed - the details tab would otherwise show "Running"
-    until COLLECTION_LOCK_MAX_AGE passed.
+    until the server restarted.
     """
     run = None
     try:
@@ -1080,6 +1093,9 @@ class ManagementStationInScopeSyncView(View):
             messages.error(request, "A collection is already running for this station.")
             return HttpResponseRedirect(detail_url)
 
+        if refused := normalization_refused(request, management_station, detail_url):
+            return refused
+
         run = _open_in_scope_refresh_run(management_station)
         threading.Thread(
             target=_run_station_collection_in_background,
@@ -1114,6 +1130,12 @@ def _run_bulk_in_scope_refresh_in_background() -> None:
 
     try:
         for management_station in stations:
+            try:
+                begin_normalization(management_station)
+            except NormalizationRefused as exc:
+                # No request to report to; the station is skipped, with nothing written.
+                logger.warning("Bulk refresh skipped station %s: %s", management_station.pk, exc)
+                continue
             try:
                 _refresh_station_in_scope_with_tracking(management_station)
             except Exception:
@@ -1266,7 +1288,7 @@ def _run_station_renormalize_in_background(management_station_pk: int, run_pk: i
     The same shape as `_run_station_collection_in_background`, for the same reason: primary
     keys rather than instances, because the thread has its own database connection; failures
     logged, because nothing it raises reaches a user; and a run the failure left open is
-    closed, or the details tab shows "Running" until COLLECTION_LOCK_MAX_AGE passes.
+    closed, or the details tab shows "Running" until the server restarts.
     """
     run = None
     try:
@@ -1306,6 +1328,9 @@ class ManagementStationRenormalizeView(View):
         if station_work_in_progress(management_station):
             messages.error(request, "Collection or renormalization is already running for this station.")
             return HttpResponseRedirect(detail_url)
+
+        if refused := normalization_refused(request, management_station, detail_url):
+            return refused
 
         run = _open_renormalize_run(management_station)
         threading.Thread(
@@ -1462,6 +1487,9 @@ class ManagementStationRefreshDynamicContentView(View):
     def post(self, request, pk):
         management_station = get_object_or_404(ManagementStation, pk=pk)
         list_url = reverse("management_station_list")
+
+        if refused := normalization_refused(request, management_station, list_url):
+            return refused
 
         outcome = _refresh_station_dynamic_content_with_tracking(management_station)
         if outcome.refresh is None:

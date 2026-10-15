@@ -2943,13 +2943,22 @@ class ManagementStationActionViewTests(TestCase):
         messages = [m.message for m in response.wsgi_request._messages]
         self.assertIn("already running", messages[0])
 
-    def test_an_orphaned_running_run_does_not_lock_the_button_for_ever(self):
-        """A daemon thread dies with the server and leaves its run RUNNING."""
+    def test_a_restart_closes_the_run_its_thread_was_killed_with(self):
+        """A daemon thread dies with the server and leaves its run RUNNING. The next server
+        process closes it on its first request, and says why on the run's events."""
+        from optivedge.lifecycle import server_started
+        from optivedge_integrations.integrations.lifecycle import INTERRUPTED_REASON
+
         station = self._create_panorama_station("panorama-in-scope-orphan.local")
         orphan = views_module._open_in_scope_refresh_run(station)
-        IntegrationRun.objects.filter(pk=orphan.pk).update(
-            started_at=timezone.now() - views_module.COLLECTION_LOCK_MAX_AGE - timedelta(minutes=1),
-        )
+        self.assertTrue(views_module.collection_in_progress(station))
+
+        server_started.send(sender=None)
+
+        orphan.refresh_from_db()
+        self.assertEqual(orphan.status, IntegrationRun.STATUS_FAILED)
+        self.assertIsNotNone(orphan.completed_at)
+        self.assertTrue(orphan.events.filter(reason=INTERRUPTED_REASON).exists())
         self.assertFalse(views_module.collection_in_progress(station))
 
         with patch("optivedge_integrations.integrations.views.threading.Thread") as mocked_thread_cls:
@@ -10729,3 +10738,95 @@ class AntivirusMlModelTests(SimpleTestCase):
                 self.kind, self.ml_models = kind, models
 
         self.assertEqual(ml_model_catalogue([N("spyware", {"Nonsense": "enable"})]), [])
+
+
+class NormalizationLifecycleTests(TestCase):
+    """`lifecycle.normalization_starting`: every normalizing path announces itself, a refusal
+    stops it before anything is written, and normalization never deletes a collection."""
+
+    def _station_with_a_rule(self):
+        station, appliance, point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-LIFE-001", appliance_hostname="fw-life-01")
+        EnforcementPoint.objects.filter(pk=point.pk).update(in_scope=True)
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"vsys": {"entry": {
+                "@name": "vsys1",
+                "rulebase": {"security": {"rules": {"entry": [{
+                    "@name": "r1", "from": {"member": ["any"]}, "to": {"member": ["any"]},
+                    "source": {"member": ["any"]}, "destination": {"member": ["any"]},
+                    "application": {"member": ["any"]}, "service": {"member": ["any"]},
+                    "action": "allow",
+                }]}}},
+            }}}}}})
+        _create_empty_pushed_policy_snapshot(station=station, enforcement_point=point)
+        return station
+
+    def test_normalization_keeps_snapshots(self):
+        """Jason, 2026-10-15: "Normalization should never, ever, delete collections." A
+        snapshot is normalization's input and what a finding records it was computed from."""
+        from optivedge_integrations.integrations.platforms.pan_os.flows import (
+            renormalize_in_scope_configuration)
+
+        station = self._station_with_a_rule()
+        before = set(Snapshot.objects.values_list("pk", flat=True))
+
+        renormalize_in_scope_configuration(station)
+        renormalize_in_scope_configuration(station)
+
+        # Guards the comparison: a renormalize that wrote nothing would keep them trivially.
+        self.assertTrue(SecurityRule.objects.filter(name="r1").exists())
+        self.assertEqual(set(Snapshot.objects.values_list("pk", flat=True)), before)
+
+    def test_every_normalizing_view_announces_itself_and_stops_on_refusal(self):
+        from optivedge_integrations.integrations.lifecycle import (
+            NormalizationRefused, normalization_starting)
+
+        station = self._station_with_a_rule()
+
+        def refuse(**kwargs):
+            raise NormalizationRefused("A findings run is in progress.")
+
+        normalization_starting.connect(refuse, weak=False, dispatch_uid="lifecycle-refuse")
+        self.addCleanup(normalization_starting.disconnect, dispatch_uid="lifecycle-refuse")
+
+        for name in ("management_station_sync", "management_station_in_scope_sync",
+                     "management_station_renormalize",
+                     "management_station_refresh_dynamic_content"):
+            with self.subTest(name), \
+                    patch("optivedge_integrations.integrations.views.threading.Thread") as thread, \
+                    patch("optivedge_integrations.integrations.views.collect_persist_and_normalize") as sync, \
+                    patch("optivedge_integrations.integrations.views."
+                          "_refresh_station_dynamic_content_with_tracking") as dynamic:
+                response = self.client.post(
+                    reverse(name, kwargs={"pk": station.pk}), follow=True)
+
+                thread.assert_not_called()
+                sync.assert_not_called()
+                dynamic.assert_not_called()
+                self.assertFalse(IntegrationRun.objects.exists())
+                self.assertIn("A findings run is in progress.",
+                              [m.message for m in response.context["messages"]])
+
+    def test_the_bulk_refresh_skips_a_refused_station(self):
+        from optivedge_integrations.integrations.lifecycle import (
+            NormalizationRefused, normalization_starting)
+
+        self._station_with_a_rule()
+
+        def refuse(**kwargs):
+            raise NormalizationRefused("no")
+
+        normalization_starting.connect(refuse, weak=False, dispatch_uid="lifecycle-refuse-bulk")
+        self.addCleanup(normalization_starting.disconnect, dispatch_uid="lifecycle-refuse-bulk")
+
+        with patch("optivedge_integrations.integrations.views."
+                   "_refresh_station_in_scope_with_tracking") as refresh, \
+                patch("optivedge_integrations.integrations.views."
+                      "rebuild_all_security_rule_search_vocabulary"), \
+                patch("optivedge_integrations.integrations.views.connections"), \
+                self.assertLogs("optivedge_integrations.integrations.views", level="WARNING"):
+            views_module._run_bulk_in_scope_refresh_in_background()
+
+        refresh.assert_not_called()

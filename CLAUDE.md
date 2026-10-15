@@ -106,7 +106,8 @@ python manage.py runserver
   route in this package under `/integrations/`. `optivedge.urls` owns the root namespace and appends
   `optional_app_urlpatterns()`; this package must never try to own root. New routes go in
   `integrations/urls.py`.
-- `SIDEBAR_SECTION` contributes the "Firewall Integrations" and "Notes" nav sections. Each item carries an
+- `SIDEBAR_SECTION` contributes the "Firewall Integrations" nav section (Notes was removed 2026-10-15 - see
+  "Notes are off the menu"). Each item carries an
   `active_names` set of URL names that light it up — **when a route name is added to `urls.py`, add it there
   too**, or the sidebar silently stops highlighting on that page.
 
@@ -1191,6 +1192,17 @@ view for some of these options."). The UI rework took their buttons away:
 
 Each still works as a POST/GET, and their tests still run.
 
+**Notes are off the menu, and knowingly broken** (Jason, 2026-10-15: "for now, I think we just
+break notes and remove it from the menu"). A `Note` attaches to its object by content type and
+DATABASE ID, with no cascade. Normalization deletes and recreates security rules, so every note
+on a rule lost its target the first time the configuration was re-normalized - and silently,
+since a generic foreign key to a missing row is not an error. Notes on objects updated in place
+survived, which made the failure look selective rather than total.
+
+The routes, views, model and data are left as they are, like the routes above. Bringing notes
+back needs a key that survives normalization - the object's type, scope and name rather than
+its id - and nothing short of that is worth re-linking.
+
 **There is no enforcement-point list page.** `/integrations/enforcement-points/` and its sidebar item
 were folded into the station's Enforcement Points tab (2026-09-25), which carries the All / In Scope /
 Out of Scope filter and links each row to `enforcement_point_detail`. The filter defaults to **All**,
@@ -1198,6 +1210,30 @@ where the old list defaulted to in-scope: the tab is where scope is chosen, so h
 points would hide the rows an operator came to change. The detail and zone pages light up the
 Management Stations sidebar item. Revisit when a hidden page (the
 `/developer/` pattern) is built for them, or delete them then.
+
+## Normalization announces itself, and never deletes a collection
+
+`integrations/lifecycle.py` (2026-10-15). Three rules, each with a test in
+`NormalizationLifecycleTests` or beside it:
+
+* **Every path that normalizes sends `normalization_starting` first** - inventory sync, the
+  in-scope collection, the bulk refresh, renormalize, the EDL/FQDN refresh. Normalization rewrites
+  what it owns, and what is built on it - OptivEdgeAssessments' findings - stops describing the
+  configuration the moment it does. This package does not know its consumers, so it says what is
+  about to happen and lets them answer: a receiver raising `NormalizationRefused` stops it before
+  anything is written or a run is opened, and its message is what the operator sees. Assessments
+  refuses while a findings run or workbook build is in progress, and otherwise discards its runs.
+  **A new normalizing path calls `normalization_refused()` (views) or `begin_normalization()`.**
+* **Normalization never deletes a collection.** Jason: "Normalization should never, ever, delete
+  collections." Snapshots are its input, and a finding records the snapshot it was computed from.
+* **A RUNNING run is a live one.** Daemon threads die with the server, and a two-hour age limit used
+  to tell a dead run from a live one - locking the buttons for up to two hours after a crash.
+  `close_interrupted_runs` answers OptivEdge's `server_started`, sent once per server process on its
+  first request, and closes them with an `InterruptedByRestart` event. That holds because an
+  engagement runs ONE server process.
+
+`integration_work_in_progress()` is the other direction: any RUNNING run on any station, which a
+consumer checks before starting work that reads normalized rows.
 
 ## Git hooks
 
