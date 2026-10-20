@@ -161,19 +161,35 @@ all do this, and fourteen normalizer modules write the rows.
 The helpers in `platforms/pan_os/normalization/common.py` are the only supported way to read
 it. Use them rather than inspecting `@ptpl` by hand:
 
-    scalar_value(node)          -> (value, raw_key, raw_provenance_value)
-    parse_yes_no_field(node, default_effective=)  same, for a yes/no leaf
-    parse_integer_field(node, default_effective=) same, for an integer leaf
+    scalar_value(node)          -> (value, raw_key, raw_provenance_value)  LOW-LEVEL; see below
+    parse_yes_no_field(node, *, implicit=)    a yes/no leaf, absence declared
+    parse_integer_field(node, *, implicit=)   an integer leaf, absence declared
+    parse_text_field(node, *, implicit=)      a text leaf, absence declared
+    Implicit.measured(value, citation) / .assumed(value, why) / .not_assumed(why)
     entry_provenance(entry)     -> (raw_key, raw_value) for a named entry's own marker
     classify_prov_type(raw_key) -> the FieldProvenance.ProvenanceType value
     ABSENT                      raw_key sentinel: the key was not in the payload
 
-Three states, and the difference between the last two is the point:
+`implicit` is not optional, deliberately - common.py:186-187: "storing a value for an absent key
+is a claim about PAN-OS, and every site now has to say whether it can back it."
 
-    raw_key is ABSENT   the key was absent. PAN-OS supplied its own default and nobody
-                        pushed or wrote anything. Write NO row - its absence is the answer.
+Three states, and the first one CHANGED on 2026-09-21:
+
+    raw_key is an       the key was ABSENT and this site declared what PAN-OS does without it.
+    `Implicit`          Write a row typed pan_os_default, assumed_default or not_configured,
+                        per the declaration's own citation.
     raw_key is None     present with no marker. Write a row typed `local`.
     raw_key is "@ptpl"  pushed. Write a row typed by classify_prov_type.
+
+A FIELD READ THROUGH BARE `scalar_value` STILL RECEIVES `ABSENT` AND WRITES NO ROW. That is the
+old rule. It survives in sixteen fields across eight modules and it is a DEFECT rather than a
+pattern to copy: a missing row now means "nothing tracks this field", so a correct consumer is
+told a field is untracked when the truth is that nobody configured it. Read a tracked field
+through parse_yes_no_field / parse_integer_field / parse_text_field.
+
+TRAP, and it type-checks: `provenance_type` turns on `citation is None and value is None`
+(common.py:93-101), so `Implicit.assumed(None, why)` records NOT_CONFIGURED, not
+assumed_default. For a text field whose inferred value is "nothing", write `Implicit.assumed("", why)`.
 
 A model whose row IS a single value - `ManagementService`, `PermittedSource` - still uses the
 mixin, with `field_name="__entry__"` for that value's own provenance. A bespoke
