@@ -193,22 +193,24 @@ def password_complexity_from_snapshot(snapshot: Snapshot) -> tuple[dict[str, Any
     commit does not materialise the rest. So there is no state where a null would mean
     something a 0 does not.
     """
-    values = {field: (False if kind == "bool" else 0)
-              for field, _, kind, _ in PASSWORD_COMPLEXITY_FIELDS}
+    # NO EARLY RETURN. Every level that is missing narrows to an empty mapping and falls
+    # through to the loop, so each of the sixteen fields is read as absent and DECLARED.
+    # Until 2026-10-20 the three exits below returned `(values, provenance)` with values
+    # pre-populated and provenance empty: sixteen stored numbers and not one row. The
+    # docstring above says PAN-OS never writes these values, so a device that has never
+    # enabled complexity has no `password-complexity` node at all - the ordinary state of a
+    # firewall, not an edge - and it took the third exit. That wrote the values and none of
+    # the rows, which is the pre-2026-09-21 rule applied to a whole model at once, and
+    # PAN-AUTH-001..013 rest on those sixteen columns.
+    values: dict[str, Any] = {}
     provenance: list[tuple[str, Any, str | None]] = []
     payload = snapshot.payload or {}
     config = payload.get("config") if isinstance(payload, dict) else None
-    if not isinstance(config, dict):
-        return values, provenance
-    node = config.get("mgt-config")
-    if not isinstance(node, dict):
-        return values, provenance
-    complexity = node.get("password-complexity")
-    if not isinstance(complexity, dict):
-        return values, provenance
+    node = config.get("mgt-config") if isinstance(config, dict) else None
+    complexity = node.get("password-complexity") if isinstance(node, dict) else None
+    complexity = complexity if isinstance(complexity, dict) else {}
     change = complexity.get("password-change")
-    if not isinstance(change, dict):
-        change = {}
+    change = change if isinstance(change, dict) else {}
 
     for field, key, kind, parent in PASSWORD_COMPLEXITY_FIELDS:
         source = change if parent else complexity
@@ -221,8 +223,8 @@ def password_complexity_from_snapshot(snapshot: Snapshot) -> tuple[dict[str, Any
                 raw, implicit=Implicit.measured(0, PASSWORD_COMPLEXITY_CITATION))
         # mgt-config is template-managed - the users node on tpa-a arrives carrying @ptpl - so
         # these values can be pushed and the provenance has to be captured like any other.
-        # Absent keys produce no row, which is what makes "local" and "defaulted" different
-        # facts rather than the same blank.
+        # An absent key produces a row too, carrying PASSWORD_COMPLEXITY_CITATION, which is
+        # what makes "pushed", "written locally" and "defaulted" three facts and not one blank.
         provenance.append((field, raw_key, raw_value))
     return values, provenance
 

@@ -63,6 +63,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     iter_member_values,
     merge_intervals,
     merged_vsys_entry,
+    parse_text_field,
     parse_yes_no_field,
     pushed_vsys_panorama,
     scalar_value,
@@ -163,6 +164,24 @@ LOG_FLAG_CITATION = (
     "in the device's own UI. Help p.134 agrees for log-end, 'enabled by default'; p.142 says "
     "'cleared by default' about the same field on another screen, which is why this was "
     "measured rather than read")
+
+
+#: What an absent `rule-type` means, settled on hardware on 2026-10-20 after the guide had
+#: asserted the equivalence and disclaimed measuring it, five lines apart.
+RULE_TYPE_IMPLICIT = Implicit.assumed(
+    "universal",
+    "measured 2026-10-20 on pan-fw-201 (PAN-OS 11.2.5): `show running security-policy` prints "
+    "`type intrazone;` for intrazone_rule_test and `type interzone;` for interzone_rule_test, "
+    "and NO type line at all for explicit_universal_rule_type_test - whose stored config "
+    "carries <rule-type>universal</rule-type> explicitly, in candidate and running both, "
+    "having been created intrazone and set back - nor for the two shared pre-rules pushed to "
+    "the same device, which carry no rule-type key. So the compiled policy renders an explicit "
+    "universal and an absent key IDENTICALLY, which is read-a-security-rule.md:60-61 ('treat "
+    "them as identical; the dataplane does') measured, where :57-58 disclaims having measured "
+    "it. Recorded as ASSUMED and not measured for a reason that survives the measurement: "
+    "PAN-OS stores an explicit universal rather than pruning it, so absence is a payload state "
+    "the device keeps distinct, and what the dataplane shows for that state is SILENCE. The "
+    "name 'universal' is our reading of the silence; no device output states it")
 
 
 def first_vsys_rulebase(payload: dict[str, Any], vsys_name: str) -> dict[str, Any]:
@@ -287,7 +306,8 @@ def normalize_rule(
         rule.get("disabled"),
         implicit=Implicit.measured(
             False, "read-a-security-rule.md: 'disabled absent -> no' [MEASURED 2026-10-05]"))
-    rule_type, rule_type_rk, rule_type_rv = scalar_value(rule.get("rule-type"))
+    rule_type, rule_type_rk, rule_type_rv = parse_text_field(
+        rule.get("rule-type"), implicit=RULE_TYPE_IMPLICIT)
     description, description_rk, description_rv = scalar_value(rule.get("description"))
     log_start, log_start_rk, log_start_rv = parse_yes_no_field(
         rule.get("log-start"),

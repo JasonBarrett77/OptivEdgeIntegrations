@@ -151,11 +151,19 @@ class ManagementSshSettings(ProvenancedMixin, SyncTrackedModel):
     #: and blank is not ECDSA.
     host_key_type = models.CharField(max_length=8, blank=True, default="")
     host_key_bits = models.PositiveIntegerField(null=True, blank=True, default=None)
-    #: Session rekey triggers. 0 is the default for each: no time-based rekey, the cipher's own
-    #: data limit, and 2^28 packets (Help p.905).
-    rekey_interval_seconds = models.PositiveIntegerField(default=0)
-    rekey_data_mb = models.PositiveIntegerField(default=0)
-    rekey_packets_exponent = models.PositiveIntegerField(default=0)
+    #: Session rekey triggers, and what a CONFIGURED 0 means in each: no time-based rekey, the
+    #: cipher's own data limit, 2^28 packets (Help p.905). That is the meaning of a 0 somebody
+    #: wrote, and it is not what PAN-OS does with the key ABSENT - which nobody has measured.
+    #:
+    #: NULL WHEN NO TRIGGER IS CONFIGURED, since 2026-10-20, on the same grounds as
+    #: `host_key_bits` above. These stored 0 for an absent key and wrote no provenance row for
+    #: two of the three, so a reader saw "rekeying is unlimited" with nothing saying whether
+    #: that was read off the device or invented here - and 0 being configurable means the
+    #: invented 0 and a deliberate one were the same number. Absence now stores nothing and the
+    #: row says `not_configured`; see REKEY_UNMEASURED in the normalizer for the reasoning.
+    rekey_interval_seconds = models.PositiveIntegerField(null=True, blank=True, default=None)
+    rekey_data_mb = models.PositiveIntegerField(null=True, blank=True, default=None)
+    rekey_packets_exponent = models.PositiveIntegerField(null=True, blank=True, default=None)
 
     class Meta:
         constraints = [

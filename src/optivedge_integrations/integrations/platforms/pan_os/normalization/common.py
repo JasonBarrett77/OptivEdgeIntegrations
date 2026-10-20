@@ -16,6 +16,14 @@ from typing import Any
 # means the field is not tracked, which is now the ONLY thing a missing row means.
 ABSENT = object()
 
+# Passed as raw_key for an object PAN-OS SHIPPED: the built-in `any`, a predefined EDL, a
+# predefined SSL/TLS profile or certificate. Such an entry carries no marker, and an unmarked
+# entry means `local` - "defined on this device", which is the one thing a vendor-shipped object
+# is not. It is a sentinel rather than a string because it is not a payload key: there is no key
+# to read, only the scope the entry was collected from, which the reading site knows and the
+# writer does not.
+PREDEFINED = object()
+
 _PROVENANCE_KEYS = ("@ptpl", "@loc", "@panorama")
 
 
@@ -118,9 +126,15 @@ def classify_prov_type(raw_key: Any) -> str:
     An `Implicit` arrives here when the key was ABSENT and the reading site declared what PAN-OS
     does without it; it classifies as the measured or assumed default according to its own
     citation, which is the one place that decision is made.
+
+    `PREDEFINED` arrives when the entry EXISTS and PAN-OS shipped it. Without it the final
+    `return "local"` answered for those too, asserting "defined on this device" about an object
+    no administrator wrote and nobody can edit.
     """
     if isinstance(raw_key, Implicit):
         return raw_key.provenance_type
+    if raw_key is PREDEFINED:
+        return "predefined"
     if raw_key == "@ptpl":
         return "template"
     if raw_key == "@loc":
@@ -143,8 +157,9 @@ def provenance_value(raw_key: Any, raw_value: str | None) -> str:
 
 
 def provenance_raw_key(raw_key: Any) -> str:
-    """The payload key a row came from. Empty for a default: there was no key."""
-    if isinstance(raw_key, Implicit) or raw_key is ABSENT or raw_key is None:
+    """The payload key a row came from. Empty for a default or a predefined entry: no key."""
+    if (isinstance(raw_key, Implicit) or raw_key is ABSENT or raw_key is PREDEFINED
+            or raw_key is None):
         return ""
     return str(raw_key)
 

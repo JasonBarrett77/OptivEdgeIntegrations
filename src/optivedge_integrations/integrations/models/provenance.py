@@ -75,6 +75,20 @@ class FieldProvenance(models.Model):
     model does not track entry provenance - true of the `deviceconfig/system` settings models,
     which are nodes rather than named entries and carry their provenance per field.
 
+    AND A THIRD CASE FELL OUT OF THAT ONE ON 2026-10-20. "Unmarked entry means LOCAL" is right
+    for every entry an administrator could have written, and wrong for the ones PAN-OS SHIPS: a
+    predefined SSL/TLS service profile, a predefined certificate, a predefined EDL, the built-in
+    `any`. None of them carries a marker, so each recorded `local` - "defined on this device" -
+    about an object that is defined in the release and cannot be edited at all. Two sites were
+    saying it two different ways: `certificates.py` wrote the LOCAL row, and `addresses.py`
+    passed an empty provenance list for its builtin objects and so wrote no entry row at all,
+    which made those objects look untracked beside siblings on the same model that had one.
+    PREDEFINED is what both say now. It is an ORIGIN type, not an absent one: the entry is
+    present, and what is being recorded is that the origin is the vendor. The scope the entry
+    was collected from is the only thing that says so - there is no payload key for it - so the
+    reading site passes `normalization.common.PREDEFINED` as the raw key and the writers are
+    unchanged.
+
     An OVERRIDE also leaves an entry unmarked, and LOCAL is correct there: the override replaced
     the object, so the device-side copy is what is in force and is where a change has to be
     made. What is lost is the history, not the destination.
@@ -82,10 +96,14 @@ class FieldProvenance(models.Model):
     `@ptpl` names a template OR a template stack, and a stack has its own config layer that
     overrides its templates - `raw_value` is stored as given and not disambiguated.
 
-    The five types that describe a value's origin:
+    The types that describe a value's origin:
 
       LOCAL / TEMPLATE / DEVICE_GROUP / PANORAMA   the key was PRESENT; this is where it came
                                                    from, read off the payload's own marker
+      PREDEFINED       the entry was PRESENT and PAN-OS shipped it. No marker says so - the
+                       scope it was collected from does - and the distinction from LOCAL is
+                       the one a reader acts on: a local object can be changed on the device
+                       and a predefined one cannot be changed at all
       PAN_OS_DEFAULT   the key was ABSENT and PAN-OS's own default applies. The stored value is
                        that default, and the claim is backed by a measurement - `raw_value`
                        carries the value, and the citation lives with the declaration in
@@ -112,6 +130,8 @@ class FieldProvenance(models.Model):
         TEMPLATE        = "template",        "Template"
         DEVICE_GROUP    = "device_group",    "Device Group"
         PANORAMA        = "panorama",        "Panorama"
+        #: The entry exists and PAN-OS shipped it. Not written here, and not editable here.
+        PREDEFINED      = "predefined",      "Predefined"
         #: Key absent, PAN-OS supplies this value, and we have measured that it does.
         PAN_OS_DEFAULT  = "pan_os_default",  "PAN-OS default"
         #: Key absent, the stored value is our inference. NOT a vendor fact.

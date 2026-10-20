@@ -33,6 +33,7 @@ from optivedge_integrations.integrations.models import (
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     ABSENT,
+    PREDEFINED,
     classify_prov_type,
     provenance_raw_key,
     provenance_value,
@@ -219,7 +220,12 @@ def build_builtin_any_object(source_snapshot: Snapshot) -> NormalizedAddressObje
         description="Built-in any match",
         raw_object={"builtin": True, "kind": "any"},
         tags=[],
-        field_provenance_data=[],
+        # `any` is not read out of any payload - this function synthesises it - so none of its
+        # columns can carry a row. The ENTRY can: PAN-OS ships `any`, and an empty list here
+        # left this object with no __entry__ row beside siblings on the same model that have
+        # one, so "nobody tracks entry provenance for AddressObject" and "this object came
+        # with the release" read identically.
+        field_provenance_data=[("__entry__", PREDEFINED, None)],
     )
 
 
@@ -364,7 +370,10 @@ def normalize_predefined_address_object(
         description=description or display_name,
         raw_object=entry,
         tags=[],
-        field_provenance_data=[],
+        # From /config/predefined, so the entry is PAN-OS's. It carries no marker and an
+        # unmarked entry records `local`; an empty list recorded nothing at all. Neither is
+        # true of an object that ships with the release.
+        field_provenance_data=[("__entry__", PREDEFINED, None)],
     )
 
 

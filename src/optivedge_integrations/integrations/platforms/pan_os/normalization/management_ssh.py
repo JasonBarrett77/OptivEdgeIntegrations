@@ -18,6 +18,7 @@ from optivedge_integrations.integrations.models import (
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     ABSENT,
     Implicit,
+    parse_integer_field,
     parse_text_field, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, iter_member_values, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot, latest_merged_snapshot)
@@ -123,16 +124,42 @@ def _host_key(profile: dict[str, Any]) -> tuple[str, int, Any, str | None]:
         "setting is deleted. Only the live SSH offer can say what is presented."), None
 
 
-def _int(node: Any) -> int:
-    text, _, _ = scalar_value(node)
-    return int(text) if str(text).isdigit() else 0
+#: What an absent `session-rekey` key means. The three triggers' defaults are UNMEASURED - this
+#: module has said so since it was written - so nothing is stored and the row says why. The same
+#: shape `_host_key` above already uses, and for the same reason: the stored number would be an
+#: inference pointing the permissive way, and 0 is a configurable value in its own right, so a
+#: stored 0 would be indistinguishable from an administrator who set 0 on purpose.
+REKEY_UNMEASURED = Implicit.not_assumed(
+    "the session-rekey defaults are unmeasured. The payload contract's `ssh-service-profile` "
+    "node (measured 2026-09-11 by action=complete on fw-core-tpa-b and pan-fw-111) carries "
+    "`session-rekey` as a child and records its three triggers' UNITS - 'data (MB), packets "
+    "(2^n), interval (seconds)' - and no implicit value for any of them; its `lab_state` is "
+    "'No device has an SSH profile or binding: deviceconfig/system/ssh is absent on all three', "
+    "so there was nothing to read an absence off. `action=complete` yields a schema, never an "
+    "implicit value. Meanwhile `0` is a value an administrator can configure here, and "
+    "models/management_ssh.py records what a configured 0 MEANS per trigger (no time limit, the "
+    "cipher's own data limit, 2^28 packets, Help p.905) while saying nothing about the key being "
+    "absent. Until the rekey is negotiated against a device with no `session-rekey` key - the "
+    "method DEFAULT_OFFER in this module already uses for the cipher lists - storing 0 would "
+    "claim a limit nobody read, in the permissive direction"
+)
 
 
-def _int_with_provenance(node: Any) -> tuple[int, Any, str | None]:
-    """`_int`, keeping the marker. ABSENT when the key is not there: the rekey defaults are
-    unmeasured, and 0 is this module's own stand-in rather than a vendor fact."""
-    text, raw_key, raw_value = scalar_value(node)
-    return (int(text) if str(text).isdigit() else 0), raw_key, raw_value
+def _int_with_provenance(node: Any) -> tuple[int | None, Any, str | None]:
+    """A rekey trigger and its marker. None when the key is absent, declared by REKEY_UNMEASURED.
+
+    A PRESENT and NEGATIVE value is treated as present-and-unreadable rather than stored. This
+    helper used to guard with `str(text).isdigit()`, which is False for "-5"; `parse_integer_field`
+    uses `int()`, which parses it, and all three columns are `PositiveIntegerField` - so a
+    negative would reach the database and raise on its `>= 0` check constraint, failing the whole
+    appliance's normalization. The device's own schema range makes a negative a shape nobody has
+    seen, so it gets exactly what the parser gives unparseable text: nothing stored, and the
+    provenance of the KEY rather than of a default, because the device does hold something here.
+    """
+    value, raw_key, raw_value = parse_integer_field(node, implicit=REKEY_UNMEASURED)
+    if value is not None and value < 0:
+        return None, raw_key, raw_value
+    return value, raw_key, raw_value
 
 
 def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
@@ -167,6 +194,8 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
         _host_key(profile) if profile else _host_key({}))
     rekey = (profile or {}).get("session-rekey") or {}
     rekey_seconds, rekey_rk, rekey_rv = _int_with_provenance(rekey.get("interval"))
+    rekey_data, rekey_data_rk, rekey_data_rv = _int_with_provenance(rekey.get("data"))
+    rekey_packets, rekey_packets_rk, rekey_packets_rv = _int_with_provenance(rekey.get("packets"))
     weak = [m for m in offer["macs"] if m not in STRONG_MACS]
     ciphers_below, beyond_ciphers = _preferred_state(
         offer["ciphers"], PREFERRED_CIPHERS, ALLOWED_CIPHERS)
@@ -206,8 +235,8 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
                 "host_key_type": key_type,
                 "host_key_bits": key_bits,
                 "rekey_interval_seconds": rekey_seconds,
-                "rekey_data_mb": _int(rekey.get("data")),
-                "rekey_packets_exponent": _int(rekey.get("packets")),
+                "rekey_data_mb": rekey_data,
+                "rekey_packets_exponent": rekey_packets,
             },
         )
         # This module worked out the same distinction before FieldProvenance could hold it:
@@ -237,12 +266,18 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
         FieldProvenance.objects.filter(content_type=content_type, object_id=row.pk).delete()
         entries = [
             ("profile_name", name_rk, name_rv),
-            # Configured host key and rekey interval carry their marker, so a control firing on
-            # them can say which template or stack to change. ABSENT where the key is not
-            # there - see `_host_key` for why neither default is declared.
+            # A configured host key or rekey trigger carries its marker, so a control firing on
+            # it can say which template or stack to change. An ABSENT key carries its
+            # declaration instead and records `not_configured` - see `_host_key` and
+            # REKEY_UNMEASURED for why no default is declared for either. All three rekey
+            # triggers are here as of 2026-10-20; `data` and `packets` were stored from absent
+            # keys and appeared in no tuple, so they were the only fields on this model whose
+            # blank meant nothing at all.
             ("host_key_type", hostkey_rk, hostkey_rv),
             ("host_key_bits", hostkey_rk, hostkey_rv),
             ("rekey_interval_seconds", rekey_rk, rekey_rv),
+            ("rekey_data_mb", rekey_data_rk, rekey_data_rv),
+            ("rekey_packets_exponent", rekey_packets_rk, rekey_packets_rv),
             *list_rows,
         ]
         FieldProvenance.objects.bulk_create([

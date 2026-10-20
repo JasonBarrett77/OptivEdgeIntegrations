@@ -7850,8 +7850,6 @@ class PasswordComplexityNormalizationTests(TestCase):
             object_id=policy.pk)}
         self.assertIn("minimum_length", rows)
         self.assertEqual(rows["minimum_length"].raw_value, "tpl-base")
-        # An absent key produces NO row - that is what keeps "defaulted" and "written locally"
-        # apart.
         # Every complexity key the device does not carry is a measured PAN-OS default - the
         # whole node absent means 0 and unticked, measured 2026-09-03 from the blank form.
         self.assertEqual(rows["minimum_special"].provenance_type, "pan_os_default")
@@ -8290,6 +8288,82 @@ class ManagementSshNormalizationTests(TestCase):
         # Still fires: PAN-MCR-004's baseline is "not ECDSA", and blank is not ECDSA.
         self.assertNotEqual(row.host_key_type.upper(), "ECDSA")
 
+    def test_an_absent_session_rekey_stores_nothing_for_all_three_triggers(self):
+        """These stored 0 for an absent key, and two of them appeared in no provenance tuple at
+        all. 0 is also a value an administrator can configure - and what a configured 0 MEANS is
+        documented per trigger (no time limit, the cipher's own data limit, 2^28 packets, Help
+        p.905) - so the stand-in and a deliberate 0 were the same number, in the permissive
+        direction, with nothing saying which it was. The module has said since it was written
+        that these defaults are unmeasured; now the row says it too."""
+        self._normalize(self._bound("p", ciphers={"member": ["aes256-gcm"]}))
+        row = _ManagementSshSettings.objects.get(appliance=self.appliance)
+        rows = {r.field_name: r for r in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
+            object_id=row.pk)}
+
+        for field in ("rekey_interval_seconds", "rekey_data_mb", "rekey_packets_exponent"):
+            with self.subTest(field):
+                self.assertIsNone(getattr(row, field))
+                self.assertEqual(rows[field].provenance_type, "not_configured")
+                self.assertEqual(rows[field].raw_value, "",
+                                 "nothing was stored, so there is no value to carry")
+
+    def test_all_three_configured_triggers_are_read_and_keep_their_marker(self):
+        """`data` and `packets` were read through a provenance-less helper and appeared in no
+        tuple, so they were the only fields on this model whose blank meant nothing at all."""
+        self._normalize(self._bound("p", **{"session-rekey": {
+            "interval": "1800",
+            "data": {"@ptpl": "stack_x", "#text": "500"},
+            "packets": "28",
+        }}))
+        row = _ManagementSshSettings.objects.get(appliance=self.appliance)
+        rows = {r.field_name: r for r in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
+            object_id=row.pk)}
+
+        self.assertEqual((row.rekey_interval_seconds, row.rekey_data_mb,
+                          row.rekey_packets_exponent), (1800, 500, 28))
+        self.assertEqual(rows["rekey_interval_seconds"].provenance_type, "local")
+        self.assertEqual(rows["rekey_packets_exponent"].provenance_type, "local")
+        self.assertEqual((rows["rekey_data_mb"].provenance_type,
+                          rows["rekey_data_mb"].raw_value), ("template", "stack_x"))
+
+    def test_a_configured_zero_is_distinguishable_from_an_absent_key(self):
+        """The whole point of the change. Both store a falsy answer; only the row says whether
+        an administrator wrote it."""
+        self._normalize(self._bound("p", **{"session-rekey": {"interval": "0"}}))
+        row = _ManagementSshSettings.objects.get(appliance=self.appliance)
+        written = FieldProvenance.objects.get(
+            content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
+            object_id=row.pk, field_name="rekey_interval_seconds")
+        self.assertEqual(row.rekey_interval_seconds, 0)
+        self.assertEqual(written.provenance_type, "local")
+
+    def test_a_present_negative_value_does_not_reach_the_column(self):
+        """The one behaviour difference in moving to `parse_integer_field`. The old helper
+        guarded with `str(text).isdigit()`, which is False for "-5"; `int("-5")` parses. All
+        three columns are `PositiveIntegerField` and SQLite carries its `>= 0` CHECK, so a
+        negative would raise and fail the whole appliance's normalization. A negative is outside
+        the device's own schema range, so it is treated the way the parser treats unparseable
+        text: nothing stored, and the provenance of the KEY rather than of a default, because
+        the device does hold something here."""
+        self._normalize(self._bound("p", **{"session-rekey": {"interval": "-5"}}))
+        row = _ManagementSshSettings.objects.get(appliance=self.appliance)
+        written = FieldProvenance.objects.get(
+            content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
+            object_id=row.pk, field_name="rekey_interval_seconds")
+        self.assertIsNone(row.rekey_interval_seconds)
+        self.assertEqual(written.provenance_type, "local",
+                         "present and unreadable is not a default")
+
+    def test_the_rekey_declaration_assumes_nothing(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.management_ssh import (  # noqa: E501
+            REKEY_UNMEASURED)
+        self.assertIsNone(REKEY_UNMEASURED.value)
+        self.assertIsNone(REKEY_UNMEASURED.citation)
+        self.assertEqual(REKEY_UNMEASURED.provenance_type, "not_configured")
+        self.assertTrue(REKEY_UNMEASURED.stores_nothing)
+
     def test_nothing_bound_offers_the_measured_default(self):
         row = self._normalize()
         self.assertEqual(row.profile_name, "")
@@ -8413,6 +8487,7 @@ class ImplicitDeclarationTests(TestCase):
         "device_services.py": 2,      # accept-dhcp-hostname, accept-dhcp-domain
         "management_ssh.py": 1,       # the built-in SSH offer of an UNMEASURED release
         "password_profiles.py": 1,    # password-change periods
+        "security_rules.py": 1,       # rule-type absent -> universal; see RULE_TYPE_IMPLICIT
         "server_profiles.py": 1,      # admin-use-only
         "zones.py": 1,                # user-identification and prenat flags
     }
@@ -10830,3 +10905,352 @@ class NormalizationLifecycleTests(TestCase):
             views_module._run_bulk_in_scope_refresh_in_background()
 
         refresh.assert_not_called()
+
+
+class PasswordComplexityAbsentNodeProvenanceTests(TestCase):
+    """Sixteen stored values and sixteen rows, on a firewall that has never enabled complexity.
+
+    `password_complexity_from_snapshot` pre-populated `values`, set `provenance = []`, and then
+    returned from three early exits before its declaring loop could run. The third exit is the
+    ORDINARY state of a firewall - the reader's own docstring says PAN-OS never writes these
+    values, so a device where nobody enabled complexity has no `password-complexity` node - so
+    the common case wrote sixteen columns and zero rows, and `provenance_for` answered "nothing
+    tracks this field" for all sixteen. PAN-AUTH-001 to 013 rest on those columns.
+
+    Nothing about the declarations changed to fix it: the loop already resolved every absent key
+    to `Implicit.measured(..., PASSWORD_COMPLEXITY_CITATION)`. The early returns were the only
+    reason those declarations never reached a row.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.pcprov")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-pcprov",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-PCPROV", hostname="fw-pcprov")
+
+    def _normalize(self, payload):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(), payload=payload)
+        normalize_appliance_password_complexity(self.appliance)
+        policy = PasswordComplexityPolicy.objects.get(appliance=self.appliance)
+        rows = {r.field_name: r for r in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(PasswordComplexityPolicy),
+            object_id=policy.pk)}
+        return policy, rows
+
+    #: The three shapes that each took one of the deleted early returns, and a fourth whose
+    #: node IS present - which always reached the loop - with the one key it writes. Mapped to
+    #: the fields that should come back `local` rather than defaulted.
+    PAYLOADS = {
+        "no config root": ({}, set()),
+        "config but no mgt-config": ({"config": {"devices": {"entry": [{}]}}}, set()),
+        "mgt-config but no password-complexity": (
+            {"config": {"mgt-config": {"users": {}}}}, set()),
+        "complexity present, no password-change": (
+            {"config": {"mgt-config": {"password-complexity": {"enabled": "no"}}}},
+            {"enabled"}),
+    }
+
+    def test_every_field_is_declared_on_every_path_that_used_to_return_early(self):
+        for label, (payload, written) in self.PAYLOADS.items():
+            with self.subTest(label):
+                PasswordComplexityPolicy.objects.filter(appliance=self.appliance).delete()
+                Snapshot.objects.filter(appliance=self.appliance).delete()
+                policy, rows = self._normalize(payload)
+                self.assertEqual(
+                    len(rows), 16,
+                    f"{label}: sixteen tracked fields, sixteen rows - a missing row means only "
+                    f"that the field is not tracked, and all sixteen are")
+                defaulted = {name for name in rows if name not in written}
+                self.assertEqual(
+                    {rows[name].provenance_type for name in defaulted}, {"pan_os_default"},
+                    f"{label}: an absent key is the measured default, not local")
+                for name in written:
+                    self.assertEqual(
+                        rows[name].provenance_type, "local",
+                        f"{label}: {name} is in the payload, so the row is the key's own")
+
+    def test_the_stored_numbers_did_not_move(self):
+        """The fix is control flow. Every field reads exactly what the pre-populated dict held -
+        `False` for a flag, `0` for a number - because that is what the loop's declarations say
+        an absent key means."""
+        policy, _ = self._normalize(self.PAYLOADS["no config root"][0])
+        self.assertFalse(policy.enabled)
+        self.assertFalse(policy.block_username_inclusion)
+        self.assertFalse(policy.change_on_first_login)
+        for field in ("minimum_length", "minimum_uppercase", "minimum_lowercase",
+                      "minimum_numeric", "minimum_special", "new_differs_by_characters",
+                      "history_count", "block_repeated_characters", "change_period_block",
+                      "expiration_period", "expiration_warning_period",
+                      "post_expiration_admin_login_count", "post_expiration_grace_period"):
+            with self.subTest(field):
+                self.assertEqual(getattr(policy, field), 0)
+
+    def test_the_row_carries_the_defaulted_value_and_no_key(self):
+        """A reader of the row can see what was defaulted without resolving the field, and
+        `raw_key` is empty because there was no key."""
+        _, rows = self._normalize(self.PAYLOADS["mgt-config but no password-complexity"][0])
+        self.assertEqual((rows["enabled"].raw_value, rows["enabled"].raw_key), ("no", ""))
+        self.assertEqual((rows["minimum_length"].raw_value, rows["minimum_length"].raw_key),
+                         ("0", ""))
+
+    def test_provenance_for_no_longer_answers_none_for_a_tracked_field(self):
+        """The consumer-visible defect. `PasswordComplexityPolicy` declares no `DERIVED_FIELDS`,
+        so all sixteen are tracked, and `None` from `provenance_for` means untracked."""
+        policy, _ = self._normalize(self.PAYLOADS["no config root"][0])
+        self.assertEqual(PasswordComplexityPolicy.DERIVED_FIELDS, ())
+        for field in ("enabled", "minimum_length", "post_expiration_grace_period"):
+            with self.subTest(field):
+                self.assertIsNotNone(policy.provenance_for(field))
+
+    def test_the_second_consumer_still_gets_every_value(self):
+        """`password_profiles.py` calls this reader as `global_values, _ =` for one comparison.
+        `values` stopped being pre-populated, so the loop has to fill all sixteen keys."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (  # noqa: E501
+            PASSWORD_COMPLEXITY_FIELDS, password_complexity_from_snapshot)
+        snapshot = Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(), payload={})
+        values, provenance = password_complexity_from_snapshot(snapshot)
+        self.assertEqual(set(values), {f for f, _, _, _ in PASSWORD_COMPLEXITY_FIELDS})
+        self.assertEqual(len(provenance), 16)
+        self.assertIn("password_expiration_period", values)
+
+
+class SecurityRuleRuleTypeProvenanceTests(TestCase):
+    """What an absent `rule-type` means - MEASURED 2026-10-20 on pan-fw-201, PAN-OS 11.2.5.
+
+    `read-a-security-rule.md` said both things five lines apart: `:60-61` "treat
+    <rule-type>universal</rule-type> and an absent rule-type as identical; the dataplane does",
+    and `:57-58` that the 2026-10-05 pass did NOT cover this key and nothing had established it.
+    The payload contract carries no `rule-type` field on either rule node. So it was measured.
+
+    Three rules were created on pan-fw-201 for it, and read back through Panorama:
+
+      intrazone_rule_test                 explicit `intrazone`
+      interzone_rule_test                 explicit `interzone`
+      explicit_universal_rule_type_test   created intrazone, then set back to universal
+
+    Both `action=get` (candidate) and `action=show` (running) report `rule-type: universal` for
+    the third, EXPLICITLY - so PAN-OS does not prune the element when it matches the default,
+    and "set it back and watch it vanish" does not establish anything here. What settles it is
+    `show running security-policy`: it prints `type intrazone;` and `type interzone;` for the
+    first two, and NO type line at all for the third - nor for the two shared pre-rules pushed
+    to the same device, which carry no `rule-type` key. The compiled policy renders an explicit
+    universal and an absent key identically, which is the guide's claim measured.
+
+    Recorded as ASSUMED and not measured, for a reason that survives the measurement: absence
+    is a payload state the device keeps distinct from an explicit universal, and what the
+    dataplane shows for it is SILENCE. No device output names "universal" for an absent key, so
+    the VALUE is still our reading. A consumer must not render it as a vendor default.
+    """
+
+    def _rules(self, *entries):
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-RULETYPE", appliance_hostname="fw-ruletype")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"vsys": {"entry": {
+                "@name": "vsys1",
+                "rulebase": {"security": {"rules": {"entry": list(entries)}}},
+            }}}}}})
+        _create_empty_pushed_policy_snapshot(station=station,
+                                             enforcement_point=enforcement_point)
+        normalize_enforcement_point_addresses(enforcement_point)
+        normalize_enforcement_point_security_rules(enforcement_point)
+        return {rule.name: rule for rule in SecurityRule.objects.all()}
+
+    @staticmethod
+    def _entry(name, **extra):
+        return {"@name": name, "from": {"member": "any"}, "to": {"member": "any"},
+                "source": {"member": "any"}, "destination": {"member": "any"},
+                "application": {"member": "any"}, "service": {"member": "application-default"},
+                "action": "allow", **extra}
+
+    def test_an_absent_rule_type_stores_universal_and_says_it_is_assumed(self):
+        rules = self._rules(self._entry("untouched"))
+        self.assertEqual(rules["untouched"].rule_type, "universal")
+        row = rules["untouched"].field_provenance.get(field_name="rule_type")
+        self.assertEqual(row.provenance_type, "assumed_default")
+        self.assertEqual(row.raw_value, "universal",
+                         "the row carries the inferred value, so a reader sees what was "
+                         "assumed without resolving the field")
+        self.assertEqual(row.raw_key, "", "there was no key")
+
+    def test_an_explicit_universal_is_local_and_not_a_default(self):
+        """The distinction the device itself keeps. The column reads the same either way, and
+        the row is the only thing that says whether an author wrote it - which is why the
+        measurement mattered: PAN-OS stores an explicit `universal` rather than pruning it."""
+        rules = self._rules(self._entry("written", **{"rule-type": "universal"}))
+        self.assertEqual(rules["written"].rule_type, "universal")
+        row = rules["written"].field_provenance.get(field_name="rule_type")
+        self.assertEqual(row.provenance_type, "local")
+
+    def test_the_two_measured_rule_types_are_read_as_written(self):
+        rules = self._rules(self._entry("intra", **{"rule-type": "intrazone"}),
+                            self._entry("inter", **{"rule-type": "interzone"}))
+        self.assertEqual(rules["intra"].rule_type, "intrazone")
+        self.assertEqual(rules["inter"].rule_type, "interzone")
+        for name in ("intra", "inter"):
+            with self.subTest(name):
+                row = rules[name].field_provenance.get(field_name="rule_type")
+                self.assertEqual(row.provenance_type, "local")
+
+    def test_a_pushed_rule_type_keeps_its_marker(self):
+        """`parse_text_field` replaced `scalar_value`, which had the marker already. It must
+        still arrive: a control firing on rule_type has to say which template to change."""
+        rules = self._rules(self._entry(
+            "pushed", **{"rule-type": {"@ptpl": "stack_x", "#text": "interzone"}}))
+        self.assertEqual(rules["pushed"].rule_type, "interzone")
+        row = rules["pushed"].field_provenance.get(field_name="rule_type")
+        self.assertEqual((row.provenance_type, row.raw_value), ("template", "stack_x"))
+
+    def test_the_declaration_is_an_inference_and_declares_itself_one(self):
+        """`assumed_default`, never `pan_os_default`: the dataplane's silence is what was
+        measured, and the name is ours. `tests.py`'s ASSUMED_DEFAULTS inventory counts it."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (  # noqa: E501
+            RULE_TYPE_IMPLICIT)
+        self.assertEqual(RULE_TYPE_IMPLICIT.value, "universal")
+        self.assertIsNone(RULE_TYPE_IMPLICIT.citation)
+        self.assertEqual(RULE_TYPE_IMPLICIT.provenance_type, "assumed_default")
+        self.assertIn("pan-fw-201", RULE_TYPE_IMPLICIT.reasoning)
+        self.assertNotIn(
+            "rule_type", SecurityRule.DERIVED_FIELDS,
+            "it reads a payload key, so it is a row's business and not a declaration's")
+
+
+class PredefinedEntryProvenanceTests(TestCase):
+    """`predefined`: the entry is present and PAN-OS SHIPPED it.
+
+    An unmarked entry records LOCAL - "defined on this device" - which was asserted about
+    objects that ship with the release and cannot be edited at all. Two sites said it two
+    different ways: `certificates.py` wrote the LOCAL row for predefined-scope SSL/TLS profiles
+    and certificates, and `addresses.py` passed an empty provenance list for the built-in `any`
+    and the predefined EDLs, so those carried no `__entry__` row and read as untracked beside
+    siblings on the same model that had one.
+
+    The scope the entry was collected from is the only thing that says so - there is no payload
+    key for it - so the reading site passes the `PREDEFINED` sentinel as the raw key.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.pre")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-pre",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-PRE", hostname="fw-pre")
+
+    def _entry_row(self, obj):
+        return FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(type(obj)),
+            object_id=obj.pk, field_name="__entry__").first()
+
+    def test_the_sentinel_classifies_as_predefined_and_carries_no_key(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+            ABSENT, PREDEFINED, classify_prov_type, provenance_raw_key, provenance_value)
+        self.assertEqual(classify_prov_type(PREDEFINED), "predefined")
+        self.assertEqual(provenance_raw_key(PREDEFINED), "")
+        self.assertEqual(provenance_value(PREDEFINED, None), "")
+        self.assertIsNot(PREDEFINED, ABSENT,
+                         "it is not an absence - the entry exists, the ORIGIN is the vendor")
+        self.assertEqual(classify_prov_type(None), "local",
+                         "an unmarked entry on any other scope is still local")
+
+    def test_predefined_is_a_choice_on_the_model(self):
+        self.assertIn(("predefined", "Predefined"), FieldProvenance.ProvenanceType.choices)
+        self.assertNotIn("predefined", FieldProvenance.ABSENT_TYPES,
+                         "an origin type, not an absent one")
+        self.assertNotIn("predefined", FieldProvenance.DEFAULTED_TYPES)
+
+    def _normalize_profiles(self, *, shared=None, predefined=None):
+        config = {"devices": {"entry": [{"@name": "localhost.localdomain"}]}}
+        if shared is not None:
+            config["shared"] = {"ssl-tls-service-profile": {"entry": shared}}
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": config})
+        if predefined is not None:
+            Snapshot.objects.create(
+                management_station=self.station, appliance=self.appliance,
+                source_type="config_predefined_ssl_tls_service_profiles",
+                collected_at=timezone.now(),
+                payload={"ssl-tls-service-profile": {"entry": predefined}})
+        normalize_appliance_certificate_objects(self.appliance)
+
+    @staticmethod
+    def _profile(name, minimum="tls1-2", certificate="cert"):
+        return {"@name": name, "certificate": certificate,
+                "protocol-settings": {"min-version": minimum, "max-version": "tls1-3"}}
+
+    def test_a_predefined_profile_says_predefined_and_a_shared_one_still_says_local(self):
+        """Both are unmarked. Before, both recorded `local`, and the one a reader can actually
+        go and change was indistinguishable from the one shipped in the release."""
+        self._normalize_profiles(shared=[self._profile("mine")],
+                                 predefined=[self._profile("TLSv1.3_Default")])
+        shipped = SslTlsServiceProfile.objects.get(
+            appliance=self.appliance, name="TLSv1.3_Default")
+        local = SslTlsServiceProfile.objects.get(appliance=self.appliance, name="mine")
+        self.assertEqual(shipped.scope, "predefined")
+        self.assertEqual(self._entry_row(shipped).provenance_type, "predefined")
+        self.assertEqual(self._entry_row(shipped).raw_key, "")
+        self.assertEqual(self._entry_row(local).provenance_type, "local")
+
+    def test_a_marker_on_a_predefined_entry_is_still_the_better_fact(self):
+        """Scope only overrides the UNMARKED case. A marker is read off the payload and says
+        where to go and change it, which no inference from scope can improve on."""
+        self._normalize_profiles(
+            predefined=[dict(self._profile("TLSv1.3_Default"), **{"@ptpl": "stack_x"})])
+        shipped = SslTlsServiceProfile.objects.get(
+            appliance=self.appliance, name="TLSv1.3_Default")
+        row = self._entry_row(shipped)
+        self.assertEqual((row.provenance_type, row.raw_value), ("template", "stack_x"))
+
+    def _normalize_addresses(self):
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-PREADDR", appliance_hostname="fw-preaddr")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"vsys": {"entry": {
+                "@name": "vsys1",
+                "address": {"entry": [{"@name": "net-obj", "ip-netmask": "10.1.2.3/24"}]},
+            }}}}}})
+        _create_empty_pushed_policy_snapshot(station=station,
+                                            enforcement_point=enforcement_point)
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_predefined_ip_block_lists", collected_at=timezone.now(),
+            payload={"ip-block-list-v2": {"entry": [{
+                "@name": "panw-known-ip-list", "filename": "panw-known-ip-list",
+                "display-name": "Palo Alto Networks - Known malicious IP addresses",
+                "description": "IP addresses used almost exclusively by malicious actors."}]}})
+        normalize_enforcement_point_addresses(enforcement_point)
+        return {obj.name: obj for obj in AddressObject.objects.all()}
+
+    def test_the_builtin_any_and_a_predefined_edl_carry_an_entry_row(self):
+        objects = self._normalize_addresses()
+        for name in ("any", "panw-known-ip-list"):
+            with self.subTest(name):
+                row = self._entry_row(objects[name])
+                self.assertIsNotNone(
+                    row, "an empty provenance list left these two with no __entry__ row, so "
+                         "'nobody tracks entry provenance here' and 'PAN-OS shipped this' read "
+                         "the same")
+                self.assertEqual(row.provenance_type, "predefined")
+                self.assertEqual(row.raw_key, "")
+
+    def test_a_locally_defined_sibling_on_the_same_model_still_says_local(self):
+        """The comparison that makes the row worth having: three objects, one model, and the
+        rows now tell a vendor object from one an administrator wrote."""
+        objects = self._normalize_addresses()
+        self.assertEqual(self._entry_row(objects["net-obj"]).provenance_type, "local")

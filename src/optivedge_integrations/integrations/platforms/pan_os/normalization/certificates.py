@@ -33,6 +33,7 @@ from optivedge_integrations.integrations.models import (
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     Implicit,
     ABSENT,
+    PREDEFINED,
     classify_prov_type,
     provenance_raw_key,
     provenance_value,
@@ -296,6 +297,13 @@ def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
             )
             seen.append(obj.pk)
             raw_key, raw_value = entry_provenance(scoped.entry)
+            if raw_key is None and scoped.scope == CertificateProfile.SCOPE_PREDEFINED:
+                # A predefined entry carries no @ptpl and no @loc, and an unmarked entry
+                # records LOCAL - "defined on this device", about an object that ships with
+                # the release and cannot be edited. Only the scope says otherwise, and this
+                # is where it is known. A marker, if one were ever present, is still the
+                # better fact and is left alone.
+                raw_key, raw_value = PREDEFINED, None
             FieldProvenance.objects.filter(
                 content_type=content_type, object_id=obj.pk).delete()
             if raw_key is not ABSENT:
