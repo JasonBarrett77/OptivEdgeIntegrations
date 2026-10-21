@@ -116,6 +116,19 @@ class NormalizedAddressGroup:
     field_provenance_data: list[tuple[str, Any, str | None]]
 
 
+#: An EDL's value lives under one of type/{ip,domain,url,imei,imsi}. An entry carrying none of
+#: them is an UNRECOGNISED PAYLOAD SHAPE - we failed to read it - which is not the same as an
+#: author leaving a field alone. The row says that much rather than letting the field look
+#: untracked. An ERROR-severity PolicyObjectIssue would say it better, and is NOT done here:
+#: external_list_value is a pure function and the issue channel is threaded through its caller,
+#: so that is a signature change and a separate decision. Jason has it.
+UNREADABLE_EDL_TYPE = Implicit.not_assumed(
+    "an EDL's value lives under one of type/{ip,domain,url,imei,imsi} and this entry carries "
+    "none of them. Nothing is stored because there is nothing to read - this is an unrecognised "
+    "payload shape, not an author leaving a field alone, and the row says so rather than the "
+    "field looking untracked")
+
+
 def external_list_value(entry: dict[str, Any]) -> tuple[str, Any, str | None, str]:
     """Return (value, raw_key, raw_prov_value, list_type) for an EDL address object entry.
 
@@ -126,7 +139,7 @@ def external_list_value(entry: dict[str, Any]) -> tuple[str, Any, str | None, st
     """
     type_node = entry.get("type")
     if not isinstance(type_node, dict):
-        return "", ABSENT, None, ""
+        return "", UNREADABLE_EDL_TYPE, None, ""
 
     for list_type in ("ip", "domain", "url", "imei", "imsi"):
         list_node = type_node.get(list_type)
@@ -140,7 +153,7 @@ def external_list_value(entry: dict[str, Any]) -> tuple[str, Any, str | None, st
         rk, rv = entry_provenance(list_node)
         return list_type, rk, rv, list_type
 
-    return "", ABSENT, None, ""
+    return "", UNREADABLE_EDL_TYPE, None, ""
 
 
 def derive_address_fields(address_type: str, value: str) -> tuple[str, int | None, int | None, int | None, bool]:
