@@ -10,6 +10,18 @@ it cites, the code wins and the line is a defect — fix it in the same change.
 Paths are relative to `src/optivedge_integrations/integrations/` unless they begin with `./`,
 which means the repository root.
 
+## Principles, which cite nothing
+
+**Every other claim in this file names the code that checks it. These do not, and that is
+deliberate** - decided by Jason, 2026-10-21. A principle that shapes every judgement is worth more
+than any single checkable claim, and the honest cost is that nobody can re-audit it mechanically.
+Keep this list to a handful. Anything that CAN cite code belongs below instead.
+
+- **Failure must be proportionate to what is unknown.** It is the reasoning behind
+  `pushed_entry_scope`'s visible fallback, the per-entry issue model, and `pushed_shared()`
+  raising where `pushed_vsys_panorama()` returns `{}`. Losing one object's scope is not a reason
+  to fail an enforcement point's whole build; being handed a shape nobody has seen is.
+
 **`./DECISIONS.md` holds what this file deliberately excludes**: decisions about code that LOOKS
 dead and is not, and shapes that look wrong and are deliberate. Read it before deleting anything
 that appears unused - four routes nothing links to, a notes feature knowingly broken, and a

@@ -110,22 +110,14 @@ why they anchor to nothing in it.
 - **Django resolves a `default:` filter argument eagerly**, so `{{ a|default:b }}` raises when `b`
   is absent. Prefer building a single display string in Python.
 
-## Open question for Jason
+## Principles without a citation - DECIDED
 
-The rebuild also named **"failure must be proportionate to what is unknown"** as the most
-transferable thing in the archived file, and it anchors to no single line — it is the principle
-behind `pushed_entry_scope`'s visible fallback, the per-entry issue model, and `pushed_shared()`
-raising where `pushed_vsys_panorama()` returns `{}`. It is a principle, not a decision and not a
-fact, so it fits neither this file nor the instruction file under the standard as written.
+**Decided by Jason, 2026-10-21:** allow them, marked as such, capped at a handful. `CLAUDE.md`
+now carries a "Principles, which cite nothing" section holding the one this question was about -
+"failure must be proportionate to what is unknown".
 
-**That is the one place I would loosen the standard**: allow a principle stated without a line,
-capped at a handful, marked as such, in the instruction file. Three or four sentences that shape
-every judgement a session makes are worth more than any single checkable claim in the file — and
-the honest cost is that nobody can re-audit them mechanically, which is exactly what the standard
-was built to guarantee.
-
----
-
+**What a session would otherwise do:** delete an uncited line from `CLAUDE.md` for breaking the
+file's own standard, or refuse to write a principle down at all because it anchors to no line.
 ## Report provenance at the layer where an override can occur
 
 > **The override boundary is the coarsest level that is never wrong.**
