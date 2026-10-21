@@ -23,8 +23,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     ensure_list,
     parse_integer_field,
     parse_yes_no_field,
-    scalar_value,
-)
+    scalar_value, parse_text_field)
 
 
 DEFAULT_IDLE_TIMEOUT_MINUTES = 60
@@ -95,7 +94,15 @@ def login_banner_from_node(system: Any) -> tuple[dict[str, Any], list]:
     """
     if not isinstance(system, dict):
         system = {}
-    text, text_rk, text_rv = scalar_value(system.get("login-banner"))
+    text, text_rk, text_rv = parse_text_field(
+        system.get("login-banner"),
+        implicit=Implicit.measured(
+            "",
+            "payload contract, mgmt-settings.login-banner: implicit '' - absent means NO "
+            "BANNER, measured 2026-09-01 on a PA-5220 (11.1.13-h3) and a PA-VM (11.2.3) "
+            "with the UI as the oracle, because these keys do not vanish when written to "
+            "their default. Corroborated the same day: ack-login-banner is greyed out "
+            "until a banner exists, so the device reads absence as no banner too"))
     ack, ack_rk, ack_rv = parse_yes_no_field(
         system.get("ack-login-banner"),
         implicit=Implicit.measured(

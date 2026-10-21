@@ -27,7 +27,7 @@ from optivedge_integrations.integrations.models import (
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     Implicit,
     ABSENT, classify_prov_type, provenance_raw_key, provenance_value, entry_provenance, ensure_list, iter_member_values,
-    parse_yes_no_field, scalar_value)
+    parse_yes_no_field, scalar_value, parse_text_field)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     latest_merged_snapshot)
 
@@ -192,7 +192,17 @@ def normalize_admin_users(appliance: Appliance) -> dict[str, int]:
         role_based = permissions.get("role-based") if isinstance(permissions, dict) else None
         role_type, role_scope, custom_profile = resolve_role(role_based)
 
-        auth_profile, auth_key, auth_value = scalar_value(entry.get("authentication-profile"))
+        auth_profile, auth_key, auth_value = parse_text_field(
+        entry.get("authentication-profile"),
+        implicit=Implicit.measured(
+            None,
+            "payload contract, admin-user.authentication-profile: implicit null - the key "
+            "holds a NAME, and an absent key is no PER-ACCOUNT binding rather than no "
+            "authentication. What then governs the account was measured on fw-core-tpa-b, "
+            "2026-09-08 to 09-10 ($authentication_precedence, $two_bindings_decide_"
+            "administrative_authentication): the stored password, else "
+            "deviceconfig/system/authentication-profile. Ask effective_authentication_profile "
+            "what governs the account, not this field"))
         pwd_profile, pwd_key, pwd_value = scalar_value(entry.get("password-profile"))
         cert_only, cert_key, cert_value = parse_yes_no_field(
             entry.get("client-certificate-only"),
