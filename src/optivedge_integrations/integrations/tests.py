@@ -11254,3 +11254,57 @@ class PredefinedEntryProvenanceTests(TestCase):
         rows now tell a vendor object from one an administrator wrote."""
         objects = self._normalize_addresses()
         self.assertEqual(self._entry_row(objects["net-obj"]).provenance_type, "local")
+
+
+class UnreadableExternalListTests(TestCase):
+    """An EDL whose `type` node carries none of ip/domain/url/imei/imsi.
+
+    Absence there means WE FAILED TO READ, not that nobody configured anything - the one
+    case in the provenance work where those differ. Two instruments say so: a
+    not_configured provenance row (the field is tracked and empty) and an ERROR issue (the
+    payload was unreadable). This covers the second.
+    """
+
+    def _edl(self, type_node):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
+            external_list_value)
+        return external_list_value({"@name": "edl-1", "type": type_node})
+
+    def test_a_recognised_type_yields_its_list_type(self):
+        value, _rk, _rv, list_type = self._edl({"ip": {"url": "https://example.test/list"}})
+        self.assertEqual(list_type, "ip")
+        self.assertEqual(value, "https://example.test/list")
+
+    def test_an_unrecognised_type_node_yields_no_list_type(self):
+        for node in ({"bogus": {"url": "x"}}, {}, "not-a-dict", None):
+            _value, _rk, _rv, list_type = self._edl(node)
+            self.assertEqual(list_type, "", f"{node!r} should not resolve a list type")
+
+    def test_an_unreadable_edl_raises_an_error_issue_and_is_kept(self):
+        from optivedge_integrations.integrations.models.policy.objects import AddressObject
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
+            _unreadable_edls)
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.types import (
+            PolicyObjectIssue)
+
+        class Fake:
+            def __init__(self, name, address_type, edl_list_type):
+                self.name, self.address_type, self.edl_list_type = name, address_type, edl_list_type
+
+        issues = _unreadable_edls([
+            Fake("good", AddressObject.TYPE_EDL, "ip"),
+            Fake("bad", AddressObject.TYPE_EDL, ""),
+            Fake("not-an-edl", AddressObject.TYPE_IP_NETMASK, ""),
+        ])
+        self.assertEqual([i.name for i in issues], ["bad"],
+                         "only the EDL with no resolved list type is an issue")
+        self.assertEqual(issues[0].severity, PolicyObjectIssue.ERROR)
+        self.assertEqual(issues[0].disposition, PolicyObjectIssue.KEPT,
+                         "dropping it would fail every referencing rule, which is the "
+                         "misattribution this design removes")
+
+    def test_an_empty_url_is_readable_and_not_an_issue(self):
+        """`value == ""` alone must not be the test - a readable EDL can have an empty url."""
+        value, _rk, _rv, list_type = self._edl({"url": {"url": ""}})
+        self.assertEqual(value, "")
+        self.assertEqual(list_type, "url", "readable: the type node WAS recognised")

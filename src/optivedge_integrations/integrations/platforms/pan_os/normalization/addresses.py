@@ -488,6 +488,38 @@ def normalize_address_group(
     )
 
 
+def _unreadable_edls(normalized) -> list[PolicyObjectIssue]:
+    """An EDL whose `type` node carried none of ip/domain/url/imei/imsi.
+
+    `external_list_value` returns `list_type=""` only in that case - an UNRECOGNISED PAYLOAD
+    SHAPE rather than an author leaving a field alone. The provenance row says the field is
+    tracked and empty; this says the payload could not be read, which is a collection fault
+    and the same severity as a duplicate name for the same reason: the data for that object
+    cannot be trusted.
+
+    DISPOSITION IS KEPT. The object normalizes with an empty value, and dropping it would make
+    every referencing rule fail - reporting the fault against rules that are fine, which is the
+    misattribution this design exists to remove.
+
+    Checked here rather than inside `external_list_value` because that is a pure function and
+    the issue channel is threaded through this module's caller. `edl_list_type` carries the
+    signal out, so no signature change is needed. Testing `value == ""` INSTEAD WOULD BE WRONG:
+    a readable EDL whose `url` node is empty also has an empty value.
+    """
+    return [
+        PolicyObjectIssue(
+            kind="address object", name=item.name, severity=PolicyObjectIssue.ERROR,
+            disposition=PolicyObjectIssue.KEPT,
+            reason=("external-list entry carries no type/{ip,domain,url,imei,imsi} child, so "
+                    "its value could not be read. Kept with an empty value; anything asserting "
+                    "on this EDL's contents is answering about a payload we did not understand"),
+        )
+        for item in normalized
+        if getattr(item, "address_type", "") == AddressObject.TYPE_EDL
+        and not getattr(item, "edl_list_type", "")
+    ]
+
+
 def _drop_unnamed_and_duplicates(normalized, kind):
     """Remove unnamed entries and same-scope duplicates, reporting each.
 
@@ -769,6 +801,7 @@ def build_normalized_addresses(
     normalized_objects.extend(build_normalized_predefined_address_objects(enforcement_point))
     normalized_objects.append(build_builtin_any_object(merged_snapshot))
 
+    issues.extend(_unreadable_edls(normalized_objects))
     normalized_objects, object_issues = _drop_unnamed_and_duplicates(
         normalized_objects, "address object")
     normalized_groups, group_issues = _drop_unnamed_and_duplicates(
