@@ -118,7 +118,11 @@ dirty must be flagged, not silently normalized.
 
 `tags:` parameters, vsys=, target=, panorama-proxy, logs, api
 
-- **`vsys=`** on the per-vsys pushed query, or `[TRAP]` you get vsys1 silently.
+- **The vsys goes INSIDE the command** on the per-vsys pushed query:
+  `<show><config><pushed-shared-policy><vsys>N</vsys></pushed-shared-policy></config></show>`.
+  `[TRAP]` **A `vsys=` PARAMETER is silently ignored here** - measured 2026-10-20, where
+  `vsys=vsys3`, `vsys=vsys1` and no vsys returned identical payloads. Omitting the vsys does
+  not fall back to vsys1; it returns the SHARED view, which is A1's other command.
 - **`target=<serial>`** proxies through Panorama, for `type=config` and `type=op`.
   `[MEASURED 2026-08-25]` `type=log` accepts it and **silently ignores it**, answering from
   Panorama's own log database with plausible, well-formed, wrong records. `type=version` likewise
@@ -415,16 +419,23 @@ are not in effect — including credentials, which are dropped like any other un
 `tags:` normalization, FieldProvenance, ProvenancedMixin, absence, coverage
 
 `ProvenancedMixin` + `FieldProvenance` rows, never a bespoke column. One row per tracked field per
-object, generic FK, with `provenance_type` ∈ `local | template | device_group | panorama | unknown`,
+object, generic FK, with `provenance_type` ∈ one of TEN members - `local | template | device_group | panorama`
+for a present key, `predefined` for a vendor-shipped entry, `pan_os_default |
+assumed_default | not_configured` for an absent one, plus `derived` and `unknown` -
 plus `raw_key` and `raw_value`.
 
-`[TRAP]` **Absence of a row is not "local".** A missing row means the key was absent from the source
-payload and nothing should be inferred. A local value HAS a row, typed `local`, with an empty
-`raw_value`. `field_name="__entry__"` is the entry's own provenance.
+`[TRAP]` **Absence of a row is not "absent from the payload", and has not been since
+2026-09-21.** A missing row means only that the field is not tracked. An absent key records a
+row typed `pan_os_default`, `assumed_default` or `not_configured`; a local value has a row
+typed `local` with an empty `raw_value`; an unmarked ENTRY has recorded `local` since
+2026-10-05. Where a tracked field still has no row for an absent key, that is a normaliser on
+the old rule, not a fact about the device. `field_name="__entry__"` is the entry's own
+provenance.
 
 `[MEASURED 2026-09-14]` Coverage in the lab: 6,912 rows — 4,889 `device_group`, 1,974 `local`,
-49 `template`. Three subject models carry **none at all** (`MasterKey`, `LoggingSettings`,
-`SnmpSettings`), so a blank provenance column is data, not an error.
+49 `template`. `MasterKey` alone carries **none at all** - `LoggingSettings` and `SnmpSettings` both record
+rows now - so a blank provenance column there is data, not an error. `MasterKey`'s absence is
+itself the old rule: the module discards two `Implicit.assumed` declarations it is handed.
 
 ## D2. Scoping
 
