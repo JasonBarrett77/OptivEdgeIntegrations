@@ -111,6 +111,16 @@ def _exposed_surfaces(appliance: Appliance) -> list[str]:
 
 #: An absent `authentication-type` means none - the contract records the implicit value, and
 #: PAN-SVC-002 reads it as the finding rather than as missing data.
+#: `community_is_default` is the one field on SnmpSettings whose ROW is the point: the community
+#: string's value is never stored, so the row is the only record of who set the credential. See
+#: the comment in SnmpSettings.DERIVED_FIELDS saying why it is deliberately not declared derived.
+COMMUNITY_UNMEASURED = Implicit.not_assumed(
+    "Help p.740 warns about the default community string 'public', and nothing has established "
+    "what an access-setting carrying a v2c child and NO snmp-community-string key actually "
+    "answers to. PAN-SVC-005 rests on that string, so a stored False would decide the control "
+    "on a guess in the permissive direction")
+
+
 NTP_AUTH_IMPLICIT = Implicit.measured(
     "none", "payload contract, ntp-servers.authentication-type: implicit 'none'")
 
@@ -181,8 +191,9 @@ def _snmp(appliance, snapshot, system) -> None:
     implicit = has_access and not version_name
     effective = version_name or ("v2c" if implicit else "")
 
-    community, community_rk, community_rv = scalar_value(
-        version_body.get("snmp-community-string")) if version_body else ("", ABSENT, None)
+    community, community_rk, community_rv = (
+        parse_text_field(version_body.get("snmp-community-string"), implicit=COMMUNITY_UNMEASURED)
+        if version_body else ("", COMMUNITY_UNMEASURED, None))
     users = ensure_list((version_body.get("users") or {}).get("entry")) if version_body else []
     views = ensure_list((version_body.get("views") or {}).get("entry")) if version_body else []
 
