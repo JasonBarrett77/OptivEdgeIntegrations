@@ -46,7 +46,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_entry_scope,
     pushed_shared,
     pushed_vsys_panorama,
-    scalar_value, parse_text_field, DESCRIPTION_ABSENT)
+    scalar_value, parse_text_field, DESCRIPTION_ABSENT, Implicit)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.regions import (
     build_normalized_regions,
     replace_regions,
@@ -420,6 +420,20 @@ def build_normalized_predefined_address_objects(
     return normalized_objects
 
 
+#: An address group is static XOR dynamic. A static one has no `dynamic` node, so there is no
+#: filter to record and the members read from `static` are the whole definition.
+#:
+#: NOT a group_type column, deliberately. That would be the clearer shape and it is DEFERRED
+#: (Jason, 2026-10-21): dynamic address groups are out of MVP scope, so modelling the thing
+#: being deferred would be premature, and `dynamic_filter` being non-empty already identifies a
+#: dynamic group for any query that needs one. See archive/requests/open/
+#: dynamic-address-group-coverage.md in OptivEdgeProbe.
+STATIC_GROUP_HAS_NO_FILTER = Implicit.not_assumed(
+    "an address group is static XOR dynamic: with no `dynamic` node there is no filter to "
+    "record, and the members read from `static` are the whole definition. not_configured says "
+    "that; a defaulted empty filter would read as a dynamic group matching nothing")
+
+
 def normalize_address_group(
     *,
     source_snapshot: Snapshot,
@@ -433,7 +447,8 @@ def normalize_address_group(
     if isinstance(dynamic_node, dict) and "filter" in dynamic_node:
         dynamic_filter, filter_rk, filter_rv = scalar_value(dynamic_node.get("filter"))
     else:
-        dynamic_filter, filter_rk, filter_rv = scalar_value(dynamic_node)
+        dynamic_filter, filter_rk, filter_rv = parse_text_field(
+            dynamic_node, implicit=STATIC_GROUP_HAS_NO_FILTER)
     tags = [
         NormalizedAddressTag(value=value_text, prov=prov, position=position)
         for position, (value_text, prov) in enumerate(member_values(entry.get("tag")))
