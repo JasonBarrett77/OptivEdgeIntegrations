@@ -10,6 +10,11 @@ it cites, the code wins and the line is a defect — fix it in the same change.
 Paths are relative to `src/optivedge_integrations/integrations/` unless they begin with `./`,
 which means the repository root.
 
+**`./DECISIONS.md` holds what this file deliberately excludes**: decisions about code that LOOKS
+dead and is not, and shapes that look wrong and are deliberate. Read it before deleting anything
+that appears unused - four routes nothing links to, a notes feature knowingly broken, and a
+missing list page are all there with the reason and who decided.
+
 ## What this repository is
 
 A reusable Django **domain package** — firewall config collection, normalization, storage. A
