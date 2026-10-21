@@ -12,7 +12,7 @@ from optivedge_integrations.integrations.models import (
     Appliance, AuthenticationProfile)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     Implicit,
-    ensure_list, parse_integer_field, parse_yes_no_field, scalar_value)
+    ensure_list, parse_integer_field, parse_yes_no_field, scalar_value, parse_text_field)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     scoped_entries, write_scoped_objects)
 # NOT normalization.snapshots, which has a function of the SAME NAME taking an
@@ -65,8 +65,21 @@ def _profile_fields(entry: dict[str, Any]) -> tuple[dict[str, Any], list]:
             "the discovery log records that mfa-enable has no implicit value to measure - the "
             "factor list is what makes MFA real. False reads a profile with no factors as not "
             "enforcing MFA, which is what PAN-AUTH-020 needs"))
-    domain, domain_rk, domain_rv = scalar_value(entry.get("user-domain"))
-    modifier, mod_rk, mod_rv = scalar_value(entry.get("username-modifier"))
+    domain, domain_rk, domain_rv = parse_text_field(
+        entry.get("user-domain"),
+        implicit=Implicit.not_assumed(
+            "the authentication-profile contract node lists user-domain among its children and "
+            "measures nothing about it - its `fields` map is empty. An absent key may mean no "
+            "domain is prepended or may mean the device supplies one, and the three sibling "
+            "fields on this object are already Implicit.assumed for the same reason"))
+    modifier, mod_rk, mod_rv = parse_text_field(
+        entry.get("username-modifier"),
+        implicit=Implicit.not_assumed(
+            "username-modifier is a DROPDOWN with a non-empty first entry, and the "
+            "authentication-profile contract node measures nothing about an absent key. An empty "
+            "string is a plausible-looking guess that would read as 'no modification' - the one "
+            "answer a wrong guess must not fabricate, because the modifier decides what username "
+            "is actually presented to the directory"))
 
     factors = [str(f) for f in ensure_list((mfa.get("factors") or {}).get("member"))
                if f is not None] if isinstance(mfa.get("factors"), dict) else []
