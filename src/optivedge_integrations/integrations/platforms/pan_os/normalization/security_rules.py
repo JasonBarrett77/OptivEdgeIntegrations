@@ -300,7 +300,16 @@ def normalize_rule(
     rule: dict[str, Any],
 ) -> NormalizedSecurityRule:
     entry_rk, entry_rv = entry_provenance(rule)
-    action, action_rk, action_rv = scalar_value(rule.get("action"))
+    action, action_rk, action_rv = parse_text_field(
+        rule.get("action"),
+        implicit=Implicit.not_assumed(
+            "payload contract, security-rule-scope.action: 'Always present on a committed rule. "
+            "Not measured as an implicit because a rule without it is refused at commit, the "
+            "same way `service` is.' That claim is about COMMITTED rules, and we read "
+            "`show config merged`, which follows the CANDIDATE (read-config-sources.md A2) - so "
+            "a staged rule reaches this code without the key. An absent action is not a default "
+            "anyone applied; it is the rule not yet being committable, and a not_configured row "
+            "is the signal"))
     disabled, disabled_rk, disabled_rv = parse_yes_no_field(
         rule.get("disabled"),
         implicit=Implicit.measured(
