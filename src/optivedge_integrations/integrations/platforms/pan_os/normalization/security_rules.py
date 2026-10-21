@@ -67,8 +67,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     parse_yes_no_field,
     pushed_vsys_panorama,
     scalar_value,
-    num_hosts_from_intervals,
-)
+    num_hosts_from_intervals, DESCRIPTION_ABSENT)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     choose_local_appliance,
     is_panorama_managed,
@@ -308,7 +307,8 @@ def normalize_rule(
             False, "read-a-security-rule.md: 'disabled absent -> no' [MEASURED 2026-10-05]"))
     rule_type, rule_type_rk, rule_type_rv = parse_text_field(
         rule.get("rule-type"), implicit=RULE_TYPE_IMPLICIT)
-    description, description_rk, description_rv = scalar_value(rule.get("description"))
+    description, description_rk, description_rv = parse_text_field(
+        rule.get("description"), implicit=DESCRIPTION_ABSENT)
     log_start, log_start_rk, log_start_rv = parse_yes_no_field(
         rule.get("log-start"),
         # The guide says this one outright: "**Unmeasured:** `log-start` / `log-end` defaults.

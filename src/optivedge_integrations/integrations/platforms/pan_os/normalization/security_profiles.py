@@ -70,8 +70,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_entry_scope,
     pushed_shared,
     pushed_vsys_panorama,
-    scalar_value,
-)
+    scalar_value, parse_text_field, DESCRIPTION_ABSENT)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     effective_in_scope_order,
 )
@@ -793,7 +792,8 @@ def normalize_security_profile(
     namespace_value: str, entry: dict[str, Any],
 ) -> NormalizedSecurityProfile:
     entry_rk, entry_rv = entry_provenance(entry)
-    description, description_rk, description_rv = scalar_value(entry.get("description"))
+    description, description_rk, description_rv = parse_text_field(
+        entry.get("description"), implicit=DESCRIPTION_ABSENT)
     rules = profile_rules(entry)
     surfaces = exception_surfaces(entry)
     decoders = profile_decoders(entry) if kind == SecurityProfile.KIND_VIRUS else []

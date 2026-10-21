@@ -46,8 +46,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_entry_scope,
     pushed_shared,
     pushed_vsys_panorama,
-    scalar_value,
-)
+    scalar_value, parse_text_field, DESCRIPTION_ABSENT)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.regions import (
     build_normalized_regions,
     replace_regions,
@@ -238,7 +237,8 @@ def normalize_address_object(
     entry: dict[str, Any],
 ) -> NormalizedAddressObject:
     entry_rk, entry_rv = entry_provenance(entry)
-    description, description_rk, description_rv = scalar_value(entry.get("description"))
+    description, description_rk, description_rv = parse_text_field(
+        entry.get("description"), implicit=DESCRIPTION_ABSENT)
 
     address_type = ""
     value = ""
@@ -300,7 +300,8 @@ def normalize_external_list_object(
     entry: dict[str, Any],
 ) -> NormalizedAddressObject:
     entry_rk, entry_rv = entry_provenance(entry)
-    description, description_rk, description_rv = scalar_value(entry.get("description"))
+    description, description_rk, description_rv = parse_text_field(
+        entry.get("description"), implicit=DESCRIPTION_ABSENT)
     value, value_rk, value_rv, list_type = external_list_value(entry)
     normalized_value, start_int, end_int, num_hosts, is_any = derive_address_fields(AddressObject.TYPE_EDL, value)
 

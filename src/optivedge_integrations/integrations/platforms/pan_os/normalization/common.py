@@ -170,6 +170,17 @@ def _as_text(value: Any) -> str:
     return "" if value is None else str(value)
 
 
+#: Shared by every `description`/`comment` leaf. It lives here rather than once per module
+#: because the justification has to stay identical across them, and four copies do not.
+DESCRIPTION_ABSENT = Implicit.not_assumed(
+    "a description has no vendor default to measure: an absent key is nobody having written "
+    "one, so the honest row is not_configured rather than a defaulted empty string. Every "
+    "`description`/`comment` leaf the payload contract covers records `implicit: null` - "
+    "admin-user.description (measured 2026-09-08), wildfire-analysis-profile.description "
+    "(2026-10-09), mgt-permitted-ip.description, ethernet-physical.comment - and none of them "
+    "claims PAN-OS supplies anything")
+
+
 def scalar_value(node: Any) -> tuple[str, Any, str | None]:
     """Extract value and provenance from a PAN-OS scalar node.
 
