@@ -328,7 +328,18 @@ def normalize_rule(
     log_end, log_end_rk, log_end_rv = parse_yes_no_field(
         rule.get("log-end"),
         implicit=Implicit.measured(True, f"log-end absent means YES - {LOG_FLAG_CITATION}"))
-    log_setting, log_setting_rk, log_setting_rv = scalar_value(rule.get("log-setting"))
+    log_setting, log_setting_rk, log_setting_rv = parse_text_field(
+        rule.get("log-setting"),
+        implicit=Implicit.not_assumed(
+            "MEASURED 2026-10-21 on Panorama shared pre-rulebase, a scope holding a "
+            "log-forwarding profile named `default`: a rule written with no log-setting "
+            "commits (job 942 OK) and the key stays ABSENT in running - nothing "
+            "materialises one, unlike `action` which is refused at commit. So absence is "
+            "real here and this code will meet it. What the device ENFORCES for such a "
+            "rule is NOT measured: PAN-OS pre-selects a profile named `default` in NEW "
+            "rules, which is form behaviour that writes a key, and no compiled view "
+            "reports log settings. not_configured is the honest row until the UI oracle "
+            "reads one. See claim S-106"))
     negate_source, negate_source_rk, negate_source_rv = parse_yes_no_field(
         rule.get("negate-source"),
         implicit=Implicit.measured(
