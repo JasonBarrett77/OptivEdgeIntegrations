@@ -203,7 +203,13 @@ def normalize_admin_users(appliance: Appliance) -> dict[str, int]:
             "administrative_authentication): the stored password, else "
             "deviceconfig/system/authentication-profile. Ask effective_authentication_profile "
             "what governs the account, not this field"))
-        pwd_profile, pwd_key, pwd_value = scalar_value(entry.get("password-profile"))
+        pwd_profile, pwd_key, pwd_value = parse_text_field(
+        entry.get("password-profile"),
+        implicit=Implicit.measured(
+            None,
+            "payload contract, admin-user.password-profile: implicit null - an absent key "
+            "applies no profile, so the global mgt-config/password-complexity policy is what "
+            "governs the account; PasswordProfile is the override and absence is its absence"))
         cert_only, cert_key, cert_value = parse_yes_no_field(
             entry.get("client-certificate-only"),
         implicit=Implicit.measured(
