@@ -53,6 +53,101 @@ it pushes. Filing any of them under a plane would hide them from the others.
 | `read-an-administrator-account.md` | Who can log in, with what privilege, and against what credential. |
 | `read-management-ssh.md` | What the CLI SSH server offers, the default it falls back to, and why configured is not in force. |
 
+## By topic, and by what pushes it
+
+The three planes above are PAN-OS's config structure. This is the same material on the axis a
+reader actually arrives with — a UI tab and a question — and it names the one fact that decides
+which provenance mechanism applies to a subtree. **Everything here is a reference.** Each guide
+states its own measurements with its own dates; nothing is restated below, because a restatement
+drifts from its source and becomes a second account to reconcile.
+
+**The two Panorama push mechanisms partition along the plane boundary, and no guide says so.**
+Templates push **Device** and **Network**; device groups push **Policies** and **Objects**. Every
+measurement in these guides is consistent with it — `read-template-provenance.md` establishes
+`@ptpl` on `deviceconfig/system`, `config/users` and `interface-management-profile`, while
+`policy/resolve-object-name.md` and `policy/enumerate-object-definitions.md` establish `@loc` on
+`vsys/entry/address` and `/config/shared`, and `read-config-sources.md` C4 establishes that `loc=`
+appears **zero times outside `/config/panorama`**. It is stated here rather than in either guide
+because it is a fact about the pair.
+
+### 1. Configuration files — what each read contains
+
+| question | where |
+|---|---|
+| which read returns what, and what each silently omits | `read-config-sources.md`, Part A |
+| whether a source is Panorama, local, merged or predefined | same, A1 — the source table |
+| precedence when they must be combined | same, B1 and B2 |
+| which reads carry provenance markers | same, Part C — and the two guides named above |
+| payload shapes to accept, and the bare-string trap | same, A4 and A5 |
+| **what you read may not be what is enforced** | same, A2 — `merged` follows the CANDIDATE. Also `policy/read-a-security-rule.md`, on checking the config is committed |
+| **a pushed object is in NO read of the device's own tree** | same, A10 — `action=get` merges the template limb and not the device-group limb, and all four reads succeed while omitting it |
+| dead ends, so nobody re-walks them | same, A9 |
+| why runtime is out of scope here | same, A7 — the oracle you cannot ship |
+
+### 2. Device and Network — template values
+
+| question | where |
+|---|---|
+| scope, locations, shared | `identify-a-vsys.md`; `read-config-sources.md` A6 and A8 |
+| what a pushed value looks like, and what an override destroys | `read-template-provenance.md` |
+| override boundaries by object shape | `read-config-sources.md` B3 |
+| the merge rule | same, B2 |
+| HA | same, B4 |
+| the planes themselves | `management/` and `network/`, above |
+
+Template **stacks** appear in `read-template-provenance.md` only as the lab's own stack and in
+`@ptpl` naming a template or a stack. **Commit options are measured nowhere.**
+
+### 3. Policies and Objects — device group values
+
+| question | where |
+|---|---|
+| the four scopes, and which read returns each | `policy/enumerate-object-definitions.md` — three reads, minimum |
+| why the merged tree holds none of it | `read-config-sources.md` A10 — and a clean absence there is not evidence |
+| which definition a firewall actually uses | `policy/resolve-object-name.md` — Order, step 1 before step 2 |
+| rule evaluation order across pushed and local | `policy/read-a-security-rule.md` — pushed-pre, local, pushed-post, plus the two implicit defaults |
+| where rules live, and that levels CONCATENATE rather than replace | `read-config-sources.md` B5 — the one place the wholesale-replacement rule does not apply |
+| device-group hierarchy | `identify-a-vsys.md`, on `show dg-hierarchy`; `policy/enumerate-object-definitions.md`, on `@loc` naming the AUTHORING group |
+| whether an object arrived, and whether it can be removed | `policy/verify-object-reached-device.md`; `policy/assess-object-deletion-safety.md` |
+| the plane itself | `policy/`, above |
+
+**Open, and stated by the guides themselves:** tags and schedules have known namespaces and
+unmeasured precedence; a shared-scope group containing a vsys-scope member is marked *never
+tried*. Both in `policy/resolve-object-name.md`.
+
+### 4. Default and implicit values — in code, not in prose
+
+**This topic's authority is code, and that is deliberate.** `platforms/pan_os/normalization/
+common.py` defines `Implicit`, whose citation travels beside the value it justifies *"rather than
+in a database column that would copy a constant and then drift from it"*. Do not restate a default
+in a guide.
+
+| question | where |
+|---|---|
+| what PAN-OS does when a key is absent | `Implicit` in `normalization/common.py` |
+| whether we measured it, inferred it, or store nothing | the three constructors — `measured` needs a checkable citation, `assumed` needs its reasoning, `not_assumed` stores null on purpose |
+| what stops the three being mixed | `ImplicitDeclarationTests` in `integrations/tests.py` |
+| predefined objects, including the ones named `default` | `read-config-sources.md` on the `/config/predefined` read; `policy/read-a-security-profile.md` on the predefined vulnerability `default` |
+
+### 5. Provenance — reading it, and where it lands
+
+| question | where |
+|---|---|
+| template provenance | `read-template-provenance.md` |
+| device-group provenance — the markers | `read-config-sources.md` C4 — `loc=`, `overrides=`, `panorama="true"`, and why `src="tpl"` is not one |
+| device-group provenance — classifying with them | `policy/enumerate-object-definitions.md` and `policy/resolve-object-name.md`, on classifying by `@loc` and never by which query returned it |
+| one attribute, two meanings by position | `read-config-sources.md` B5 — `@panorama` is a routing flag on an entry and a provenance marker on a scalar |
+| `@loc` decoration on every container and member | `policy/read-a-security-rule.md` — applies to every pushed object, not only rules |
+| overrides | `read-config-sources.md` B3 and `read-template-provenance.md` |
+| markers, and what they cannot tell you | `read-config-sources.md` C1, C2, C3 |
+| where provenance is STORED, and what a missing row means | `read-config-sources.md` Part D; `models/provenance.py` |
+
+### Not a topic above, and first-class anyway
+
+`classify-an-api-failure.md`, `identify-a-vsys.md` and `discovery-log.md` are in **Read these
+first** for the reasons that section gives. They are transport, partitioning and provenance-of-
+claims — none of them is a subtree, and none belongs under a topic here.
+
 ## Where a new guide goes
 
 **Ask which configuration subtree it reads.** The three planes are not an invented taxonomy —
