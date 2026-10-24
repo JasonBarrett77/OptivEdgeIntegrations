@@ -218,6 +218,57 @@ Provenance needs `running` in either case — see C2.
 | `show config synced-diff` | works, but 837/837 lines of unified-diff text over set-format braces, no xpaths — HA peer sync, not candidate |
 | `object-xpaths` argument | input scoping only; does not emit xpaths |
 
+## A10. `[TRAP]` A device-group object is not in the merged tree. Read the pushed limb instead
+
+`tags:` device-group, pushed-shared-policy, merged, absence-is-not-evidence, trap
+
+`[MEASURED 2026-10-21]` `loc=` appears 19,606 times on fw-core-tpa-a and 1,627 on
+pan-fw-111, and **zero times outside `/config/panorama`** on either - `/config/devices`,
+`/config/shared` and `/config/mgt-config` were each checked separately.
+
+`action=get` merges the TEMPLATE limb and does not merge the DEVICE-GROUP limb. So:
+
+- type=config action=show - a pushed object is simply absent, no error
+- type=config action=complete - a pushed object never joins the completion list
+- show config merged - contains NO Panorama-pushed policy objects at all
+- show config running - as action=show
+
+**All four of those succeed and return plausible data, which is the whole hazard: nothing errors, so a reader who checks the merged tree and finds nothing concludes ABSENT when the answer is ELSEWHERE.** A collector reading the merged rulebase on a managed firewall sees the local rules and none of the pushed pre-rules, and no read tells it so.
+
+**`[MEASURED 2026-10-22]` A SECOND INSTANCE, AND IT CAUGHT THE PERSON WHO WROTE THIS SECTION.**
+On pan-fw-201, `show config merged` is **1,204,054 bytes and contains the string `file-blocking`
+zero times** — and `show config pushed-shared-policy` on the same appliance carries two
+file-blocking and two data-filtering elements, including the profiles `zz_fileblock_shared` and
+`test_dlp_prof`, both `@loc="shared"`, both named by a pushed profile group, both IN FORCE.
+`show config running` is 12,960 bytes and also holds neither.
+
+I reframed this section on the morning of 2026-10-22 and then, the same afternoon, wrote a stage 4
+dispatch whose lab census was taken from `show config merged` — and told the run it was "building
+from nothing" on a device with two profiles in force. The run measured the pushed read and
+corrected me. **Nothing errored, the census was arithmetically right, and the conclusion drawn
+from it was false**, which is exactly what the tag above says this trap does.
+
+So the consequence is not hypothetical and is worth stating in the document's own terms: **a
+collector that normalises from `merged` reports a clean absence on a configured device.** For
+this object type that makes two extra reads load-bearing per appliance -
+`/config/predefined/profiles/<kind>` and
+`/config/panorama/vsys/entry[@name='<vsys>']/profiles/<kind>` - because between them they hold
+every instance the device actually enforces.
+
+**THIS IS A FACT ABOUT WHERE THINGS LIVE, NOT A DEFICIENCY — in PAN-OS or in this project.** Jason,
+2026-10-22: *"the new trap is simply stating that what you are looking for isn't here. Look
+elsewhere. It's not a gap, it's just a fact."* A device-group object is not part of the device's
+own configuration, so the merged tree has no reason to carry it; it is pushed policy, it lives
+under `/config/panorama`, and `loc=` names the level that supplied it. **And it is already
+collected** — `platforms/pan_os/collectors/pushed_shared_policy.py` issues both forms and `platforms/pan_os/flows.py` calls them, so
+the pushed limb is in the collection set and normalised today.
+
+An earlier version of this paragraph called it "the single most expensive omission in the
+inventory". It was not an omission when that was written and is not one now, and framing a
+representational fact as a deficiency sends a reader looking for something to fix. What it needs
+is a pointer: the content is in the pushed limb, read BOTH forms, and never read the absence in
+the merged tree as evidence.
+
 ---
 
 # PART B — HOW THE SOURCES COMBINE
@@ -301,6 +352,24 @@ beneath it: local service routes stayed refused until the template's whole `rout
 targeting a device-wide model yields two identical findings for one real configuration. Deduplicate
 on the HA pair, not the serial. `[MEASURED 2026-09-15]` Collect from **both** peers: their configs
 are not identical (40,468 vs 41,026 values in the lab).
+
+## B5. The rule outliers
+
+`tags:` rulebase, pushed-pre, pushed-post, per-vsys, concatenation, panorama-attribute
+
+**where rules live.** THREE places, and a consumer reading only the first sees a fraction. See archive/catalog/findings/security-rule-payload.md: local at vsys/entry[@name=V]/rulebase/security/rules; pushed PRE at /config/panorama/vsys/entry[@name=V]/pre-rulebase/security/rules; pushed POST at the post-rulebase path. PUSHED POLICY IS STORED PER VSYS, not once per device - one lab device had 74 pushed pre-rules on vsys1 and 158 on vsys5, from different device groups.
+
+**pushed shared policy does not contain rules.** Measured in archive/catalog/findings/security-rule-payload.md: on that device it returned shared objects, tags and profiles only. Pass 3 later found all 147 rules reachable only through the PER-VSYS form on 11.1. Both readings say the same thing - do not look for rules in the non-vsys form.
+
+**concatenation not replacement.** Pass 3, claim S-093: levels CONCATENATE rather than one replacing another - pre-rules Shared->root->leaf, post-rules leaf->root->Shared, order preserved within each level, nothing interleaved or dropped. This is the ONE place the wholesale-replacement rule of claim S-088 does not apply.
+
+**AND `@panorama` MEANS TWO DIFFERENT THINGS BY POSITION, which is the part this draft missed
+entirely.** `platforms/pan_os/normalization/common.py::entry_provenance` excludes it in terms — *"at the entry level it appears
+as the boolean flag `@panorama: true` (a routing signal used by default_rule_source), not a
+provenance pointer"* — and checks only `@ptpl` and `@loc`. At SCALAR level it is the opposite: it
+is in `platforms/pan_os/normalization/common.py`'s `_PROVENANCE_KEYS`, `::scalar_value` returns it as a marker, and
+`::classify_prov_type` maps it to the provenance type `panorama`. One attribute name, a routing
+flag on an entry and a provenance marker on a scalar.
 
 ---
 
@@ -410,6 +479,27 @@ template-supplied nodes in the candidate, but override detection was measured at
 object, and the device uses none of them. A reader of `pushed-template` alone reports values that
 are not in effect — including credentials, which are dropped like any other unrestated value.
 
+## C4. `loc=`, `overrides=` and `panorama="true"` — the device-group markers
+
+`tags:` provenance, device-group, loc, overrides, panorama-attribute
+
+`[MEASURED 2026-10-21]`
+
+- `src="tpl"` - NOT a provenance signal on its own - almost every occurrence on a firewall is App-ID content-preview carrying no @ptpl. Claim S-083.
+- `loc=` - names the DEVICE GROUP that defined the node; loc="shared" is Panorama's Shared device group. /config/panorama only.
+- `overrides=` - names the nearest ancestor device group whose copy is displaced; get-only; ABSENT when the displaced copy is the Shared DG's. Claim S-094.
+- `panorama="true"` - MEASURED 2026-10-21 and not previously recorded here. It marks a RULE as Panorama-delivered, not as a default rule: 646 occurrences on fw-core-tpa-a across all pushed rules, 7 on pan-fw-111, zero outside /config/panorama on both. It co-occurs only with uuid and loc. I first read it as a default-rule marker because the default rules were where I saw it - wrong, and counting it is what corrected me.
+
+**CHECKED 2026-10-21 BEFORE PROMOTING THIS: the code already documents the classification
+rule, and this addition must not restate it.** Read these two rather than repeat them:
+
+- `platforms/pan_os/normalization/common.py::pushed_entry_scope` - scope comes from `@loc`,
+  never from which query returned the entry, and why an absent marker falls back to vsys.
+- `platforms/pan_os/normalization/common.py::merge_pushed_entries` - why the two pushed
+  reads are merged and classified per entry, why read position put one object in two scopes
+  on a single-vsys device, and why two disagreeing definitions in one scope can only mean a
+  collection fault.
+
 ---
 
 # PART D — NORMALIZATION (read after collection works)
@@ -510,23 +600,3 @@ but is weaker: `any` is not a valid zone, and an earlier terminal `allow` ends e
     OEI platforms/pan_os/collectors/            merged_config.py, pushed_shared_policy.py, predefined.py
 
 ---
-
-## Draft notes — not part of the doc
-
-For Jason's review before this replaces
-`OEI/src/optivedge_integrations/integrations/docs/palo-alto/pan-os/read-config-sources.md`.
-
-**What is new relative to the current file:** `effective-running` and the whole of Part B (the merge
-rule, override boundaries, the pre/post-rulebase collapse); Part C (own-marker provenance, the
-walking-up trap, what markers cannot say); the candidate guard via `show config list changes`; the
-dead ends in A9; the collection-set recommendation in A8; and Part D.
-
-**What was kept verbatim in substance:** the source table, the candidate warning, required
-parameters, both payload shapes, the bare-string asymmetry, the empty-pushed-read trap, the
-success-is-not-a-read note, and the runtime instruments.
-
-**Overlap to settle:** Part C duplicates ground now covered by `read-template-provenance.md`, whose
-granularity table is contradicted by the 2026-09-15 measurements (see
-`scratch/doc-drafts/merge-behaviour/read-template-provenance-corrections.md`). Either that file is
-corrected and Part C points at it, or Part C absorbs it and that file shrinks. Worth deciding before
-promotion rather than leaving two accounts.
