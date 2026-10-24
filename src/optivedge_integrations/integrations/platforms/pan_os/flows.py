@@ -35,7 +35,9 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_merged_config,
     collect_predefined_certificates,
     collect_predefined_security_profiles,
+    collect_show_logging_status,
     collect_show_masterkey_properties,
+    collect_predefined_log_forwarding_profiles,
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
     collect_show_predefined_url_lists,
@@ -67,6 +69,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_certificate_objects,
     normalize_appliance_interface_management_profiles,
     normalize_appliance_authentication_settings,
+    normalize_appliance_log_settings,
     normalize_appliance_login_banner,
     normalize_appliance_management_tls,
     normalize_appliance_management_ssh,
@@ -327,6 +330,14 @@ class PANOSInScopeConfigCollection:
     security_rule_item_failures: list[PANOSSecurityRuleFailure]
     zone_normalizations: list[PANOSZoneNormalizedPoint]
     zone_failures: list[PANOSZoneNormalizationFailure]
+    #: `show logging-status`, the one read in this estate that is not a view of configuration.
+    #: Appended rather than folded into predefined_lists_* because a failure here means one
+    #: control goes silent, and a failure there means a different one over-reports - two
+    #: outcomes a reader has to be able to tell apart.
+    logging_status_collections: list[PANOSApplianceCollectedSnapshot] = field(
+        default_factory=list)
+    logging_status_failures: list[PANOSApplianceCollectionFailure] = field(
+        default_factory=list)
     management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = field(
         default_factory=list)
     management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = field(
@@ -598,6 +609,29 @@ def collect_appliance_masterkey_properties(
     )
 
 
+def collect_appliance_logging_status(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> PANOSPersistedCollection:
+    """PAN-LOG-010's only source. No configuration read can say whether forwarding WORKS.
+
+    One op call per appliance. Until this snapshot exists,
+    `LoggingSettings.central_store_status_collected` is false on every row and the control is
+    silent - which is the deliberate direction, because the alternative is a finding on every
+    appliance in the estate.
+    """
+    return collect_appliance_and_persist(
+        appliance,
+        collector=collect_show_logging_status,
+        credentials_provider=credentials_provider,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+
+
 def collect_appliance_predefined_catalogs(
     appliance: Appliance,
     *,
@@ -607,10 +641,11 @@ def collect_appliance_predefined_catalogs(
 ) -> tuple[list[PANOSPersistedCollection], list[str]]:
     """Collect PAN-OS's predefined (vendor-shipped) catalogs for one appliance.
 
-    Appliance-wide, not vsys-scoped, so one session covers every call. Two of the three are
-    `show predefined` op commands; the SSL/TLS service profiles are a direct config read,
-    because they live in the config tree's predefined branch rather than the content catalog
-    `show predefined` addresses, and `show config merged` does not carry that branch either.
+    Appliance-wide, not vsys-scoped, so one session covers every call. TWO of them are `show
+    predefined` op commands; the rest - the SSL/TLS service profiles, the certificates, the
+    security profiles and the Log Forwarding profiles - are direct config reads, because they
+    live in the config tree's predefined branch rather than the content catalog `show predefined`
+    addresses, and `show config merged` does not carry that branch either.
     """
     session = open_session(
         appliance.management_station,
@@ -634,6 +669,9 @@ def collect_appliance_predefined_catalogs(
         collect_predefined_ssl_tls_service_profiles,
         collect_predefined_certificates,
         collect_predefined_security_profiles,
+        # PAN-LOG-005's only route. Without it a vsys whose only coverage is the vendor's
+        # predefined profile reports as having no log forwarding at all.
+        collect_predefined_log_forwarding_profiles,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))
@@ -709,6 +747,11 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     ("login banner", normalize_appliance_login_banner),
     ("master key", normalize_appliance_master_key),
     ("services settings", normalize_appliance_services_settings),
+    # AFTER services settings, which owns the other column on the same LoggingSettings row.
+    # The two write disjoint column sets and each deletes only its own provenance rows, so the
+    # order is about PAN-MGT-011 keeping its behaviour if this one fails rather than about the
+    # values. Device > Log Settings, the log-settings server profiles and per-vsys forwarding.
+    ("log settings", normalize_appliance_log_settings),
     # Device > Setup > WildFire. Reads the same device entry as its neighbours and
     # depends on nothing else in this tuple.
     ("wildfire settings", normalize_appliance_wildfire_settings),
@@ -992,6 +1035,8 @@ def collect_in_scope_configuration_snapshots(
     merged_config_failures: list[PANOSApplianceCollectionFailure] = []
     predefined_lists_collections: list[PANOSApplianceCollectedSnapshot] = []
     predefined_lists_failures: list[PANOSApplianceCollectionFailure] = []
+    logging_status_collections: list[PANOSApplianceCollectedSnapshot] = []
+    logging_status_failures: list[PANOSApplianceCollectionFailure] = []
     shared_policy_collections: list[PANOSApplianceGroupCollectedSnapshot] = []
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure] = []
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot] = []
@@ -1050,6 +1095,26 @@ def collect_in_scope_configuration_snapshots(
                 )
             )
 
+    # ITS OWN LOOP AND ITS OWN FAILURE LIST. One op call per appliance, and a failure here is
+    # not a failure of the configuration collection: it leaves PAN-LOG-010 silent rather than
+    # leaving any column wrong, which is a different thing for a reader to act on.
+    for appliance in appliances:
+        try:
+            persisted = collect_appliance_logging_status(
+                appliance,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            logging_status_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=str(exc))
+            )
+            continue
+        logging_status_collections.append(
+            PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
+        )
+
     for appliance_group in appliance_groups:
         try:
             persisted = collect_appliance_group_pushed_shared_policy(
@@ -1106,6 +1171,8 @@ def collect_in_scope_configuration_snapshots(
         merged_config_failures=merged_config_failures,
         predefined_lists_collections=predefined_lists_collections,
         predefined_lists_failures=predefined_lists_failures,
+        logging_status_collections=logging_status_collections,
+        logging_status_failures=logging_status_failures,
         shared_policy_collections=shared_policy_collections,
         shared_policy_failures=shared_policy_failures,
         vsys_policy_collections=vsys_policy_collections,

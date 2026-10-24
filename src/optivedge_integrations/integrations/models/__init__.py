@@ -32,6 +32,16 @@ from .management_interface import (
 from .normalization import NormalizationIssue
 from .admin_user import AdminUser, ROLE_KEYS
 from .server_profile import ServerProfile
+from .log_settings import (
+    ALL_FORWARDING_LOG_TYPES_MISSING,
+    ALL_PANORAMA_LOG_TYPES_MISSING,
+    ALL_SYSTEM_SEVERITIES_MISSING,
+    FORWARDING_PROFILE_LOG_TYPES,
+    LogServerTarget,
+    PANORAMA_FORWARDABLE_LOG_TYPES,
+    SYSTEM_LOG_SEVERITIES,
+    VsysLogForwarding,
+)
 from .authentication_settings import AuthenticationSettings
 from .login_banner import LoginBanner
 from .management_tls import ManagementTlsBinding
@@ -115,6 +125,14 @@ __all__ = [
     "AuthenticationSequence",
     "AdminUser",
     "ServerProfile",
+    "ALL_FORWARDING_LOG_TYPES_MISSING",
+    "ALL_PANORAMA_LOG_TYPES_MISSING",
+    "ALL_SYSTEM_SEVERITIES_MISSING",
+    "FORWARDING_PROFILE_LOG_TYPES",
+    "LogServerTarget",
+    "PANORAMA_FORWARDABLE_LOG_TYPES",
+    "SYSTEM_LOG_SEVERITIES",
+    "VsysLogForwarding",
     "ROLE_KEYS",
     "AuthenticationSettings",
     "LoggingSettings",

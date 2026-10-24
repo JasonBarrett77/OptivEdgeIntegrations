@@ -113,6 +113,38 @@ def collect_predefined_certificates(session: PANSession) -> PANOSCollectedRespon
     )
 
 
+#: The vendor-shipped Log Forwarding profiles. The same namespace as the certificates and the
+#: SSL/TLS profiles above - the config tree's predefined branch, which `show config merged` does
+#: not carry and which `show predefined` does not address - so a direct config read is the only
+#: route, and this is a new xpath on an existing pattern rather than a new mechanism.
+PREDEFINED_LOG_FORWARDING_PROFILES_XPATH = "/config/predefined/log-settings/profiles"
+
+
+def collect_predefined_log_forwarding_profiles(session: PANSession) -> PANOSCollectedResponse:
+    """Collect the vendor-shipped Log Forwarding profiles for one appliance. PAN-LOG-005.
+
+    Needed because a vsys CAN be covered by a profile nobody configured: `IoT Security Default
+    Profile` ships with eight match lists, every one with filter `All Logs` and
+    `send-to-panorama` yes, covering traffic, threat, wildfire, url, data, tunnel, auth and
+    decryption. Read on all four lab appliances 2026-10-22, identical on each.
+
+    WITHOUT THIS READ THE CONTROL OVER-REPORTS, and over-reporting here means telling an engineer
+    that a correctly configured vsys has no log forwarding at all - a high-severity false finding
+    on exactly the devices that are fine. `VsysLogForwarding.pushed_profile_sources_collected` is
+    what keeps the control silent until this snapshot exists.
+    """
+    request = PANOSConfigRequest(
+        xpath=PREDEFINED_LOG_FORWARDING_PROFILES_XPATH,
+        target=session.target,
+        metadata={"command_name": "config get predefined log-settings profiles"},
+    )
+    return collect_config_response(
+        session,
+        source_type="config_predefined_log_forwarding_profiles",
+        request=request,
+    )
+
+
 #: Every predefined profile type in one read - anti-spyware and vulnerability for PAN-SPY-001 and
 #: PAN-VLN-001, and antivirus, URL filtering, file blocking and WildFire for the controls after
 #: them. About 16 KB on both lab platforms. Like the SSL/TLS profile this is the config tree's

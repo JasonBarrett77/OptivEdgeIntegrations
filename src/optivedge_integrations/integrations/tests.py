@@ -11308,3 +11308,491 @@ class UnreadableExternalListTests(TestCase):
         value, _rk, _rv, list_type = self._edl({"url": {"url": ""}})
         self.assertEqual(value, "")
         self.assertEqual(list_type, "url", "readable: the type node WAS recognised")
+
+
+class LogSettingsFilterParseTests(SimpleTestCase):
+    """The Log Settings filter is FREE TEXT the device evaluates, so coverage is a parse.
+
+    `action=complete` on the key answers with an empty list, so there is no enum to compare
+    against and nothing upstream states a grammar. These tests pin the three rules the
+    normalizer implements, and rule 3 is the one that matters: an expression it cannot read
+    covers NOTHING, which is the firing direction for `system_log_severity_gaps`.
+    """
+
+    def _covered(self, text):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.log_settings import (
+            severities_covered)
+        return severities_covered(text)
+
+    def test_the_two_spellings_of_unrestricted_cover_everything(self):
+        """The device spells it two ways on two nodes - `All Logs` in the grid and on the Log
+        Forwarding profile, empty on the Log Settings filter's own completion."""
+        from optivedge_integrations.integrations.models import SYSTEM_LOG_SEVERITIES
+        for text in ("All Logs", "all logs", "", "   "):
+            self.assertEqual(self._covered(text), set(SYSTEM_LOG_SEVERITIES), text)
+
+    def test_geq_covers_the_value_and_everything_above_it(self):
+        self.assertEqual(self._covered("(severity geq high)"), {"critical", "high"})
+        self.assertEqual(self._covered("severity geq informational"),
+                         {"critical", "high", "medium", "low", "informational"})
+
+    def test_leq_eq_and_neq(self):
+        self.assertEqual(self._covered("(severity leq low)"), {"low", "informational"})
+        self.assertEqual(self._covered("(severity eq critical)"), {"critical"})
+        self.assertEqual(self._covered("(severity neq critical)"),
+                         {"high", "medium", "low", "informational"})
+
+    def test_and_intersects_and_or_unions(self):
+        self.assertEqual(self._covered("(severity geq medium) and (severity leq high)"),
+                         {"medium", "high"})
+        self.assertEqual(self._covered("(severity eq critical) or (severity eq low)"),
+                         {"critical", "low"})
+
+    def test_a_filter_naming_another_dimension_covers_nothing(self):
+        """RULE 3, AND IT IS DELIBERATE. `(admin eq 'x')` narrows by something this cannot see,
+        so no severity has been shown to be forwarded in full. It OVER-REPORTS a gap, which is
+        the side an assessor can check in a minute - the reverse would claim coverage nobody
+        established."""
+        self.assertEqual(self._covered("(admin eq 'oep-nobody')"), set())
+        self.assertEqual(self._covered("(severity geq high) and (subtype eq general)"), set())
+        self.assertEqual(self._covered("(severity eq nonsense)"), set())
+
+    def test_unrestricted_is_not_the_same_question_as_covered(self):
+        """`config_log_filter_narrows` asks only whether anything is held back, and `filter` is
+        mandatory at commit validation - so no committed entry may be assumed unrestricted."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.log_settings import (
+            filter_is_unrestricted)
+        self.assertTrue(filter_is_unrestricted("All Logs"))
+        self.assertFalse(filter_is_unrestricted("(severity geq high)"))
+        self.assertFalse(filter_is_unrestricted("(admin eq 'oep-nobody')"))
+
+
+class LogServerTransportGradeTests(SimpleTestCase):
+    """Four grades for two measured enums, and the fourth is the state nothing can settle.
+
+    Protocol TLS with no `tls-version` key is NOT read as 1.2: that implicit value was measured
+    as a RELATION - the dialog renders 1.2 under protocol TLS and nothing under SMTP - so
+    materialising it would claim a hardened setting for relays that have none.
+    """
+
+    def _grade(self, protocol, tls_version):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.log_settings import (
+            _transport_grade)
+        return _transport_grade(protocol, tls_version)
+
+    def test_each_measured_pair_grades(self):
+        from optivedge_integrations.integrations.models import LogServerTarget
+        self.assertEqual(self._grade("SMTP", ""), LogServerTarget.GRADE_SMTP)
+        self.assertEqual(self._grade("TLS", "1.2"), LogServerTarget.GRADE_TLS_12)
+        self.assertEqual(self._grade("TLS", "1.1"), LogServerTarget.GRADE_TLS_11)
+        self.assertEqual(self._grade("TLS", ""), LogServerTarget.GRADE_TLS_VERSION_UNSET)
+
+    def test_no_protocol_key_is_ungraded_rather_than_the_weakest_value(self):
+        """`protocol` is mandatory at commit validation on both platforms, so an absent one can
+        only be an uncommitted candidate state - not a configuration to report."""
+        self.assertEqual(self._grade("", ""), "")
+
+    def test_the_floor_needs_all_three_parts(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.log_settings import (
+            _meets_authenticated_tls)
+        self.assertTrue(_meets_authenticated_tls("TLS", "1.2", "Auto"))
+        self.assertFalse(_meets_authenticated_tls("TLS", "1.2", ""),
+                         "no authentication method")
+        self.assertFalse(_meets_authenticated_tls("TLS", "", "Auto"),
+                         "protocol TLS with no version key is a third state, not 1.2")
+        self.assertFalse(_meets_authenticated_tls("SMTP", "1.2", "Auto"))
+
+
+class CentralStoreDeliveryTests(TestCase):
+    """CONNECTION IS NOT DELIVERY, which is the whole reason PAN-LOG-010 exists.
+
+    AN UNKNOWN FIRES - Jason's rule, 2026-10-23. A missing snapshot, an unreadable reply and a
+    connected collector that has never delivered anything all read FALSE and raise the finding;
+    healthy is true only on positive evidence of a completed forward. Until that rule landed the
+    first three read None, which matched no positive comparison and so came out of the query as
+    healthy - an appliance nobody had read reported as safe on the strength of nothing.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.logstatus")
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, hostname="fw.logstatus", serial_number="LS-1")
+
+    def _snapshot(self, entries):
+        return Snapshot.objects.create(
+            appliance=self.appliance, source_type="show_logging_status",
+            payload={"show-logging-status": {"Conn-Info": {"entry": entries}}},
+            collected_at=timezone.now())
+
+    def _verdict(self, entries):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.log_settings import (
+            central_store_delivery)
+        return central_store_delivery(self._snapshot(entries))
+
+    def test_no_snapshot_fires_rather_than_reading_as_healthy(self):
+        """The rule's own case: no reading at all must not come out of the query as compliant."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.log_settings import (
+            central_store_delivery)
+        self.assertEqual(central_store_delivery(None), (False, False))
+
+    def test_an_inactive_connection_beside_an_active_one_is_not_a_fault(self):
+        """`cms1 Inactive` beside `cms0 Active` is the ordinary state on THREE of the four lab
+        appliances - measured 2026-10-23 - so the per-appliance question is whether ANY
+        connection is up. Reading the first entry alone would report all three as down."""
+        healthy, collected = self._verdict([
+            {"@name": "lr-cms1", "conn-status": "Connection Status       : lr - Inactive",
+             "system": "system         Not Available         Not Available"
+                       "                        0                   0                        0"},
+            {"@name": "lr-cms0", "conn-status": "Connection Status       : lr - Active",
+             "system": "system   2026/10/22 00:58:21   2026/10/22 03:30:07"
+                       "      7698606905303761886 7698606905303761886                       18"},
+        ])
+        self.assertEqual((healthy, collected), (True, True))
+
+    def test_every_connection_inactive_is_unhealthy(self):
+        self.assertEqual(self._verdict([
+            {"@name": "lr-cms0", "conn-status": "Connection Status       : lr - Inactive"},
+        ]), (False, True))
+
+    def test_a_counter_that_has_not_caught_up_is_unhealthy(self):
+        """The failure the control exists for: connected, and the acked sequence number is
+        behind the forwarded one, so a backlog is building up."""
+        self.assertEqual(self._verdict([
+            {"@name": "lr-cms0", "conn-status": "Connection Status       : lr - Active",
+             "traffic": "traffic   2026/10/22 00:58:21   2026/10/22 03:30:07"
+                        "      7698606905303761886 7698606905303700000                    1800"},
+        ]), (False, True))
+
+    def test_logs_created_and_never_forwarded_is_unhealthy(self):
+        self.assertEqual(self._verdict([
+            {"@name": "lr-cms0", "conn-status": "Connection Status       : lr - Active",
+             "traffic": "traffic   2026/10/22 00:58:21         Not Available"
+                        "                        0                   0                        0"},
+        ]), (False, True))
+
+    def test_a_reply_naming_no_connection_at_all_is_unhealthy_and_collected(self):
+        """A real reading, and not healthy: an appliance with no collector connection is not
+        delivering to one."""
+        self.assertEqual(self._verdict([]), (False, True))
+
+    def test_an_unreadable_line_fires_rather_than_reading_as_healthy(self):
+        """A reply shape nobody has seen is not evidence that delivery is fine, and an unknown
+        fires. It read None until 2026-10-23, which passed."""
+        self.assertEqual(self._verdict([
+            {"@name": "lr-cms0", "conn-status": "Connection Status       : lr - Active",
+             "traffic": "traffic 2026/10/22 nonsense"},
+        ]), (False, True))
+
+    def test_a_connection_that_has_never_delivered_anything_fires(self):
+        """THE CHANGE OF DIRECTION, and it moves real rows: both lab PA-VMs are in this state.
+        Every counter reads `Not Available`, and the read cannot tell "this appliance created no
+        logs" from "nothing is populating this counter" - so it is an unknown, and an unknown
+        fires. It read healthy on the strength of the Active connection alone until 2026-10-23,
+        which is the naive reading stage 3 explicitly narrowed away from."""
+        self.assertEqual(self._verdict([
+            {"@name": "lr-cms0", "conn-status": "Connection Status       : lr - Active",
+             "traffic": "traffic         Not Available         Not Available"
+                        "                        0                   0                        0",
+             "system": "system         Not Available         Not Available"
+                       "                        0                   0                        0"},
+        ]), (False, True))
+
+    def test_one_log_type_delivering_is_enough_while_another_is_idle(self):
+        """The measured lab state on both PA-5220s: System delivers and the other eleven log
+        types are idle. Requiring EVERY log type to have delivered would fire on a firewall that
+        is demonstrably forwarding, which is a finding with no defect behind it."""
+        self.assertEqual(self._verdict([
+            {"@name": "lr-cms1", "conn-status": "Connection Status       : lr - Inactive"},
+            {"@name": "lr-cms0", "conn-status": "Connection Status       : lr - Active",
+             "traffic": "traffic         Not Available         Not Available"
+                        "                        0                   0                        0",
+             "system": "system   2026/10/22 00:58:21   2026/10/22 03:30:07"
+                       "      7698606905303761886 7698606905303761886                       18"},
+        ]), (True, True))
+
+
+class LogSettingsNormalizationTests(TestCase):
+    """End to end over a synthetic merged payload, on the shapes that would bite a reader.
+
+    The values here are deliberately NOT a device's: they exercise the per-server grain, the
+    two address key names, the implicit transport, the referrer walk and the audit-tracking
+    exclusion. The device readback for this domain is recorded in the stage 7 artifact.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.logsettings")
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, hostname="fw.logsettings", serial_number="LG-1")
+
+    def _normalize(self, config):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_appliance_log_settings)
+        Snapshot.objects.create(
+            appliance=self.appliance, source_type="show_merged_config",
+            payload={"config": config}, collected_at=timezone.now())
+        return normalize_appliance_log_settings(self.appliance)
+
+    @staticmethod
+    def _config(shared_log_settings=None, vsys_log_settings=None, management=None):
+        return {
+            "shared": {"log-settings": shared_log_settings or {}},
+            "devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "deviceconfig": {"setting": {"management": management or {}}},
+                "vsys": {"entry": [{"@name": "vsys1",
+                                    "log-settings": vsys_log_settings or {}}]},
+            }]},
+        }
+
+    def test_one_profile_with_two_servers_yields_two_rows_with_their_own_transports(self):
+        """THE SERVER IS THE ROW because transport is per server: one profile holding a TLS
+        server and a cleartext one is the case a profile-keyed row could not report."""
+        from optivedge_integrations.integrations.models import LogServerTarget
+        self._normalize(self._config(shared_log_settings={
+            "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                {"@name": "s-plain", "server": "10.0.0.1"},
+                {"@name": "s-tls", "server": "10.0.0.2", "transport": "SSL", "port": "6514"},
+            ]}}]}}))
+        rows = {r.server_name: r for r in LogServerTarget.objects.all()}
+        self.assertEqual(set(rows), {"s-plain", "s-tls"})
+        self.assertEqual(rows["s-plain"].transport, "UDP",
+                         "the absent key is the MEASURED implicit, on the firing side")
+        self.assertIsNone(rows["s-plain"].port, "514 is not stored - no oracle supports it")
+        self.assertEqual(rows["s-tls"].transport, "SSL")
+        self.assertEqual(rows["s-tls"].port, 6514)
+        self.assertEqual(rows["s-plain"].profile_name, "p1")
+
+    def test_the_implicit_transport_records_a_measured_provenance_row(self):
+        from optivedge_integrations.integrations.models import LogServerTarget
+        self._normalize(self._config(shared_log_settings={
+            "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                {"@name": "s1", "server": "10.0.0.1"}]}}]}}))
+        row = LogServerTarget.objects.get()
+        provenance = {
+            r.field_name: (r.provenance_type, r.raw_value)
+            for r in FieldProvenance.objects.filter(
+                content_type=ContentType.objects.get_for_model(LogServerTarget),
+                object_id=row.pk)}
+        self.assertEqual(provenance["transport"], ("pan_os_default", "UDP"))
+        self.assertEqual(provenance["port"][0], "not_configured",
+                         "nothing is assumed, and the row says which kind of absence it is")
+
+    def test_the_email_kind_reads_gateway_and_not_server(self):
+        """TWO KEY NAMES, ONE COLUMN. A normalizer reading one loses the other kind silently -
+        the same trap `ServerProfile` folds three names for."""
+        from optivedge_integrations.integrations.models import LogServerTarget
+        self._normalize(self._config(shared_log_settings={
+            "email": {"entry": [{"@name": "m1", "server": {"entry": [
+                {"@name": "r1", "gateway": "10.0.0.9", "protocol": "TLS",
+                 "tls-version": "1.2", "auth": "Auto"}]}}]}}))
+        row = LogServerTarget.objects.get()
+        self.assertEqual((row.kind, row.server_address), ("email", "10.0.0.9"))
+        self.assertTrue(row.meets_authenticated_tls)
+        self.assertEqual(row.transport_grade, LogServerTarget.GRADE_TLS_12)
+
+    def test_a_vsys_profile_and_a_shared_one_of_the_same_name_are_two_rows(self):
+        """The collision was written on a device deliberately and both were accepted at commit.
+        Keying without the scope would silently store one of the two."""
+        from optivedge_integrations.integrations.models import LogServerTarget
+        profile = {"entry": [{"@name": "same", "server": {"entry": [
+            {"@name": "s1", "server": "10.0.0.1"}]}}]}
+        self._normalize(self._config(shared_log_settings={"syslog": profile},
+                                     vsys_log_settings={"syslog": profile}))
+        self.assertEqual(
+            sorted(LogServerTarget.objects.values_list("scope", "vsys_name")),
+            [("shared", ""), ("vsys", "vsys1")])
+
+    def test_a_match_list_member_counts_as_a_referrer_and_audit_tracking_does_not(self):
+        """Of the three places this leaf appears, TWO count. Audit-tracking's own `send-syslog`
+        was ruled out of scope, and counting it would make an unused profile look in use."""
+        from optivedge_integrations.integrations.models import LoggingSettings, LogServerTarget
+        self._normalize(self._config(
+            shared_log_settings={
+                "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                    {"@name": "s1", "server": "10.0.0.1"}]}}]},
+                "system": {"match-list": {"entry": [{
+                    "@name": "m", "filter": "All Logs",
+                    "send-syslog": {"member": ["p1"]}}]}},
+            },
+            management={"audit-tracking": {"send-syslog": {"member": ["p1"]}}}))
+        self.assertEqual(LogServerTarget.objects.get().profile_referrer_count, 1)
+        row = LoggingSettings.objects.get(appliance=self.appliance)
+        self.assertTrue(row.syslog_destination_in_use)
+        self.assertEqual(row.system_log_severity_gaps, "",
+                         "an unrestricted filter to a resolvable syslog profile covers all five")
+
+    def test_a_member_naming_nothing_is_not_a_destination_in_use(self):
+        """A profile that does not exist delivers nothing, and counting the member would make an
+        appliance with a typo look like one with a working collector."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        from optivedge_integrations.integrations.models import ALL_SYSTEM_SEVERITIES_MISSING
+        self._normalize(self._config(shared_log_settings={
+            "system": {"match-list": {"entry": [{
+                "@name": "m", "filter": "All Logs",
+                "send-syslog": {"member": ["does-not-exist"]}}]}}}))
+        row = LoggingSettings.objects.get(appliance=self.appliance)
+        self.assertFalse(row.syslog_destination_in_use)
+        self.assertEqual(row.system_log_severity_gaps, ALL_SYSTEM_SEVERITIES_MISSING,
+                         "no off-box destination means every severity is uncovered")
+
+    def test_the_two_halves_of_the_configuration_log_verdict_are_stored_separately(self):
+        """The failure is a DISJUNCTION - no destination OR a narrowing filter - and the clause
+        grammar is a flat conjunction, so the halves are stored beside the verdict."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(shared_log_settings={
+            "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                {"@name": "s1", "server": "10.0.0.1"}]}}]},
+            "config": {"match-list": {"entry": [{
+                "@name": "m", "filter": "(admin eq 'nobody')",
+                "send-syslog": {"member": ["p1"]}}]}}}))
+        row = LoggingSettings.objects.get(appliance=self.appliance)
+        self.assertTrue(row.config_log_offbox_destination)
+        self.assertTrue(row.config_log_filter_narrows)
+        self.assertFalse(row.config_log_fully_offbox)
+
+    def test_an_absent_quota_branch_reads_as_left_at_the_shipped_quotas(self):
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config())
+        self.assertFalse(
+            LoggingSettings.objects.get(appliance=self.appliance).log_retention_configured)
+
+    def test_either_platform_shape_of_the_quota_branch_counts(self):
+        """The branches differ between the PA-5220 and the PA-VM, so all four are checked on
+        every device rather than branching on a platform this lab cannot separate."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(management={"quota-settings": {
+            "disk-quota": {"traffic": "20"}}}))
+        self.assertTrue(
+            LoggingSettings.objects.get(appliance=self.appliance).log_retention_configured)
+
+    def test_the_audit_comment_key_defaults_to_the_firing_side(self):
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config())
+        row = LoggingSettings.objects.get(appliance=self.appliance)
+        self.assertFalse(row.require_audit_comment)
+        provenance = FieldProvenance.objects.get(
+            content_type=ContentType.objects.get_for_model(LoggingSettings),
+            object_id=row.pk, field_name="require_audit_comment")
+        self.assertEqual((provenance.provenance_type, provenance.raw_value),
+                         ("pan_os_default", "no"))
+
+    def test_the_two_normalizers_on_one_row_do_not_erase_each_others_provenance(self):
+        """`LoggingSettings` is written by TWO normalizers - the Setup > Management checkbox
+        PAN-MGT-011 reads, and this domain's thirteen columns. Each deletes only the rows for
+        the fields it writes, because a missing row means `not tracked` and the erasure would
+        read as a deliberate statement."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_appliance_services_settings)
+        self._normalize(self._config())
+        normalize_appliance_services_settings(self.appliance)
+        row = LoggingSettings.objects.get(appliance=self.appliance)
+        names = set(FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(LoggingSettings),
+            object_id=row.pk).values_list("field_name", flat=True))
+        self.assertEqual(names, {"require_audit_comment", "log_on_high_dp_load"})
+
+    def test_a_vsys_gets_a_row_and_its_gaps_are_the_full_set_with_no_profile(self):
+        from optivedge_integrations.integrations.models import (
+            ALL_FORWARDING_LOG_TYPES_MISSING, VsysLogForwarding)
+        self._normalize(self._config())
+        row = VsysLogForwarding.objects.get(appliance=self.appliance)
+        self.assertEqual(row.vsys_name, "vsys1")
+        self.assertEqual(row.offbox_log_type_gaps, ALL_FORWARDING_LOG_TYPES_MISSING)
+        self.assertFalse(row.pushed_profile_sources_collected,
+                         "neither the pushed nor the predefined read exists, so the control "
+                         "stays silent rather than reporting a vsys it cannot see")
+
+    def test_a_shared_profile_counts_for_a_vsys_and_a_destinationless_match_list_does_not(self):
+        from optivedge_integrations.integrations.models import VsysLogForwarding
+        self._normalize(self._config(shared_log_settings={
+            "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                {"@name": "s1", "server": "10.0.0.1"}]}}]},
+            "profiles": {"entry": [{"@name": "lf", "match-list": {"entry": [
+                {"@name": "a", "log-type": "traffic", "filter": "All Logs",
+                 "send-syslog": {"member": ["p1"]}},
+                {"@name": "b", "log-type": "threat", "filter": "All Logs"},
+            ]}}]}}))
+        row = VsysLogForwarding.objects.get(appliance=self.appliance)
+        self.assertNotIn("traffic", row.offbox_log_type_gaps.split(","))
+        self.assertIn("threat", row.offbox_log_type_gaps.split(","),
+                      "a match list with no destination at all forwards nothing off the box")
+
+    def test_a_vsys_that_has_gone_from_the_device_loses_its_row(self):
+        """Leaving it would report a gap against an enforcement point nobody can configure."""
+        from optivedge_integrations.integrations.models import VsysLogForwarding
+        self._normalize(self._config())
+        config = self._config()
+        config["devices"]["entry"][0]["vsys"]["entry"] = [{"@name": "vsys2"}]
+        self._normalize(config)
+        self.assertEqual(list(VsysLogForwarding.objects.values_list("vsys_name", flat=True)),
+                         ["vsys2"])
+
+    def test_the_match_list_display_structure_keeps_every_destination_kind(self):
+        """The ONLY place the Log Settings match-list content is stored, so a finding has
+        evidence beside it. Not for a query: nothing may clause on a stored structure."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(shared_log_settings={
+            "system": {"match-list": {"entry": [{
+                "@name": "m", "filter": "All Logs",
+                "send-snmptrap": {"member": ["trap1"]},
+                "send-to-panorama": "yes"}]}}}))
+        shown = LoggingSettings.objects.get(
+            appliance=self.appliance).log_settings_match_lists
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(shown[0]["log_type"], "system")
+        entry = shown[0]["entries"][0]
+        self.assertEqual(entry["destinations"]["snmptrap"], ["trap1"])
+        self.assertTrue(entry["destinations"]["panorama"])
+
+    def test_an_snmptrap_only_match_list_is_not_an_offbox_destination(self):
+        """SNMP traps and email NOTIFY rather than retain, so neither leaves a durable off-box
+        copy - stage 3's settlement, and it is why the gap is the full set here."""
+        from optivedge_integrations.integrations.models import (
+            ALL_SYSTEM_SEVERITIES_MISSING, LoggingSettings)
+        self._normalize(self._config(shared_log_settings={
+            "system": {"match-list": {"entry": [{
+                "@name": "m", "filter": "All Logs",
+                "send-snmptrap": {"member": ["trap1"]}}]}}}))
+        self.assertEqual(
+            LoggingSettings.objects.get(appliance=self.appliance).system_log_severity_gaps,
+            ALL_SYSTEM_SEVERITIES_MISSING)
+
+    def test_send_to_panorama_removes_only_its_own_log_type_from_the_gap(self):
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(shared_log_settings={
+            "system": {"match-list": {"entry": [{
+                "@name": "m", "filter": "All Logs", "send-to-panorama": "yes"}]}}}))
+        gaps = LoggingSettings.objects.get(
+            appliance=self.appliance).panorama_log_type_gaps.split(",")
+        self.assertNotIn("system", gaps)
+        self.assertIn("config", gaps)
+        self.assertEqual(len(gaps), 15)
+
+    def test_correlation_is_not_in_the_panorama_gap_set(self):
+        """It has no `send-to-panorama` key at all, measured, and the vendor says correlation
+        logs cannot be forwarded from a firewall - so listing it would be a permanent gap."""
+        from optivedge_integrations.integrations.models import PANORAMA_FORWARDABLE_LOG_TYPES
+        self.assertNotIn("correlation", PANORAMA_FORWARDABLE_LOG_TYPES)
+
+    def test_email_alerting_needs_critical_coverage_and_a_profile_that_exists(self):
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(shared_log_settings={
+            "email": {"entry": [{"@name": "m1", "server": {"entry": [
+                {"@name": "r1", "gateway": "10.0.0.9", "protocol": "SMTP"}]}}]},
+            "system": {"match-list": {"entry": [
+                {"@name": "a", "filter": "(severity eq low)",
+                 "send-email": {"member": ["m1"]}},
+            ]}}}))
+        row = LoggingSettings.objects.get(appliance=self.appliance)
+        self.assertFalse(row.email_alerting_for_critical_system_events,
+                         "a filter that excludes critical does not alert on critical")
+
+    def test_no_merged_snapshot_writes_nothing_rather_than_an_empty_verdict(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_appliance_log_settings)
+        self.assertEqual(
+            normalize_appliance_log_settings(self.appliance),
+            {"log_server_targets": 0, "vsys_log_forwarding": 0, "logging_settings": 0})

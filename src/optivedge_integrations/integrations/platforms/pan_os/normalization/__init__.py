@@ -57,6 +57,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.services
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_services import (
     normalize_device_services,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.log_settings import (
+    normalize_log_settings,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.password_complexity import (
     normalize_password_complexity,
 )
@@ -151,6 +154,22 @@ def normalize_appliance_services_settings(appliance: Appliance) -> dict:
     return normalize_services_settings(appliance)
 
 
+def normalize_appliance_log_settings(appliance: Appliance) -> dict:
+    """Device > Log Settings, the log-settings server profiles and per-vsys Log Forwarding.
+
+    PAN-LOG-001 to 010. Writes three models in one pass - `LogServerTarget`,
+    `VsysLogForwarding` and the logging columns of `LoggingSettings` - because they share the
+    scope walk, the profile index and the referrer walk over the whole payload.
+
+    MUST RUN AFTER `normalize_appliance_services_settings`, which owns the other column on the
+    `LoggingSettings` row. Not for correctness of the values - the two write disjoint column
+    sets and each deletes only its own provenance rows - but so that a fresh row is created by
+    the normalizer whose columns PAN-MGT-011 reads, keeping that control's behaviour unchanged
+    on an appliance where this one fails.
+    """
+    return normalize_log_settings(appliance)
+
+
 def normalize_appliance_wildfire_settings(appliance: Appliance) -> dict:
     """Device > Setup > WildFire, the device-wide settings. PAN-AVW-004 and PAN-AVW-005.
 
@@ -241,6 +260,7 @@ __all__ = [
     "normalize_appliance_authentication_profiles",
     "normalize_appliance_authentication_sequences",
     "normalize_appliance_authentication_settings",
+    "normalize_appliance_log_settings",
     "normalize_appliance_login_banner",
     "normalize_appliance_management_tls",
     "normalize_appliance_management_ssh",

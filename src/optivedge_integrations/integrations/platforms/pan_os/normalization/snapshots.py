@@ -15,8 +15,8 @@ from optivedge_integrations.integrations.models import (
 )
 
 
-def is_panorama_managed(enforcement_point: EnforcementPoint) -> bool:
-    """Whether Panorama manages this enforcement point's device.
+def is_panorama_managed(owner: EnforcementPoint | Appliance) -> bool:
+    """Whether Panorama manages this enforcement point's - or this appliance's - device.
 
     Read from `ManagementStation.station_type`, which states it explicitly. Do NOT infer
     it from `EnforcementPoint.appliance_group` being set: `ApplianceGroup` models HA and
@@ -27,9 +27,16 @@ def is_panorama_managed(enforcement_point: EnforcementPoint) -> bool:
 
     Anything asking "should pushed Panorama data exist for this?" belongs here, so there
     is one definition to change rather than three call sites to keep in step.
+
+    TAKES EITHER GRAIN, because the question is a property of the STATION and neither grain
+    owns it. It was enforcement-point only until the logging domain needed it per appliance:
+    `LoggingSettings.panorama_managed` is one row per appliance, and an appliance on a
+    Panorama station need not have an enforcement point at all. A second copy of the rule in
+    that normalizer is what this signature avoids, and this rule is the one thing here that
+    must not exist twice.
     """
     return (
-        enforcement_point.management_station.station_type
+        owner.management_station.station_type
         == ManagementStation.StationType.PAN_PANORAMA
     )
 

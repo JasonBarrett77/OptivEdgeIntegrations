@@ -266,13 +266,21 @@ def _algorithms(protocol_settings: dict[str, Any]) -> tuple[dict[str, bool], lis
 
 
 def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
-           rows: list[tuple], extra_key: str | None = None):
+           rows: list[tuple], extra_key: str | None = None,
+           identity: tuple[str, ...] = ("name",)):
     """Write one row per scoped entry, replacing whatever the appliance held before.
 
     `extra_key` names a field that is part of the object's identity ALONGSIDE the scope and the
     name. Server profiles need it: six kinds live in six sibling containers, so one appliance can
     hold a `shared` saml-idp and a `shared` radius, and keying on the name alone would make the
     second overwrite the first and the count come out short.
+
+    `identity` names the fields that, with the appliance, scope and vsys, identify the row.
+    It defaults to `("name",)` - the base's own column, taken from the entry's `@name` - which
+    is every caller but one. A field named here that the row's own `defaults` carries is read
+    from there instead, which is how a CHILD row identifies itself: a log server target is one
+    server entry inside one NAMED PROFILE, so its identity needs the parent's name as well as
+    its own, and `name` alone would make the second server of a profile overwrite the first.
     """
     content_type = ContentType.objects.get_for_model(model)
     with transaction.atomic():
@@ -283,7 +291,10 @@ def write_scoped_objects(model, appliance: Appliance, snapshot: Snapshot,
             scoped, defaults = row[0], row[1]
             field_rows = row[2] if len(row) > 2 else ()
             lookup = {"appliance": appliance, "scope": scoped.scope,
-                      "vsys_name": scoped.vsys_name, "name": scoped.entry["@name"]}
+                      "vsys_name": scoped.vsys_name}
+            for field in identity:
+                lookup[field] = (defaults[field] if field in defaults
+                                 else scoped.entry["@name"])
             if extra_key:
                 lookup[extra_key] = defaults[extra_key]
             obj, _ = model.objects.update_or_create(
