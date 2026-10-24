@@ -11796,3 +11796,70 @@ class LogSettingsNormalizationTests(TestCase):
         self.assertEqual(
             normalize_appliance_log_settings(self.appliance),
             {"log_server_targets": 0, "vsys_log_forwarding": 0, "logging_settings": 0})
+
+
+class DefaultRuleSourcePanoramaFlagTests(TestCase):
+    """`@panorama` on a default rule, which fires on every Panorama-managed device and had no test.
+
+    Found by `read-config-sources-DEVICE-GROUP-addition.md`, which said it was for a person rather
+    than for itself, and verified 2026-10-24: `@panorama` appeared ZERO times in this file. So
+    `default_rule_source`'s `"true"` branch and its `raise ValueError` had never been exercised by
+    a fixture, on a function with one caller.
+
+    THE RAISE IS THE POINT OF THE DESIGN. `@panorama="true"` says the authoritative copy of this
+    default rule is the PUSHED one, so falling back to the merged copy when no pushed default
+    matches would report a Panorama-delivered rule from the wrong source and look like success.
+    Raising makes that loud. An untested raise is a raise nobody has seen fire.
+    """
+
+    def test_a_panorama_flagged_default_rule_takes_the_PUSHED_copy(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (  # noqa: E501
+            default_rule_source)
+
+        merged = {"@name": "intrazone-default", "@panorama": "true", "action": "allow"}
+        pushed = {"@name": "intrazone-default", "@loc": "shared", "action": "deny"}
+        source, rule = default_rule_source(merged, {"intrazone-default": pushed})
+
+        self.assertEqual(source, SecurityRule.SOURCE_DEFAULT)
+        self.assertIs(rule, pushed)
+        # The merged copy's own `action` is the wrong answer, and naming it here is what makes
+        # this test fail if the branch is removed rather than merely not covered.
+        self.assertEqual(rule["action"], "deny")
+
+    def test_the_flag_is_read_case_insensitively(self):
+        """The code lowercases it. A payload carrying `True` is the same claim."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (  # noqa: E501
+            default_rule_source)
+
+        pushed = {"@name": "interzone-default", "action": "deny"}
+        for flag in ("true", "True", "TRUE"):
+            _source, rule = default_rule_source(
+                {"@name": "interzone-default", "@panorama": flag},
+                {"interzone-default": pushed})
+            self.assertIs(rule, pushed, flag)
+
+    def test_a_flagged_rule_with_no_pushed_default_RAISES_and_names_the_rule(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (  # noqa: E501
+            default_rule_source)
+
+        with self.assertRaises(ValueError) as caught:
+            default_rule_source(
+                {"@name": "intrazone-default", "@panorama": "true"}, {})
+        # The name is in the message because the caller loops over every default rule, and a
+        # bare "missing pushed default rule" would not say which one.
+        self.assertIn("intrazone-default", str(caught.exception))
+
+    def test_an_UNflagged_default_rule_keeps_the_MERGED_copy(self):
+        """The other limb, and the one a standalone firewall takes. Both store SOURCE_DEFAULT, so
+        the config_source does not distinguish them - which is why the rule object returned is
+        what this asserts on."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (  # noqa: E501
+            default_rule_source)
+
+        merged = {"@name": "intrazone-default", "action": "allow"}
+        pushed = {"@name": "intrazone-default", "action": "deny"}
+        source, rule = default_rule_source(merged, {"intrazone-default": pushed})
+
+        self.assertEqual(source, SecurityRule.SOURCE_DEFAULT)
+        self.assertIs(rule, merged)
+
