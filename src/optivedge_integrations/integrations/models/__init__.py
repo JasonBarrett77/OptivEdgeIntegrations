@@ -21,6 +21,7 @@ from .authentication import AuthenticationProfile
 from .authentication_sequence import AuthenticationSequence
 from .certificates import Certificate, CertificateProfile, SslTlsServiceProfile
 from .interface_management_profile import InterfaceManagementProfile
+from .ike import IkeCryptoProfile, IkeGateway
 from .interfaces import Interface
 from .management_interface import (
     ManagementInterface,
@@ -150,6 +151,8 @@ __all__ = [
     "Certificate",
     "CertificateProfile",
     "InterfaceManagementProfile",
+    "IkeCryptoProfile",
+    "IkeGateway",
     "SslTlsServiceProfile",
     "ManagementInterface",
     "ManagementService",

@@ -88,6 +88,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.interfac
     NormalizedInterfaces,
     normalize_interfaces,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.ike import (
+    normalize_ike_crypto_profiles,
+    normalize_ike_gateways,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
     normalize_management_interfaces,
 )
@@ -282,5 +286,7 @@ __all__ = [
     "normalize_security_rule_profile_coverage",
     "normalize_security_rules",
     "normalize_show_managed_devices",
+    "normalize_ike_crypto_profiles",
+    "normalize_ike_gateways",
     "normalize_zones",
 ]
