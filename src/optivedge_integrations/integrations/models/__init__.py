@@ -69,6 +69,7 @@ from .policy import (
     AddressObjectResolvedEntry,
     AddressObjectTag,
     CONFIG_SOURCE_CHOICES,
+    DataFilteringPosture,
     PolicyObjectBase,
     PolicyObjectNamespace,
     PolicyObjectPrecedence,
@@ -110,6 +111,7 @@ from .policy import (
 
 __all__ = [
     "Appliance",
+    "DataFilteringPosture",
     "FieldProvenance",
     "ProvenancedMixin",
     "ApplianceGroup",

@@ -9,14 +9,35 @@ the same rule BELOW it, which is the accepted cost.
 
 from __future__ import annotations
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
+from django.utils import timezone
 
-from optivedge_integrations.integrations.models import PolicyObjectNamespace, SecurityProfile
+from optivedge_integrations.integrations.models import (
+    Appliance,
+    ApplianceGroup,
+    DataFilteringPosture,
+    EnforcementNode,
+    EnforcementPoint,
+    ManagementStation,
+    PolicyObjectNamespace,
+    SecurityProfile,
+    Snapshot,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (
     NormalizedSecurityProfile,
     ProfileReference,
     attribute_references,
+    collect_profile_and_group_references,
     collect_references,
+    data_filtering_rule_pattern_names,
+    data_filtering_verdicts,
+    data_pattern_defines_a_pattern,
+    file_blocking_verdicts,
+    reference_reach_by_key,
+    GroupReference,
+    NormalizedSecurityProfileGroup,
+    VIA_GROUP,
+    VIA_RULE,
     profile_rules,
     rule_action,
     category_verdict,
@@ -24,6 +45,16 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     dns_signature_sources,
     dns_sinkhole_address,
     severity_verdict,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+    normalize_appliance_group_security_profiles,
+    normalize_security_profiles,
+)
+from optivedge_integrations.integrations.platforms.pan_os.collectors import (
+    build_pushed_vsys_profiles_xpath,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    pushed_vsys_profiles,
 )
 
 SPY = SecurityProfile.KIND_SPYWARE
@@ -122,6 +153,7 @@ def profile(name, namespace_type, kind=SPY):
         category_verdicts={},
         dns_signature_sources=[], dns_categories=[],
         dns_sinkhole_ipv4='', dns_sinkhole_ipv6='',
+        has_rules=False, file_blocking={}, data_filtering={}, pattern_names=[],
         raw_profile={},
         field_provenance_data=[])
 
@@ -501,3 +533,618 @@ class DnsSecurityCategoryTests(SimpleTestCase):
         # one control answer the other's question.
         for row in dns_security_categories(spy_categories_entry("bare")).__iter__():
             self.assertFalse(row[1])
+
+
+# ============================================================================================
+# FILE BLOCKING AND DATA FILTERING - PAN-FIL-001 to PAN-FIL-004's subjects.
+#
+# Every rule shape below is what the lab STORED, read back out of the RUNNING config on
+# 2026-10-29 (pan-fw-201 / serial 691665AC334B458 vsys1 and shared, pan-fw-111 / serial
+# 6A9C0A9904E7D6E, Panorama shared, and /config/predefined/profiles on both) - not a shape
+# reconstructed from documentation. The file-type SPELLINGS are the device's own: the lower-case
+# `pe` and `multi-level-encoding` are refused at the write with code=12, so a test written in the
+# asserted spelling would pass against a verdict that matches no stored row anywhere.
+# ============================================================================================
+
+FB = SecurityProfile.KIND_FILE_BLOCKING
+DF = SecurityProfile.KIND_DATA_FILTERING
+
+#: The ten the floor names, device spelling. `PE` upper case is not a typo.
+FLOOR = ["PE", "dll", "bat", "vbe", "hta", "pif", "scr", "chm", "hlp", "torrent"]
+MLE = "Multi-Level-Encoding"
+
+
+def fb_rule(name, file_types, action=None, direction=None, applications=("any",)):
+    rule = {"@name": name, "file-type": {"member": list(file_types)}}
+    if applications is not None:
+        rule["application"] = {"member": list(applications)}
+    if direction is not None:
+        rule["direction"] = direction
+    if action is not None:
+        rule["action"] = action
+    return rule
+
+
+def fb_profile(*rules):
+    return {"@name": "p", "rules": {"entry": list(rules)}} if rules else {"@name": "p"}
+
+
+def df_rule(name, data_object="d1", alert=None, block=None):
+    rule = {"@name": name, "data-object": data_object,
+            "application": {"member": ["any"]}, "file-type": {"member": ["any"]}}
+    if alert is not None:
+        rule["alert-threshold"] = alert
+    if block is not None:
+        rule["block-threshold"] = block
+    return rule
+
+
+def df_profile(*rules):
+    return {"@name": "f", "rules": {"entry": list(rules)}} if rules else {"@name": "f"}
+
+
+class PushedProfilesReadTests(SimpleTestCase):
+    def test_the_xpath_is_the_one_measured_on_the_device(self):
+        # Measured with that exact string on both lab PA-VMs on 2026-10-29: it answers with
+        # every pushed profile collection under it, file-blocking and data-filtering included,
+        # while the op read `show config pushed-shared-policy` omits them on the PA-5220 pair.
+        self.assertEqual(
+            build_pushed_vsys_profiles_xpath("vsys1"),
+            "/config/panorama/vsys/entry[@name='vsys1']/profiles")
+
+    def test_the_payload_is_shaped_like_the_other_pushed_roots(self):
+        self.assertEqual(
+            pushed_vsys_profiles({"@total-count": "1", "@count": "1",
+                                  "profiles": {"file-blocking": {"entry": [{"@name": "z"}]}}}),
+            {"profiles": {"file-blocking": {"entry": [{"@name": "z"}]}}})
+
+    def test_an_absent_collection_and_an_empty_envelope_both_answer_nothing(self):
+        # The three answers a container read can give are not interchangeable, and `if result:`
+        # cannot tell an absent collection from a committed empty one.
+        for payload in (None, {}, {"@total-count": "0", "@count": "0", "profiles": None}):
+            self.assertEqual(pushed_vsys_profiles(payload), {})
+
+
+class FileBlockingVerdictTests(SimpleTestCase):
+    """oep-fdf7-01 to oep-fdf7-06 and the two vendor profiles, as they stand on the lab."""
+
+    def test_the_floor_is_stopped_only_by_block_in_both_directions(self):
+        # oep-fdf7-01 r1, read back from the running config.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", FLOOR + [MLE], action="block", direction="both")))
+        self.assertTrue(v["stops_floor_file_types"])
+        self.assertEqual(v["floor_file_type_action"], "block")
+
+    def test_one_direction_is_not_both(self):
+        # oep-fdf7-06: the ACTION is the value the grading calls acceptable and the DIRECTION is
+        # not, so the verdict is false while the graded column sits on its best value. Keeping
+        # those two apart is the whole reason there are two columns.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", FLOOR + [MLE], action="block", direction="upload")))
+        self.assertFalse(v["stops_floor_file_types"])
+        self.assertEqual(v["floor_file_type_action"], "block")
+
+    def test_nine_of_the_ten_members_is_not_the_floor(self):
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", FLOOR[1:], action="block", direction="both")))
+        self.assertFalse(v["stops_floor_file_types"])
+        self.assertEqual(v["floor_file_type_action"], "",
+                         "no rule names the floor, so no action is in force on it")
+
+    def test_the_asserted_lower_case_spelling_matches_nothing(self):
+        # The control asserts `pe` and `multi-level-encoding`; the device refuses both at the
+        # write. A verdict computed against the asserted spelling passes nothing, ever.
+        lower = [t.lower() for t in FLOOR] + ["multi-level-encoding"]
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", lower, action="block", direction="both")))
+        self.assertFalse(v["stops_floor_file_types"])
+        self.assertFalse(v["stops_nested_encoding"])
+
+    def test_two_rules_naming_the_floor_store_the_weakest_action(self):
+        # Rule ORDER is not stored and first-match-wins has never been measured, so the weakest
+        # action is what is kept. The error that leaves can only under-state protection.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", FLOOR, action="block", direction="both"),
+            fb_rule("r2", FLOOR, action="alert", direction="both")))
+        self.assertEqual(v["floor_file_type_action"], "alert")
+        self.assertTrue(v["stops_floor_file_types"],
+                        "one rule DOES block them in both directions, which the verdict reports")
+
+    def test_an_absent_action_stops_nothing_and_grades_nothing(self):
+        # oep-fdf7-05: neither a direction nor an action, both optional at commit validation.
+        # Stage 4 measured no implicit for either, so an absent action is UNKNOWN - and an
+        # unknown fires. The action column then matches none of the three placements, so the
+        # baseline finding reports at its own severity rather than a calibrated one.
+        v = file_blocking_verdicts(fb_profile(fb_rule("r1", FLOOR + [MLE])))
+        self.assertFalse(v["stops_floor_file_types"])
+        self.assertFalse(v["stops_nested_encoding"])
+        self.assertEqual(v["floor_file_type_action"], "")
+        self.assertEqual(v["nested_encoding_action"], "")
+
+    def test_the_nested_encoding_member_is_judged_on_its_own(self):
+        # oep-fdf7-04's shape: one encrypted member and nothing else. The nested-encoding
+        # columns must not borrow the floor's answer.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", [MLE], action="block", direction="both")))
+        self.assertTrue(v["stops_nested_encoding"])
+        self.assertFalse(v["stops_floor_file_types"])
+
+    def test_an_encrypted_member_expresses_the_unopenable_decision_whatever_the_action(self):
+        # The assertion is that a decision is EXPRESSED, not which way it went.
+        for action in ("block", "alert", "continue"):
+            v = file_blocking_verdicts(fb_profile(
+                fb_rule("r1", ["encrypted-zip"], action=action, direction="both")))
+            self.assertTrue(v["expresses_unopenable_file_decision"], action)
+
+    def test_a_profile_naming_no_encrypted_member_expresses_no_decision(self):
+        # oep-fdf7-02's shape.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", FLOOR + [MLE], action="alert", direction="both")))
+        self.assertFalse(v["expresses_unopenable_file_decision"])
+
+    def test_continue_on_web_browsing_alone_is_the_vendors_one_permitted_case(self):
+        # oep-fdf7-04, and the only configuration in the lab that passes this half.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", ["encrypted-zip"], action="continue", direction="both",
+                    applications=["web-browsing"])))
+        self.assertFalse(v["confirm_rule_beyond_web_browsing"])
+
+    def test_continue_on_any_application_is_the_finding(self):
+        # oep-fdf7-03, and the vendor's own `basic file blocking` ships this combination:
+        # `any` is a MEMBER of the application list, not an absence.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", FLOOR, action="continue", direction="both", applications=["any"])))
+        self.assertTrue(v["confirm_rule_beyond_web_browsing"])
+
+    def test_a_continue_rule_with_no_application_list_fires(self):
+        # An absent application list is a key nobody measured, and an unmeasured precondition
+        # must not read as the vendor's one permitted case.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", FLOOR, action="continue", direction="both", applications=None)))
+        self.assertTrue(v["confirm_rule_beyond_web_browsing"])
+
+    def test_a_block_rule_on_any_application_does_not_fire_the_continue_column(self):
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", FLOOR, action="block", direction="both", applications=["any"])))
+        self.assertFalse(v["confirm_rule_beyond_web_browsing"])
+
+    def test_the_pushed_profile_is_judged_per_rule_and_not_per_profile(self):
+        # zz_fileblock_shared: its two rules name every floor member BETWEEN them except the
+        # executable one, and the question is existential over single rules. A union would read
+        # this profile as very nearly compliant; it stops none of the floor as one transfer.
+        v = file_blocking_verdicts(fb_profile(
+            fb_rule("r1", ["exe", "dll", "jar"], action="block", direction="both"),
+            fb_rule("r2", [t for t in FLOOR if t != "PE"], action="block", direction="both")))
+        self.assertFalse(v["stops_floor_file_types"])
+
+    def test_a_profile_with_no_rules_stops_nothing(self):
+        v = file_blocking_verdicts(fb_profile())
+        self.assertFalse(v["stops_floor_file_types"])
+        self.assertFalse(v["stops_nested_encoding"])
+        self.assertFalse(v["expresses_unopenable_file_decision"])
+        self.assertFalse(v["confirm_rule_beyond_web_browsing"],
+                         "the one column whose firing side is TRUE stays false here")
+
+    def test_a_pushed_action_carries_loc_beside_the_choice(self):
+        # Every element of the pushed profile arrives decorated @loc, action included.
+        v = file_blocking_verdicts(fb_profile(
+            {"@name": "r1", "@loc": "shared",
+             "file-type": {"@loc": "shared", "member": FLOOR},
+             "direction": {"@loc": "shared", "#text": "both"},
+             "action": {"@loc": "shared", "block": {"@loc": "shared"}}}))
+        self.assertTrue(v["stops_floor_file_types"])
+
+
+class DataFilteringVerdictTests(SimpleTestCase):
+    def test_both_counts_on_the_one_rule_passes(self):
+        # oep-fdf7-f1 as committed: alert 100, block 10.
+        v = data_filtering_verdicts(df_profile(df_rule("r1", alert="100", block="10")))
+        self.assertTrue(v["every_rule_carries_both_counts"])
+        self.assertEqual(v["lowest_block_threshold"], 10)
+
+    def test_a_second_rule_carrying_neither_count_fails_the_quantifier(self):
+        # oep-fdf7-f2, and the shape stage 3 warned a per-profile answer would pass.
+        v = data_filtering_verdicts(df_profile(
+            df_rule("r1", alert="100", block="10"), df_rule("r2", data_object="d2")))
+        self.assertFalse(v["every_rule_carries_both_counts"])
+        self.assertEqual(v["lowest_block_threshold"], 10,
+                         "the number is still the smallest any rule carries")
+
+    def test_a_stored_zero_is_present_and_passes(self):
+        # oep-fdf7-f3. What 0 MEANS is unsettled - inside the writable range at both ends, and
+        # the value the dialog's OK writes by default - so this test pins the mechanism and not
+        # the meaning.
+        v = data_filtering_verdicts(df_profile(df_rule("r1", alert="0", block="0")))
+        self.assertTrue(v["every_rule_carries_both_counts"])
+        self.assertEqual(v["lowest_block_threshold"], 0,
+                         "0 is distinct from 'no rule carries one', which is None")
+
+    def test_a_profile_with_no_rules_is_false_and_not_vacuously_true(self):
+        # oep-fdf7-f4 and the pushed test_dlp_prof: legal, committed, scanning nothing. A bare
+        # entry with no child element at all was accepted at the write.
+        v = data_filtering_verdicts({"@name": "f"})
+        self.assertFalse(v["every_rule_carries_both_counts"])
+        self.assertIsNone(v["lowest_block_threshold"])
+
+    def test_one_count_alone_fails(self):
+        for alert, block in (("100", None), (None, "10")):
+            v = data_filtering_verdicts(df_profile(df_rule("r1", alert=alert, block=block)))
+            self.assertFalse(v["every_rule_carries_both_counts"], (alert, block))
+
+    def test_the_lowest_block_count_is_the_minimum_across_rules(self):
+        v = data_filtering_verdicts(df_profile(
+            df_rule("r1", alert="100", block="50"), df_rule("r2", alert="1", block="3")))
+        self.assertEqual(v["lowest_block_threshold"], 3)
+
+    def test_the_rules_pattern_objects_are_read_in_order_without_duplicates(self):
+        names = data_filtering_rule_pattern_names(df_profile(
+            df_rule("r1", data_object="d1"), df_rule("r2", data_object="d2"),
+            df_rule("r3", data_object="d1")))
+        self.assertEqual(names, ["d1", "d2"])
+
+
+class DataPatternObjectTests(SimpleTestCase):
+    """oep-fdf7-d1, d2 and d3 - the three branches `pattern-type` can take."""
+
+    def test_the_predefined_branch_defines_a_pattern(self):
+        entry = {"@name": "d1", "pattern-type": {"predefined": {"pattern": {"entry": [
+            {"@name": "credit-card-numbers", "file-type": {"member": ["any"]}}]}}}}
+        self.assertEqual(data_pattern_defines_a_pattern(entry), (True, "predefined"))
+
+    def test_the_regex_branch_defines_a_pattern(self):
+        entry = {"@name": "d2", "pattern-type": {"regex": {"pattern": {"entry": [
+            {"@name": "p1", "regex": "OEP-FDF7-000000",
+             "file-type": {"member": ["any"]}}]}}}}
+        self.assertEqual(data_pattern_defines_a_pattern(entry), (True, "regex"))
+
+    def test_the_file_properties_branch_defines_a_pattern(self):
+        entry = {"@name": "d3", "pattern-type": {"file-properties": {"pattern": {"entry": [
+            {"@name": "p1", "file-type": "docx",
+             "file-property": "panav-rsp-office-dlp-author",
+             "property-value": "oep-fdf7"}]}}}}
+        self.assertEqual(data_pattern_defines_a_pattern(entry), (True, "file-properties"))
+
+    def test_a_branch_with_no_pattern_entry_defines_nothing(self):
+        # The device makes a pattern entry mandatory at commit, so this is the state a
+        # collection gap or a future release could produce - not one an operator can commit. It
+        # must not read as a defined pattern.
+        entry = {"@name": "d4", "pattern-type": {"regex": {"pattern": None}}}
+        self.assertEqual(data_pattern_defines_a_pattern(entry), (False, ""))
+
+    def test_no_pattern_type_at_all_defines_nothing(self):
+        self.assertEqual(data_pattern_defines_a_pattern({"@name": "d5"}), (False, ""))
+
+
+def fb_group(name, namespace_type=PolicyObjectNamespace.LOCAL_VSYS, members=("p",),
+             member_kind=None):
+    return NormalizedSecurityProfileGroup(
+        source_snapshot=None, config_source="local", name=name,
+        namespace_type=namespace_type, namespace_value="vsys1", precedence_rank=0,
+        members={member_kind or FB: list(members)}, raw_group={}, field_provenance_data=[])
+
+
+class ReferenceReachTests(SimpleTestCase):
+    """The two-hop walk: oep-fdf7-01 through -06, and the one rule in the estate that reaches."""
+
+    def reach(self, profiles, references, group_references=(), groups=()):
+        return reference_reach_by_key(list(references), list(group_references),
+                                      list(profiles), list(groups))
+
+    def test_a_rule_naming_the_profile_directly_is_named_by_a_rule(self):
+        p = profile("p", PolicyObjectNamespace.LOCAL_VSYS, FB)
+        ref = ProfileReference(kind=FB, name="p", referrer="vsys1 rulebase/.../r1",
+                               shared_scope=False, via=VIA_RULE)
+        self.assertEqual(self.reach([p], [ref])[p.key], SecurityProfile.REACH_BY_RULE)
+
+    def test_a_group_a_rule_names_carries_the_profile_the_second_hop(self):
+        # oep-fdf7-01: group oep-fdf7-g1 names it and rule oep-fdf7-r1 names that group. The
+        # ONLY two-hop path in the lab estate, and a boolean referrer flag cannot tell it from
+        # the case below.
+        p = profile("p", PolicyObjectNamespace.LOCAL_VSYS, FB)
+        g = fb_group("g1")
+        reach = self.reach(
+            [p],
+            [ProfileReference(kind=FB, name="p", referrer="vsys1 profile-group/g1",
+                              shared_scope=False, via=VIA_GROUP, owner_group="g1")],
+            [GroupReference(name="g1", referrer="vsys1 rulebase/.../r1", shared_scope=False)],
+            [g])
+        self.assertEqual(reach[p.key], SecurityProfile.REACH_BY_RULE)
+
+    def test_a_group_no_rule_names_leaves_the_profile_named_by_a_group_only(self):
+        # oep-fdf7-02 through -06: five profiles a group names and nothing enforces. The shipped
+        # one-hop `is_used` passes every one of them.
+        p = profile("p", PolicyObjectNamespace.LOCAL_VSYS, FB)
+        reach = self.reach(
+            [p],
+            [ProfileReference(kind=FB, name="p", referrer="vsys1 profile-group/g2",
+                              shared_scope=False, via=VIA_GROUP, owner_group="g2")],
+            [], [fb_group("g2")])
+        self.assertEqual(reach[p.key], SecurityProfile.REACH_BY_GROUP_ONLY)
+
+    def test_a_rule_naming_a_group_that_resolves_to_nothing_reaches_no_profile(self):
+        # Resolved and not assumed: the lab's `default` group is named by 113 rules and names
+        # no profile at all.
+        p = profile("p", PolicyObjectNamespace.LOCAL_VSYS, FB)
+        reach = self.reach(
+            [p],
+            [ProfileReference(kind=FB, name="p", referrer="vsys1 profile-group/g2",
+                              shared_scope=False, via=VIA_GROUP, owner_group="g2")],
+            [GroupReference(name="absent", referrer="vsys1 rulebase/.../r1",
+                            shared_scope=False)],
+            [fb_group("g2")])
+        self.assertEqual(reach[p.key], SecurityProfile.REACH_BY_GROUP_ONLY)
+
+    def test_a_profile_nothing_names_is_unreferenced(self):
+        # oep-fdf7-04, and PAN-FIL-004's whole subject.
+        p = profile("p", PolicyObjectNamespace.LOCAL_VSYS, FB)
+        self.assertEqual(self.reach([p], [])[p.key], SecurityProfile.REACH_UNREFERENCED)
+
+    def test_a_rule_beats_a_group_for_one_profile(self):
+        p = profile("p", PolicyObjectNamespace.LOCAL_VSYS, FB)
+        reach = self.reach(
+            [p],
+            [ProfileReference(kind=FB, name="p", referrer="g", shared_scope=False,
+                              via=VIA_GROUP, owner_group="g2"),
+             ProfileReference(kind=FB, name="p", referrer="r", shared_scope=False,
+                              via=VIA_RULE)],
+            [], [fb_group("g2")])
+        self.assertEqual(reach[p.key], SecurityProfile.REACH_BY_RULE)
+
+    def test_a_vsys_group_naming_a_shared_profile_reaches_it(self):
+        # oep-fdf7-g5 is at vsys scope and its member oep-fdf7-06 is at SHARED scope: the pool
+        # merges vsys, shared, predefined and pushed-shared and returns one winner per name.
+        shared = profile("p", PolicyObjectNamespace.LOCAL_SHARED, FB)
+        reach = self.reach(
+            [shared],
+            [ProfileReference(kind=FB, name="p", referrer="vsys1 profile-group/g5",
+                              shared_scope=False, via=VIA_GROUP, owner_group="g5")],
+            [], [fb_group("g5")])
+        self.assertEqual(reach[shared.key], SecurityProfile.REACH_BY_GROUP_ONLY)
+
+
+class ReferenceWalkPathTests(SimpleTestCase):
+    """Which payload path a member list was found at is what decides `via`."""
+
+    def test_a_local_rules_profile_setting_is_a_rule_and_its_group_arm_is_collected(self):
+        vsys = {"rulebase": {"security": {"rules": {"entry": [
+            {"@name": "r1", "profile-setting": {"profiles": {FB: {"member": ["p"]}}}},
+            {"@name": "r2", "profile-setting": {"group": {"member": ["g1"]}}},
+        ]}}}}
+        refs, groups = collect_profile_and_group_references(
+            vsys, where="vsys1 ", shared_root=False, pushed=False)
+        self.assertEqual([(r.name, r.via) for r in refs], [("p", VIA_RULE)])
+        self.assertEqual([(g.name, g.referrer) for g in groups],
+                         [("g1", "vsys1 rulebase/security/rules/r2")])
+
+    def test_a_profile_group_member_is_a_group_and_carries_the_groups_name(self):
+        vsys = {"profile-group": {"entry": [{"@name": "g1", FB: {"member": ["p"]}}]}}
+        refs, groups = collect_profile_and_group_references(
+            vsys, where="vsys1 ", shared_root=False, pushed=False)
+        self.assertEqual([(r.name, r.via, r.owner_group) for r in refs],
+                         [("p", VIA_GROUP, "g1")])
+        self.assertEqual(groups, [])
+
+    def test_a_pushed_pre_rulebase_is_still_a_rule(self):
+        # THE BUG THIS PINS: the rulebase key is `rulebase` locally and `pre-rulebase` in the
+        # pushed tree, so a path test naming the rulebase matches the local arm and silently
+        # misses every pushed rule - which is the half that decides whether a pushed group is in
+        # the enforcement path.
+        pushed = {"pre-rulebase": {"security": {"rules": {"entry": [
+            {"@name": "r1", "@loc": "shared",
+             "profile-setting": {"group": {"member": ["OutBound-Block"]}}},
+        ]}}}}
+        refs, groups = collect_profile_and_group_references(
+            pushed, where="pushed ", shared_root=False, pushed=True)
+        self.assertEqual([g.name for g in groups], ["OutBound-Block"])
+        self.assertTrue(all(g.shared_scope for g in groups),
+                        "@loc=shared makes the referrer a Panorama-Shared one")
+        self.assertEqual(refs, [])
+
+    def test_a_definition_is_not_a_referrer(self):
+        vsys = {"profiles": {FB: {"entry": [{"@name": "p", "rules": {"entry": []}}]}}}
+        refs, groups = collect_profile_and_group_references(
+            vsys, where="vsys1 ", shared_root=False, pushed=False)
+        self.assertEqual((refs, groups), ([], []))
+
+
+class FileDataFilteringNormalizationTests(TestCase):
+    """End to end, over payloads shaped like the ones read off pan-fw-201 on 2026-10-29."""
+
+    def _point(self, *, serial="FDF7", merged, pushed_profiles=None, predefined=True):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname=f"pano-{serial}")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name=f"grp-{serial}",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number=serial, hostname=f"host-{serial}")
+        group.active_appliance = appliance
+        group.save()
+        point = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group, vsys_name="vsys1", in_scope=True)
+        EnforcementNode.objects.create(
+            management_station=station, enforcement_point=point, appliance=appliance)
+        now = timezone.now()
+        Snapshot.objects.create(management_station=station, appliance=appliance,
+                                source_type="show_merged_config", collected_at=now,
+                                payload=merged)
+        if predefined:
+            Snapshot.objects.create(
+                management_station=station, appliance=appliance,
+                source_type="config_predefined_security_profiles", collected_at=now,
+                payload={"profiles": {}})
+        Snapshot.objects.create(management_station=station, appliance_group=group,
+                                source_type="show_pushed_shared_policy", collected_at=now,
+                                payload={"policy": {"panorama": {}}})
+        Snapshot.objects.create(management_station=station, enforcement_point=point,
+                                source_type="show_pushed_shared_policy_vsys", scope_name="vsys1",
+                                collected_at=now, payload={"policy": {"panorama": {}}})
+        if pushed_profiles is not None:
+            Snapshot.objects.create(
+                management_station=station, enforcement_point=point,
+                source_type="config_pushed_vsys_profiles", scope_name="vsys1",
+                collected_at=now, payload=pushed_profiles)
+        return station, group, point
+
+    @staticmethod
+    def _merged(vsys_content=None, shared_content=None):
+        return {"config": {
+            "shared": shared_content or {},
+            "devices": {"entry": [{"@name": "localhost.localdomain", "vsys": {"entry": [
+                dict({"@name": "vsys1"}, **(vsys_content or {}))]}}]}}}
+
+    def _normalize(self, group, point):
+        normalize_appliance_group_security_profiles(group)
+        return normalize_security_profiles(point)
+
+    def test_a_point_with_no_data_filtering_anywhere_still_gets_a_posture_row(self):
+        # THE WHOLE REASON THE SUBJECT EXISTS. Three of the four lab appliances are in this
+        # state, and a profile-keyed row cannot report something that does not exist.
+        station, group, point = self._point(merged=self._merged(), pushed_profiles={})
+        counts = self._normalize(group, point)
+        self.assertEqual(counts["data_filtering_postures"], 1)
+        row = DataFilteringPosture.objects.get(enforcement_point=point)
+        self.assertFalse(row.outward_data_filtering_effective)
+        self.assertFalse(row.data_filtering_in_force)
+        self.assertFalse(row.named_patterns_defined)
+        self.assertEqual(row.profiles_in_force, [],
+                         "an empty evidence list beside a firing verdict is the honest pair")
+
+    def test_a_profile_a_rule_reaches_through_a_group_makes_the_posture_effective(self):
+        # oep-fdf7-f1 + oep-fdf7-g1 + oep-fdf7-r1 + oep-fdf7-d1, which is the only
+        # configuration in the lab estate that a two-hop walk reaches from a rule.
+        station, group, point = self._point(pushed_profiles={}, merged=self._merged({
+            "profiles": {
+                DF: {"entry": [df_profile(df_rule("r1", data_object="d1",
+                                                  alert="100", block="10")) | {"@name": "f1"}]},
+                "data-objects": {"entry": [
+                    {"@name": "d1", "pattern-type": {"predefined": {"pattern": {"entry": [
+                        {"@name": "credit-card-numbers",
+                         "file-type": {"member": ["any"]}}]}}}}]},
+            },
+            "profile-group": {"entry": [{"@name": "g1", DF: {"member": ["f1"]}}]},
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r1", "profile-setting": {"group": {"member": ["g1"]}}}]}}},
+        }))
+        self._normalize(group, point)
+        row = DataFilteringPosture.objects.get(enforcement_point=point)
+        self.assertTrue(row.data_filtering_in_force)
+        self.assertTrue(row.named_patterns_defined)
+        self.assertTrue(row.outward_data_filtering_effective)
+        self.assertEqual([p["reference_reach"] for p in row.profiles_in_force],
+                         [SecurityProfile.REACH_BY_RULE])
+
+    def test_a_referenced_profile_with_no_rules_is_not_in_force(self):
+        # THE PUSHED test_dlp_prof: the only data-filtering profile anything in the estate
+        # references, and it carries no rules. A bare "is it referenced" predicate finds it and
+        # reports the estate as watched.
+        station, group, point = self._point(pushed_profiles={}, merged=self._merged({
+            "profiles": {DF: {"entry": [{"@name": "f1"}]}},
+            "profile-group": {"entry": [{"@name": "g1", DF: {"member": ["f1"]}}]},
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r1", "profile-setting": {"group": {"member": ["g1"]}}}]}}},
+        }))
+        self._normalize(group, point)
+        row = DataFilteringPosture.objects.get(enforcement_point=point)
+        self.assertFalse(row.data_filtering_in_force)
+        self.assertFalse(row.outward_data_filtering_effective)
+        self.assertEqual(row.profiles_in_force[0]["reference_reach"],
+                         SecurityProfile.REACH_BY_RULE,
+                         "it IS reached; what it is not is watching anything")
+        self.assertFalse(row.profiles_in_force[0]["has_rules"])
+
+    def test_an_in_force_profile_naming_a_pattern_that_defines_nothing_fails_the_verdict(self):
+        station, group, point = self._point(pushed_profiles={}, merged=self._merged({
+            "profiles": {
+                DF: {"entry": [df_profile(df_rule("r1", data_object="d1",
+                                                  alert="1", block="1")) | {"@name": "f1"}]},
+                "data-objects": {"entry": [
+                    {"@name": "d1", "pattern-type": {"regex": {"pattern": None}}}]},
+            },
+            "profile-group": {"entry": [{"@name": "g1", DF: {"member": ["f1"]}}]},
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r1", "profile-setting": {"group": {"member": ["g1"]}}}]}}},
+        }))
+        self._normalize(group, point)
+        row = DataFilteringPosture.objects.get(enforcement_point=point)
+        self.assertTrue(row.data_filtering_in_force)
+        self.assertFalse(row.named_patterns_defined)
+        self.assertFalse(row.outward_data_filtering_effective)
+
+    def test_has_rules_agrees_with_rule_count_on_every_row(self):
+        # The two are the same reading in two forms and are written from one `profile_rules()`
+        # call. Nothing calls `full_clean` anywhere in this package - measured, zero hits - so
+        # this test is the gate and a `clean()` would not be.
+        station, group, point = self._point(pushed_profiles={}, merged=self._merged({
+            "profiles": {
+                FB: {"entry": [fb_profile(fb_rule("r1", FLOOR, action="block", direction="both"))
+                               | {"@name": "p1"},
+                               {"@name": "p2"}]},
+                DF: {"entry": [{"@name": "f1"}]},
+            }}))
+        self._normalize(group, point)
+        rows = SecurityProfile.objects.filter(management_station=station)
+        self.assertTrue(rows.exists())
+        for row in rows:
+            self.assertEqual(row.has_rules, row.rule_count > 0, row.name)
+
+    def test_a_data_filtering_row_is_never_reference_reach_resolved(self):
+        # Four of the ten fields that can point at the data-filtering collection are AI-security
+        # profile `data-leak-detection` member lists and nothing in this package reads
+        # `profiles/ai-security`. False FIRES, and the finding it raises - "we could not
+        # establish whether anything points at this profile" - replaces a false one.
+        station, group, point = self._point(pushed_profiles={}, merged=self._merged({
+            "profiles": {DF: {"entry": [{"@name": "f1"}]},
+                         FB: {"entry": [{"@name": "p1"}]}}}))
+        self._normalize(group, point)
+        self.assertFalse(SecurityProfile.objects.get(kind=DF).reference_reach_resolved)
+        self.assertTrue(SecurityProfile.objects.get(kind=FB).reference_reach_resolved,
+                        "the file-blocking walk HAS every read it needs")
+
+    def test_an_unreferenced_data_filtering_profile_reads_undetermined_and_not_unreferenced(self):
+        # PAN-FIL-004's second restatement cannot report today, and this is where that is
+        # visible: the clause is `equals unreferenced` and the column never holds it while the
+        # AI-security read is missing. Stage 5 predicted it; the expectation it breaks is stage
+        # 6's, which read the column as `unreferenced` for oep-fdf7-f4.
+        station, group, point = self._point(pushed_profiles={}, merged=self._merged({
+            "profiles": {DF: {"entry": [{"@name": "f1"}]}}}))
+        self._normalize(group, point)
+        self.assertEqual(SecurityProfile.objects.get(kind=DF).reference_reach,
+                         SecurityProfile.REACH_UNDETERMINED)
+
+    def test_an_unissued_pushed_profiles_read_leaves_the_walk_unresolved(self):
+        # The read is the only source for the pushed profiles on one of the two lab platforms,
+        # so a point without it has not established what Panorama put in the enforcement path.
+        station, group, point = self._point(pushed_profiles=None, merged=self._merged({
+            "profiles": {FB: {"entry": [{"@name": "p1"}]}}}))
+        self._normalize(group, point)
+        row = SecurityProfile.objects.get(kind=FB)
+        self.assertFalse(row.reference_reach_resolved)
+        self.assertEqual(row.reference_reach, SecurityProfile.REACH_UNDETERMINED,
+                         "nothing named it AND the reads were short, so the answer is unknown")
+
+    def test_an_incomplete_read_set_does_not_downgrade_a_rule_that_was_found(self):
+        # Positive evidence stays positive: a read nobody issued can only hide a REFERRER.
+        station, group, point = self._point(pushed_profiles=None, merged=self._merged({
+            "profiles": {FB: {"entry": [{"@name": "p1"}]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r1", "profile-setting": {"profiles": {FB: {"member": ["p1"]}}}}]}}},
+        }))
+        self._normalize(group, point)
+        row = SecurityProfile.objects.get(kind=FB)
+        self.assertEqual(row.reference_reach, SecurityProfile.REACH_BY_RULE)
+        self.assertFalse(row.reference_reach_resolved)
+
+    def test_a_fresh_row_holds_the_firing_side_on_every_column_but_one(self):
+        # The migration window. A row nobody has renormalised must raise rather than pass.
+        row = SecurityProfile(kind=FB, name="x")
+        for column in ("has_rules", "stops_floor_file_types", "stops_nested_encoding",
+                       "expresses_unopenable_file_decision", "every_rule_carries_both_counts",
+                       "reference_reach_resolved"):
+            self.assertFalse(getattr(row, column), column)
+        self.assertEqual(row.reference_reach, SecurityProfile.REACH_UNDETERMINED)
+        self.assertFalse(row.confirm_rule_beyond_web_browsing,
+                         "THE EXCEPTION: this column names a configuration that is PRESENT, so "
+                         "its firing side is True and its migration window is silent")

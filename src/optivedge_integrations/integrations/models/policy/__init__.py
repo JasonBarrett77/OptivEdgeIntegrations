@@ -9,6 +9,7 @@ from .base import (
     precedence_for,
     scope_for,
 )
+from .data_filtering import DataFilteringPosture
 from .objects import (
     AddressGroup,
     AddressGroupMember,
@@ -55,6 +56,7 @@ from .search import SecurityRuleSearchVocabularyEntry
 
 __all__ = [
     "AddressGroup",
+    "DataFilteringPosture",
     "AddressGroupMember",
     "AddressGroupTag",
     "AddressObject",
