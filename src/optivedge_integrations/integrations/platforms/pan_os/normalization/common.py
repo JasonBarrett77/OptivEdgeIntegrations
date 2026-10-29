@@ -460,6 +460,36 @@ def iter_nested_entries(node: Any) -> Iterable[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Cryptographic offer helpers — shared by the normalizers that grade an algorithm list
+# ---------------------------------------------------------------------------
+
+def bare_algorithm(algorithm: str) -> str:
+    """`aes256-gcm@openssh.com` -> `aes256-gcm`; the suffix names a source, not an algorithm."""
+    return str(algorithm).split("@", 1)[0]
+
+
+def offer_below_preferred(offer: list[str], preferred: frozenset[str],
+                          allowed: frozenset[str]) -> tuple[bool, list[str]]:
+    """(the control fires, the offered members outside `allowed`).
+
+    Either fault fires it: something outside the allowed set is offered, or nothing from the
+    preferred set is. The list is empty in the second case, which is how the finding tells
+    "remove this" apart from "add that". An empty offer fires on the second fault, so a list
+    nobody collected is never vacuously compliant.
+
+    Compared on the bare name throughout - see bare_algorithm() for why.
+
+    Written for management_ssh.py's three algorithm lists and moved here on 2026-10-28: the IKE
+    normalizer computes one of its own floors with exactly this logic (`dh_group_floor_met`,
+    with `preferred` and `allowed` the same set) and could not import it from a module private
+    to another domain. It lives here, not in either of those modules, so that sharing it does
+    not create a cross-module dependency between them - the same reason merge_intervals() is
+    here.
+    """
+    beyond = [a for a in offer if bare_algorithm(a) not in allowed]
+    return bool(beyond) or not any(bare_algorithm(a) in preferred for a in offer), beyond
+
+# ---------------------------------------------------------------------------
 # Payload structure helpers — shared across address and security rule normalizers
 # ---------------------------------------------------------------------------
 

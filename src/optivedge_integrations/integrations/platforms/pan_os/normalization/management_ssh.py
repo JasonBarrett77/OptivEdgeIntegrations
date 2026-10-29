@@ -18,6 +18,7 @@ from optivedge_integrations.integrations.models import (
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     ABSENT,
     Implicit,
+    offer_below_preferred,
     parse_integer_field,
     parse_text_field, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, iter_member_values, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
@@ -68,23 +69,6 @@ PREFERRED_KEX = frozenset({"ecdh-sha2-nistp256", "ecdh-sha2-nistp384", "ecdh-sha
 ALLOWED_KEX = PREFERRED_KEX
 PREFERRED_MACS = frozenset({"hmac-sha2-512", "hmac-sha2-512-etm"})
 ALLOWED_MACS = PREFERRED_MACS | {"hmac-sha2-256", "hmac-sha2-256-etm"}
-
-
-def _bare(algorithm: str) -> str:
-    """`aes256-gcm@openssh.com` -> `aes256-gcm`; the suffix names a source, not an algorithm."""
-    return str(algorithm).split("@", 1)[0]
-
-
-def _preferred_state(offer: list[str], preferred: frozenset[str],
-                     allowed: frozenset[str]) -> tuple[bool, list[str]]:
-    """(the control fires, the offered members outside `allowed`).
-
-    Either fault fires it: something outside the allowed set is offered, or nothing from the
-    preferred set is. The list is empty in the second case, which is how the finding tells
-    "remove this" apart from "add that".
-    """
-    beyond = [a for a in offer if _bare(a) not in allowed]
-    return bool(beyond) or not any(_bare(a) in preferred for a in offer), beyond
 
 
 def _release(appliance: Appliance) -> str:
@@ -197,10 +181,10 @@ def normalize_management_ssh(appliance: Appliance) -> dict[str, int]:
     rekey_data, rekey_data_rk, rekey_data_rv = _int_with_provenance(rekey.get("data"))
     rekey_packets, rekey_packets_rk, rekey_packets_rv = _int_with_provenance(rekey.get("packets"))
     weak = [m for m in offer["macs"] if m not in STRONG_MACS]
-    ciphers_below, beyond_ciphers = _preferred_state(
+    ciphers_below, beyond_ciphers = offer_below_preferred(
         offer["ciphers"], PREFERRED_CIPHERS, ALLOWED_CIPHERS)
-    kex_below, beyond_kex = _preferred_state(offer["kex"], PREFERRED_KEX, ALLOWED_KEX)
-    macs_below, beyond_macs = _preferred_state(offer["macs"], PREFERRED_MACS, ALLOWED_MACS)
+    kex_below, beyond_kex = offer_below_preferred(offer["kex"], PREFERRED_KEX, ALLOWED_KEX)
+    macs_below, beyond_macs = offer_below_preferred(offer["macs"], PREFERRED_MACS, ALLOWED_MACS)
 
     content_type = ContentType.objects.get_for_model(ManagementSshSettings)
     with transaction.atomic():
