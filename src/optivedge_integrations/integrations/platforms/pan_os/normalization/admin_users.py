@@ -205,11 +205,16 @@ def normalize_admin_users(appliance: Appliance) -> dict[str, int]:
             "what governs the account, not this field"))
         pwd_profile, pwd_key, pwd_value = parse_text_field(
         entry.get("password-profile"),
-        implicit=Implicit.measured(
-            None,
-            "payload contract, admin-user.password-profile: implicit null - an absent key "
-            "applies no profile, so the global mgt-config/password-complexity policy is what "
-            "governs the account; PasswordProfile is the override and absence is its absence"))
+        implicit=Implicit.not_assumed(
+            "an absent reference asserts that nothing is bound, and the honest store for that "
+            "is nothing - storing a name would invent a binding. The global "
+            "mgt-config/password-complexity policy is then what governs the account and "
+            "PasswordProfile is the override, which is a fact about the OTHER object rather "
+            "than a value PAN-OS supplies here. Stage 4 of the admin-authentication pipeline "
+            "run records this key's implicit as unmeasured with disposition not_assumed, so "
+            "the row reads `not_configured` rather than `pan_os_default`. Changed 2026-10-29; "
+            "the stored value is the empty string either way, which is what the shipped "
+            "`is_empty` compiler can reach"))
         cert_only, cert_key, cert_value = parse_yes_no_field(
             entry.get("client-certificate-only"),
         implicit=Implicit.measured(
@@ -218,6 +223,13 @@ def normalize_admin_users(appliance: Appliance) -> dict[str, int]:
 
         has_password = bool(str(entry.get("phash") or "").strip())
         has_public_key = bool(str(entry.get("public-key") or "").strip())
+        # PAN-AUTH-019's second half as ONE verdict. `phash` arrives as eight asterisks in
+        # every view, so only its presence is ever available, and the query layer offers no OR
+        # across two columns of a row - which is why the disjunction is stored rather than
+        # asked. `centrally_authenticated` below is the verdict over BOTH of stage 3's halves
+        # and does not replace this one: the two findings have different remediations - a
+        # binding to add, against a credential to delete.
+        has_local_credential = has_password or has_public_key
 
         if auth_profile:
             effective, binding = auth_profile, AdminUser.AuthenticationBinding.USER
@@ -254,6 +266,14 @@ def normalize_admin_users(appliance: Appliance) -> dict[str, int]:
             "client_certificate_only": cert_only,
             "has_password": has_password,
             "has_public_key": has_public_key,
+            "has_local_credential": has_local_credential,
+            # THE ROSTER IS CONFIGURATION ALONE and this says so on every row. Nothing here
+            # issues `<show><admins><all/></admins></show>`, so an administrator the identity
+            # service defines is not in `mgt-config/users` and is not counted - which makes
+            # `superuser_cohort_size` a FLOOR. It is a constant True rather than a parameter
+            # because the collector set is what decides it: when a roster read is collected and
+            # reconciled against these entries, that code sets this False and not before.
+            "roster_is_configuration_only": True,
             # BOTH halves, and neither is redundant. A profile whose method is
             # `local-database` or `none` authenticates against the device, so a bound profile
             # is not evidence of centralization; and a stored credential outlives the binding

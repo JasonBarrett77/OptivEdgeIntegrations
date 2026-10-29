@@ -35,6 +35,12 @@ from .provenance import ProvenancedMixin
 class AuthenticationSettings(ProvenancedMixin, SyncTrackedModel):
     """The device-wide administrator authentication settings on one appliance."""
 
+    #: Computed here: the lockout-duration absence flag, read off whether the parse stored a
+    #: value. It has no payload key of its own. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "lockout_time_minutes_unknown",
+    )
+
     management_station = models.ForeignKey(
         "integrations.ManagementStation", on_delete=models.CASCADE,
         related_name="authentication_settings")
@@ -55,8 +61,21 @@ class AuthenticationSettings(ProvenancedMixin, SyncTrackedModel):
     #: the same two names for the per-profile lockout - which is the right parallel, because a
     #: query always names its model and the two settings really are the same idea at two scopes.
     lockout_failed_attempts = models.PositiveIntegerField(default=0)
-    #: PAN-AUTH-015. 0 is "until released", the strictest value on this field alone.
-    lockout_time_minutes = models.PositiveIntegerField(default=0)
+    #: PAN-AUTH-015, and the one field on this model whose 0 is the STRICTEST value rather
+    #: than the weakest - so an absent key expanded to 0 would store the compliant answer
+    #: about a setting nobody read. NULLABLE for that reason: `Implicit.not_assumed` stores
+    #: nothing and records `not_configured`, and the companion flag below carries the
+    #: reporting. The shipped clause is `greater than 0 AND less than 30`, which a stored 0
+    #: and a NULL both fail, so the nullability changes no verdict - it stops the row
+    #: asserting a value nobody measured.
+    #:
+    #: THE VENDOR CONTRADICTS ITSELF ABOUT WHICH END OF THE RANGE 0 SITS AT - Help p.707 says
+    #: both, two lines apart - and the project measured the strict reading on 2026-09-04.
+    #: Neither this model nor the control ranks the two readings.
+    lockout_time_minutes = models.PositiveIntegerField(null=True, blank=True)
+    #: True when nothing was stored for `lockout_time_minutes`. DEFAULT TRUE, the firing side:
+    #: a row written before the recompute declares itself unread rather than compliant.
+    lockout_time_minutes_unknown = models.BooleanField(default=True)
     #: PAN-AUTH-017. 0 is a key that never expires.
     api_key_lifetime_minutes = models.PositiveIntegerField(default=0)
 

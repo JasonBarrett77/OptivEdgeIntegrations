@@ -43,6 +43,8 @@ class AdminUser(ProvenancedMixin, SyncTrackedModel):
         "superuser_cohort_size",
         "has_password",
         "has_public_key",
+        "has_local_credential",
+        "roster_is_configuration_only",
         "authentication_is_external",
         "centrally_authenticated",
     )
@@ -152,6 +154,26 @@ class AdminUser(ProvenancedMixin, SyncTrackedModel):
     #: `phash` present - a local password exists. `public-key` present - an SSH key does.
     has_password = models.BooleanField(default=False)
     has_public_key = models.BooleanField(default=False)
+
+    #: PAN-AUTH-019's SECOND HALF on its own: either credential is a way in that outlives the
+    #: identity-service binding. The disjunction is stored rather than queried because a clause
+    #: here is one conjunction with no OR, and `phash` arrives as eight asterisks in every view
+    #: - so only its PRESENCE is usable and no value comparison can express it.
+    #:
+    #: Separate from `centrally_authenticated`, which is a verdict over BOTH halves. Stage 3
+    #: split the control because the remediations differ - one half is a binding to add, the
+    #: other a credential to delete - and two findings cannot be told apart through one column.
+    has_local_credential = models.BooleanField(default=False)
+
+    #: PAN-AUTH-021 and 022. True when this appliance's roster was built from CONFIGURATION
+    #: ALONE, so the superuser count beside it is a FLOOR and not a census: an administrator the
+    #: identity service defines can hold a role this appliance never stores.
+    #:
+    #: DEFAULT TRUE and TRUE IN PRACTICE TODAY, because no collector issues
+    #: `<show><admins><all/></admins></show>` - this column does not recover the missing
+    #: accounts, it stops the count reading as complete. It turns false only when an operational
+    #: roster read has been reconciled against `mgt-config/users` for the appliance.
+    roster_is_configuration_only = models.BooleanField(default=True)
 
     #: The effective profile exists AND its method is one of RADIUS, TACACS+, LDAP, Kerberos,
     #: SAML or Cloud. A profile whose method is `local-database` or `none` authenticates against

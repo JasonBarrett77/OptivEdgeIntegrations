@@ -82,6 +82,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.authenti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.admin_users import (
     normalize_admin_users,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.admin_role_posture import (
+    normalize_admin_role_posture,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.authentication_sequences import (
     normalize_authentication_sequences,
 )
@@ -277,6 +280,11 @@ def normalize_appliance_admin_users(appliance: Appliance) -> dict:
     return normalize_admin_users(appliance)
 
 
+def normalize_appliance_admin_role_posture(appliance: Appliance) -> dict:
+    """Whether this appliance defines and uses any scoped administrator role. One row."""
+    return normalize_admin_role_posture(appliance)
+
+
 def normalize_appliance_authentication_profiles(appliance: Appliance) -> dict:
     """Authentication profiles, in every scope they occupy."""
     return normalize_authentication_profiles(appliance)
@@ -315,6 +323,7 @@ __all__ = [
     "normalize_appliance_group_security_profiles",
     "normalize_appliance_group_shared_scope",
     "normalize_appliance_admin_users",
+    "normalize_appliance_admin_role_posture",
     "normalize_appliance_server_profiles",
     "normalize_appliance_authentication_profiles",
     "normalize_appliance_authentication_sequences",

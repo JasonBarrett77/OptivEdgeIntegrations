@@ -29,10 +29,46 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
 DEFAULT_IDLE_TIMEOUT_MINUTES = 60
 
 #: Shared by the thirteen complexity keys, which one form measured in one sitting.
+#:
+#: NO LONGER USED AS A MEASUREMENT, and kept because it is the pointer to what was actually
+#: seen. Reading an unconfigured FORM establishes what the UI RENDERS for an absent key, which
+#: is not the same claim as "PAN-OS supplies this value": stage 4 of the admin-authentication
+#: pipeline run recorded every one of these keys' implicit as `status: unmeasured`,
+#: `consumer_disposition: not_assumed` - no oracle exists for the Device > Setup panel shape and
+#: `show system state filter` is NO_MATCHES on every term tried. So the stored value is OUR
+#: INFERENCE, which is `Implicit.assumed`, and the rows now read `assumed_default` rather than
+#: `pan_os_default`. Changed 2026-10-29; the citation text travels on as the reasoning.
 PASSWORD_COMPLEXITY_CITATION = (
     "payload contract, password-complexity $implicit_values: measured 2026-09-03 from the "
     "unconfigured Minimum Password Complexity form, where the whole node is absent - every "
     "numeric key reads 0 and every checkbox unticked")
+
+#: Why an absent complexity key is expanded to its insecure value anyway: on eleven of the
+#: thirteen a 0 (or an unticked box) IS the finding, so materialising it is what makes an
+#: unknown fire. The query layer has no is-null operator and SQL passes a NULL on every
+#: positive comparison, so a nullable column there would report a clean estate it never read.
+PASSWORD_COMPLEXITY_ASSUMED_WHY = (
+    "the unconfigured form reading establishes what the UI RENDERS for an absent key and not "
+    "what PAN-OS supplies - no oracle for this panel exists and `show system state filter` "
+    "returns NO_MATCHES on every term tried, so the stored value is our inference. It is "
+    "stored rather than left null because 0/unticked is the FINDING value on this key, so "
+    "materialising it is what makes an unknown fire. The reading itself: "
+    + PASSWORD_COMPLEXITY_CITATION)
+
+#: The two keys on this node where 0 is the COMPLIANT value, so expanding an absent key to 0
+#: would store the reassuring answer about a setting nobody measured. Nothing is assumed for
+#: them; the `*_unknown` companion columns on PasswordComplexityPolicy carry the reporting.
+PASSWORD_COMPLEXITY_NOT_ASSUMED = frozenset({
+    "password_post_expiration_admin_login_count",
+    "password_post_expiration_grace_period",
+})
+
+PASSWORD_COMPLEXITY_NOT_ASSUMED_WHY = (
+    "0 is the COMPLIANT value on this key - PAN-AUTH-012 and 013 both assert `greater than 0` "
+    "- so expanding an absent key to 0 would store 'we asked and it was fine' about a key "
+    "nobody has measured. Stage 4 records the implicit as unmeasured with "
+    "`may_materialise: false`. The absence is reported by the `*_unknown` companion column, "
+    "which fires on its own")
 
 #: Raised when deviceconfig/system names an SSL/TLS profile no collected scope defines.
 SSL_TLS_ISSUE_KIND = "ssl_tls_service_profile_unresolved"
@@ -124,9 +160,18 @@ def authentication_settings_from_node(management: Any) -> tuple[dict[str, Any], 
 
     `admin-lockout` is a CONTAINER, and the whole `setting/management` node is absent on a device
     that has never had one of its keys set - measured on both PA-5220s - so this tolerates the
-    parent missing, not just the key. Idle timeout defaults to 60, which the vendor sets; the
-    other three default to 0, and 0 is the WEAKEST value on all three - unlimited attempts, no
-    lockout, and an API key that never expires.
+    parent missing, not just the key. Idle timeout infers 60, which the vendor documents; two of
+    the other three infer 0, and 0 is the WEAKEST value on both of those - unlimited attempts
+    and an API key that never expires.
+
+    `lockout_time_minutes` COMES BACK None FOR AN ABSENT KEY and is the exception: 0 is the
+    strictest value there on the reading the project measured, so nothing is inferred. A caller
+    reading this dict for a number must tolerate None on that one key.
+
+    A TEMPLATE CAN CONTRIBUTE THIS NODE AND NO CHILDREN - measured on both PA-5220s, where the
+    merged read answers `{'management': {'@ptpl': .., '@src': 'tpl'}}` while `action=show`
+    raises `No such node`. The node is then present, truthy, EMPTY and template-owned at once,
+    and every key under it reads absent, which is the correct reading of it.
     """
     if not isinstance(management, dict):
         management = {}
@@ -138,25 +183,45 @@ def authentication_settings_from_node(management: Any) -> tuple[dict[str, Any], 
     if not isinstance(api_key, dict):
         api_key = {}
 
-    # All four measured 2026-09-04 from the unconfigured Authentication Settings form, and all
-    # four default to a zero-ish value that means something different - which is why each states
-    # its own citation rather than sharing one.
+    # All four were READ OFF the unconfigured Authentication Settings form on 2026-09-04, which
+    # establishes what the UI renders for an absent key rather than what PAN-OS supplies. Stage
+    # 4 of the admin-authentication pipeline run records all four implicits as
+    # `status: unmeasured`, `consumer_disposition: not_assumed` - no oracle exists for this
+    # panel and `show system state filter` is NO_MATCHES on every term tried - so these are
+    # `Implicit.assumed` and the rows read `assumed_default`. Changed 2026-10-29 from
+    # `Implicit.measured`; the old citations travel on as the reasoning, unchanged in substance.
+    #
+    # THREE ARE ASSUMED AND ONE IS NOT, and the split is the direction each zero points. On
+    # idle-timeout, failed-attempts and the API key lifetime a zero-ish value is the WEAKEST
+    # setting, so materialising it is what makes an unknown fire. On lockout-time 0 is the
+    # STRICTEST, so materialising it would store the compliant answer about a setting nobody
+    # read - that one stores nothing and `lockout_time_minutes_unknown` reports the absence.
     reads = (
-        ("idle_timeout_minutes", management.get("idle-timeout"), Implicit.measured(
+        ("idle_timeout_minutes", management.get("idle-timeout"), Implicit.assumed(
             DEFAULT_IDLE_TIMEOUT_MINUTES,
-            "payload contract, authentication-settings.idle-timeout: 60, from a dropdown that "
-            "labels it '60 (default)'. PAN-AUTH-016's verdict turns on it")),
-        ("lockout_failed_attempts", admin_lockout.get("failed-attempts"), Implicit.measured(
+            "the idle-timeout dropdown labels 60 '60 (default)', which is the vendor "
+            "documenting a value rather than anybody measuring the device; stage 4 records "
+            "this key's implicit as unmeasured. 60 lands inside PAN-AUTH-016's firing band, so "
+            "storing it reports the appliance rather than reassuring about it")),
+        ("lockout_failed_attempts", admin_lockout.get("failed-attempts"), Implicit.assumed(
             0,
-            "payload contract, authentication-settings.admin-lockout/failed-attempts: 0, "
-            "meaning UNLIMITED attempts - Help p.707, and 10 in FIPS-CC mode, which this model "
-            "does not distinguish")),
-        ("lockout_time_minutes", admin_lockout.get("lockout-time"), Implicit.measured(
-            0, "payload contract, authentication-settings.admin-lockout/lockout-time: 0")),
-        ("api_key_lifetime_minutes", api_key.get("lifetime"), Implicit.measured(
+            "the unconfigured form renders 0, meaning UNLIMITED attempts - Help p.707, and 10 "
+            "in FIPS-CC mode, which this model does not distinguish. Stage 4 records the "
+            "implicit as unmeasured, so this is our inference; 0 is the WORST value here, so "
+            "materialising it is what makes an unknown fire")),
+        ("lockout_time_minutes", admin_lockout.get("lockout-time"), Implicit.not_assumed(
+            "0 is the STRICTEST value this field offers on the reading the project measured "
+            "(2026-09-04: three failures against a threshold of 2 with the duration at 0 left "
+            "the account locked until released), so expanding an absent key to 0 would store "
+            "the compliant answer about a setting nobody read. The vendor also states the "
+            "opposite two lines earlier on Help p.707 and neither reading is ranked here, "
+            "which is a second reason not to infer anything. "
+            "`lockout_time_minutes_unknown` reports the absence instead")),
+        ("api_key_lifetime_minutes", api_key.get("lifetime"), Implicit.assumed(
             0,
-            "payload contract, authentication-settings.api/key/lifetime: 0, meaning keys never "
-            "expire - Administrator's Guide p.85")),
+            "the unconfigured form renders 0, meaning keys never expire - Administrator's "
+            "Guide p.85. Stage 4 records the implicit as unmeasured, so this is our inference; "
+            "0 is the worst value here, so materialising it is what makes an unknown fire")),
     )
     values: dict[str, Any] = {}
     provenance: list[tuple[str, Any, str | None]] = []
@@ -194,11 +259,23 @@ def password_complexity_from_snapshot(snapshot: Snapshot) -> tuple[dict[str, Any
     `mgt-config` sits at the TOP of the merged config beside `devices` and `shared`, not under
     a device entry, so it needs its own accessor rather than reusing device_entry_from_snapshot.
 
-    Every default is the insecure one - flag off, every number 0 - measured from the
-    unconfigured form. Absent is expanded rather than left null because PAN-OS never writes
-    these values: the UI stores only the flag when an administrator enables complexity, and a
-    commit does not materialise the rest. So there is no state where a null would mean
-    something a 0 does not.
+    ELEVEN of the thirteen defaults are the insecure one - flag off, every number 0 - and
+    absent is expanded rather than left null because PAN-OS never writes these values: the UI
+    stores only the flag when an administrator enables complexity, and a commit does not
+    materialise the rest. On those eleven a 0 is the FINDING value, so materialising it is what
+    makes an unknown fire.
+
+    THE TWO POST-EXPIRATION KEYS ARE `Implicit.not_assumed` AND COME BACK None, because 0 is
+    the COMPLIANT value on both of them - see PASSWORD_COMPLEXITY_NOT_ASSUMED. Any caller
+    reading this dict for a number must tolerate None on those two keys;
+    `normalize_password_profiles` reads only `password_expiration_period`, which is not one of
+    them.
+
+    THE CHANGE REACHES ALL FOURTEEN NON-DECLINED KEYS, including the three no control reads -
+    block-repeated-characters, password-change-on-first-login, password-change-period-block.
+    They share this loop and they share the one form reading, so a third branch holding them at
+    `Implicit.measured` would say the form measured PAN-OS behaviour for three keys and not for
+    the other eleven, which is not a distinction anything supports.
     """
     # NO EARLY RETURN. Every level that is missing narrows to an empty mapping and falls
     # through to the loop, so each of the sixteen fields is read as absent and DECLARED.
@@ -222,12 +299,16 @@ def password_complexity_from_snapshot(snapshot: Snapshot) -> tuple[dict[str, Any
     for field, key, kind, parent in PASSWORD_COMPLEXITY_FIELDS:
         source = change if parent else complexity
         raw = source.get(key)
-        if kind == "bool":
+        if field in PASSWORD_COMPLEXITY_NOT_ASSUMED:
+            # Stores NOTHING for an absent key, and the provenance row says `not_configured`.
+            values[field], raw_key, raw_value = parse_integer_field(
+                raw, implicit=Implicit.not_assumed(PASSWORD_COMPLEXITY_NOT_ASSUMED_WHY))
+        elif kind == "bool":
             values[field], raw_key, raw_value = parse_yes_no_field(
-                raw, implicit=Implicit.measured(False, PASSWORD_COMPLEXITY_CITATION))
+                raw, implicit=Implicit.assumed(False, PASSWORD_COMPLEXITY_ASSUMED_WHY))
         else:
             values[field], raw_key, raw_value = parse_integer_field(
-                raw, implicit=Implicit.measured(0, PASSWORD_COMPLEXITY_CITATION))
+                raw, implicit=Implicit.assumed(0, PASSWORD_COMPLEXITY_ASSUMED_WHY))
         # mgt-config is template-managed - the users node on tpa-a arrives carrying @ptpl - so
         # these values can be pushed and the provenance has to be captured like any other.
         # An absent key produces a row too, carrying PASSWORD_COMPLEXITY_CITATION, which is
