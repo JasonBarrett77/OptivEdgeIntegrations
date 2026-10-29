@@ -47,7 +47,9 @@ from optivedge_integrations.integrations.models import (
 )
 from optivedge_integrations.integrations.query_chunking import chunked
 from optivedge_integrations.integrations.platforms.pan_os.collectors.external_list import (
+    invalid_members_from_result,
     members_from_result,
+    total_invalid_from_result,
     total_valid_from_result,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import derive_address_fields
@@ -59,6 +61,94 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     classify_literal_address_type,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import choose_local_appliance
+
+
+#: The one "valid" member a firewall reports for a list it has never fetched.
+#:
+#: MEASURED on pan-fw-111 2026-10-29 and on 2026-10-26 before that, at four lists on two
+#: scopes: `oep-cov6-el-ref` (named by a rule), `oep-cov6-el-unref` (named by nothing),
+#: `oep-cov6-el-shared` (/config/shared) and the pre-existing `v8-edl-b2` all answer
+#: total-valid 1 / total-ignored 0 / total-invalid 0 with `valid-members/member` holding this
+#: literal and nothing else. It is a syntactically valid address, so every count the device
+#: gives is non-zero and every column computed from a count reads as a successful collection:
+#: resolved_content_source_total becomes 1, num_hosts becomes 1, resolved_content_truncated
+#: stays false, and the two existing properties size_known and collection_attempted both
+#: answer True for a list the firewall has not read a byte of.
+#:
+#: THE READING IS NARROW AND SAYS SO. A list that genuinely holds one host and that host is
+#: 0.0.0.0/32 is indistinguishable from this, and the lab has no reachable source host to
+#: serve one, so the discriminating control cannot be built here. It is the best-supported
+#: reading available rather than a wide one.
+NEVER_FETCHED_PLACEHOLDER_MEMBER = "0.0.0.0/32"
+
+
+def content_was_fetched_from_result(result: Any) -> bool:
+    """Whether the collected reply is real content, as against the device's two non-answers.
+
+    Three states, all measured on pan-fw-111 2026-10-29 in one pass:
+
+      NEVER FETCHED      total-valid 1, total-invalid 0, the single member 0.0.0.0/32
+      FETCH FAILED       total-valid 0, total-invalid 1, invalid-members carrying the reason
+                         verbatim - `web request failed to complete, error:28` on prod_west_edl
+      FETCHED            total-valid 2776 with 2,776 real members, on panw-highrisk-ip-list
+
+    and a FOURTH the three-state model does not cover, measured in the same pass:
+    `panw-auth-portal-exclude-list` answers every counter zero with NO member key at all -
+    present, readable, holding nothing. Nothing in the reply separates "fetched an empty list"
+    from "never fetched", so per rules.md that reads as the unknown and the unknown fires: it
+    answers False here, which routes the row to the control whose remediation is "collect it"
+    rather than grading a shortfall nothing bounds.
+
+    `referenced_by_policy` is the fourth input the spec names and it does not appear here,
+    because it is already upstream: `_candidate_dynamic_address_objects` yields only objects a
+    rule in this enforcement point names, so every row this module touches is referenced. A
+    row nothing references never reaches a refresh and keeps the materialised False.
+    """
+    members = members_from_result(result)
+    total_valid = total_valid_from_result(result)
+    total_invalid = total_invalid_from_result(result)
+
+    if total_valid == 1 and members == [NEVER_FETCHED_PLACEHOLDER_MEMBER]:
+        return False
+    if not members:
+        # The failed fetch (total-invalid non-zero, a reason rather than an address) and the
+        # all-zero reply land here together, and both are a no. The reason is kept on the
+        # snapshot; it is a sentence, not a count, so no column holds it.
+        return False
+    return True
+
+
+def content_shortfall_band_for(
+    *, content_was_fetched: bool, source_total: int | None, kept: int | None
+) -> str:
+    """Which band the shortfall between the DEVICE's member count and OURS falls in.
+
+    Both sides are MEMBER counts. num_hosts is the address total of the merged intervals, so
+    comparing it against total-valid compares /24s against members: a list of /24s reads as a
+    surplus 256 times the size of the shortfall it actually has.
+
+    The bands are graded elsewhere and the boundaries are deliberately round. What is fixed
+    here is the DIRECTION - a larger band means a reach computed from the kept part sits
+    further below the truth - and that an unfetched list is banded apart rather than banded
+    `equal`: the device's never-fetched reply computes a ratio of exactly 1.0, so the gentlest
+    band would otherwise be worn by the state a coverage control exists to find.
+    """
+    if not content_was_fetched:
+        return AddressObject.BAND_CONTENT_NOT_FETCHED
+    if source_total is None or kept is None:
+        # Members in hand with no total beside them: the shortfall is unbounded rather than
+        # small, and nothing later can grade it down without a reading that does not exist.
+        return AddressObject.BAND_NO_DEVICE_COUNT
+    if kept <= 0:
+        return AddressObject.BAND_MORE_THAN_TEN_TIMES
+    ratio = source_total / kept
+    if ratio <= 1:
+        return AddressObject.BAND_EQUAL
+    if ratio <= 2:
+        return AddressObject.BAND_UP_TO_TWO_TIMES
+    if ratio <= 10:
+        return AddressObject.BAND_TWO_TO_TEN_TIMES
+    return AddressObject.BAND_MORE_THAN_TEN_TIMES
 
 
 @dataclass(slots=True)
@@ -223,6 +313,9 @@ def _record_resolution(
     truncated: bool,
     source_total: int | None,
     num_hosts: int | None,
+    member_count: int | None = None,
+    content_was_fetched: bool = False,
+    resolution_was_read: bool = False,
 ) -> None:
     """Record what this refresh established about the object: whether the content is the whole
     of what the device reported, and how many addresses it covers.
@@ -235,11 +328,29 @@ def _record_resolution(
     A truncated object gets the count of what WAS collected, which is a known under-count; the
     shortfall is readable from resolved_content_truncated beside it. Anything scoring breadth
     has to consult that flag rather than the count alone.
+
+    `member_count` is the same quantity as `source_total` - a MEMBER count - and that is the
+    whole reason it is stored: `num_hosts` is the address total of the merged intervals, so the
+    two numbers a shortfall is the ratio of were in different units until this column existed.
+    It is NULL and never 0 where no snapshot was parsed, for the same reason num_hosts is: 0
+    says the list was collected and found empty, which is the reassuring neighbour of the fact.
+
+    The three verdict columns default to the FIRING side on every path that records nothing, so
+    a row this function has not recomputed reports itself as uncollected rather than as clean.
     """
+    band = content_shortfall_band_for(
+        content_was_fetched=content_was_fetched,
+        source_total=source_total,
+        kept=member_count,
+    )
     fields = {
         "resolved_content_truncated": truncated,
         "resolved_content_source_total": source_total,
         "num_hosts": num_hosts,
+        "resolved_member_count": member_count,
+        "content_was_fetched": content_was_fetched,
+        "content_shortfall_band": band,
+        "resolution_was_read": resolution_was_read,
     }
     if all(getattr(address_object, name) == value for name, value in fields.items()):
         return
@@ -273,6 +384,9 @@ def normalize_enforcement_point_dynamic_address_content(
         truncated = False
         source_total = None
         num_hosts = None
+        member_count = None
+        content_was_fetched = False
+        resolution_was_read = False
 
         if address_object.address_type == AddressObject.TYPE_EDL:
             snapshot = _latest_external_list_snapshot(
@@ -285,6 +399,10 @@ def normalize_enforcement_point_dynamic_address_content(
             result = _edl_result_from_snapshot(snapshot)
             members = members_from_result(result)
             source_total = total_valid_from_result(result)
+            # OUR side of the shortfall, in the device's own unit. It was already computed
+            # here and thrown away: the truncation test below is the only thing that used it.
+            member_count = len(members)
+            content_was_fetched = content_was_fetched_from_result(result)
             # Measured against the DEVICE's count, never against the members in hand - those
             # two are equal exactly when nothing was dropped, which is the thing being tested.
             truncated = source_total is not None and len(members) < source_total
@@ -294,9 +412,19 @@ def normalize_enforcement_point_dynamic_address_content(
             if fqdn_snapshot is None:
                 _record_resolution(address_object, truncated=False, source_total=None, num_hosts=None)
                 continue
-            matching = fqdn_addresses.get((address_object.normalized_value or "").strip().lower())
+            lookup_name = (address_object.normalized_value or "").strip().lower()
+            # KEY PRESENCE and not truthiness: a stanza answering only AAAA, or carrying the
+            # `::  unknown` sentinel, resolves to no IPv4 interval and leaves num_hosts null -
+            # and it is still a stanza, so the table WAS read for this name. That distinction
+            # is the column's whole purpose, since num_hosts cannot tell "never looked" from
+            # "looked and the firewall holds no v4 answer".
+            resolution_was_read = lookup_name in fqdn_addresses
+            matching = fqdn_addresses.get(lookup_name)
             if not matching:
-                _record_resolution(address_object, truncated=False, source_total=None, num_hosts=None)
+                _record_resolution(
+                    address_object, truncated=False, source_total=None, num_hosts=None,
+                    resolution_was_read=resolution_was_read,
+                )
                 continue
             intervals = _intervals_from_values(matching)
             source_snapshot = fqdn_snapshot
@@ -306,6 +434,8 @@ def normalize_enforcement_point_dynamic_address_content(
         num_hosts = num_hosts_from_intervals(intervals) if intervals else None
         _record_resolution(
             address_object, truncated=truncated, source_total=source_total, num_hosts=num_hosts,
+            member_count=member_count, content_was_fetched=content_was_fetched,
+            resolution_was_read=resolution_was_read,
         )
 
         if not intervals:

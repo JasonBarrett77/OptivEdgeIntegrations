@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MinValueValidator
 from django.db import models
 
 from ..base import SyncTrackedModel
@@ -114,6 +115,16 @@ class AddressObject(ScopedPolicyObject):
         "num_hosts",
         "resolved_content_truncated",
         "resolved_content_source_total",
+        # The same kind of fact as the two above: outcomes of the EDL/FQDN refresh rather
+        # than configuration. No payload key carries any of them, so none can have a
+        # provenance row. resolved_member_count is OUR side of the comparison the device's
+        # total-valid is the other half of; content_was_fetched and resolution_was_read say
+        # whether the device ever answered with content at all; content_shortfall_band is
+        # arithmetic over the first two.
+        "resolved_member_count",
+        "content_was_fetched",
+        "content_shortfall_band",
+        "resolution_was_read",
     )
     TYPE_BUILTIN_ANY = "builtin_any"
     TYPE_EDL = "edl"
@@ -131,6 +142,28 @@ class AddressObject(ScopedPolicyObject):
         (TYPE_IP_RANGE, "IP Range"),
         (TYPE_IP_WILDCARD, "IP Wildcard"),
         (TYPE_NEGATED_COMPLEMENT, "Negated Complement (system-generated)"),
+    ]
+
+    #: How far the content THIS COLLECTION kept falls short of what the device said the list
+    #: holds. The six members are the five ranks a coverage assertion grades on plus the state
+    #: measured after those ranks were written: a list whose content was never fetched has no
+    #: shortfall to band, and saying `equal` for it would report the most incomplete thing on
+    #: the device as the most compliant. MEASURED on pan-fw-111 2026-10-29: an unfetched list
+    #: answers total-valid 1 with the single member 0.0.0.0/32, so a ratio over it is 1.0.
+    BAND_EQUAL = "equal"
+    BAND_UP_TO_TWO_TIMES = "up_to_two_times"
+    BAND_TWO_TO_TEN_TIMES = "two_to_ten_times"
+    BAND_MORE_THAN_TEN_TIMES = "more_than_ten_times"
+    BAND_NO_DEVICE_COUNT = "no_device_count"
+    BAND_CONTENT_NOT_FETCHED = "content_not_fetched"
+
+    CONTENT_SHORTFALL_BAND_CHOICES = [
+        (BAND_EQUAL, "Equal"),
+        (BAND_UP_TO_TWO_TIMES, "Up to two times"),
+        (BAND_TWO_TO_TEN_TIMES, "Two to ten times"),
+        (BAND_MORE_THAN_TEN_TIMES, "More than ten times"),
+        (BAND_NO_DEVICE_COUNT, "No device count"),
+        (BAND_CONTENT_NOT_FETCHED, "Content not fetched"),
     ]
 
     SYNTHETIC_KIND_RULE_LITERAL = "rule_literal"
@@ -184,6 +217,37 @@ class AddressObject(ScopedPolicyObject):
     #: What the device said the list holds, which is what truncation is measured against.
     #: Null means never refreshed, or a kind that has no such count (FQDN).
     resolved_content_source_total = models.BigIntegerField(null=True, blank=True)
+    #: How many members THIS COLLECTION kept, in the SAME UNIT as
+    #: resolved_content_source_total - a member count, not an address total. num_hosts is the
+    #: address total of the merged intervals, so comparing it against the device's total-valid
+    #: compares /24s against members and a shortfall reads as a surplus. BigInteger to match
+    #: the column it is compared against. NULL, never 0, where no snapshot was parsed: 0 says
+    #: the list was collected and found empty, which is a different fact and the reassuring one.
+    resolved_member_count = models.BigIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(0)]
+    )
+    #: Whether the firewall has ever actually fetched this list's content. It is the only thing
+    #: that tells the device's three answers apart, and nothing else here can: MEASURED on
+    #: pan-fw-111 2026-10-29, a list never fetched answers total-valid 1 / total-invalid 0 with
+    #: the single member 0.0.0.0/32, a list whose fetch FAILED answers total-valid 0 /
+    #: total-invalid 1 with the reason verbatim in invalid-members, and a fetched list answers a
+    #: real count with real members. The first of those sets resolved_content_source_total to 1
+    #: and num_hosts to 1, so collection_attempted and size_known are both true for a list the
+    #: device has never read a byte of.
+    content_was_fetched = models.BooleanField(default=False)
+    content_shortfall_band = models.CharField(
+        max_length=48,
+        choices=CONTENT_SHORTFALL_BAND_CHOICES,
+        default=BAND_CONTENT_NOT_FETCHED,
+    )
+    #: Whether this collection read the firewall's FQDN resolution table AND found a stanza for
+    #: this object's name. TRUE DOES NOT MEAN THE REACH IS KNOWN - a stanza answering only AAAA,
+    #: or the `::  unknown` sentinel, leaves num_hosts null with this true. What it establishes
+    #: is that somebody asked, which num_hosts alone cannot say: MEASURED on pan-fw-111
+    #: 2026-10-29, three committed fqdn objects in .invalid are absent from the table entirely
+    #: while a fourth, referenced by policy, resolves - so an absent stanza is "the firewall does
+    #: not resolve this name", not "nobody looked".
+    resolution_was_read = models.BooleanField(default=False)
     description = models.TextField(blank=True)
     raw_object = models.JSONField(default=dict, blank=True)
 
@@ -246,6 +310,22 @@ class AddressObject(ScopedPolicyObject):
             models.CheckConstraint(
                 condition=~models.Q(address_type="negated_complement") | models.Q(is_synthetic=True),
                 name="integrations_negated_complement_must_be_synthetic",
+            ),
+            # An IFF, enforced in the database rather than in clean(), because normalization
+            # writes these through save(update_fields=...) and bulk paths that never run
+            # full_clean(). A band is a GRADE and content_was_fetched is the applicability of
+            # grading at all: a row banded `equal` while nothing was fetched reports the list
+            # the coverage controls exist to find as the most compliant object on the device,
+            # and a row banded `content_not_fetched` while content WAS fetched hides a real
+            # shortfall. Both directions are silent in a query, so neither may be storable.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(content_was_fetched=False,
+                             content_shortfall_band="content_not_fetched")
+                    | (models.Q(content_was_fetched=True)
+                       & ~models.Q(content_shortfall_band="content_not_fetched"))
+                ),
+                name="integrations_shortfall_band_matches_content_was_fetched",
             ),
         ]
 

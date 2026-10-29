@@ -692,6 +692,33 @@ def build_normalized_addresses(
             ),
         )
 
+    # EVERY FIREWALL-LOCAL EXTERNAL DYNAMIC LIST WAS BEING DROPPED HERE, at both local scopes.
+    # `external-list` was normalized from the PUSHED reads only, so the single EDL row in the
+    # lab was the one Panorama pushes, and nine lists committed on the firewall itself - six
+    # kinds in vsys1, one at /config/shared, and two pre-existing ones - reached no row at all.
+    # MEASURED 2026-10-29 on serial 6A9C0A9904E7D6E: `show config merged` carries
+    # `external-list` under BOTH the vsys entry and `shared`, beside `address` and
+    # `address-group`, which have had these loops from the start.
+    #
+    # Nothing noticed because the failure is an ABSENCE of rows: a list with no row is
+    # indistinguishable from an appliance with no lists, and a coverage statement made over
+    # the rows that do exist reads as complete. The rule normalizer resolves a local list's
+    # name through `name_is_owned`, so a rule naming one of these got a synthetic literal
+    # row instead of the list - which also means the gap is invisible from the rule side.
+    for entry in ensure_list((merged_root.get("external-list") or {}).get("entry") if isinstance(merged_root.get("external-list"), dict) else None):
+        if not isinstance(entry, dict):
+            continue
+        collect(
+            normalized_objects, "address object", "external-list", "merged vsys", entry,
+            lambda entry=entry: normalize_external_list_object(
+                source_snapshot=merged_snapshot,
+                config_source=SecurityRule.SOURCE_LOCAL,
+                namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
+                namespace_value=enforcement_point.vsys_name,
+                entry=entry,
+            ),
+        )
+
     for entry in ensure_list((merged_shared_root.get("address") or {}).get("entry") if isinstance(merged_shared_root.get("address"), dict) else None):
         if not isinstance(entry, dict):
             continue
@@ -713,6 +740,24 @@ def build_normalized_addresses(
         collect(
             normalized_groups, "address group", "address-group", "merged shared", entry,
             lambda entry=entry: normalize_address_group(
+                source_snapshot=merged_snapshot,
+                config_source=SecurityRule.SOURCE_LOCAL,
+                namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
+                namespace_value="shared",
+                entry=entry,
+            ),
+            shared=True,
+        )
+
+    # The /config/shared half of the same gap. `shared=True` routes the row to the appliance
+    # GROUP, which is the unit holding one /config/shared - storing it per enforcement point
+    # copies one observation once per vsys.
+    for entry in ensure_list((merged_shared_root.get("external-list") or {}).get("entry") if isinstance(merged_shared_root.get("external-list"), dict) else None):
+        if not isinstance(entry, dict):
+            continue
+        collect(
+            normalized_objects, "address object", "external-list", "merged shared", entry,
+            lambda entry=entry: normalize_external_list_object(
                 source_snapshot=merged_snapshot,
                 config_source=SecurityRule.SOURCE_LOCAL,
                 namespace_type=PolicyObjectNamespace.LOCAL_SHARED,
