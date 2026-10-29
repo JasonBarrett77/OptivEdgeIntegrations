@@ -66,6 +66,8 @@ class Migration(migrations.Migration):
     # because none could see a sibling's work. Four leaf nodes is a state Django refuses outright,
     # so the four were put in a line at merge time; they touch different models, so the order
     # carries no meaning beyond the filenames they were assigned.
+    # SO THE `dependencies` LINE BELOW IS NOT WHAT THE RUN WROTE: it was rewritten from
+    # `0096_file_data_filtering` to `0098_anti_spyware` here, at merge time.
     dependencies = [
         ('integrations', '0098_anti_spyware'),
     ]

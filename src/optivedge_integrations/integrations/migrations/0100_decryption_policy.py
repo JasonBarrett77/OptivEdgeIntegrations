@@ -62,7 +62,7 @@ class Migration(migrations.Migration):
     # a sibling's work. The four will be put in a line at merge time by the orchestrator; they
     # touch different models, so the order carries no meaning beyond the filenames assigned.
     # RE-CHAINED WHEN WAVE 2 WAS MERGED, 2026-10-29. All four runs were told to depend on the
-    # head they found, `0096_file_data_filtering`; four leaf nodes is a state Django refuses, so
+    # head they found, `0096_file_data_filtering` — SO THIS FILE'S OWN `dependencies` LINE BELOW WAS REWRITTEN FROM `0096_file_data_filtering` TO `0099_certificates` AND IS NOT WHAT THE RUN WROTE; four leaf nodes is a state Django refuses, so
     # they were put in a line at merge time. The four touch different models.
     dependencies = [
         ('integrations', '0099_certificates'),

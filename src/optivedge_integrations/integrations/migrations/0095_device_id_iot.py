@@ -44,6 +44,8 @@ class Migration(migrations.Migration):
     # Django refuses outright ("Conflicting migrations detected; multiple leaf nodes"), so the
     # four were put in a line at merge time. The four touch different models, so the order
     # carries no meaning beyond the filenames they were assigned.
+    # SO THE `dependencies` LINE BELOW IS NOT WHAT THE RUN WROTE: it was rewritten from
+    # `0092_ike_crypto` to `0094_ha_panorama` here, at merge time.
     dependencies = [
         ('integrations', '0094_ha_panorama'),
     ]

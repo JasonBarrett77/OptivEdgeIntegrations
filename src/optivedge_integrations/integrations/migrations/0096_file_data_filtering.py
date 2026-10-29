@@ -48,6 +48,8 @@ class Migration(migrations.Migration):
     # none could see a sibling's work. Four leaf nodes is a state Django refuses outright, so the
     # four were put in a line at merge time; the four touch different models, so the order
     # carries no meaning beyond the filenames they were assigned.
+    # SO THE `dependencies` LINE BELOW IS NOT WHAT THE RUN WROTE: it was rewritten from
+    # `0092_ike_crypto` to `0095_device_id_iot` here, at merge time.
     dependencies = [
         ('integrations', '0095_device_id_iot'),
     ]
