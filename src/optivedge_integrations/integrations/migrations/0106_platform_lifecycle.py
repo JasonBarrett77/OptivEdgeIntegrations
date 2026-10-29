@@ -56,8 +56,13 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
 
+    # RE-CHAINED WHEN WAVE 4 WAS MERGED, 2026-10-29. All four runs were told to depend on the
+    # head they found, `0104_network_hardening`; four leaf nodes is a state Django refuses, so they were put
+    # in a line at merge time. They touch different models.
+    # SO THE `dependencies` LINE BELOW IS NOT WHAT THE RUN WROTE: it was rewritten from
+    # `0104_network_hardening` to `0105_decryption_profiles` here, at merge time.
     dependencies = [
-        ('integrations', '0104_network_hardening'),
+        ('integrations', '0105_decryption_profiles'),
     ]
 
     operations = [

@@ -67,6 +67,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.platform
     normalize_log_alarm_settings,
     normalize_platform_content_streams,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.saas_security import (
+    normalize_cloud_app_engine,
+    normalize_saas_security,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.master_key import (
     normalize_master_key,
 )
@@ -569,6 +573,41 @@ def normalize_appliance_management_interfaces(appliance: Appliance) -> list:
     return normalize_management_interfaces(appliance)
 
 
+def normalize_enforcement_point_saas_security(
+    enforcement_point: EnforcementPoint,
+) -> dict:
+    """One enforcement point's three SaaS verdict rows. PAN-SAS-001 to 004.
+
+    DEPENDS ON NOTHING ELSE IN THIS MODULE. The three verdicts are computed from the merged and
+    pushed payloads this same call parses rather than from rows another normalizer wrote, so -
+    like `normalize_enforcement_point_decryption_policy` and unlike
+    `normalize_enforcement_point_rulebase_device_match` - running it first or last gives the same
+    answer and there is no first collection on which it would read nothing.
+
+    A row is written even where the partition holds no application-tag container, no URL
+    Filtering profile and no rulebase at all, which is the commonest state in this estate and is
+    what three of this domain's five controls fire on. The per-entry grain has no row for it.
+
+    Its two function columns additionally rest on a `/config/predefined/application` SNAPSHOT
+    existing for the owning appliance. Where none does, the function-child population is empty,
+    both columns hold their firing defaults and nothing distinguishes that from a rulebase naming
+    no function application - the returned dict carries
+    `predefined_application_catalogue_collected` for a caller that needs the difference.
+    """
+    return normalize_saas_security(enforcement_point)
+
+
+def normalize_appliance_cloud_app_engine(appliance: Appliance) -> dict:
+    """One appliance's App-ID Cloud Engine, configured and actual. PAN-SAS-005.
+
+    Depends on nothing else in the appliance normalizer tuple: it reads the same merged device
+    entry as its neighbours, plus its own `show cloud-appid connection-to-cloud` snapshot if one
+    exists - and where none does, `ace_not_operational` holds its firing default and
+    `ace_failure_reason` says `unread`, which is what tells that apart from a measured failure.
+    """
+    return normalize_cloud_app_engine(appliance)
+
+
 __all__ = [
     "NormalizedDynamicAddressContent",
     "NormalizedInterfaces",
@@ -636,6 +675,8 @@ __all__ = [
     "normalize_collected_response",
     "normalize_security_profiles",
     "normalize_security_rule_profile_coverage",
+    "normalize_appliance_cloud_app_engine",
+    "normalize_enforcement_point_saas_security",
     "normalize_security_rules",
     "normalize_show_managed_devices",
     "normalize_ike_crypto_profiles",

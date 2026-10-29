@@ -9550,6 +9550,14 @@ class ImplicitDeclarationTests(TestCase):
         "device_services.py": 2,      # accept-dhcp-hostname, accept-dhcp-domain
         "management_ssh.py": 1,       # the built-in SSH offer of an UNMEASURED release
         "password_profiles.py": 1,    # password-change periods
+        # `deviceconfig/setting/cloudapp/disable`, the App-ID Cloud Engine's off switch. Stage 4
+        # DECLINED to licence this one as a measurement and said why it cannot be measured on
+        # this estate at all: the bar needs a rendering or a behaviour separating "the engine is
+        # on" from "the key is not set", and no positive control can move the operational oracle
+        # while the licence check fails on all four lab appliances - measured again 2026-10-29.
+        # So this entry is a queue item that cannot be cleared without a subscription, which is
+        # a different state from the rest of this list and worth knowing before anyone tries.
+        "saas_security.py": 1,
         "security_rules.py": 1,       # rule-type absent -> universal; see RULE_TYPE_IMPLICIT
         "server_profiles.py": 1,      # admin-use-only
         "zones.py": 1,                # user-identification and prenat flags

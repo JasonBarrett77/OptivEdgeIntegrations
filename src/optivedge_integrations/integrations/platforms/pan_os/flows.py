@@ -40,6 +40,8 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_request_license_info,
     collect_show_iot_icd_version,
     collect_pushed_vsys_profiles,
+    collect_predefined_applications,
+    collect_show_cloud_appid_connection,
     collect_show_logging_status,
     collect_show_system_info,
     collect_device_telemetry,
@@ -116,7 +118,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_decryption_settings,
     normalize_appliance_ssl_decryption_exclusions,
     normalize_appliance_ssl_decryption_vendor_exclusion_optout,
+    normalize_appliance_cloud_app_engine,
     normalize_enforcement_point_decryption_policy,
+    normalize_enforcement_point_saas_security,
     normalize_collected_response,
 )
 from optivedge_integrations.integrations.platforms.pan_os.persistence import (
@@ -380,6 +384,15 @@ class PANOSInScopeConfigCollection:
     high_availability_collections: list[PANOSApplianceCollectedSnapshot] = field(
         default_factory=list)
     high_availability_failures: list[PANOSApplianceCollectionFailure] = field(
+        default_factory=list)
+    #: `show cloud-appid connection-to-cloud`, the only firewall-side reading of whether the
+    #: App-ID Cloud Engine is RUNNING. Its own pair for the same reason as the two above: a
+    #: failure here leaves `CloudAppEngineSetting.ace_failure_reason` at `unread` and the verdict
+    #: at its firing default, which is a different thing for a reader to act on from a column
+    #: that came out wrong. PAN-SAS-005, and the premise PAN-SAS-003 and 004 rest on.
+    cloud_appid_connection_collections: list[PANOSApplianceCollectedSnapshot] = field(
+        default_factory=list)
+    cloud_appid_connection_failures: list[PANOSApplianceCollectionFailure] = field(
         default_factory=list)
     panorama_status_collections: list[PANOSApplianceCollectedSnapshot] = field(
         default_factory=list)
@@ -711,6 +724,31 @@ def collect_appliance_high_availability(
     )
 
 
+def collect_appliance_cloud_appid_connection(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> PANOSPersistedCollection:
+    """PAN-SAS-005's only reading of whether the App-ID Cloud Engine WORKS.
+
+    One op call per appliance. No configuration read can answer it: `deviceconfig/setting/cloudapp`
+    says only whether somebody switched the engine off on purpose, and on every appliance in this
+    lab that key reads reassuringly while the engine reports its licence check failing. Until this
+    snapshot exists `CloudAppEngineSetting.ace_failure_reason` is `unread` on every row and
+    `ace_not_operational` holds its firing default - which is the deliberate direction, and is NOT
+    the same as a measured failure: the reason column is what tells the two apart.
+    """
+    return collect_appliance_and_persist(
+        appliance,
+        collector=collect_show_cloud_appid_connection,
+        credentials_provider=credentials_provider,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+
+
 def collect_appliance_panorama_status(
     appliance: Appliance,
     *,
@@ -787,6 +825,15 @@ def collect_appliance_predefined_catalogs(
         # The entry count differs by appliance in this estate, which is why it is read here -
         # once per appliance - rather than once and reused.
         collect_predefined_gp_app_config_dictionary,
+        # PAN-SAS-003's population: the App-ID catalogue, which is what makes "a rule names a
+        # function child application rather than the base application" decidable at all.
+        # BY FAR THE LARGEST READ IN THIS TUPLE - 3.6 to 7.3 MB per appliance, measured on three
+        # lab appliances 2026-10-29, most of it the inline base64 icon on each of ~5,500
+        # entries - and the normalizer needs four leaves of it. It shares this tuple's single
+        # failure list, so losing it reads as "the predefined catalogs were partial for this
+        # appliance"; `SaasApplicationPolicyPosture`'s two function columns then hold their
+        # firing defaults and the normalizer's return value says the catalogue was absent.
+        collect_predefined_applications,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))
@@ -1065,6 +1112,11 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     ("DHCP interface configurations", normalize_appliance_dhcp_interface_configs),
     ("tunnel inspection coverage", normalize_appliance_tunnel_inspection_coverage),
     ("routing adjacencies", normalize_appliance_routing_adjacencies),
+    # Device > Setup > Content-ID > App-ID Cloud Engine, one leaf, plus the engine's own
+    # operational reply. Reads the same merged device entry as its neighbours and depends on
+    # nothing else in this tuple; a missing operational snapshot is a reading in its own right
+    # rather than an ordering problem. PAN-SAS-005.
+    ("App-ID Cloud Engine", normalize_appliance_cloud_app_engine),
 )
 
 
@@ -1255,6 +1307,22 @@ def renormalize_in_scope_configuration(
                 kind="decryption policy", enforcement_point=enforcement_point,
                 counts={k: v for k, v in (counts or {}).items() if isinstance(v, int)}))
 
+    # The three SaaS verdicts. Reuses the policy-object failure pair rather than adding a
+    # fourth: the shape is identical and two lists that can disagree are worse than one. NO
+    # ORDERING OBLIGATION - all three are computed from the payloads this same call parses, so
+    # they cannot read a previous run's rows. PAN-SAS-001 to 004.
+    for enforcement_point in enforcement_points:
+        try:
+            counts = normalize_enforcement_point_saas_security(enforcement_point)
+        except Exception as exc:
+            policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                kind="SaaS security", enforcement_point=enforcement_point,
+                error_text=str(exc)))
+        else:
+            policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                kind="SaaS security", enforcement_point=enforcement_point,
+                counts={k: v for k, v in (counts or {}).items() if isinstance(v, int)}))
+
     for enforcement_point in enforcement_points:
         try:
             zones = normalize_enforcement_point_zones(enforcement_point)
@@ -1369,6 +1437,8 @@ def collect_in_scope_configuration_snapshots(
     predefined_lists_failures: list[PANOSApplianceCollectionFailure] = []
     logging_status_collections: list[PANOSApplianceCollectedSnapshot] = []
     logging_status_failures: list[PANOSApplianceCollectionFailure] = []
+    cloud_appid_connection_collections: list[PANOSApplianceCollectedSnapshot] = []
+    cloud_appid_connection_failures: list[PANOSApplianceCollectionFailure] = []
     high_availability_collections: list[PANOSApplianceCollectedSnapshot] = []
     high_availability_failures: list[PANOSApplianceCollectionFailure] = []
     panorama_status_collections: list[PANOSApplianceCollectedSnapshot] = []
@@ -1473,6 +1543,24 @@ def collect_in_scope_configuration_snapshots(
         high_availability_collections.append(
             PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
         )
+
+    # ITS OWN LOOP AND ITS OWN FAILURE LIST, on the same grounds as the three above. PAN-SAS-005.
+    for appliance in appliances:
+        try:
+            persisted = collect_appliance_cloud_appid_connection(
+                appliance,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            cloud_appid_connection_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=str(exc))
+            )
+        else:
+            cloud_appid_connection_collections.append(
+                PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
+            )
 
     for appliance in appliances:
         try:
@@ -1580,6 +1668,8 @@ def collect_in_scope_configuration_snapshots(
         predefined_lists_failures=predefined_lists_failures,
         logging_status_collections=logging_status_collections,
         logging_status_failures=logging_status_failures,
+        cloud_appid_connection_collections=cloud_appid_connection_collections,
+        cloud_appid_connection_failures=cloud_appid_connection_failures,
         high_availability_collections=high_availability_collections,
         high_availability_failures=high_availability_failures,
         panorama_status_collections=panorama_status_collections,
