@@ -18,9 +18,14 @@ from optivedge_integrations.integrations.models import (
     DataFilteringPosture,
     EnforcementNode,
     EnforcementPoint,
+    FieldProvenance,
     ManagementStation,
     PolicyObjectNamespace,
     SecurityProfile,
+    SecurityProfileInlineDetector,
+    SecurityProfileThreatException,
+    SecurityRule,
+    SecurityRuleProfileVerdict,
     Snapshot,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (
@@ -38,7 +43,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     NormalizedSecurityProfileGroup,
     VIA_GROUP,
     VIA_RULE,
+    inline_detector_action,
+    profile_inline_detector_ldl,
     profile_rules,
+    profile_threat_exceptions,
+    normalize_security_profile,
+    normalize_security_rule_profile_coverage,
     rule_action,
     category_verdict,
     dns_security_categories,
@@ -49,6 +59,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_group_security_profiles,
     normalize_security_profiles,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
+    normalize_security_rules,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     build_pushed_vsys_profiles_xpath,
@@ -150,6 +163,9 @@ def profile(name, namespace_type, kind=SPY):
         verdicts={}, decoders=[], ml_models={}, application_overrides=[], wildfire_rules=[],
         exception_surfaces={},
         inline_detectors={},
+        inline_detector_ldl={},
+        threat_exceptions=[],
+        cloud_inline_analysis=False,
         category_verdicts={},
         dns_signature_sources=[], dns_categories=[],
         dns_sinkhole_ipv4='', dns_sinkhole_ipv6='',
@@ -1148,3 +1164,476 @@ class FileDataFilteringNormalizationTests(TestCase):
         self.assertFalse(row.confirm_rule_beyond_web_browsing,
                          "THE EXCEPTION: this column names a configuration that is PRESENT, so "
                          "its firing side is True and its migration window is silent")
+
+
+# --------------------------------------------------------------------------- anti-spyware,
+# PAN-SPY-001 to PAN-SPY-005. Every payload shape below was read off serial 691665AC334B458
+# (PA-VM 11.2.5, hostname PA-VM, labelled pan-fw-201 in the probe inventory) on 2026-10-29 with
+# `type=config&action=get`, from the thirteen vsys profiles, the one shared profile, the two
+# predefined profiles and the twenty-three rules stage 6 and earlier runs left standing - not a
+# shape reconstructed from documentation.
+
+
+def spy_engine(name, action=None, ldl=None):
+    entry = {"@name": name}
+    if action is not None:
+        entry["inline-policy-action"] = action
+    if ldl is not None:
+        entry["local-deep-learning"] = ldl
+    return entry
+
+
+class CloudInlineAnalysisTests(SimpleTestCase):
+    """The Inline Cloud Analysis tab's own enable. PAN-SPY-004's prerequisite."""
+
+    @staticmethod
+    def _normalize(entry, kind=SPY):
+        return normalize_security_profile(
+            kind=kind, source_snapshot=None, config_source="local",
+            namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1",
+            entry=entry)
+
+    def test_an_absent_key_is_false_and_carries_a_measured_provenance(self):
+        # oep-spy6-13, the committed keyless profile, and BOTH predefined profiles are in this
+        # state - so every estate binding `default` or `strict` reads false here.
+        normalized = self._normalize({"@name": "p"})
+        self.assertFalse(normalized.cloud_inline_analysis)
+        recorded = dict((name, rk) for name, rk, _ in normalized.field_provenance_data)
+        self.assertEqual(recorded["cloud_inline_analysis"].value, False)
+        self.assertIn("691665AC334B458", recorded["cloud_inline_analysis"].citation)
+
+    def test_yes_and_no_are_both_read_and_neither_is_the_implicit(self):
+        # `yes` on all twelve configured standing profiles. `no` is not in the lab and is the
+        # value that must not be confused with absence - the provenance row is what separates
+        # them, and the stored boolean is the same either way.
+        for wire, expected in (("yes", True), ("no", False)):
+            normalized = self._normalize({"@name": "p", "cloud-inline-analysis": wire})
+            self.assertIs(normalized.cloud_inline_analysis, expected)
+            # raw_key None means PRESENT AND LOCALLY CONFIGURED - not absent, which is the
+            # `Implicit` object, and not pushed, which is one of the marker keys. `no` and
+            # absent store the same False and are separated by exactly this.
+            recorded = dict((n, rk) for n, rk, _ in normalized.field_provenance_data)
+            self.assertIsNone(recorded["cloud_inline_analysis"])
+
+    def test_no_other_kind_carries_the_column(self):
+        # The key exists on no other profile kind, so the model default stands for them - which
+        # is the firing side, kept off the wrong rows by the `kind` clause on every query.
+        normalized = self._normalize({"@name": "p", "cloud-inline-analysis": "yes"}, kind=VLN)
+        self.assertFalse(normalized.cloud_inline_analysis)
+        self.assertNotIn("cloud_inline_analysis",
+                         [name for name, _, _ in normalized.field_provenance_data])
+
+
+class InlineDetectorLocalDeepLearningTests(SimpleTestCase):
+    """`local-deep-learning`, which NOTHING ASSERTS and which no row in the lab holds."""
+
+    def test_only_what_the_config_stores_reaches_the_mapping(self):
+        entry = {"@name": "p", "mica-engine-spyware-enabled": {"entry": [
+            spy_engine("HTTP Command and Control detector", "reset-both", "enable"),
+            spy_engine("SSL Command and Control detector", "reset-both"),
+        ]}}
+        self.assertEqual(profile_inline_detector_ldl(SPY, entry),
+                         {"HTTP Command and Control detector": "enable"})
+
+    def test_an_11_1_appliance_and_an_unwritten_key_are_indistinguishable_here(self):
+        # On 11.1.13-h3 the key does not exist at all - completing it answers code=6 `Invalid
+        # sequence` - and on 11.2 an engine that stores nothing answers the same way. Both are
+        # blank, and the column's own comment is where that is recorded; nothing is materialised,
+        # so no clause may be written over it.
+        entry = {"@name": "p", "mica-engine-spyware-enabled": {"entry": [
+            spy_engine("HTTP Command and Control detector", "alert")]}}
+        self.assertEqual(profile_inline_detector_ldl(SPY, entry), {})
+
+    def test_a_vulnerability_profile_is_not_asked(self):
+        self.assertEqual(profile_inline_detector_ldl(VLN, {"@name": "p"}), {})
+
+
+class InlineDetectorWeakestActionTests(SimpleTestCase):
+    """PAN-SPY-004's graded value. The order is the control's grading, not an invention."""
+
+    def test_a_blank_action_sorts_weakest_and_is_not_given_an_implicit_here(self):
+        # A blank reaches this only on a VULNERABILITY engine the profile omits, whose implicit
+        # nothing has read - so it sorts weakest, which is the safe direction, and no value is
+        # claimed for it. The SPYWARE implicit is materialised on the way in instead, by
+        # `inline_detector_action`, where its citation is.
+        self.assertEqual(SecurityProfileInlineDetector.weakest_action(["reset-both", ""]), "")
+
+    def test_the_spyware_implicit_is_materialised_on_the_way_in(self):
+        # Both predefined profiles carry no engine node at all, and every one of their engine
+        # rows therefore stores `alert` rather than an empty string - which is what the device
+        # renders and the baseline failing state of PAN-SPY-004.
+        self.assertEqual(inline_detector_action(SPY, {}, "SSL Command and Control detector"),
+                         "alert")
+        self.assertEqual(inline_detector_action(SPY, {"SSL Command and Control detector": "drop"},
+                                                "SSL Command and Control detector"), "drop")
+        self.assertEqual(inline_detector_action(VLN, {}, "SQL Injection"), "",
+                         "the vulnerability engine's implicit is not measured and not borrowed")
+
+    def test_drop_is_the_weakest_of_the_four_stopping_actions(self):
+        # oep-spy6-11: drop on HTTP, reset-client on HTTP2, reset-server on SSL, reset-both on
+        # the other two. stage6-anti-spyware.json records the graded column reading `drop` there.
+        self.assertEqual(SecurityProfileInlineDetector.weakest_action(
+            ["drop", "reset-client", "reset-server", "reset-both", "reset-both"]), "drop")
+
+    def test_allow_beats_alert_to_the_bottom(self):
+        self.assertEqual(
+            SecurityProfileInlineDetector.weakest_action(["reset-both", "alert", "allow"]),
+            "allow")
+
+    def test_an_action_the_table_does_not_know_sorts_weakest(self):
+        # The same rule `_weakest_action` follows: a value nobody has measured must not be read
+        # as protection. A content release adding a seventh action lands here.
+        self.assertEqual(SecurityProfileInlineDetector.weakest_action(
+            ["reset-both", "oep-not-an-action"]), "oep-not-an-action")
+
+    def test_no_rows_at_all_is_empty_rather_than_a_value(self):
+        self.assertEqual(SecurityProfileInlineDetector.weakest_action([]), "")
+
+
+class ThreatExceptionTests(SimpleTestCase):
+    """The per-signature override - PAN-SPY-005's own row, and what can undo PAN-SPY-001."""
+
+    def test_nothing_is_synthesized_for_a_profile_with_no_exception(self):
+        # The OPPOSITE of the engine and category collections on the same object. An exception
+        # that does not exist is not an exception at any action, and the Signature Exceptions
+        # GRID rendering thirty catalogue rows at this state is the trap that reading says no to.
+        self.assertEqual(profile_threat_exceptions({"@name": "p"}), [])
+        self.assertEqual(profile_threat_exceptions({"@name": "p", "threat-exception": {}}), [])
+
+    def test_the_action_is_a_choice_element_and_an_absent_one_is_the_pointer(self):
+        # oep-spy6-12 and oep-spy6-20 both hold exactly this shape on threat 10001.
+        self.assertEqual(
+            profile_threat_exceptions({"@name": "p", "threat-exception": {"entry": [
+                {"@name": "10001", "action": {"default": None}},
+                {"@name": "10002", "action": {"reset-both": None}},
+                {"@name": "10003"},
+            ]}}),
+            [("10001", "default", 0), ("10002", "reset-both", 0), ("10003", "default", 0)])
+
+    def test_exempt_ip_is_entry_keyed_and_zero_is_the_widest_form(self):
+        # Settled by refusal: <member> is rejected at this position and <entry name=...> is
+        # accepted. A member list here would count ZERO, which is the widest and worst value.
+        rows = profile_threat_exceptions({"@name": "p", "threat-exception": {"entry": [
+            {"@name": "10001", "action": {"allow": None},
+             "exempt-ip": {"entry": [{"@name": "10.1.1.1"}, {"@name": "10.1.1.2"}]}},
+            {"@name": "10002", "action": {"allow": None},
+             "exempt-ip": {"member": ["10.1.1.3"]}},
+        ]}})
+        self.assertEqual(rows, [("10001", "allow", 2), ("10002", "allow", 0)])
+
+    def test_the_pointer_is_undecided_rather_than_harmless(self):
+        default_row = SecurityProfileThreatException(threat_id="1", action="default")
+        alert_row = SecurityProfileThreatException(threat_id="2", action="alert")
+        drop_row = SecurityProfileThreatException(threat_id="3", action="drop")
+        self.assertFalse(default_row.hands_signature_back)
+        self.assertTrue(default_row.undecided_without_resolution)
+        self.assertTrue(alert_row.hands_signature_back)
+        self.assertFalse(alert_row.undecided_without_resolution)
+        self.assertFalse(drop_row.hands_signature_back)
+        self.assertFalse(drop_row.undecided_without_resolution)
+
+    def test_both_threat_rule_kinds_are_parsed_and_no_other_is(self):
+        entry = {"@name": "p", "threat-exception": {"entry": [{"@name": "10001"}]}}
+        for kind, expected in ((SPY, 1), (VLN, 1), (SecurityProfile.KIND_VIRUS, 0)):
+            normalized = normalize_security_profile(
+                kind=kind, source_snapshot=None, config_source="local",
+                namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1",
+                entry=entry)
+            self.assertEqual(len(normalized.threat_exceptions), expected, kind)
+
+
+class AntiSpywarePerRuleTests(TestCase):
+    """End to end over the shapes serial 691665AC334B458 holds: thirteen vsys profiles, one
+    shared profile, two predefined profiles and sixteen rules binding them.
+
+    What this pins that the offline cases above cannot: the THIRD ATTACHMENT STATE, the three
+    graded values, and the one place an exception reaches back into a severity verdict.
+    """
+
+    def _point(self, *, vsys, shared=None, predefined=None):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano-spy")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name="grp-spy",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="691665AC334B458", hostname="PA-VM")
+        group.active_appliance = appliance
+        group.save()
+        point = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group, vsys_name="vsys1", in_scope=True)
+        EnforcementNode.objects.create(
+            management_station=station, enforcement_point=point, appliance=appliance)
+        now = timezone.now()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=now,
+            payload={"config": {
+                "shared": shared or {},
+                "devices": {"entry": [{"@name": "localhost.localdomain", "vsys": {"entry": [
+                    dict({"@name": "vsys1"}, **vsys)]}}]}}})
+        if predefined is not None:
+            Snapshot.objects.create(
+                management_station=station, appliance=appliance,
+                source_type="config_predefined_security_profiles", collected_at=now,
+                payload={"profiles": predefined})
+        Snapshot.objects.create(management_station=station, appliance_group=group,
+                                source_type="show_pushed_shared_policy", collected_at=now,
+                                payload={"policy": {"panorama": {}}})
+        Snapshot.objects.create(management_station=station, enforcement_point=point,
+                                source_type="show_pushed_shared_policy_vsys", scope_name="vsys1",
+                                collected_at=now, payload={"policy": {"panorama": {}}})
+        Snapshot.objects.create(management_station=station, enforcement_point=point,
+                                source_type="config_pushed_vsys_profiles", scope_name="vsys1",
+                                collected_at=now, payload={})
+        normalize_security_rules(point)
+        normalize_appliance_group_security_profiles(group)
+        normalize_security_profiles(point)
+        return point, normalize_security_rule_profile_coverage(point)
+
+    @staticmethod
+    def _rule(name, *, octet, spyware=None, group=None, action="allow"):
+        # The lab's own shape: both addresses inside TEST-NET-2, so no traffic matches the rule.
+        entry = {"@name": name,
+                 "from": {"member": ["any"]}, "to": {"member": ["any"]},
+                 "source": {"member": ["198.18.251.1/32"]},
+                 "destination": {"member": [f"198.18.251.{octet}/32"]},
+                 "application": {"member": ["any"]}, "service": {"member": ["any"]},
+                 "action": action}
+        if spyware is not None:
+            entry["profile-setting"] = {"profiles": {"spyware": {"member": [spyware]}}}
+        if group is not None:
+            entry["profile-setting"] = {"group": {"member": [group]}}
+        return entry
+
+    @staticmethod
+    def _strong_profile(name, **overrides):
+        # oep-spy6-01: one catch-all rule on all three bands at reset-both, the content list
+        # sinkholed with an address pair, the three asserted categories sinkholed, every engine
+        # at reset-both, inline analysis on, and no exception anywhere.
+        entry = {
+            "@name": name,
+            "rules": {"entry": [spy_rule("p1", ["critical", "high", "medium"], "reset-both")]},
+            "botnet-domains": {
+                "lists": {"entry": [{"@name": "default-paloalto-dns",
+                                     "action": {"sinkhole": None}}]},
+                "dns-security-categories": {"entry": [
+                    {"@name": "pan-dns-sec-cc", "action": "sinkhole"},
+                    {"@name": "pan-dns-sec-malware", "action": "sinkhole"},
+                    {"@name": "pan-dns-sec-phishing", "action": "sinkhole"}]},
+                "sinkhole": {"ipv4-address": "pan-sinkhole-default-ip", "ipv6-address": "::1"}},
+            "mica-engine-spyware-enabled": {"entry": [
+                spy_engine(n, "reset-both")
+                for n in SecurityProfileInlineDetector.SPYWARE_DETECTORS]},
+            "cloud-inline-analysis": "yes",
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_the_three_attachment_states_are_three_different_pairs_of_columns(self):
+        # THE WHOLE POINT OF spyware_profile_resolved. All three shapes stand on the lab:
+        # oep-spy6-r01 binds a profile that exists; intrazone_rule_test binds the group `default`
+        # which resolves to nothing at any scope (measured: /config/predefined/profile-group
+        # answers null on both PA-VMs); oep-spy6-r16 binds nothing at all.
+        point, counts = self._point(vsys={
+            "profiles": {SPY: {"entry": [self._strong_profile("p1")]}},
+            "profile-group": {"entry": [{"@name": "g-empty", SPY: {"member": []}},
+                                        {"@name": "g-missing", SPY: {"member": ["p-gone"]}}]},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r-bound", octet=11, spyware="p1"),
+                self._rule("r-unresolvable-name", octet=12, spyware="p-gone"),
+                self._rule("r-group-names-nothing", octet=13, group="g-empty"),
+                self._rule("r-group-names-a-ghost", octet=14, group="g-missing"),
+                self._rule("r-nothing", octet=15),
+            ]}}}})
+        state = {r.name: (r.has_spyware_profile, r.spyware_profile_resolved)
+                 for r in SecurityRule.objects.all()}
+        self.assertEqual(state["r-bound"], (True, True))
+        self.assertEqual(state["r-unresolvable-name"], (True, False),
+                         "a name is bound and resolves to nothing: repair the profile")
+        self.assertEqual(state["r-group-names-a-ghost"], (True, False),
+                         "the group exists and names a profile that does not: repair the group")
+        self.assertEqual(state["r-nothing"], (False, False), "attach a profile")
+        # THE FOURTH SHAPE, and the one the pair cannot separate: a group whose spyware key
+        # exists and is EMPTY. `has_spyware_profile` reads the KEY and answers True; nothing
+        # resolves. That is the lab's `default` group exactly, and it is reported here rather
+        # than smoothed over - the verdict's NULL still fires, so the finding is raised.
+        self.assertEqual(state["r-group-names-nothing"], (True, False))
+        self.assertEqual(counts["spyware_profile_unresolved"], 4)
+
+    def test_each_graded_value_lands_on_its_own_assertion_and_nowhere_else(self):
+        # oep-spy6-02 (critical uncovered), -05 (content list at alert) and -09 (engines at
+        # alert) are the three single-respect variants stage 6 built for exactly this.
+        point, _ = self._point(vsys={
+            "profiles": {SPY: {"entry": [
+                self._strong_profile("p-band", rules={"entry": [
+                    spy_rule("p1", ["high", "medium"], "reset-both")]}),
+                self._strong_profile("p-dns", **{"botnet-domains": {
+                    "lists": {"entry": [{"@name": "default-paloalto-dns",
+                                         "action": {"alert": None}}]}}}),
+                self._strong_profile("p-engine", **{"mica-engine-spyware-enabled": {"entry": [
+                    spy_engine(n, "alert")
+                    for n in SecurityProfileInlineDetector.SPYWARE_DETECTORS]}}),
+            ]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r-band", octet=21, spyware="p-band"),
+                self._rule("r-dns", octet=22, spyware="p-dns"),
+                self._rule("r-engine", octet=23, spyware="p-engine"),
+            ]}}}})
+        graded = {(v.security_rule.name, v.assertion): (v.satisfied, v.grading_value)
+                  for v in SecurityRuleProfileVerdict.objects.select_related("security_rule")}
+        self.assertEqual(graded[("r-band", "spyware_blocks_critical_high")], (False, "critical"))
+        self.assertEqual(graded[("r-dns", "spyware_dns_sinkholes")], (False, "alert"))
+        self.assertEqual(graded[("r-engine", "spyware_inline_analysis_blocks")], (False, "alert"))
+        # NO GRADED VALUE on the assertions that have no grading, and none on the OTHER rules'
+        # copy of a graded assertion when the profile satisfies it in a way that names no band.
+        self.assertEqual(graded[("r-band", "spyware_exceptions_minimal")], (True, ""))
+        self.assertEqual(graded[("r-dns", "spyware_blocks_critical_high")], (True, ""))
+        # The rule whose DNS action is fine still carries the VALUE, because a grading reads the
+        # value whether or not the verdict failed - oep-spy6-r01 reads `sinkhole` on the lab.
+        self.assertEqual(graded[("r-band", "spyware_dns_sinkholes")], (True, "sinkhole"))
+
+    def test_a_verdict_with_no_profile_carries_no_graded_value(self):
+        point, _ = self._point(vsys={
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r-nothing", octet=31)]}}}})
+        verdict = SecurityRule.objects.get(name="r-nothing").profile_verdict(
+            "spyware_blocks_critical_high")
+        self.assertIsNone(verdict.satisfied, "a NULL verdict fires, which is the finding")
+        self.assertEqual(verdict.grading_value, "",
+                         "naming a band here would hand the grading a severity it has not earned")
+
+    def test_an_exception_at_alert_undoes_a_severity_verdict_the_rule_set_satisfied(self):
+        # STAGE 5 ASKS FOR THIS and the lab cannot show it: the only exception standing on the
+        # estate is at the pointer `default`, on oep-spy6-12 and oep-spy6-20. Both halves are
+        # here so the difference between them is pinned rather than argued.
+        point, _ = self._point(vsys={
+            "profiles": {SPY: {"entry": [
+                self._strong_profile("p-exc-alert", **{"threat-exception": {"entry": [
+                    {"@name": "10001", "action": {"alert": None}}]}}),
+                self._strong_profile("p-exc-default", **{"threat-exception": {"entry": [
+                    {"@name": "10001", "action": {"default": None}}]}}),
+            ]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r-alert", octet=41, spyware="p-exc-alert"),
+                self._rule("r-default", octet=42, spyware="p-exc-default"),
+            ]}}}})
+        alert = SecurityRule.objects.get(name="r-alert").profile_verdict(
+            "spyware_blocks_critical_high")
+        self.assertFalse(alert.satisfied)
+        self.assertIn("10001", alert.detail)
+        # THE POINTER DOES NOT FAIL IT. `default` resolves per signature from the content
+        # release and the resolution is in no column, so failing on it would assert something
+        # nothing read - and stage6-anti-spyware.json requires oep-spy6-12, which holds exactly
+        # this, to keep PAN-SPY-001 satisfied while making only PAN-SPY-005 false.
+        pointer = SecurityRule.objects.get(name="r-default").profile_verdict(
+            "spyware_blocks_critical_high")
+        self.assertTrue(pointer.satisfied)
+        self.assertFalse(SecurityRule.objects.get(name="r-default").profile_verdict(
+            "spyware_exceptions_minimal").satisfied)
+        profile = SecurityProfile.objects.get(name="p-exc-default")
+        self.assertEqual(profile.exceptions_undecided_without_resolution, ["10001"])
+        self.assertEqual(profile.exceptions_handing_signatures_back, [])
+        self.assertEqual(profile.widest_exempt_ip_count, 0,
+                         "zero is the widest form, not the narrowest")
+
+    def test_a_predefined_profile_reads_false_on_inline_analysis_and_fails_four_controls(self):
+        # Read off /config/predefined/profiles/spyware on BOTH PA-VMs on 2026-10-29: neither
+        # shipped profile carries `cloud-inline-analysis` or any engine node, `default` has the
+        # content list at alert and no sinkhole node, and both leave every DNS category at the
+        # literal `default`.
+        predefined = {SPY: {"entry": [
+            {"@name": "default",
+             "rules": {"entry": [
+                 {"@name": "simple-critical", "threat-name": "any", "category": "any",
+                  "severity": {"member": ["critical"]}, "action": {"default": None}}]},
+             "botnet-domains": {
+                 "lists": {"entry": [{"@name": "default-paloalto-dns",
+                                      "packet-capture": "disable",
+                                      "action": {"alert": None}}]},
+                 "dns-security-categories": {"entry": [
+                     {"@name": n, "action": "default"} for n in
+                     ("pan-dns-sec-cc", "pan-dns-sec-malware", "pan-dns-sec-phishing")]}}},
+        ]}}
+        point, _ = self._point(predefined=predefined, vsys={
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r-default", octet=90, spyware="default")]}}}})
+        profile = SecurityProfile.objects.get(name="default", kind=SPY)
+        self.assertTrue(profile.is_predefined)
+        self.assertFalse(profile.cloud_inline_analysis,
+                         "the vendor's own profile reads false, which is the firing side")
+        self.assertEqual(profile.inline_detectors.count(), 5)
+        self.assertEqual(profile.worst_inline_detector_action, "alert")
+        rule = SecurityRule.objects.get(name="r-default")
+        self.assertTrue(rule.spyware_profile_resolved,
+                        "the predefined read is what makes the commonest binding resolve at all")
+        self.assertEqual(rule.spyware_worst_engine_action, "alert")
+        self.assertEqual(rule.spyware_dns_content_list_action, "alert")
+        self.assertEqual(rule.spyware_worst_unstopped_severity, "critical")
+        self.assertFalse(rule.spyware_inline_analysis_blocks)
+        self.assertFalse(rule.spyware_dns_sinkholes)
+        self.assertFalse(rule.spyware_dns_categories_enforced)
+        self.assertFalse(rule.spyware_blocks_critical_high)
+
+    def test_a_profile_that_stores_no_dns_branch_passes_the_action_half_and_not_the_rest(self):
+        # oep-spy6-13, the committed keyless profile: THE ONE PLACE IN THIS DOMAIN WHERE AN
+        # ABSENCE PASSES. The content list's implicit is sinkhole, measured on two appliances
+        # and two content releases, so the action half of PAN-SPY-002 is satisfied by a profile
+        # that configures nothing - while the categories, the engines and the rule set all fail.
+        point, _ = self._point(vsys={
+            "profiles": {SPY: {"entry": [{"@name": "p-bare"}]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r-bare", octet=23, spyware="p-bare")]}}}})
+        profile = SecurityProfile.objects.get(name="p-bare")
+        self.assertFalse(profile.cloud_inline_analysis)
+        self.assertEqual(profile.rule_count, 0)
+        self.assertEqual(profile.threat_exceptions.count(), 0)
+        self.assertEqual(profile.dns_content_list_action, "sinkhole")
+        self.assertTrue(profile.dns_sinkhole_action_is_implicit)
+        self.assertEqual(profile.dns_sinkhole_ipv4, "",
+                         "and it holds NO address, which the action half does not test")
+        rule = SecurityRule.objects.get(name="r-bare")
+        self.assertTrue(rule.spyware_dns_sinkholes)
+        self.assertEqual(rule.spyware_dns_content_list_action, "sinkhole")
+        self.assertFalse(rule.spyware_blocks_critical_high)
+        self.assertEqual(rule.spyware_worst_unstopped_severity, "critical")
+        self.assertFalse(rule.spyware_dns_categories_enforced)
+        self.assertFalse(rule.spyware_inline_analysis_blocks)
+        self.assertEqual(rule.spyware_worst_engine_action, "alert")
+
+    def test_every_engine_row_carries_a_blank_local_deep_learning_on_this_estate(self):
+        # A COLUMN NOBODY POPULATED, said out loud. No standing profile on the lab writes
+        # `local-deep-learning`, so every row of it is blank - which is what stage 5 declared
+        # and is the answer this stage owes rather than a defect to hunt.
+        point, _ = self._point(vsys={
+            "profiles": {SPY: {"entry": [
+                self._strong_profile("p1"),
+                self._strong_profile("p2", **{"mica-engine-spyware-enabled": {"entry": [
+                    spy_engine("HTTP Command and Control detector", "reset-both",
+                               ldl="enable")]}}),
+            ]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=51, spyware="p1")]}}}})
+        p1 = SecurityProfile.objects.get(name="p1")
+        self.assertEqual({d.local_deep_learning for d in p1.inline_detectors.all()}, {""})
+        p2 = SecurityProfile.objects.get(name="p2")
+        self.assertEqual(
+            p2.inline_detectors.get(name="HTTP Command and Control detector")
+            .local_deep_learning, "enable")
+        self.assertEqual(
+            {d.local_deep_learning for d in p2.inline_detectors.exclude(
+                name="HTTP Command and Control detector")}, {""},
+            "a synthesized row stores nothing here, and nothing is materialised")
+
+    def test_the_provenance_row_for_the_new_profile_column_is_written(self):
+        point, _ = self._point(vsys={
+            "profiles": {SPY: {"entry": [self._strong_profile("p1"), {"@name": "p-bare"}]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=61, spyware="p1")]}}}})
+        rows = {p.name: FieldProvenance.objects.get(
+            object_id=p.pk, field_name="cloud_inline_analysis").provenance_type
+            for p in SecurityProfile.objects.filter(kind=SPY)}
+        self.assertEqual(rows["p1"], "local")
+        self.assertEqual(rows["p-bare"], "pan_os_default",
+                         "the measured implicit, not an assumption")

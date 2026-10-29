@@ -47,6 +47,7 @@ from optivedge_integrations.integrations.models import (
     SecurityProfileWildfireRule,
     SecurityProfileCategoryVerdict,
     SecurityProfileSeverityVerdict,
+    SecurityProfileThreatException,
     SecurityRuleProfileVerdict,
     SecurityRule,
     Snapshot,
@@ -72,7 +73,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_shared,
     pushed_vsys_panorama,
     pushed_vsys_profiles,
-    scalar_value, parse_text_field, was_absent, DESCRIPTION_ABSENT)
+    scalar_value, parse_text_field, parse_yes_no_field, Implicit, was_absent,
+    DESCRIPTION_ABSENT)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     effective_in_scope_order,
 )
@@ -663,6 +665,15 @@ class NormalizedSecurityProfile:
     #: the CONFIG holds it. Which detectors exist is settled against the catalogue at persist
     #: time, the same way the antivirus ML models are.
     inline_detectors: dict[str, str]
+    #: Spyware only: {detector name: configured local-deep-learning}, for the names that STORE
+    #: one. A detector missing from here stored nothing, and nothing is materialised for it.
+    inline_detector_ldl: dict[str, str]
+    #: Spyware and vulnerability only: (threat_id, action, exempt_ip_count) per per-signature
+    #: exception. NOT synthesized - a profile with no exception has no rows.
+    threat_exceptions: list[tuple[str, str, int]]
+    #: Spyware only: the Inline Cloud Analysis tab's own enable. FALSE where the key is absent,
+    #: which is MEASURED and is also what both predefined profiles read.
+    cloud_inline_analysis: bool
     category_verdicts: dict[str, tuple[bool, str, str, int | None, str]]
     #: Anti-spyware only: one tuple per DNS signature source, including a
     #: synthesized row for the Palo Alto Networks Content list when absent.
@@ -840,6 +851,26 @@ def resolve_decoder_action(protocol: str, configured: str) -> str:
 
 #: Where each kind keeps its inline cloud-analysis detectors. NOT `cloud-inline-analysis`,
 #: which controls.json names and which the device refuses - see SecurityProfileInlineDetector.
+#: What an absent `cloud-inline-analysis` key means. MEASURED rather than documented, which is
+#: why it is `Implicit.measured`: on a committed profile storing no such key the Inline Cloud
+#: Analysis tab's `Enable cloud inline analysis` box renders UNTICKED. It is a form checkbox with
+#: a boxLabel, so `.checked` is readable and the class-based grid-boolean trap does not apply; the
+#: positive control was paid (writing `yes` is accepted and reads back) and so was the sibling
+#: move (relocating the five engine entries underneath it left the box unticked, so the tab's
+#: enable is not derived from the engines).
+#:
+#: controls.json's set command and xpath BOTH point at a `/enabled` child that does not exist, and
+#: the refusal is the misleading class - code=13 `set failed, may need to override template object
+#: first` - which taken at face value sends a reader to Panorama for a node no appliance has.
+CLOUD_INLINE_ANALYSIS_ABSENT = Implicit.measured(
+    False,
+    "measured 2026-10-25 on serial 691665AC334B458 (PA-VM 11.2.5): a committed anti-spyware "
+    "profile storing no cloud-inline-analysis key renders the Inline Cloud Analysis tab's "
+    "`Enable cloud inline analysis` checkbox UNTICKED; re-read 2026-10-29 off the same serial, "
+    "where the key is absent on the keyless standing profile and on BOTH predefined profiles. "
+    "stage4-anti-spyware.json anti-spyware-profile.fields['cloud-inline-analysis'].implicit")
+
+
 INLINE_DETECTOR_NODE = {
     SecurityProfile.KIND_SPYWARE: "mica-engine-spyware-enabled",
     SecurityProfile.KIND_VULNERABILITY: "mica-engine-vulnerability-enabled",
@@ -889,12 +920,94 @@ def profile_inline_detectors(kind: str, entry: dict[str, Any]) -> dict[str, str]
     the antivirus ML models answer it - catalogued across the build at persist time, so a
     detector a later content release adds is assessed without a code change.
     """
+    return _detector_leaf(kind, entry, "inline-policy-action")
+
+
+def _detector_leaf(kind: str, entry: dict[str, Any], leaf: str) -> dict[str, str]:
+    """{detector name: that leaf's text} over the inline-detector collection of one profile.
+
+    One walk shared by the two leaves the entry carries, so adding the second did not duplicate
+    the collection reader. Absent and empty come back the same way - the empty string - and each
+    caller says what that means for its own leaf.
+    """
     node = entry.get(INLINE_DETECTOR_NODE.get(kind, ""))
-    detectors = {}
+    found = {}
     for detector in ensure_list(node.get("entry") if isinstance(node, dict) else None):
         if isinstance(detector, dict) and detector.get("@name"):
-            detectors[str(detector["@name"])] = _text(detector.get("inline-policy-action"))
-    return detectors
+            found[str(detector["@name"])] = _text(detector.get(leaf))
+    return found
+
+
+def profile_inline_detector_ldl(kind: str, entry: dict[str, Any]) -> dict[str, str]:
+    """{detector name: configured local-deep-learning} for what the config names.
+
+    SEPARATE from `profile_inline_detectors` rather than folded into it: that function's
+    `{name: action}` shape is asserted by the suite and read by the vulnerability-protection
+    domain, whose entries have no such key at all. Both share `_detector_leaf`, so the collection
+    is walked by one reader.
+
+    NOTHING IS SYNTHESIZED and nothing is materialised. A name missing from this mapping means the
+    profile stored no such key - which is every row the lab holds, and which is also what an 11.1
+    appliance returns, because the key does not exist there. See the model column.
+    """
+    return {name: value for name, value
+            in _detector_leaf(kind, entry, "local-deep-learning").items() if value}
+
+
+def profile_threat_exceptions(entry: dict[str, Any]) -> list[tuple[str, str, int]]:
+    """(threat_id, action, exempt_ip_count) per per-signature exception. PAN-SPY-005.
+
+    NOTHING IS SYNTHESIZED - a profile with no `threat-exception` node has no rows, which is
+    correct and is the OPPOSITE of the engine and category collections on the same object, where
+    an absent entry still has an effective value. An exception that does not exist is not an
+    exception at any action.
+
+    An entry with no `action` is materialised to the POINTER `default`, which is what the device
+    does: an absent action, like an absent entry, leaves the signature at its own content action.
+    `action` is a CHOICE element here - `{"default": None}` - as it is on a profile rule, so it is
+    read with `_choice` and not as text.
+
+    `exempt-ip` is an ENTRY-KEYED collection and not a member list, settled by refusal
+    (`<member>10.1.1.2</member>` rejected, `<entry name='10.1.1.1'/>` accepted), so it is counted
+    the way the exception surfaces are counted. ZERO IS THE WIDEST FORM.
+    """
+    rows: list[tuple[str, str, int]] = []
+    node = entry.get("threat-exception")
+    for item in ensure_list(node.get("entry") if isinstance(node, dict) else None):
+        if not isinstance(item, dict) or not item.get("@name"):
+            continue
+        action = _choice(item.get("action")) or SecurityProfileThreatException.IMPLICIT_ACTION
+        exempt = item.get("exempt-ip")
+        count = len([e for e in ensure_list(
+            exempt.get("entry") if isinstance(exempt, dict) else None) if isinstance(e, dict)])
+        rows.append((str(item["@name"]), action, count))
+    return rows
+
+
+def inline_detector_action(kind: str, configured: dict[str, str], detector: str) -> str:
+    """What this engine's action IS on one profile, including where the profile is silent.
+
+    THE MEASURED IMPLICIT IS MATERIALISED FOR SPYWARE AND FOR NO OTHER KIND. An engine a
+    spyware profile does not mention renders ACTION `alert` on the device - measured on two
+    appliances and two content releases, with `action=complete` returning @default='yes' on
+    alert and Help p.287 agreeing - so storing `alert` says what the device does. It is also
+    the baseline failing state of PAN-SPY-004, so the materialised value is on the FIRING side.
+
+    THE VULNERABILITY ENGINE'S IMPLICIT IS NOT MEASURED, and is left blank rather than borrowed:
+    the two engines have different action sets (`drop` is spyware-only) and nothing in this
+    project has read what a vulnerability profile renders for a detector it omits. A blank
+    sorts WEAKEST in `weakest_action`, which is the safe direction for a value nobody has.
+
+    This replaced reading the configured string as the whole answer, which stored an EMPTY
+    action for an engine that is running - stage5-anti-spyware.json declares `materialised`
+    `alert` for exactly this column and said so of the shipped behaviour.
+    """
+    action = configured.get(detector, "")
+    if action:
+        return action
+    if kind == SecurityProfile.KIND_SPYWARE:
+        return SecurityProfileInlineDetector.IMPLICIT_ACTION
+    return ""
 
 
 def inline_detector_catalogue(profiles: list, kind: str) -> list[str]:
@@ -1063,6 +1176,15 @@ def normalize_security_profile(
                 if kind == SecurityProfile.KIND_WILDFIRE_ANALYSIS else [])
     detectors = (profile_inline_detectors(kind, entry)
                  if kind in INLINE_DETECTOR_NODE else {})
+    detector_ldl = (profile_inline_detector_ldl(kind, entry)
+                    if kind == SecurityProfile.KIND_SPYWARE else {})
+    # BOTH THREAT-RULE KINDS carry `threat-exception`, and an exception's action set is the same
+    # eight as a profile rule's on either - which is what makes one exception able to undo a
+    # severity verdict the rule set satisfied. Antivirus and the rest have no such node.
+    exceptions = (profile_threat_exceptions(entry)
+                  if kind in SecurityProfile.THREAT_RULE_KINDS else [])
+    cloud_inline, cloud_inline_rk, cloud_inline_rv = parse_yes_no_field(
+        entry.get("cloud-inline-analysis"), implicit=CLOUD_INLINE_ANALYSIS_ABSENT)
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -1087,6 +1209,12 @@ def normalize_security_profile(
         application_overrides=overrides,
         wildfire_rules=wildfire,
         inline_detectors=detectors,
+        inline_detector_ldl=detector_ldl,
+        threat_exceptions=exceptions,
+        # ANTI-SPYWARE ONLY: no other kind has the key, and the model default (False) stands for
+        # them - which is the firing side, kept off the wrong rows by the `kind` clause every
+        # query over this model carries.
+        cloud_inline_analysis=(cloud_inline if kind == SecurityProfile.KIND_SPYWARE else False),
         verdicts=({severity: severity_verdict(kind, rules, severity)
                    for severity in ASSESSED_SEVERITIES}
                   if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
@@ -1124,7 +1252,8 @@ def normalize_security_profile(
         field_provenance_data=[
             ("__entry__", entry_rk, entry_rv),
             ("description", description_rk, description_rv),
-        ],
+        ] + ([("cloud_inline_analysis", cloud_inline_rk, cloud_inline_rv)]
+             if kind == SecurityProfile.KIND_SPYWARE else []),
     )
 
 
@@ -1575,6 +1704,7 @@ def replace_security_profiles(
             exception_surfaces=normalized.exception_surfaces,
             dns_sinkhole_ipv4=normalized.dns_sinkhole_ipv4,
             dns_sinkhole_ipv6=normalized.dns_sinkhole_ipv6,
+            cloud_inline_analysis=normalized.cloud_inline_analysis,
             referrer_count=len(used_by), is_used=bool(used_by), referrers=used_by,
             has_rules=normalized.has_rules,
             # DEFAULTED where the caller passed no reach: `undetermined` and False, which are
@@ -1624,14 +1754,34 @@ def replace_security_profiles(
         SecurityProfileInlineDetector.objects.bulk_create([
             SecurityProfileInlineDetector(
                 security_profile=row, name=detector,
-                configured_action=normalized.inline_detectors.get(detector, ""),
-                # An unmentioned detector does not run, the same rule as an unmentioned
-                # antivirus ML model. `alert` RUNS and does not block - the
-                # `enable(alert-only)` case under another name.
-                enabled=bool(normalized.inline_detectors.get(detector, "")),
-                blocks=normalized.inline_detectors.get(detector, "")
-                in SecurityProfileInlineDetector.BLOCKING_ACTIONS)
+                # THE EFFECTIVE ACTION, with the spyware implicit materialised - see
+                # `inline_detector_action`. This stored an empty string for an engine that is
+                # running at `alert` until 2026-10-29.
+                configured_action=inline_detector_action(
+                    normalized.kind, normalized.inline_detectors, detector),
+                # WHETHER THE PROFILE MENTIONS THE ENGINE AT ALL, which is what this column
+                # holds and is now read from the ENTRY rather than from the action string - the
+                # string is no longer empty for an unmentioned spyware engine. It also fixes a
+                # second shape: an entry present with no `inline-policy-action` leaf read as
+                # unmentioned, and such an engine is configured and running.
+                enabled=detector in normalized.inline_detectors,
+                blocks=inline_detector_action(
+                    normalized.kind, normalized.inline_detectors, detector)
+                in SecurityProfileInlineDetector.BLOCKING_ACTIONS,
+                # BLANK for a synthesized row and for an entry that stores no such key, which is
+                # every row the lab holds. Nothing is materialised - see the model column.
+                local_deep_learning=normalized.inline_detector_ldl.get(detector, ""))
             for detector in inline_catalogues.get(normalized.kind, [])
+        ])
+        # ONE ROW PER EXCEPTION THE CONFIG NAMES, and none otherwise - unlike the detectors
+        # above, where every catalogue member is synthesized. An exception is an operator-added
+        # override, so no rows is the normal and correct state for almost every profile, and
+        # synthesizing one would assert an override nobody wrote.
+        SecurityProfileThreatException.objects.bulk_create([
+            SecurityProfileThreatException(
+                security_profile=row, threat_id=threat_id, action=action,
+                exempt_ip_count=exempt_ip_count)
+            for threat_id, action, exempt_ip_count in normalized.threat_exceptions
         ])
         SecurityProfileWildfireRule.objects.bulk_create([
             SecurityProfileWildfireRule(
@@ -1994,10 +2144,32 @@ def wildfire_analysis_verdict(rule, groups_by_name, profiles_by_name) -> tuple:
 
 
 def _severity_verdict_for_rule(profile) -> tuple[bool, str]:
-    """Does this profile block critical AND high? PAN-SPY-001 / PAN-VLN-001, per rule."""
+    """Does this profile block critical AND high? PAN-SPY-001 / PAN-VLN-001, per rule.
+
+    AN EXCEPTION CAN UNDO A RULE SET THAT PASSED, which is why this reads the per-signature
+    exceptions as well as the severity verdicts: the exception's action set is the SAME EIGHT as a
+    profile rule's, measured at the field's own position, so one entry at `allow` or `alert` hands
+    a signature back after every rule of the profile has stopped it.
+
+    ONLY THE TWO VALUES THAT ARE KNOWN TO DELIVER THE SESSION count here. An exception at the
+    literal `default` does NOT fail the verdict: `default` is a POINTER to the signature's own
+    content action, its resolution is content-supplied and rendered only by the device's own
+    dialog, and no read a collector issues carries it - so failing on it would assert something
+    nothing read. Those rows are findable through
+    `SecurityProfileThreatException.undecided_without_resolution`, and PAN-SPY-005 reports the
+    exception's EXISTENCE regardless.
+
+    BOTH THREAT-RULE KINDS, deliberately, rather than a `kind` switch: a vulnerability profile
+    with an `alert` exception leaves the signature un-stopped for exactly the same reason. The
+    direction is stricter than the previous reading, which is the firing direction.
+    """
     gaps = [f"{severity}: {detail}" for severity, blocked, detail in (
         ("critical", profile.critical_blocked, profile.critical_detail),
         ("high", profile.high_blocked, profile.high_detail)) if blocked is False]
+    handed_back = profile.exceptions_handing_signatures_back
+    if handed_back:
+        gaps.append("exception hands a signature back on threat "
+                    f"{', '.join(handed_back)}")
     return (not gaps), "; ".join(gaps)
 
 
@@ -2085,8 +2257,41 @@ RULE_PROFILE_ASSERTIONS = {
 }
 
 
+#: assertion -> the profile property holding the value that assertion's SEVERITY GRADING varies
+#: with. Separate from the table above rather than a third element of it, because only three of
+#: the eleven assertions have a grading and a sentinel on the other eight would read as a value
+#: nobody declared.
+#:
+#: Each property is a computation over rows the profile already stores - the per-severity verdicts,
+#: the DNS source collection, the engine collection - so none of them costs a read or a column.
+RULE_PROFILE_GRADINGS = {
+    _V.SPYWARE_SEVERITIES: lambda profile: profile.worst_unstopped_severity,
+    _V.SPYWARE_DNS_SINKHOLE: lambda profile: profile.dns_content_list_action,
+    _V.SPYWARE_INLINE: lambda profile: profile.worst_inline_detector_action,
+}
+
+
+def spyware_profile_is_resolved(rule, groups_by_name, profiles_by_kind_and_name) -> bool:
+    """Did this rule's anti-spyware binding resolve to a definition the store holds?
+
+    THE THIRD ATTACHMENT STATE - see `SecurityRule.spyware_profile_resolved`. A rule binding a
+    name through a group whose `spyware` key names a profile that does not exist in scope answers
+    False here and True on `has_spyware_profile`, and the two together are what separate "repair
+    the profile" from "attach one".
+
+    Resolution is by name AND scope, exactly as the verdict pass resolves it, so this cannot
+    disagree with the verdict rows written beside it.
+    """
+    name = profile_names_in_force(rule, groups_by_name).get(SecurityProfile.KIND_SPYWARE)
+    if not name:
+        return False
+    return effective_in_scope_order(
+        name, profiles_by_kind_and_name.get(SecurityProfile.KIND_SPYWARE, {}),
+        "spyware profile") is not None
+
+
 def rule_profile_verdicts(rule, groups_by_name, profiles_by_kind_and_name) -> list[tuple]:
-    """(assertion, profile_name, satisfied, detail) for every assertion, for ONE rule.
+    """(assertion, profile_name, satisfied, detail, grading_value) for every assertion, ONE rule.
 
     A row is written for every assertion even when no profile reaches the rule, with
     `satisfied` NULL - so "this rule makes no claim" is a stored fact with a reason rather
@@ -2116,12 +2321,17 @@ def rule_profile_verdicts(rule, groups_by_name, profiles_by_kind_and_name) -> li
     rows = []
     for assertion, (kind, verdict) in RULE_PROFILE_ASSERTIONS.items():
         profile = resolved.get(kind)
+        grading = RULE_PROFILE_GRADINGS.get(assertion)
         if profile is None:
-            rows.append((assertion, names.get(kind, ""), None, reasons.get(kind, "")[:255]))
+            # NO GRADED VALUE on a verdict whose profile did not resolve. There is nothing to
+            # name, and naming one would hand the grading a severity it has not earned; the
+            # finding is still raised, because a NULL `satisfied` fires.
+            rows.append((assertion, names.get(kind, ""), None, reasons.get(kind, "")[:255], ""))
             continue
         satisfied, detail = verdict(profile)
         rows.append((assertion, profile.name, satisfied,
-                     (detail if not satisfied else "")[:255]))
+                     (detail if not satisfied else "")[:255],
+                     (grading(profile) if grading else "")[:32]))
     return rows
 
 
@@ -2157,7 +2367,10 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
                              SecurityProfile.KIND_SPYWARE,
                              SecurityProfile.KIND_VULNERABILITY)).prefetch_related(
             "severity_verdicts", "category_verdicts", "inline_detectors",
-            "dns_signature_sources", "decoders", "ml_models", "application_overrides"):
+            "dns_signature_sources", "decoders", "ml_models", "application_overrides",
+            # The per-signature exceptions the severity verdict and the engine grading read. Not
+            # prefetching one of these turns a handful of queries into a handful per rule.
+            "threat_exceptions"):
         profiles_by_kind_and_name.setdefault(profile.kind, {}).setdefault(
             profile.name, []).append(profile)
 
@@ -2165,6 +2378,7 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
     counts = {column: 0 for column in PROFILE_COVERAGE_COLUMNS.values()}
     counts["wildfire_analysis_gap"] = 0
     counts["profile_verdict_failures"] = 0
+    counts["spyware_profile_unresolved"] = 0
     verdict_rows: list[SecurityRuleProfileVerdict] = []
     rules = (SecurityRule.objects.filter(enforcement_point=enforcement_point)
              .prefetch_related("securityruleprofiles", "securityruleprofilegroups"))
@@ -2178,6 +2392,13 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
             if getattr(rule, column) != value:
                 setattr(rule, column, value)
                 changed.append(column)
+        resolved_spyware = spyware_profile_is_resolved(
+            rule, groups_by_name, profiles_by_kind_and_name)
+        if rule.spyware_profile_resolved != resolved_spyware:
+            rule.spyware_profile_resolved = resolved_spyware
+            changed.append("spyware_profile_resolved")
+        if not resolved_spyware:
+            counts["spyware_profile_unresolved"] += 1
         submits_all, detail = wildfire_analysis_verdict(
             rule, groups_by_name, profiles_by_name)
         if submits_all is not True:
@@ -2191,11 +2412,11 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
         if changed:
             rule.save(update_fields=changed)
             updated += 1
-        for assertion, profile_name, satisfied, detail in rule_profile_verdicts(
+        for assertion, profile_name, satisfied, detail, grading in rule_profile_verdicts(
                 rule, groups_by_name, profiles_by_kind_and_name):
             verdict_rows.append(SecurityRuleProfileVerdict(
                 security_rule=rule, assertion=assertion, profile_name=profile_name,
-                satisfied=satisfied, detail=detail))
+                satisfied=satisfied, detail=detail, grading_value=grading))
             if satisfied is False:
                 counts["profile_verdict_failures"] += 1
 

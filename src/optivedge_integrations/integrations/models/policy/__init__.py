@@ -26,6 +26,7 @@ from .security_profiles import (
     SecurityProfileDnsSignatureSource,
     SecurityProfileApplicationOverride,
     SecurityProfileInlineDetector,
+    SecurityProfileThreatException,
     SecurityProfileMlModel,
     SecurityProfileWildfireRule,
     SecurityProfileGroup,

@@ -147,6 +147,24 @@ class SecurityProfile(ScopedPolicyObject):
     dns_sinkhole_ipv4 = models.CharField(max_length=128, blank=True)
     dns_sinkhole_ipv6 = models.CharField(max_length=128, blank=True)
 
+    #: ANTI-SPYWARE ONLY, and the Inline Cloud Analysis tab's own enable - the profile's
+    #: `cloud-inline-analysis` key, POSITIVE polarity, so the column says what a reader wants it
+    #: to say. FALSE is the firing side and the default.
+    #:
+    #: **controls.json points at a child that does not exist.** Its set command and xpath both end
+    #: `/enabled`; the PARENT is a real bare boolean and the child is refused with the MISLEADING
+    #: code=13 `set failed, may need to override template object first`, which taken at face value
+    #: sends a reader to Panorama to override a template for a node no appliance has.
+    #:
+    #: Measured 2026-10-25 on serial 691665AC334B458 (PA-VM 11.2.5): on a committed profile
+    #: storing no such key the tab's `Enable cloud inline analysis` box renders UNTICKED, with the
+    #: positive control paid (writing `yes` is accepted and reads back) and the sibling move paid
+    #: (moving the five engine entries underneath it left the box unticked, so the tab's enable is
+    #: not derived from the engines). Re-read 2026-10-29 off the same serial: `yes` on all twelve
+    #: configured standing profiles, the key ABSENT on the keyless one, and ABSENT on BOTH
+    #: predefined profiles - so every estate binding `default` or `strict` reads false here.
+    cloud_inline_analysis = models.BooleanField(default=False)
+
     #: {surface: count} for every exception surface that holds any. The COUNT is in
     #: `threat_exception_count`; this says WHERE, which is what a hygiene finding names and
     #: what an engineer needs to find them. Detail only - a control rests on the count.
@@ -287,6 +305,35 @@ class SecurityProfile(ScopedPolicyObject):
         return bool(self.non_blocking_ml_models)
 
     @property
+    def exceptions_handing_signatures_back(self) -> list[str]:
+        """Threat IDs whose exception is KNOWN to leave the signature un-stopped.
+
+        `allow` and `alert` only. An exception at the literal `default` is NOT here, because its
+        resolution is content-supplied and in no column - see
+        `SecurityProfileThreatException.undecided_without_resolution`, which is how those are
+        found instead.
+        """
+        return sorted(row.threat_id for row in self.threat_exceptions.all()
+                      if row.hands_signature_back)
+
+    @property
+    def exceptions_undecided_without_resolution(self) -> list[str]:
+        """Threat IDs whose exception sits at the pointer, so its effect is not in the store."""
+        return sorted(row.threat_id for row in self.threat_exceptions.all()
+                      if row.undecided_without_resolution)
+
+    @property
+    def widest_exempt_ip_count(self) -> int | None:
+        """The SMALLEST exempt-IP count on any exception, or None where there is none.
+
+        Smallest, because zero is the widest form: an exception narrowed to no source applies to
+        every source. The name says what it MEANS rather than what it computes, because getting
+        that polarity backwards is this column's whole hazard.
+        """
+        counts = [row.exempt_ip_count for row in self.threat_exceptions.all()]
+        return min(counts) if counts else None
+
+    @property
     def exception_detail(self) -> str:
         """Where this profile's exceptions live, for a hygiene finding.
 
@@ -314,6 +361,51 @@ class SecurityProfile(ScopedPolicyObject):
     @property
     def has_inline_detector_not_blocking(self) -> bool:
         return bool(self.inline_detectors_not_blocking)
+
+    @property
+    def worst_inline_detector_action(self) -> str:
+        """The WEAKEST action any analysis engine holds, or "" for a kind with no engines.
+
+        The graded value behind PAN-SPY-004 and PAN-VLN-003, as against the booleans above,
+        which say only whether. An engine the profile never mentions is counted at its MEASURED
+        implicit rather than skipped - a row is synthesized for every engine in the catalogue
+        with a blank configured action, and `ACTION_STRENGTH_WEAKEST_FIRST` ranks blank with the
+        implicit, so an unconfigured profile reads `alert` here rather than empty.
+
+        ORDER TAKEN FROM THE CONTROL'S OWN GRADING, not invented: `drop` is the weakest of the
+        four stopping actions, which is why a profile holding drop on one engine and reset-* on
+        the other four reads `drop`.
+        """
+        rows = list(self.inline_detectors.all())
+        if not rows:
+            return ""
+        return SecurityProfileInlineDetector.weakest_action(
+            row.configured_action for row in rows)
+
+    @property
+    def worst_unstopped_severity(self) -> str:
+        """The worst severity band this profile leaves un-stopped, or "" where none is.
+
+        The graded value behind PAN-SPY-001, read off the per-severity verdict rows. EMPTY means
+        every band the control asserts is stopped - and it is also what a profile with no verdict
+        rows reads, which is why nothing may clause on this column alone: the firing is carried
+        by the per-rule verdict, whose NULL fires.
+
+        **`any` IS IN THE FIELD'S MEASURED VALUE SET AND IS NOT REACHABLE FROM HERE.** The device
+        offers `any` at the severity member position as its own schema default, help-string `All
+        severities`, and a profile whose coverage is written there cannot be resolved into bands -
+        but telling that profile from one that names bands explicitly needs the matched rule's
+        severity member list, and no stored column carries it. The verdict rows answer per band
+        and nothing else. The direction of the loss is safe: such a profile reads as its worst
+        FAILING band, which is the most severe placement its grading has, so the error over-states
+        rather than reassures.
+        """
+        for severity in (SecurityProfileSeverityVerdict.CRITICAL,
+                         SecurityProfileSeverityVerdict.HIGH,
+                         SecurityProfileSeverityVerdict.MEDIUM):
+            if self.verdict(severity)[0] is False:
+                return severity
+        return ""
 
     @property
     def non_blocking_decoders(self) -> list[str]:
@@ -496,6 +588,18 @@ class SecurityProfile(ScopedPolicyObject):
             else:
                 parts.append(f"{short} is {row.configured_action}")
         return ", ".join(parts)
+
+    @property
+    def dns_content_list_action(self) -> str:
+        """The effective action on the vendor's own downloaded malicious-domain list, or "".
+
+        The graded value behind PAN-SPY-002, as against `dns_sinkholes_malicious_queries`, which
+        says only whether it sinkholes. It reads the EFFECTIVE action, so a profile that names no
+        entry reads the implicit rather than empty - and `dns_sinkhole_action_is_implicit` beside
+        it is how a reviewer finds the rows that rest on the implicit.
+        """
+        row = self.paloalto_dns_source
+        return row.effective_action if row else ""
 
     @property
     def dns_sinkhole_action_is_implicit(self) -> bool:
@@ -854,6 +958,28 @@ class SecurityProfileInlineDetector(models.Model):
     #: Actions that stop the traffic rather than logging it. Same set the decoders use, minus
     #: `block-ip` which this node does not offer.
     BLOCKING_ACTIONS = frozenset({"drop", "reset-client", "reset-server", "reset-both"})
+    #: What an engine the profile never mentions actually does. MEASURED 2026-10-25 on serial
+    #: 691665AC334B458 (PA-VM 11.2.5) and independently on 6A9C0A9904E7D6E (11.2.3-h3, a
+    #: different content release): on a COMMITTED profile storing no `mica-engine-spyware-enabled`
+    #: node at all, the Available Analysis Engines grid renders ACTION `alert` for all five
+    #: engines, as a bare value with no `default (...)` parenthetical. Three surfaces agree and
+    #: two are not the UI - `action=complete` returns @default='yes' on alert, and the vendor's
+    #: Help p.287 states "The default action for all analysis engines is alert".
+    #:
+    #: `enabled` ALREADY SAYS THE OPPOSITE ABOUT THE DEVICE and its verdict is still right: an
+    #: unmentioned engine RUNS at alert, delivers the session and writes a threat log - it is not
+    #: a engine that does not run. The column's name is a claim the measurement refutes; renaming
+    #: it is a consumer decision and is recorded rather than made (OEP stage 7, anti-spyware).
+    IMPLICIT_ACTION = "alert"
+    #: WEAKEST FIRST, and taken from PAN-SPY-004's own severity grading rather than invented:
+    #: `allow` and `alert` are the two failing values in rank order, and `drop` is the weakest of
+    #: the four stopping ones - which is what makes a profile holding drop on one engine and
+    #: reset-* on the other four read `drop`.
+    ACTION_STRENGTH_WEAKEST_FIRST = (
+        "allow", "alert", "drop", "reset-both", "reset-client", "reset-server")
+    #: 11.2 ONLY, and the key does not exist at all on 11.1.13-h3/PA-5220, where completing it
+    #: answers code=6 `Invalid sequence`. @default='yes' sits on `enable`.
+    LOCAL_DEEP_LEARNING_VALUES = ("enable", "disable")
 
     security_profile = models.ForeignKey(
         SecurityProfile, on_delete=models.CASCADE, related_name="inline_detectors")
@@ -862,12 +988,40 @@ class SecurityProfileInlineDetector(models.Model):
     #: What the config holds. BLANK where the profile does not mention this detector, which
     #: is itself the finding - the same rule as an unmentioned antivirus ML model.
     configured_action = models.CharField(max_length=32, blank=True)
-    #: Does the detector run at all? An unmentioned detector does not.
+    #: WHETHER THE PROFILE MENTIONS THIS ENGINE AT ALL - true where an entry exists for it,
+    #: false where the row was synthesized from the catalogue.
+    #:
+    #: ITS NAME IS A CLAIM ABOUT THE DEVICE AND THE MEASUREMENT REFUTES IT. `enabled: false`
+    #: reads as "this engine is not running", and a spyware engine the profile never mentions
+    #: RUNS at `alert`: the session is delivered and a threat log is written. What the column
+    #: reliably says is that nobody configured it. The verdict it feeds is right either way,
+    #: because `alert` is not a blocking action; the sentence a report builds from the column
+    #: NAME would be wrong. Renaming it to `configured` is a consumer decision and is recorded
+    #: rather than made (OEP stage 7, anti-spyware, 2026-10-29).
     enabled = models.BooleanField(default=False)
     #: Does it STOP the traffic, or only log it? `alert` runs and does not block, exactly as
     #: `enable(alert-only)` does on an antivirus ML model - and that distinction is why these
     #: are two booleans rather than one.
     blocks = models.BooleanField(default=False)
+    #: The on-device deep-learning setting for this engine, where the profile stores one. SPYWARE
+    #: ENGINES ONLY - a vulnerability entry has no such key - and BLANK on every row the lab
+    #: holds, because no standing profile writes it.
+    #:
+    #: **NOTHING ASSERTS IT, and the column exists so that a reading stage 4 took and deliberately
+    #: declined to promote has somewhere to land.** The Available Analysis Engines grid carries a
+    #: Local Deep Learning column whose cells read `enable` for the HTTP and HTTP2 engines and
+    #: EMPTY for the other three, and the column's own header has NO CLIENT RECTANGLE - it is in
+    #: the DOM and not on the page, so nobody can be shown it. What the reading suggests is an
+    #: implicit of `enable` where the engine supports the feature and nothing where it does not,
+    #: which is a value conditional on WHICH ENTRY holds it; against reading the blank as
+    #: unsettable, writing `enable` on the SSL engine (whose cell was blank) was ACCEPTED, so the
+    #: blank is a rendering fact and not a schema one.
+    #:
+    #: NOTHING IS MATERIALISED HERE for that reason. A blank therefore means three things at once
+    #: - the profile stores nothing, the appliance is an 11.1 build where the key does not exist,
+    #: or the engine does not support the feature - and no clause may be written over it until a
+    #: surface an operator can see settles which.
+    local_deep_learning = models.CharField(max_length=32, blank=True)
 
     class Meta:
         ordering = ["security_profile", "name"]
@@ -881,6 +1035,25 @@ class SecurityProfileInlineDetector(models.Model):
     def detectors_for(cls, kind: str) -> tuple[str, ...]:
         return {SecurityProfile.KIND_SPYWARE: cls.SPYWARE_DETECTORS,
                 SecurityProfile.KIND_VULNERABILITY: cls.VULNERABILITY_DETECTORS}.get(kind, ())
+
+    @classmethod
+    def weakest_action(cls, actions) -> str:
+        """The weakest of `actions`, or "" where there are none.
+
+        AN ACTION THIS TABLE DOES NOT KNOW SORTS WEAKEST, and so does a BLANK one - the same
+        rule `_weakest_action` follows in the normalizer: a value nobody has measured must not be
+        read as protection. A content release adding a seventh action lands there, and so does a
+        VULNERABILITY engine the profile omits, whose implicit nothing in this project has read.
+
+        NO IMPLICIT IS SUBSTITUTED HERE. A spyware row never arrives blank, because
+        `inline_detector_action` materialises the measured `alert` on the way in - which is where
+        a claim about the device belongs, beside its citation.
+        """
+        resolved = list(actions)
+        if not resolved:
+            return ""
+        order = cls.ACTION_STRENGTH_WEAKEST_FIRST
+        return min(resolved, key=lambda a: order.index(a) if a in order else -1)
 
     def __str__(self) -> str:
         return f"{self.security_profile} / {self.name}: {self.configured_action or '(unset)'}"
@@ -1233,6 +1406,102 @@ class SecurityProfileDnsSignatureSource(models.Model):
     def __str__(self) -> str:
         how = " (implicit)" if self.action_is_implicit else ""
         return f"{self.security_profile} / {self.name}: {self.effective_action}{how}"
+
+
+class SecurityProfileThreatException(models.Model):
+    """One per-signature override on one anti-spyware or vulnerability profile.
+
+    PAN-SPY-005's own subject, and the row PAN-SPY-001 needs and cannot have today. The estate
+    already held a COUNT - `SecurityProfile.threat_exception_count`, summed over all five
+    exception surfaces - which answers *does an exception exist* and cannot answer *does an
+    exception hand a critical signature back to a non-stopping action*. An exception's action set
+    is the SAME EIGHT as a profile rule's action, measured at the field's own position on three
+    builds, which is exactly why one exception can undo a severity verdict that passed.
+
+    **ONE SURFACE OF FIVE, deliberately.** The five are `threat-exception`,
+    `botnet-domains/threat-exception`, `botnet-domains/whitelist` (three entry-keyed collections)
+    and `inline-exception-ip-address`, `inline-exception-edl-url` (two member lists). This model
+    is the first of them - the one whose entries carry a per-signature ACTION, which is the only
+    surface that can reverse a severity verdict. The other four stay as counts in
+    `exception_surfaces` until a control asserts something about an individual entry on them.
+
+    **THE NAME SPACE IS NOT CLOSED.** Measured: an arbitrary numeric name is ACCEPTED at the
+    write with NO reference check, unlike the engine and category collections where a bogus name
+    is refused. So a row here can name a signature that does not exist, and a reader must not
+    treat `threat_id` as resolvable.
+
+    **`default` IS A POINTER AND NO COLUMN HOLDS WHAT IT RESOLVES TO.** An absent action, and an
+    absent exception entry, both leave the signature at its own content action, which the grid
+    renders per row as `default (alert)` - the same pointer notation the DNS Security categories
+    use. The resolution is content-supplied and rendered only by the device's own dialog, so no
+    read a collector issues carries it. `action` therefore stores the literal, which is on the
+    firing side for PAN-SPY-005 (an exception exists at all) and is UNDECIDABLE for PAN-SPY-001
+    without the resolution. That is a gap recorded rather than a pass taken.
+    """
+
+    #: The literal an absent action asserts - a POINTER to the signature's own content action,
+    #: not an action. Measured on serial 691665AC334B458: on the committed keyless profile all
+    #: thirty catalogue rows read `default (alert)`, and the one row written moved to a bare
+    #: `allow` while the other twenty-nine kept the parenthetical in the same read.
+    IMPLICIT_ACTION = "default"
+    #: The SAME EIGHT as a profile rule's action, measured with action=complete at the field's own
+    #: position on all three lab builds, with NO @default on any of them. That identity is what
+    #: makes PAN-SPY-001 depend on PAN-SPY-005.
+    ACTIONS = ("default", "allow", "alert", "drop", "reset-client", "reset-server", "reset-both",
+               "block-ip")
+    #: Actions that stop the signature. `default` is NOT here and nor is `alert`: a signature
+    #: handed back to its content action is not known to be stopped.
+    BLOCKING_ACTIONS = frozenset({"drop", "reset-client", "reset-server", "reset-both",
+                                  "block-ip"})
+
+    security_profile = models.ForeignKey(
+        SecurityProfile, on_delete=models.CASCADE, related_name="threat_exceptions")
+    #: The threat ID as the operator wrote it. See the class docstring: not a closed name space.
+    threat_id = models.CharField(max_length=64)
+    #: The action this exception gives the signature, INCLUDING the literal `default`. Never
+    #: blank: an absent action is materialised to the pointer, which is what the device does.
+    action = models.CharField(max_length=32, default=IMPLICIT_ACTION)
+    #: How many source addresses the exception is narrowed to, and ZERO IS THE WIDEST FORM -
+    #: the exception then applies to every source. THE POLARITY IS THE OPPOSITE OF WHAT A COUNT
+    #: USUALLY READS AS, and the device's own grid makes the worst state look like no state: the
+    #: cell renders BLANK when the collection is absent and a COUNT when it is not. A reader who
+    #: takes a zero here for the compliant answer has it backwards.
+    #:
+    #: A count rather than a list because the members are an entry-keyed collection, settled by
+    #: refusal - `<member>10.1.1.2</member>` is rejected and `<entry name='10.1.1.1'/>` accepted.
+    exempt_ip_count = models.PositiveIntegerField(default=0)
+
+    class Meta:
+        ordering = ["security_profile", "threat_id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["security_profile", "threat_id"],
+                name="integrations_unique_threat_exception_per_profile"),
+        ]
+
+    @property
+    def hands_signature_back(self) -> bool:
+        """Does this exception leave the signature un-stopped by the profile's own rules?
+
+        TRUE for `allow` and `alert` - the two values that deliver the session. `default` is
+        NEITHER, and this property says so by being False: the pointer's resolution is not in the
+        store, so claiming it hands the signature back would assert something nothing read.
+        `undecided_without_resolution` is the companion that says which case it is.
+        """
+        return self.action in ("allow", "alert")
+
+    @property
+    def undecided_without_resolution(self) -> bool:
+        """Is this exception's effect unknowable from the configuration alone?
+
+        TRUE for the literal `default`, whose resolution is content-supplied and rendered only by
+        the device's own dialog. The pair of booleans is what keeps `hands_signature_back`'s
+        False from reading as "this exception is harmless".
+        """
+        return self.action == self.IMPLICIT_ACTION
+
+    def __str__(self) -> str:
+        return f"{self.security_profile} / {self.threat_id}: {self.action}"
 
 
 class SecurityProfileGroup(ScopedPolicyObject):
