@@ -29,6 +29,13 @@ from .certificate_settings import CertificateSettings
 from .interface_management_profile import InterfaceManagementProfile
 from .ike import IkeCryptoProfile, IkeGateway
 from .interfaces import Interface
+from .network_hardening import (
+    PanOsDhcpInterfaceConfig,
+    PanOsLldpGlobalSettings,
+    PanOsRoutingAdjacency,
+    PanOsSessionSettings,
+    PanOsTunnelInspectionCoverage,
+)
 from .management_interface import (
     ADMINISTRATIVE_SERVICE_NAMES,
     ManagementInterface,
@@ -171,6 +178,11 @@ __all__ = [
     "DeviceGroupBinding",
     "ManagementStation",
     "Interface",
+    "PanOsDhcpInterfaceConfig",
+    "PanOsLldpGlobalSettings",
+    "PanOsRoutingAdjacency",
+    "PanOsSessionSettings",
+    "PanOsTunnelInspectionCoverage",
     "AuthenticationProfile",
     "AuthenticationSequence",
     "AdminRolePosture",

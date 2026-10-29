@@ -110,6 +110,13 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.interfac
     NormalizedInterfaces,
     normalize_interfaces,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.network_hardening import (
+    normalize_dhcp_interface_configs,
+    normalize_lldp_global_settings,
+    normalize_routing_adjacencies,
+    normalize_session_settings,
+    normalize_tunnel_inspection_coverage,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.ike import (
     normalize_ike_crypto_profiles,
     normalize_ike_gateways,
@@ -405,6 +412,58 @@ def normalize_appliance_interfaces(appliance: Appliance) -> NormalizedInterfaces
     return normalize_interfaces(appliance)
 
 
+def normalize_appliance_session_settings(appliance: Appliance) -> dict:
+    """Device > Setup > Session - policy rematch and IPv6 firewalling. PAN-NET-002 and 005.
+
+    Two sibling leaves under `deviceconfig/setting`, one row per appliance. Reads the same
+    merged device entry as its neighbours and depends on nothing else in the appliance
+    tuple.
+    """
+    return normalize_session_settings(appliance)
+
+
+def normalize_appliance_lldp_global_settings(appliance: Appliance) -> dict:
+    """Network > LLDP, the device-wide enable. PAN-NET-003's preferred value.
+
+    One leaf, one row per appliance, out of the same merged device entry. Independent of
+    the per-interface LLDP columns, which `normalize_appliance_interfaces` writes.
+    """
+    return normalize_lldp_global_settings(appliance)
+
+
+def normalize_appliance_dhcp_interface_configs(appliance: Appliance) -> dict:
+    """Network > DHCP - server and relay, per interface. PAN-NET-004.
+
+    A row exists only where `network/dhcp/interface` carries an entry, so an appliance
+    with no DHCP produces none - which is the control's passing state. Depends on nothing
+    else in this tuple; it does NOT read the `Interface` rows, because the entry's name is
+    the interface and a DHCP configuration can name a port the interface walk skipped.
+    """
+    return normalize_dhcp_interface_configs(appliance)
+
+
+def normalize_appliance_tunnel_inspection_coverage(appliance: Appliance) -> dict:
+    """Policies > Tunnel Inspection, as a coverage verdict per vsys. PAN-NET-006.
+
+    Reads the merged payload for the firewall-local rulebase and, where one was collected,
+    the per-vsys `show config pushed-shared-policy` snapshot for the Panorama device
+    group's. Depends on nothing else in this tuple - the verdict is computed over the
+    payload rather than over stored rule rows, because no normalizer stores a
+    tunnel-inspect rule.
+    """
+    return normalize_tunnel_inspection_coverage(appliance)
+
+
+def normalize_appliance_routing_adjacencies(appliance: Appliance) -> dict:
+    """Network > Virtual Routers - the adjacencies that carry authentication. PAN-NET-007.
+
+    One row per BGP peer and per OSPF attachment, with the authentication reference
+    resolved against the profiles on the SAME router. Depends on nothing else in this
+    tuple.
+    """
+    return normalize_routing_adjacencies(appliance)
+
+
 def normalize_appliance_management_interfaces(appliance: Appliance) -> list:
     """Every administrative surface on one appliance - MGT, aux, and bound layer-3 interfaces."""
     return normalize_management_interfaces(appliance)
@@ -441,6 +500,16 @@ __all__ = [
     "normalize_appliance_globalprotect",
     "normalize_appliance_interface_management_profiles",
     "normalize_appliance_interfaces",
+    "normalize_appliance_session_settings",
+    "normalize_appliance_lldp_global_settings",
+    "normalize_appliance_dhcp_interface_configs",
+    "normalize_appliance_tunnel_inspection_coverage",
+    "normalize_appliance_routing_adjacencies",
+    "normalize_session_settings",
+    "normalize_lldp_global_settings",
+    "normalize_dhcp_interface_configs",
+    "normalize_tunnel_inspection_coverage",
+    "normalize_routing_adjacencies",
     "normalize_appliance_management_interfaces",
     "normalize_enforcement_point_addresses",
     "normalize_enforcement_point_dynamic_address_content",

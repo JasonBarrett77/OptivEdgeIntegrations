@@ -25,12 +25,27 @@ from optivedge_integrations.integrations.models import (
     NormalizationIssue,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ABSENT,
     ensure_list,
     scalar_value,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot,
     latest_merged_snapshot,
+)
+# PAN-NET-001 and PAN-NET-003's eight columns. The reasoning for each one lives in
+# `normalization/network_hardening.py` rather than here, because it is one domain's
+# judgement and this module is read by three other consumers. What crosses the boundary is
+# six pure functions and two index builders, and no state.
+from optivedge_integrations.integrations.platforms.pan_os.normalization.network_hardening import (
+    announced_content,
+    lldp_profiles_by_name,
+    lldp_reading,
+    management_profiles_by_name,
+    out_of_service_residue,
+    restricts_sources,
+    routing_instance_members,
+    zone_membership,
 )
 
 #: Type keys that appear as a SUBTREE on a physical entry. Exactly one is present per
@@ -393,6 +408,14 @@ def normalize_interfaces(appliance: Appliance) -> NormalizedInterfaces:
 
     raw, issues = _collect(device_entry)
 
+    # Four device-wide indexes built once rather than per interface. The three namespaces
+    # are device-wide by path shape and measured to be so, and the zone membership is the
+    # join PAN-NET-001 needs read from the end that expresses it.
+    management_profiles = management_profiles_by_name(device_entry)
+    lldp_profiles = lldp_profiles_by_name(device_entry)
+    zones = zone_membership(device_entry)
+    in_routers = routing_instance_members(device_entry)
+
     seen: set[str] = set()
     rows: list[dict] = []
     #: Parents are emitted before their units by `_collect`, so a unit can look its
@@ -420,12 +443,53 @@ def normalize_interfaces(appliance: Appliance) -> NormalizedInterfaces:
         # `address_node` is already the node that carries the binding in every shape: the
         # type subtree for a physical entry, the entry itself for a unit or a logical one.
         profile_name = _text((address_node or {}).get("interface-management-profile"))
+
+        # `link-state` SITS ON THE ENTRY and not under the type subtree - measured on
+        # 013201001475, where `{"@name": "ethernet1/17", "link-state": "down", "layer3":
+        # null}` is the shape of an administratively shut-down port. Read through bare
+        # `scalar_value` and stored as NULL when the key is absent: `Interface` carries no
+        # `ProvenancedMixin`, so no field of it is tracked and there is no row for a
+        # `parse_*_field` to write. The absence is deliberately not resolved to a value -
+        # see the column's own comment on the model.
+        _link_raw, _link_key, _ = scalar_value(entry.get("link-state"))
+        link_state = None if _link_key is ABSENT else (_link_raw or None)
+        # The LLDP node hangs off the SAME node that carries the addressing - the type
+        # subtree for a physical entry, the entry itself for a unit or a logical one -
+        # which is why it reads `address_node` and not `entry`.
+        lldp_node = address_node if not item["parent"] else entry
+        node_present, lldp_enabled, lldp_profile = lldp_reading(lldp_node)
+        restricted = restricts_sources(profile_name, management_profiles)
+        zone_name = zones.get(name, "")
         rows.append({
             "name": name, "container": item["container"], "interface_type": interface_type,
             "parent_name": item["parent"], "aggregate_group": aggregate,
             "management_profile_name": profile_name,
             "addressing": addressing, "ipv4_addresses": ipv4, "ipv6_addresses": ipv6,
             "comment": _text(entry.get("comment")),
+            "management_profile_restricts_sources": restricted,
+            "security_zone_name": zone_name,
+            "link_state": link_state,
+            "lldp_node_present": node_present,
+            "lldp_enabled": lldp_enabled,
+            "lldp_profile_name": lldp_profile,
+            "lldp_announced_content": announced_content(
+                lldp_enabled, lldp_profile, lldp_profiles),
+            "out_of_service_residue": out_of_service_residue(
+                profile_name=profile_name,
+                restricted=restricted,
+                zone_name=zone_name,
+                addressing=addressing,
+                ipv4=ipv4,
+                ipv6=ipv6,
+                link_state=link_state,
+                in_routing_instance=name in in_routers,
+                # `comment` is on the entry; the two link settings are the other members of
+                # the rank and both sit beside `link-state` on the entry.
+                has_link_settings=bool(
+                    _text(entry.get("comment"))
+                    or _text(entry.get("link-speed"))
+                    or _text(entry.get("link-duplex"))),
+            ),
         })
 
     written: list[Interface] = []
