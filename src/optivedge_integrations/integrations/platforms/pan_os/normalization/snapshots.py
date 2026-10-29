@@ -134,6 +134,25 @@ def latest_pushed_vsys_snapshot(enforcement_point: EnforcementPoint) -> Snapshot
     )
 
 
+def latest_pushed_vsys_profiles_snapshot(enforcement_point: EnforcementPoint) -> Snapshot | None:
+    """The config get of `/config/panorama/vsys/entry[@name=...]/profiles` for this point.
+
+    A SECOND READ OF WHAT PANORAMA PUSHED, and not a duplicate of the one above: the op read
+    `show config pushed-shared-policy` omits the pushed security profiles entirely on the
+    PA-5220 pair while this one returns them on every lab appliance. Absent means the read was
+    not issued, which is what `SecurityProfile.reference_reach_resolved` reports - not that
+    nothing is pushed.
+    """
+    return (
+        Snapshot.objects.filter(
+            enforcement_point=enforcement_point,
+            source_type="config_pushed_vsys_profiles",
+        )
+        .order_by("-collected_at", "-pk")
+        .first()
+    )
+
+
 def latest_predefined_ip_block_lists_snapshot(enforcement_point: EnforcementPoint) -> Snapshot | None:
     appliance = choose_local_appliance(enforcement_point)
     if appliance is None:

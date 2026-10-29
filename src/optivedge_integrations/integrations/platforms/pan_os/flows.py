@@ -35,6 +35,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_merged_config,
     collect_predefined_certificates,
     collect_predefined_security_profiles,
+    collect_pushed_vsys_profiles,
     collect_show_logging_status,
     collect_show_masterkey_properties,
     collect_predefined_log_forwarding_profiles,
@@ -721,6 +722,34 @@ def collect_enforcement_point_pushed_shared_policy(
     return persist_enforcement_point_collected_response(enforcement_point, collected)
 
 
+def collect_enforcement_point_pushed_profiles(
+    enforcement_point: EnforcementPoint,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> PANOSPersistedCollection:
+    """The pushed security profiles, read on the firewall's own pushed tree.
+
+    A SECOND READ OF THE SAME QUESTION, and both are needed: the op read above omits the pushed
+    security profiles entirely on the PA-5220 pair while this config get returns them on every
+    lab appliance. See `collectors/pushed_profiles.py` for the measurement.
+    """
+    appliance = resolve_enforcement_point_collection_appliance(enforcement_point)
+    session = open_session(
+        appliance.management_station,
+        credentials_provider=credentials_provider,
+        target=appliance.serial_number,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    collected = collect_pushed_vsys_profiles(
+        session,
+        vsys_name=enforcement_point.vsys_name,
+    )
+    return persist_enforcement_point_collected_response(enforcement_point, collected)
+
+
 #: Appliance-anchored object normalizers that return a plain count dict. Each one reads the
 #: same merged snapshot and owns a different subtree, so they share one loop and one failure
 #: type instead of a dataclass pair each.
@@ -1138,28 +1167,34 @@ def collect_in_scope_configuration_snapshots(
             )
         )
 
+    # TWO READS OF WHAT PANORAMA PUSHED, per point, collected INDEPENDENTLY - one failing must
+    # not abandon the other, because the two disagree per platform and each is the only source
+    # for what the other omits. They share the result lists because they answer one question at
+    # one scope; a run can tell them apart by the snapshot's own source_type.
     for enforcement_point in enforcement_points:
-        try:
-            persisted = collect_enforcement_point_pushed_shared_policy(
-                enforcement_point,
-                credentials_provider=credentials_provider,
-                timeout=timeout,
-                user_agent=user_agent,
-            )
-        except Exception as exc:
-            vsys_policy_failures.append(
-                PANOSEnforcementPointCollectionFailure(
+        for collect_pushed in (collect_enforcement_point_pushed_shared_policy,
+                               collect_enforcement_point_pushed_profiles):
+            try:
+                persisted = collect_pushed(
+                    enforcement_point,
+                    credentials_provider=credentials_provider,
+                    timeout=timeout,
+                    user_agent=user_agent,
+                )
+            except Exception as exc:
+                vsys_policy_failures.append(
+                    PANOSEnforcementPointCollectionFailure(
+                        enforcement_point=enforcement_point,
+                        error_text=f"{collect_pushed.__name__}: {exc}",
+                    )
+                )
+                continue
+            vsys_policy_collections.append(
+                PANOSEnforcementPointCollectedSnapshot(
                     enforcement_point=enforcement_point,
-                    error_text=str(exc),
+                    persisted=persisted,
                 )
             )
-            continue
-        vsys_policy_collections.append(
-            PANOSEnforcementPointCollectedSnapshot(
-                enforcement_point=enforcement_point,
-                persisted=persisted,
-            )
-        )
 
     renormalized = renormalize_in_scope_configuration(management_station)
 

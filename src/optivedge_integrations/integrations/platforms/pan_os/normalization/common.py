@@ -521,6 +521,27 @@ def merged_shared(payload: dict[str, Any]) -> dict[str, Any]:
     return shared if isinstance(shared, dict) else {}
 
 
+def pushed_vsys_profiles(payload: dict[str, Any] | Any) -> dict[str, Any]:
+    """Shape a `config_pushed_vsys_profiles` payload like the other pushed roots.
+
+    The read answers `{"@total-count": "...", "@count": "...", "profiles": {...}}`, measured on
+    both lab PA-VMs 2026-10-29, and the pushed-entry machinery downstream expects a root with a
+    `profiles` key - so this hands back `{"profiles": ...}` and nothing else.
+
+    AN ABSENT OR EMPTY CONTAINER ANSWERS `{}`. The three answers a container read can give are
+    not interchangeable: an ABSENT collection answers None (falsy), an EMPTY COMMITTED container
+    answers TRUTHY with a null child, and a populated one carries entries. Only the third has
+    anything to merge, and `if result:` cannot tell the first two apart - which is why this
+    checks the child rather than the envelope.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    profiles = payload.get("profiles")
+    if not isinstance(profiles, dict):
+        return {}
+    return {"profiles": profiles}
+
+
 def pushed_shared(payload: dict[str, Any] | Any) -> dict[str, Any]:
     """Extract the object-bearing subtree from a show_pushed_shared_policy payload.
 

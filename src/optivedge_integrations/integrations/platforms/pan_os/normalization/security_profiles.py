@@ -34,6 +34,7 @@ from optivedge_integrations.integrations.models import (
     ApplianceGroup,
     EnforcementPoint,
     FieldProvenance,
+    DataFilteringPosture,
     PolicyObjectNamespace,
     PolicyObjectScope,
     SecurityProfile,
@@ -70,15 +71,20 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_entry_scope,
     pushed_shared,
     pushed_vsys_panorama,
-    scalar_value, parse_text_field, DESCRIPTION_ABSENT)
+    pushed_vsys_profiles,
+    scalar_value, parse_text_field, was_absent, DESCRIPTION_ABSENT)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     effective_in_scope_order,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.services_settings import (
+    write_node_row,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     choose_local_appliance,
     is_panorama_managed,
     latest_merged_snapshot,
     latest_pushed_shared_snapshot,
+    latest_pushed_vsys_profiles_snapshot,
     latest_pushed_vsys_snapshot,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import (
@@ -88,7 +94,49 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.types im
 #: Every profile kind normalized into rows. Antivirus is here for PAN-AVW-006 and so a rule's
 #: `virus` profile resolves to an object; it writes no severity verdicts - see below.
 PROFILE_KINDS = (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY,
-                SecurityProfile.KIND_VIRUS, SecurityProfile.KIND_WILDFIRE_ANALYSIS)
+                SecurityProfile.KIND_VIRUS, SecurityProfile.KIND_WILDFIRE_ANALYSIS,
+                SecurityProfile.KIND_FILE_BLOCKING, SecurityProfile.KIND_DATA_FILTERING)
+
+#: The file types PAN-FIL-001 asserts a profile must stop, SPELLED AS THE DEVICE SPELLS THEM.
+#: Nine come from the control's own command and `PE` is the tenth. The case matters and is
+#: measured: the lower-case spellings are REFUSED at the write with code=12, "file-type 'pe' is
+#: not an allowed keyword", so a verdict computed against the asserted spelling matches no
+#: stored row anywhere.
+FLOOR_FILE_TYPES = frozenset({
+    "PE", "bat", "chm", "dll", "hlp", "hta", "pif", "scr", "torrent", "vbe"})
+
+#: The nested-encoding member, spelled as /config/predefined/tdb/file-type spells it. Measured
+#: 2026-10-26: `multi-level-encoding` is refused at the write and this spelling is accepted; the
+#: member carries @id=116, category Archives, and the vendor's `strict file blocking` blocks it.
+NESTED_ENCODING_FILE_TYPE = "Multi-Level-Encoding"
+
+#: File types the firewall cannot look inside - password-protected archives and protected office
+#: documents. Enumerated on the leaf itself and confirmed present on all three lab builds.
+UNOPENABLE_FILE_TYPES = frozenset({
+    "encrypted-7z", "encrypted-doc", "encrypted-docx", "encrypted-office2007", "encrypted-pdf",
+    "encrypted-ppt", "encrypted-pptx", "encrypted-rar", "encrypted-xls", "encrypted-xlsx",
+    "encrypted-zip", "aip-encrypted-docx", "aip-encrypted-pptx", "aip-encrypted-xlsx"})
+
+#: The only transfer direction that covers both ways. The leaf's whole value set is
+#: upload|download|both; `inbound` and `outbound` are refused at the write, so a floor of "at
+#: minimum inbound from untrusted zones" has exactly one satisfying value.
+FILE_TRANSFER_BOTH = "both"
+
+#: The file-blocking action that stops a transfer.
+FILE_BLOCK_ACTION = "block"
+
+#: The file-blocking action that stops a transfer only if a user declines a prompt. The vendor
+#: permits it on `web-browsing` alone.
+FILE_CONTINUE_ACTION = "continue"
+
+#: The one application the vendor's precondition allows beside a `continue` action.
+WEB_BROWSING_APPLICATION = "web-browsing"
+
+#: Weakest LAST. A rule naming a floor file type is read for the action it HOLDS, and where two
+#: rules name the same type the WEAKEST of their actions is stored - weakest rather than first
+#: because rule ORDER is not stored and nothing has measured whether PAN-OS evaluates a
+#: profile's rules first-match-wins. The error that leaves is in the conservative direction.
+FILE_BLOCK_ACTION_STRENGTH = (FILE_BLOCK_ACTION, FILE_CONTINUE_ACTION, "alert")
 
 #: What counts as blocking a threat. Jason, 2026-09-11: any blocking action passes - a deviation
 #: from the corpus minimum, which names reset-both alone. `default` is NOT here: a signature's
@@ -424,6 +472,148 @@ def dns_security_categories(entry: dict[str, Any]) -> list[tuple]:
     return rows
 
 
+def _weakest_action(actions: list[str]) -> str:
+    """The weakest of `actions` by FILE_BLOCK_ACTION_STRENGTH, or "" where there are none.
+
+    An action this table does not know sorts last, which is the weakest end: a value nobody has
+    measured must not be read as protection.
+    """
+    if not actions:
+        return ""
+    return max(actions, key=lambda a: (FILE_BLOCK_ACTION_STRENGTH.index(a)
+                                       if a in FILE_BLOCK_ACTION_STRENGTH
+                                       else len(FILE_BLOCK_ACTION_STRENGTH)))
+
+
+def _rule_file_types(rule: dict[str, Any]) -> set[str]:
+    return set(_members(rule.get("file-type")))
+
+
+def file_blocking_verdicts(entry: dict[str, Any]) -> dict[str, Any]:
+    """Every file-blocking column for one profile, from one pass over its rules.
+
+    COMPUTED OVER THE RULE SET AND NOT THE RULE SEQUENCE. The rules are an ordered collection and
+    the device preserves write order in both views, but whether the FIRST matching rule wins has
+    never been measured - it needs a file transfer across the firewall. So where two rules name
+    one file type the weakest action is stored, which can only under-state protection.
+
+    `application` is deliberately not part of the stopping test: the assertion is about the file
+    types, the action and the direction, and a rule that stops those types on a narrower
+    application still stops them there. The application list is read by exactly one column, the
+    `continue` precondition below.
+    """
+    rules = profile_rules(entry)
+    floor_actions: list[str] = []
+    nested_actions: list[str] = []
+    stops_floor = False
+    stops_nested = False
+    unopenable = False
+    confirm_beyond_web = False
+    for rule in rules:
+        types = _rule_file_types(rule)
+        action = rule_action(rule)
+        direction = _text(rule.get("direction"))
+        covers_both = direction == FILE_TRANSFER_BOTH
+        if FLOOR_FILE_TYPES <= types:
+            floor_actions.append(action)
+            if action == FILE_BLOCK_ACTION and covers_both:
+                stops_floor = True
+        if NESTED_ENCODING_FILE_TYPE in types:
+            nested_actions.append(action)
+            if action == FILE_BLOCK_ACTION and covers_both:
+                stops_nested = True
+        if types & UNOPENABLE_FILE_TYPES:
+            unopenable = True
+        # `any` is a MEMBER of the application list and not an absence, so a rule naming `any`
+        # satisfies the test. An EMPTY list satisfies it too: an absent application list is a key
+        # nobody measured, and an unmeasured precondition must not read as the vendor's one case.
+        if action == FILE_CONTINUE_ACTION:
+            applications = set(_members(rule.get("application")))
+            if applications != {WEB_BROWSING_APPLICATION}:
+                confirm_beyond_web = True
+    return {
+        "stops_floor_file_types": stops_floor,
+        "floor_file_type_action": _weakest_action(floor_actions),
+        "stops_nested_encoding": stops_nested,
+        "nested_encoding_action": _weakest_action(nested_actions),
+        "expresses_unopenable_file_decision": unopenable,
+        "confirm_rule_beyond_web_browsing": confirm_beyond_web,
+    }
+
+
+def data_filtering_verdicts(entry: dict[str, Any]) -> dict[str, Any]:
+    """Every data-filtering column for one profile, from one pass over its rules.
+
+    THE QUANTIFIER IS UNIVERSAL and that is the whole point: a profile carrying two rules with
+    different thresholds is the normal configuration, so an answer computed PER PROFILE would
+    pass a profile whose second rule stops nothing. A profile with NO rules is False and not
+    vacuously true - the assertion is about a profile that is watching.
+
+    A STORED 0 PASSES, because the key is present. What 0 MEANS is unsettled: it is inside the
+    device's writable range at both ends, `alert > block` is accepted so the pair is not
+    validated as ordered, and 0 is what the dialog's OK writes by default.
+    """
+    rules = profile_rules(entry)
+    both_counts = bool(rules)
+    blocks: list[int] = []
+    for rule in rules:
+        # PRESENCE and not truthiness: a stored 0 is present, and `was_absent` is the only
+        # correct absence test here - an absent key arrives as an `Implicit`, not as None.
+        _, alert_key, _ = scalar_value(rule.get("alert-threshold"))
+        block_raw, block_key, _ = scalar_value(rule.get("block-threshold"))
+        if was_absent(alert_key) or was_absent(block_key):
+            both_counts = False
+        try:
+            blocks.append(int(block_raw))
+        except (TypeError, ValueError):
+            continue
+    return {
+        "every_rule_carries_both_counts": both_counts,
+        "lowest_block_threshold": min(blocks) if blocks else None,
+    }
+
+
+#: The three branches a data pattern object's `pattern-type` can take, and the leaf that has to
+#: be present under one of them for the object to define anything. Measured 2026-10-26: the
+#: device makes `pattern-type` mandatory at commit and a pattern entry under it mandatory too, so
+#: a committed object always defines something - what is NOT guaranteed is that the regex is
+#: meaningful or that the predefined name is the one the organisation needs, and that is beyond
+#: any column.
+DATA_PATTERN_BRANCHES = ("predefined", "regex", "file-properties")
+
+
+def data_pattern_defines_a_pattern(entry: dict[str, Any]) -> tuple[bool, str]:
+    """(defines at least one pattern, which branch) for one data pattern object.
+
+    An object whose `pattern-type` holds a branch with no pattern entry defines NOTHING, which is
+    valid configuration that filters nothing - and is the half the device does not enforce for
+    free.
+    """
+    node = entry.get("pattern-type")
+    if not isinstance(node, dict):
+        return False, ""
+    for branch in DATA_PATTERN_BRANCHES:
+        inner = node.get(branch)
+        if not isinstance(inner, dict):
+            continue
+        pattern = inner.get("pattern")
+        entries = [e for e in ensure_list(pattern.get("entry") if isinstance(pattern, dict) else None)
+                   if isinstance(e, dict)]
+        if entries:
+            return True, branch
+    return False, ""
+
+
+def data_filtering_rule_pattern_names(entry: dict[str, Any]) -> list[str]:
+    """Every data pattern object this profile's rules name, in order, without duplicates."""
+    names: list[str] = []
+    for rule in profile_rules(entry):
+        name = _text(rule.get("data-object"))
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def dns_sinkhole_address(entry: dict[str, Any]) -> tuple[str, str]:
     """(ipv4, ipv6) from `botnet-domains/sinkhole`. A PREREQUISITE, not a setting.
 
@@ -482,6 +672,17 @@ class NormalizedSecurityProfile:
     dns_categories: list[tuple]
     dns_sinkhole_ipv4: str
     dns_sinkhole_ipv6: str
+    #: Whether the profile carries any rule at all, for every kind. Written from the same
+    #: `profile_rules()` call as `rule_count`, so the two cannot disagree.
+    has_rules: bool
+    #: The file-blocking columns, keyed by field name. EMPTY for every other kind, so the
+    #: model's own defaults stand - which are the firing side.
+    file_blocking: dict[str, Any]
+    #: The data-filtering columns, keyed by field name. Empty for every other kind.
+    data_filtering: dict[str, Any]
+    #: Data-filtering only: the pattern objects this profile's rules name, in order. Not a
+    #: column on this model - it feeds the enforcement point's posture verdict.
+    pattern_names: list[str]
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
 
@@ -507,6 +708,15 @@ class NormalizedSecurityProfileGroup:
     field_provenance_data: list[tuple[str, Any, str | None]]
 
 
+#: What named the profile. A SECURITY RULE puts the profile in the enforcement path; a PROFILE
+#: GROUP only makes it reachable, and whether anything reaches the GROUP is the second hop.
+#: `other` is anything else the member-list walk finds, which is nothing today and is kept as a
+#: value rather than guessed at, because the walk deliberately does not enumerate paths.
+VIA_RULE = "rule"
+VIA_GROUP = "group"
+VIA_OTHER = "other"
+
+
 @dataclass(frozen=True, slots=True)
 class ProfileReference:
     kind: str
@@ -517,6 +727,41 @@ class ProfileReference:
     #: Whether the REFERRER lives in shared scope. A shared referrer cannot see vsys
     #: definitions, so it resolves shared first.
     shared_scope: bool
+    #: VIA_RULE / VIA_GROUP / VIA_OTHER - see above. Defaulted so a caller constructing one by
+    #: hand still gets a reference that resolves; what it cannot get is a reach verdict better
+    #: than `other`.
+    via: str = VIA_OTHER
+    #: The profile group's own name when `via` is VIA_GROUP, so the second hop can be taken.
+    owner_group: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class GroupReference:
+    """A SECURITY RULE naming a profile group - the second hop of the reference walk.
+
+    Collected in the same payload walk as the profile references, because a rule's
+    `profile-setting` is a CHOICE node (`group` XOR `profiles`, never both) and a walk that reads
+    only one arm calls a group-mediated profile unused.
+    """
+    name: str
+    referrer: str
+    shared_scope: bool
+
+
+@dataclass(frozen=True, slots=True)
+class NormalizedDataPatternObject:
+    """A data pattern object, which has no model and no row: only the posture verdict needs it.
+
+    `/config/.../profiles/data-objects` is the ONLY place the patterns themselves are defined -
+    nothing is pushed or predefined at that path, measured on all four lab appliances - so the
+    local read is the whole picture for this node.
+    """
+    name: str
+    namespace_type: str
+    #: Whether the object defines at least one pattern under whichever branch it chose.
+    defines_pattern: bool
+    #: `predefined` / `regex` / `file-properties`, or "" where it defines nothing.
+    branch: str
 
 
 @dataclass(slots=True)
@@ -524,7 +769,21 @@ class SecurityProfileBuild:
     profiles: list[NormalizedSecurityProfile] = field(default_factory=list)
     groups: list[NormalizedSecurityProfileGroup] = field(default_factory=list)
     references: list[ProfileReference] = field(default_factory=list)
+    #: Profile groups named by a security rule. The second hop; see `GroupReference`.
+    group_references: list[GroupReference] = field(default_factory=list)
+    #: Data pattern objects visible from this point, for the data-filtering posture verdict.
+    pattern_objects: list[NormalizedDataPatternObject] = field(default_factory=list)
     issues: list[PolicyObjectIssue] = field(default_factory=list)
+    #: Whether every read the REFERENCE WALK needs was present for this point. False is the
+    #: firing side and it is what `SecurityProfile.reference_reach_resolved` stores.
+    reference_reads_complete: bool = False
+    #: Whether a read of `profiles/ai-security` was present. NOTHING IN THIS PACKAGE ISSUES ONE,
+    #: so it is False everywhere today - and it is a field rather than a literal because it is
+    #: the one read that stands between a data-filtering profile and a resolved reference walk.
+    #: Four of the ten fields that can point at the data-filtering collection are AI-security
+    #: profile `data-leak-detection` member lists, and an audit reading security rules and
+    #: profile groups alone calls such a profile unused.
+    ai_security_read_present: bool = False
 
 
 def profile_ml_models(entry: dict[str, Any]) -> dict[str, str]:
@@ -846,6 +1105,17 @@ def normalize_security_profile(
                            if kind == SecurityProfile.KIND_SPYWARE else ""),
         dns_sinkhole_ipv6=(dns_sinkhole_address(entry)[1]
                            if kind == SecurityProfile.KIND_SPYWARE else ""),
+        has_rules=bool(rules),
+        # EMPTY for a kind that does not answer these questions, the same rule the severity
+        # verdicts follow - except that these are COLUMNS, so "makes no claim" cannot be the
+        # absence of a row. What stands instead is the model default, which is the firing side,
+        # and the `kind` clause on every query is what keeps the assertion off the wrong rows.
+        file_blocking=(file_blocking_verdicts(entry)
+                       if kind in SecurityProfile.FILE_BLOCKING_KINDS else {}),
+        data_filtering=(data_filtering_verdicts(entry)
+                        if kind in SecurityProfile.DATA_FILTERING_KINDS else {}),
+        pattern_names=(data_filtering_rule_pattern_names(entry)
+                       if kind in SecurityProfile.DATA_FILTERING_KINDS else []),
         category_verdicts=({SecurityProfileCategoryVerdict.BRUTE_FORCE:
                             category_verdict(kind, rules,
                                              SecurityProfileCategoryVerdict.BRUTE_FORCE)}
@@ -880,19 +1150,38 @@ def normalize_security_profile_group(
 # --------------------------------------------------------------------------- references
 
 
-def collect_references(root: Any, *, where: str, shared_root: bool, pushed: bool) -> list[ProfileReference]:
-    """Every rule or group in `root` naming a profile. See the module docstring for why this walks
-    the whole payload rather than enumerating paths.
+#: The collection path a PROFILE GROUP's entries sit under, and the one a SECURITY RULE's do.
+#: `via` is decided from the path the member list was found at rather than by sniffing the
+#: readable referrer string, because the referrer is for a human and its format is free.
+#:
+#: THE RULE SUFFIX STOPS AT `/rules/` ON PURPOSE. The rulebase key is `rulebase` locally and
+#: `pre-rulebase` / `post-rulebase` in the pushed tree, so a suffix naming the rulebase matches
+#: the local arm and silently misses every pushed rule - which is the half that decides whether
+#: a pushed group is in the enforcement path.
+_GROUP_COLLECTION_PATH = "/profile-group"
+_RULE_PROFILE_SETTING_SUFFIX = "/rules/profile-setting"
+
+
+def collect_profile_and_group_references(
+    root: Any, *, where: str, shared_root: bool, pushed: bool,
+) -> tuple[list[ProfileReference], list[GroupReference]]:
+    """Every rule or group in `root` naming a profile, AND every rule naming a profile group.
+
+    See the module docstring for why this walks the whole payload rather than enumerating paths.
+    One walk for both, because a rule's `profile-setting` is a CHOICE node - `group` XOR
+    `profiles`, never both - so the two arms have to be read together or a group-mediated profile
+    looks unused.
 
     A pushed referrer's scope comes from its @loc, like a pushed object's: "shared" is Panorama
     Shared, anything else a device group, which is vsys-scoped on the firewall.
     """
     found: list[ProfileReference] = []
+    groups: list[GroupReference] = []
 
-    def walk(node: Any, path: str, owner: str, owner_loc: str | None) -> None:
+    def walk(node: Any, path: str, owner: str, owner_name: str, owner_loc: str | None) -> None:
         if isinstance(node, list):
             for item in node:
-                walk(item, path, owner, owner_loc)
+                walk(item, path, owner, owner_name, owner_loc)
             return
         if not isinstance(node, dict):
             return
@@ -901,20 +1190,60 @@ def collect_references(root: Any, *, where: str, shared_root: bool, pushed: bool
                 continue
             if key in PROFILE_KINDS and isinstance(value, dict) and "entry" not in value:
                 shared = (owner_loc == "shared") if pushed else shared_root
+                if path.endswith(_GROUP_COLLECTION_PATH):
+                    via, owner_group = VIA_GROUP, owner_name
+                elif path.endswith(_RULE_PROFILE_SETTING_SUFFIX + "/profiles"):
+                    via, owner_group = VIA_RULE, ""
+                else:
+                    via, owner_group = VIA_OTHER, ""
                 for name in _members(value):
-                    found.append(ProfileReference(kind=key, name=name, referrer=owner or f"{where}{path}",
-                                                  shared_scope=shared))
+                    found.append(ProfileReference(
+                        kind=key, name=name, referrer=owner or f"{where}{path}",
+                        shared_scope=shared, via=via, owner_group=owner_group))
+                continue
+            if key == "group" and path.endswith(_RULE_PROFILE_SETTING_SUFFIX):
+                shared = (owner_loc == "shared") if pushed else shared_root
+                for name in _members(value):
+                    groups.append(GroupReference(
+                        name=name, referrer=owner or f"{where}{path}", shared_scope=shared))
                 continue
             if key == "entry":
                 for entry in ensure_list(value):
                     if isinstance(entry, dict):
                         walk(entry, path, f"{where}{path.strip('/')}/{entry.get('@name')}",
-                             entry.get("@loc", owner_loc))
+                             str(entry.get("@name") or ""), entry.get("@loc", owner_loc))
                 continue
-            walk(value, f"{path}/{key}", owner, owner_loc)
+            walk(value, f"{path}/{key}", owner, owner_name, owner_loc)
 
-    walk(root, "", "", None)
-    return found
+    walk(root, "", "", "", None)
+    return found, groups
+
+
+def collect_references(root: Any, *, where: str, shared_root: bool, pushed: bool) -> list[ProfileReference]:
+    """The profile half of `collect_profile_and_group_references`. Kept because it is what every
+    caller before the second hop existed asked for."""
+    return collect_profile_and_group_references(
+        root, where=where, shared_root=shared_root, pushed=pushed)[0]
+
+
+def _profiles_by_scope(
+    profiles: list[NormalizedSecurityProfile],
+) -> dict[str, dict[tuple[str, str], NormalizedSecurityProfile]]:
+    by_scope: dict[str, dict[tuple[str, str], NormalizedSecurityProfile]] = {
+        PolicyObjectScope.VSYS: {}, PolicyObjectScope.SHARED: {}, PolicyObjectScope.VENDOR: {}}
+    for profile in profiles:
+        by_scope[scope_for(profile.namespace_type)].setdefault((profile.kind, profile.name), profile)
+    return by_scope
+
+
+def _resolve_reference(reference, by_scope, key):
+    """The definition `key` resolves to for this referrer, in scope order, or None.
+
+    A SHARED referrer cannot see vsys definitions, so it starts one rung in. Walk
+    `PolicyObjectScope.ORDER` explicitly rather than sorting - the base model says why.
+    """
+    scopes = PolicyObjectScope.ORDER[1:] if reference.shared_scope else PolicyObjectScope.ORDER
+    return next((by_scope[s][key] for s in scopes if key in by_scope[s]), None)
 
 
 def attribute_references(
@@ -922,17 +1251,11 @@ def attribute_references(
 ) -> tuple[dict[tuple[str, str, str, str], list[str]], list[ProfileReference]]:
     """Map each reference to the definition it resolves to: vsys, then shared, then predefined.
     Returns ({profile key: [referrer, ...]}, unresolved references)."""
-    by_scope: dict[str, dict[tuple[str, str], NormalizedSecurityProfile]] = {
-        PolicyObjectScope.VSYS: {}, PolicyObjectScope.SHARED: {}, PolicyObjectScope.VENDOR: {}}
-    for profile in profiles:
-        by_scope[scope_for(profile.namespace_type)].setdefault((profile.kind, profile.name), profile)
-
+    by_scope = _profiles_by_scope(profiles)
     attributed: dict[tuple[str, str, str, str], list[str]] = {}
     unresolved: list[ProfileReference] = []
     for reference in dict.fromkeys(references):
-        scopes = PolicyObjectScope.ORDER[1:] if reference.shared_scope else PolicyObjectScope.ORDER
-        target = next((by_scope[s][(reference.kind, reference.name)] for s in scopes
-                       if (reference.kind, reference.name) in by_scope[s]), None)
+        target = _resolve_reference(reference, by_scope, (reference.kind, reference.name))
         if target is None:
             unresolved.append(reference)
             continue
@@ -940,6 +1263,86 @@ def attribute_references(
         if reference.referrer not in referrers:
             referrers.append(reference.referrer)
     return attributed, unresolved
+
+
+def reference_reach_by_key(
+    references: list[ProfileReference],
+    group_references: list[GroupReference],
+    profiles: list[NormalizedSecurityProfile],
+    groups: list[NormalizedSecurityProfileGroup],
+) -> dict[tuple[str, str, str, str], str]:
+    """How far the TWO-HOP walk reaches each profile. {profile key: one of the REACH_* values}.
+
+    A boolean cannot hold the answer and that is why this exists: `unreferenced` and
+    `undetermined` have opposite consequences for a reader, and the shipped `is_used` /
+    `referrer_count` pair collapses them.
+
+    THE ONE-HOP PREDICATE IS MEASURED WRONG IN THIS LAB IN BOTH DIRECTIONS. It passes every
+    profile that only a group names while no rule names the group - so nothing enforces them -
+    and a rules-only audit calls a group-mediated profile unused, because a rule's
+    `profile-setting` is `group` XOR `profiles` and never both.
+
+    `undetermined` is NOT decided here. This function answers from the payload it was given;
+    whether that payload was the whole picture is `reference_reads_complete`, and the caller
+    overwrites the reach with `undetermined` where it was not.
+    """
+    by_scope = _profiles_by_scope(profiles)
+    groups_by_scope: dict[str, dict[str, NormalizedSecurityProfileGroup]] = {
+        PolicyObjectScope.VSYS: {}, PolicyObjectScope.SHARED: {}, PolicyObjectScope.VENDOR: {}}
+    for group in groups:
+        groups_by_scope[scope_for(group.namespace_type)].setdefault(group.name, group)
+
+    # THE SECOND HOP, resolved and not assumed: a rule naming a group that resolves to nothing
+    # puts no profile in the enforcement path, and a group that names no profile of this kind
+    # does not either. Both states exist in the lab.
+    reached_groups: set[tuple[str, str, str]] = set()
+    for reference in dict.fromkeys(group_references):
+        scopes = PolicyObjectScope.ORDER[1:] if reference.shared_scope else PolicyObjectScope.ORDER
+        group = next((groups_by_scope[s][reference.name] for s in scopes
+                      if reference.name in groups_by_scope[s]), None)
+        if group is not None:
+            reached_groups.add((group.name, str(group.namespace_type), group.namespace_value))
+
+    reach: dict[tuple[str, str, str, str], str] = {
+        profile.key: SecurityProfile.REACH_UNREFERENCED for profile in profiles}
+    group_only: set[tuple[str, str, str, str]] = set()
+    for reference in dict.fromkeys(references):
+        target = _resolve_reference(by_scope=by_scope, reference=reference,
+                                   key=(reference.kind, reference.name))
+        if target is None:
+            continue
+        if reference.via == VIA_RULE:
+            reach[target.key] = SecurityProfile.REACH_BY_RULE
+            continue
+        if reference.via == VIA_GROUP:
+            owner = next((g for g in groups
+                          if g.name == reference.owner_group
+                          and (g.name, str(g.namespace_type), g.namespace_value) in reached_groups),
+                         None)
+            if owner is not None:
+                reach[target.key] = SecurityProfile.REACH_BY_RULE
+            else:
+                group_only.add(target.key)
+    for key in group_only:
+        if reach.get(key) == SecurityProfile.REACH_UNREFERENCED:
+            reach[key] = SecurityProfile.REACH_BY_GROUP_ONLY
+    return reach
+
+
+def collect_data_pattern_objects(
+    root: Any, namespace_type: str,
+) -> list[NormalizedDataPatternObject]:
+    """The data pattern objects at one scope, with whether each defines anything."""
+    profiles_root = root.get("profiles") if isinstance(root.get("profiles"), dict) else {}
+    found = []
+    for entry in _entries(profiles_root, "data-objects"):
+        name = str(entry.get("@name") or "")
+        if not name:
+            continue
+        defines, branch = data_pattern_defines_a_pattern(entry)
+        found.append(NormalizedDataPatternObject(
+            name=name, namespace_type=namespace_type, defines_pattern=defines, branch=branch))
+    return found
 
 
 # --------------------------------------------------------------------------- the build
@@ -975,6 +1378,7 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
     merged_snapshot = latest_merged_snapshot(enforcement_point)
     pushed_shared_snapshot = latest_pushed_shared_snapshot(enforcement_point)
     pushed_snapshot = latest_pushed_vsys_snapshot(enforcement_point)
+    pushed_profiles_snapshot = latest_pushed_vsys_profiles_snapshot(enforcement_point)
     if merged_snapshot is None:
         raise ValueError(f"missing merged config snapshot for {enforcement_point}")
     if is_panorama_managed(enforcement_point) and pushed_shared_snapshot is None:
@@ -1027,7 +1431,16 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
                         namespace_type=namespace_type, namespace_value=namespace_value, entry=entry),
                     shared=shared)
 
-    pushed_reads = [(pushed_shared_root, pushed_shared_snapshot), (pushed_root, pushed_snapshot)]
+    # THE THIRD PUSHED READ, and the only one that carries the pushed file-blocking and
+    # data-filtering profiles on every platform: the op read above is 57,809 bytes with zero
+    # occurrences of either name on the PA-5220 pair, while this config get returns both on all
+    # four appliances. It is merged in beside the other two rather than replacing them, because
+    # `merge_pushed_entries` is what reconciles reads that disagree about one entry.
+    pushed_profiles_root = (pushed_vsys_profiles(pushed_profiles_snapshot.payload)
+                            if pushed_profiles_snapshot else {})
+
+    pushed_reads = [(pushed_shared_root, pushed_shared_snapshot), (pushed_root, pushed_snapshot),
+                    (pushed_profiles_root, pushed_profiles_snapshot)]
     pushed_profile_reads = [(r.get("profiles") if isinstance(r.get("profiles"), dict) else {}, s)
                             for r, s in pushed_reads]
     for kind, reads, kind_label, node in (
@@ -1079,8 +1492,34 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
         (merged_shared_root, "shared ", True, False),
         (pushed_shared_root, "pushed ", False, True),
         (pushed_root, "pushed ", False, True),
+        (pushed_profiles_root, "pushed ", False, True),
     ):
-        build.references.extend(collect_references(root, where=where, shared_root=shared_root, pushed=pushed))
+        profile_refs, group_refs = collect_profile_and_group_references(
+            root, where=where, shared_root=shared_root, pushed=pushed)
+        build.references.extend(profile_refs)
+        build.group_references.extend(group_refs)
+
+    # The pattern objects behind the data-filtering posture verdict. NO MODEL AND NO ROW: the
+    # only thing that needs them is the verdict, and `/config/.../profiles/data-objects` is the
+    # only place the patterns themselves are defined - measured absent in the predefined branch
+    # and empty in the pushed tree on all four lab appliances.
+    for root, namespace_type in (
+        (merged_root, PolicyObjectNamespace.LOCAL_VSYS),
+        (merged_shared_root, PolicyObjectNamespace.LOCAL_SHARED),
+    ):
+        build.pattern_objects.extend(collect_data_pattern_objects(root, namespace_type))
+
+    # WHETHER THE WALK HAD THE WHOLE PICTURE, which is a statement about the READS and not about
+    # any profile. For a Panorama-managed point the two pushed reads are already required above,
+    # so what is left to check is the pushed-profiles read and the predefined namespace.
+    managed = is_panorama_managed(enforcement_point)
+    build.reference_reads_complete = bool(
+        predefined_snapshot is not None
+        and (not managed or pushed_profiles_snapshot is not None))
+    # NOTHING IN THIS PACKAGE ISSUES `profiles/ai-security`, so this is False everywhere. It is
+    # set from a name rather than written as a literal so that adding that collector is the only
+    # change needed here.
+    build.ai_security_read_present = False
     return build
 
 
@@ -1092,6 +1531,8 @@ def replace_security_profiles(
     profiles: list[NormalizedSecurityProfile],
     groups: list[NormalizedSecurityProfileGroup],
     referrers: dict[tuple[str, str, str, str], list[str]],
+    reach: dict[tuple[str, str, str, str], str] | None = None,
+    reach_resolved: dict[tuple[str, str, str, str], bool] | None = None,
 ) -> tuple[list[SecurityProfile], list[SecurityProfileGroup]]:
     """Write the definitions `owner` owns, replacing what it holds. As replace_addresses: the
     caller passes everything and this keeps its own share."""
@@ -1135,6 +1576,15 @@ def replace_security_profiles(
             dns_sinkhole_ipv4=normalized.dns_sinkhole_ipv4,
             dns_sinkhole_ipv6=normalized.dns_sinkhole_ipv6,
             referrer_count=len(used_by), is_used=bool(used_by), referrers=used_by,
+            has_rules=normalized.has_rules,
+            # DEFAULTED where the caller passed no reach: `undetermined` and False, which are
+            # both the firing side. A caller that cannot say how far the walk got must not leave
+            # a row saying the walk found nothing.
+            reference_reach=(reach or {}).get(
+                normalized.key, SecurityProfile.REACH_UNDETERMINED),
+            reference_reach_resolved=(reach_resolved or {}).get(normalized.key, False),
+            **normalized.file_blocking,
+            **normalized.data_filtering,
             raw_profile=normalized.raw_profile, last_synced_at=normalized.source_snapshot.collected_at,
         )
         # One row per severity the profile actually answers for. A kind with no threat rules
@@ -1233,6 +1683,106 @@ def replace_security_profiles(
     return created_profiles, created_groups
 
 
+# --------------------------------------------------------------------------- the posture verdict
+
+
+def _patterns_by_scope(
+    pattern_objects: list[NormalizedDataPatternObject],
+) -> dict[str, dict[str, NormalizedDataPatternObject]]:
+    by_scope: dict[str, dict[str, NormalizedDataPatternObject]] = {
+        PolicyObjectScope.VSYS: {}, PolicyObjectScope.SHARED: {}, PolicyObjectScope.VENDOR: {}}
+    for obj in pattern_objects:
+        by_scope[scope_for(obj.namespace_type)].setdefault(obj.name, obj)
+    return by_scope
+
+
+def data_filtering_posture_values(
+    build: SecurityProfileBuild, reach: dict[tuple[str, str, str, str], str],
+) -> dict[str, Any]:
+    """The four posture columns for one enforcement point.
+
+    WHY THE RULE-BEARING TEST IS PART OF `data_filtering_in_force` rather than a column of its
+    own: the only data-filtering profile anything in the lab estate references is a pushed one
+    carrying NO RULES, so a bare "is it referenced" predicate finds exactly one profile in force
+    across four appliances and it scans nothing - which would report the estate as watched.
+
+    `named_patterns_defined` IS FALSE WITH NOTHING IN FORCE, and that is a decision rather than a
+    reading. Vacuous truth is available - there are no named patterns to fail - and it would make
+    the column say "every pattern this point relies on is defined" about a point that relies on
+    none. Nothing was established, so the column holds the firing side; the verdict beside it is
+    a conjunction, so the choice changes no finding and only what this column says on its own.
+    """
+    profiles = [p for p in build.profiles
+                if p.kind in SecurityProfile.DATA_FILTERING_KINDS]
+    by_scope = _patterns_by_scope(build.pattern_objects)
+
+    def resolve(profile, name):
+        scopes = (PolicyObjectScope.ORDER[1:] if is_shared_scope(profile.namespace_type)
+                  else PolicyObjectScope.ORDER)
+        return next((by_scope[s][name] for s in scopes if name in by_scope[s]), None)
+
+    evidence = []
+    in_force = []
+    for profile in profiles:
+        route = reach.get(profile.key, SecurityProfile.REACH_UNDETERMINED)
+        patterns = []
+        for name in profile.pattern_names:
+            target = resolve(profile, name)
+            patterns.append({
+                "name": name,
+                "resolved": target is not None,
+                "defines_pattern": bool(target and target.defines_pattern),
+                "branch": target.branch if target else "",
+            })
+        evidence.append({
+            "name": profile.name,
+            "namespace_type": str(profile.namespace_type),
+            "namespace_value": profile.namespace_value,
+            "has_rules": profile.has_rules,
+            "reference_reach": route,
+            "patterns": patterns,
+        })
+        if route == SecurityProfile.REACH_BY_RULE and profile.has_rules:
+            in_force.append((profile, patterns))
+
+    named_defined = bool(in_force) and all(
+        pattern["resolved"] and pattern["defines_pattern"]
+        for _, patterns in in_force for pattern in patterns)
+    # A rule with no `data-object` at all names no pattern, so an in-force profile whose rules
+    # name nothing has nothing defined either. `all()` over an empty list is True, so this is
+    # checked rather than left to it.
+    if bool(in_force) and not any(patterns for _, patterns in in_force):
+        named_defined = False
+    return {
+        "data_filtering_in_force": bool(in_force),
+        "named_patterns_defined": named_defined,
+        "outward_data_filtering_effective": bool(in_force) and named_defined,
+        "profiles_in_force": evidence,
+    }
+
+
+def replace_data_filtering_posture(
+    enforcement_point: EnforcementPoint,
+    build: SecurityProfileBuild,
+    reach: dict[tuple[str, str, str, str], str],
+) -> int:
+    """Write this point's one posture row. Returns how many rows were written, which is 0 or 1.
+
+    A ROW EXISTS WHETHER OR NOT ANY PROFILE WAS FOUND, and that is the whole reason the subject
+    exists: a pass that wrote a row only where a profile exists would report nothing on exactly
+    the appliances with no data filtering at all, which is three of the four in the lab.
+    """
+    appliance = choose_local_appliance(enforcement_point)
+    snapshot = latest_merged_snapshot(enforcement_point)
+    if appliance is None or snapshot is None:
+        return 0
+    write_node_row(
+        DataFilteringPosture, appliance, snapshot,
+        data_filtering_posture_values(build, reach),
+        lookup={"appliance": appliance, "enforcement_point": enforcement_point})
+    return 1
+
+
 def _unresolved_issues(unresolved: list[ProfileReference]) -> list[PolicyObjectIssue]:
     return [PolicyObjectIssue(
         kind="security profile reference", name=ref.name, severity=PolicyObjectIssue.WARNING,
@@ -1250,16 +1800,57 @@ def _own_issues(owner, issues: list[PolicyObjectIssue]) -> list[PolicyObjectIssu
     return [i for i in issues if getattr(i, "shared_scope", False) == want_shared]
 
 
+def _reach_for_build(build: SecurityProfileBuild) -> tuple[dict, dict]:
+    """({profile key: reach}, {profile key: resolved}) for one build.
+
+    TWO THINGS DECIDE THE REACH and they are different in kind. The first is the payload walk,
+    which `reference_reach_by_key` answers. The second is whether the payload WAS the whole
+    picture, which is a statement about the READS and is what `reference_reach_resolved` stores.
+
+    AN INCOMPLETE SET OF READS ONLY DOWNGRADES `unreferenced`, and nothing else. A read nobody
+    issued can only hide a REFERRER, so it can turn "nothing names this" into a wrong answer and
+    can never turn "a rule names this" into one: positive evidence stays positive whatever else
+    went uncollected. Overwriting every reach with `undetermined` instead was the first version
+    of this function, and it destroyed the only two-hop answer in the lab - the profile a rule
+    reaches through a group - and with it the enforcement point's whole posture verdict.
+
+    A DATA-FILTERING PROFILE IS THEREFORE NEVER `resolved` TODAY while still getting a real
+    reach where the walk found one. Four of the ten fields that can point at that collection are
+    AI-security profile `data-leak-detection` member lists and nothing in this package reads
+    `profiles/ai-security`, so the companion column is False on every data-filtering row in every
+    estate - which fires, and says "we could not establish whether anything points at this
+    profile" where the walk found nothing to point at it.
+    """
+    walked = reference_reach_by_key(
+        build.references, build.group_references, build.profiles, build.groups)
+    reach: dict[tuple[str, str, str, str], str] = {}
+    resolved: dict[tuple[str, str, str, str], bool] = {}
+    for profile in build.profiles:
+        complete = build.reference_reads_complete
+        if profile.kind in SecurityProfile.DATA_FILTERING_KINDS:
+            complete = complete and build.ai_security_read_present
+        resolved[profile.key] = complete
+        value = walked.get(profile.key, SecurityProfile.REACH_UNREFERENCED)
+        if value == SecurityProfile.REACH_UNREFERENCED and not complete:
+            value = SecurityProfile.REACH_UNDETERMINED
+        reach[profile.key] = value
+    return reach, resolved
+
+
 def normalize_security_profiles(enforcement_point: EnforcementPoint) -> dict[str, int]:
     """The point's own definitions: vsys scope and predefined. Shared scope is written by the
     appliance-group pass, which must run first for the same reason the address one does."""
     with transaction.atomic():
         build = build_normalized_security_profiles(enforcement_point)
         referrers, unresolved = attribute_references(build.references, build.profiles)
+        reach, resolved = _reach_for_build(build)
         issues = build.issues + _unresolved_issues(unresolved)
-        profiles, groups = replace_security_profiles(enforcement_point, build.profiles, build.groups, referrers)
+        profiles, groups = replace_security_profiles(
+            enforcement_point, build.profiles, build.groups, referrers, reach, resolved)
         replace_normalization_issues(enforcement_point, _own_issues(enforcement_point, issues), kinds=ISSUE_KINDS)
-    return {"security_profiles": len(profiles), "security_profile_groups": len(groups), "issues": len(issues)}
+        postures = replace_data_filtering_posture(enforcement_point, build, reach)
+    return {"security_profiles": len(profiles), "security_profile_groups": len(groups),
+            "data_filtering_postures": postures, "issues": len(issues)}
 
 
 def normalize_appliance_group_security_profiles(appliance_group: ApplianceGroup) -> dict[str, int]:
@@ -1271,12 +1862,29 @@ def normalize_appliance_group_security_profiles(appliance_group: ApplianceGroup)
     shared_profiles: dict[tuple[str, str, str, str], NormalizedSecurityProfile] = {}
     shared_groups: dict[tuple[str, str, str], NormalizedSecurityProfileGroup] = {}
     referrers: dict[tuple[str, str, str, str], list[str]] = {}
+    # THE STRONGEST ANSWER ANY POINT GAVE, because a shared definition is one namespace and a
+    # rule in ANY vsys can name it: a profile reached from one point's rulebase is in force,
+    # whatever the other points' rulebases say. `undetermined` is the weakest and never
+    # displaces a real answer; `resolved` is an AND, because a walk that was incomplete anywhere
+    # did not establish the shared row.
+    reach: dict[tuple[str, str, str, str], str] = {}
+    resolved: dict[tuple[str, str, str, str], bool] = {}
+    reach_strength = {SecurityProfile.REACH_UNDETERMINED: 0,
+                      SecurityProfile.REACH_UNREFERENCED: 1,
+                      SecurityProfile.REACH_BY_GROUP_ONLY: 2,
+                      SecurityProfile.REACH_BY_RULE: 3}
     issues: list[PolicyObjectIssue] = []
     with transaction.atomic():
         for point in points:
             build = build_normalized_security_profiles(point)
             issues.extend(build.issues)
             point_referrers, _ = attribute_references(build.references, build.profiles)
+            point_reach, point_resolved = _reach_for_build(build)
+            for key, value in point_reach.items():
+                if reach_strength[value] > reach_strength.get(reach.get(key, SecurityProfile.REACH_UNDETERMINED), 0):
+                    reach[key] = value
+            for key, value in point_resolved.items():
+                resolved[key] = resolved.get(key, True) and value
             for profile in build.profiles:
                 if not is_shared_scope(profile.namespace_type):
                     continue
@@ -1292,7 +1900,8 @@ def normalize_appliance_group_security_profiles(appliance_group: ApplianceGroup)
                 if is_shared_scope(group.namespace_type):
                     shared_groups.setdefault((group.name, str(group.namespace_type), group.namespace_value), group)
         profiles, groups = replace_security_profiles(
-            appliance_group, list(shared_profiles.values()), list(shared_groups.values()), referrers)
+            appliance_group, list(shared_profiles.values()), list(shared_groups.values()),
+            referrers, reach, resolved)
         replace_normalization_issues(appliance_group, _own_issues(appliance_group, issues), kinds=ISSUE_KINDS)
     return {"security_profiles": len(profiles), "security_profile_groups": len(groups), "issues": len(issues)}
 

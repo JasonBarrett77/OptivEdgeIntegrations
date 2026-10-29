@@ -54,17 +54,53 @@ class SecurityProfile(ScopedPolicyObject):
         "threat_exception_count",
         "referrer_count",
         "is_used",
+        "has_rules",
+        "stops_floor_file_types",
+        "floor_file_type_action",
+        "stops_nested_encoding",
+        "nested_encoding_action",
+        "expresses_unopenable_file_decision",
+        "confirm_rule_beyond_web_browsing",
+        "every_rule_carries_both_counts",
+        "lowest_block_threshold",
+        "reference_reach",
+        "reference_reach_resolved",
     )
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
     KIND_VIRUS = "virus"
     KIND_WILDFIRE_ANALYSIS = "wildfire-analysis"
+    KIND_FILE_BLOCKING = "file-blocking"
+    KIND_DATA_FILTERING = "data-filtering"
     KIND_CHOICES = [
         (KIND_SPYWARE, "Anti-Spyware"),
         (KIND_VULNERABILITY, "Vulnerability Protection"),
         (KIND_VIRUS, "Antivirus"),
         (KIND_WILDFIRE_ANALYSIS, "WildFire Analysis"),
+        (KIND_FILE_BLOCKING, "File Blocking"),
+        (KIND_DATA_FILTERING, "Data Filtering"),
     ]
+
+    #: How far the reference walk behind `reference_reach` got. FOUR values, not a boolean,
+    #: because `unreferenced` and `undetermined` have opposite consequences for a reader and a
+    #: boolean collapses them - which is the measured failure the column exists for.
+    REACH_BY_RULE = "named_by_a_rule"
+    REACH_BY_GROUP_ONLY = "named_by_a_group_only"
+    REACH_UNREFERENCED = "unreferenced"
+    REACH_UNDETERMINED = "undetermined"
+    REACH_CHOICES = [
+        (REACH_BY_RULE, "Named by a security rule"),
+        (REACH_BY_GROUP_ONLY, "Named only by a profile group no rule names"),
+        (REACH_UNREFERENCED, "Nothing on this firewall names it"),
+        (REACH_UNDETERMINED, "The reference walk could not be completed"),
+    ]
+    #: Which kinds answer the file-blocking questions, and which answer the data-filtering
+    #: ones. A kind that answers neither keeps the column default, which is the firing side -
+    #: the same rule the severity verdicts follow, except that these are COLUMNS and so cannot
+    #: be absent the way a verdict ROW can. The `kind` clause on every query is what keeps a
+    #: file-blocking assertion off an antivirus row; nothing downstream enforces that.
+    FILE_BLOCKING_KINDS = (KIND_FILE_BLOCKING,)
+    DATA_FILTERING_KINDS = (KIND_DATA_FILTERING,)
     #: Kinds built from an ordered rule list matching on SEVERITY, and so the only kinds for
     #: which a severity verdict means anything. Antivirus is deliberately not here: it has
     #: per-protocol decoders instead, and writes no verdict rows.
@@ -118,6 +154,94 @@ class SecurityProfile(ScopedPolicyObject):
     #: Four surfaces exist on an anti-spyware profile and controls.json names one. See
     #: `exception_surfaces` in the normalizer.
     exception_surfaces = models.JSONField(default=dict, blank=True)
+
+    #: Whether this profile carries any rule at all. FALSE means it matches nothing and takes no
+    #: action, whatever its name suggests - legal, committable and measured on two of the lab's
+    #: six data-filtering profiles, including the only one anything in the estate references.
+    #:
+    #: THE SIBLING OF `rule_count` AND DELIBERATELY NOT THE SAME CLAIM. `rule_count` is an
+    #: arithmetic reading; this is the vendor fact the absence of the `rules` key licenses. The
+    #: two are written from one `profile_rules()` call and `test_has_rules_agrees_with_rule_count`
+    #: fails if they ever disagree.
+    has_rules = models.BooleanField(default=False)
+
+    # --- file blocking. Blank/false on every other kind; see FILE_BLOCKING_KINDS. ---
+
+    #: Whether at least one rule blocks EVERY floor file type, in BOTH directions. The floor is
+    #: spelled as the device's own catalogue spells it - `PE` upper case, the rest lower - because
+    #: the lower-case spellings are REFUSED at the write (code=12, "file-type 'pe' is not an
+    #: allowed keyword"), so a verdict computed against the asserted spelling matches no stored
+    #: row anywhere. `inbound` is refused too: the leaf's value set is upload|download|both, so
+    #: `both` is the only reading that satisfies a floor of "at minimum inbound".
+    #:
+    #: FALSE IS THE FIRING SIDE and the default, so a row nobody has recomputed raises rather
+    #: than passes. Computed over the rule SET and not the rule SEQUENCE - see
+    #: `file_blocking_verdicts`.
+    stops_floor_file_types = models.BooleanField(default=False)
+
+    #: The WEAKEST action in force on the floor file types across this profile's rules, ordered
+    #: block, continue, alert. BLANK where no rule names any of them, which matches none of the
+    #: severity placements - so the baseline finding reports at its own severity instead of a
+    #: calibrated one. Blank rather than null deliberately: the search layer has no is-null
+    #: operator, so a nullable column passes every clause written over it.
+    floor_file_type_action = models.CharField(max_length=32, blank=True)
+
+    #: The same conjunction as `stops_floor_file_types` over the single nested-encoding member,
+    #: `Multi-Level-Encoding`, spelled as /config/predefined/tdb/file-type spells it. The
+    #: lower-case spelling the control asserts is refused at the write.
+    stops_nested_encoding = models.BooleanField(default=False)
+
+    #: The weakest action in force on the nested-encoding member, same order and same blank rule
+    #: as `floor_file_type_action`.
+    nested_encoding_action = models.CharField(max_length=32, blank=True)
+
+    #: Whether any rule names at least one file type the firewall cannot look inside - a
+    #: password-protected archive or a protected office document - with ANY action. TRUE means a
+    #: decision about those files is expressed in the configuration; it says nothing about which
+    #: way the decision went, which is the whole of what the assertion asks.
+    expresses_unopenable_file_decision = models.BooleanField(default=False)
+
+    #: Whether this profile carries a rule whose action is `continue` over anything but
+    #: web-browsing alone. TRUE IS THE FINDING: the vendor says such a rule stops the traffic the
+    #: security policy permits, and neither the write gate nor the commit gate enforces it - the
+    #: vendor's own predefined `basic file blocking` ships the combination.
+    #:
+    #: THE ONE COLUMN HERE WHOSE FIRING SIDE IS TRUE, so its migration window is silent. That is
+    #: deliberate: inverting it would mean storing the negation of what the device says.
+    confirm_rule_beyond_web_browsing = models.BooleanField(default=False)
+
+    # --- data filtering. False/null on every other kind; see DATA_FILTERING_KINDS. ---
+
+    #: Whether EVERY rule carries both the alert count and the block count. FALSE is the finding:
+    #: at least one rule detects without stopping, or stops without warning. A profile with no
+    #: rules is FALSE and not vacuously true - the assertion is about a profile that is watching.
+    #:
+    #: A STORED 0 PASSES THIS COLUMN, because the key is present. What 0 MEANS is unsettled: it is
+    #: inside the device's writable range at both ends, and `alert > block` is accepted, so the
+    #: pair is not validated as ordered either.
+    every_rule_carries_both_counts = models.BooleanField(default=False)
+
+    #: The smallest block count any rule carries, or NULL where no rule carries one. NULL here is
+    #: safe where it would not be elsewhere: nothing clauses on this column, it is the number an
+    #: assessor reads beside the verdict, and 0 is a real and distinct stored value that an
+    #: empty-string sentinel could not hold.
+    lowest_block_threshold = models.PositiveIntegerField(null=True, blank=True)
+
+    # --- the reference walk, both kinds (and every other kind once its walk is trusted) ---
+
+    #: How far the two-hop reference walk reaches this profile. `undetermined` IS THE DEFAULT and
+    #: not null, on this column's own instruction: a null never matches `is not unreferenced`, so
+    #: an applicability clause over a null SUPPRESSES the control on exactly the appliances whose
+    #: walk could not be completed, and a suppressed control reads in the report as a profile that
+    #: was examined and found fine.
+    reference_reach = models.CharField(
+        max_length=32, choices=REACH_CHOICES, default=REACH_UNDETERMINED)
+
+    #: Whether the walk behind `reference_reach` actually completed on this appliance. FALSE means
+    #: the question "is this profile in force" was not answered, which is a finding in its own
+    #: right and not a pass. Non-nullable and false by default, which is the firing side - that is
+    #: what makes the column safe to ship before the walk is complete everywhere.
+    reference_reach_resolved = models.BooleanField(default=False)
 
     raw_profile = models.JSONField(default=dict, blank=True)
 

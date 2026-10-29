@@ -14,6 +14,11 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.pushed_shar
     collect_show_pushed_shared_policy,
     collect_show_pushed_shared_policy_vsys,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.pushed_profiles import (
+    PUSHED_VSYS_PROFILES_XPATH_TEMPLATE,
+    build_pushed_vsys_profiles_xpath,
+    collect_pushed_vsys_profiles,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.dns_proxy_fqdn import (
     SHOW_DNS_PROXY_FQDN_ALL_COMMAND,
     collect_show_dns_proxy_fqdn_all,
@@ -53,6 +58,9 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.types impor
 
 __all__ = [
     "LIST_TYPE_CUSTOM",
+    "PUSHED_VSYS_PROFILES_XPATH_TEMPLATE",
+    "build_pushed_vsys_profiles_xpath",
+    "collect_pushed_vsys_profiles",
     "LIST_TYPE_PREDEFINED",
     "NUM_RECORDS_PER_PAGE",
     "PANOSCollectedResponse",
