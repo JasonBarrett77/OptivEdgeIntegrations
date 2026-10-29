@@ -74,6 +74,12 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.cloud_appid
     SHOW_CLOUD_APPID_CONNECTION_COMMAND,
     collect_show_cloud_appid_connection,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.rule_hit_count import (
+    RULE_HIT_COUNT_RULE_BASE,
+    RULE_HIT_COUNT_SOURCE_TYPE,
+    build_show_rule_hit_count_command,
+    collect_show_rule_hit_count,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
     PREDEFINED_APPLICATION_SOURCE_TYPE,
     PREDEFINED_GP_APP_CONFIG_SOURCE_TYPE,
@@ -110,6 +116,10 @@ __all__ = [
     "LIST_TYPE_PREDEFINED",
     "NUM_RECORDS_PER_PAGE",
     "PANORAMA_STATUS_SOURCE_TYPE",
+    "RULE_HIT_COUNT_RULE_BASE",
+    "RULE_HIT_COUNT_SOURCE_TYPE",
+    "build_show_rule_hit_count_command",
+    "collect_show_rule_hit_count",
     "PANOSCollectedResponse",
     "PANOSOperationRequest",
     "REQUEST_LICENSE_INFO_COMMAND",

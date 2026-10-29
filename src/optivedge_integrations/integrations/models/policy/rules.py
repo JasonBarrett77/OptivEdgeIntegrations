@@ -27,7 +27,60 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
         "spyware_profile_resolved",
         "wildfire_analysis_submits_all",
         "wildfire_analysis_detail",
+        # --- security-policy domain (PAN-POL). Every one is worked out at normalization from
+        # other stored rows or from the rule's own satellites; no payload key carries any of
+        # them, so none can have a provenance row. `group_tag` and `schedule` are deliberately
+        # NOT here - both read a real key on the rule and record one.
+        "threat_profile_kinds_in_force",
+        "has_url_filtering_profile",
+        "url_inspection_posture",
+        "permitted_port_count",
+        "permits_high_risk_application",
+        "high_risk_application_characteristic",
+        "open_zone_side_count",
+        "is_shadowed_by_earlier_rule",
+        "shadow_relation_computed",
+        "has_exact_duplicate",
+        "duplicate_comparison_computed",
+        "days_since_last_hit",
+        "hit_count_reading_known",
+        "busy_rule_placed_late",
+        "schedule_kind",
+        "schedule_window_expired",
     )
+    #: The three site-inspection states PAN-POL-020 grades, and the reason a boolean is not
+    #: enough: `exception_unrecorded` is the middle state - a URL filtering profile IS in force
+    #: and the rule's own `category` list excuses something from it - and it is the state the
+    #: control's severity turns on. EMPTY is a fourth value and is not a state: it means no pass
+    #: has run, matches none of the three literals, and leaves `has_url_filtering_profile` to
+    #: carry the finding. None of the three is a device value: PAN-OS holds a profile binding
+    #: and a category list and nothing that says whether an exception was recorded, so these are
+    #: this assessment's reading and `exception_unrecorded` CANNOT be told from a deliberate,
+    #: bounded exception - the device has no field for a reason or a date.
+    URL_POSTURE_NONE = "none"
+    URL_POSTURE_EXCEPTION_UNRECORDED = "exception_unrecorded"
+    URL_POSTURE_IN_FORCE = "in_force"
+    URL_INSPECTION_POSTURE_CHOICES = [
+        (URL_POSTURE_NONE, "No site inspection in force"),
+        (URL_POSTURE_EXCEPTION_UNRECORDED, "In force, with an unrecorded exception"),
+        (URL_POSTURE_IN_FORCE, "In force"),
+    ]
+
+    #: Which of the schedule object's two mutually exclusive branches the rule's named schedule
+    #: carries, plus `none` for a rule that names no schedule at all. `none` is a REAL and
+    #: reportable state - the rule is permanent, which is PAN-POL-022's finding - so the empty
+    #: string is kept distinct from it and means "no pass has resolved this rule's schedule".
+    #: Defaulting to `none` would report every unresolved rule as permanent, which is a finding
+    #: raised on no evidence.
+    SCHEDULE_KIND_NONE = "none"
+    SCHEDULE_KIND_NON_RECURRING = "non_recurring"
+    SCHEDULE_KIND_RECURRING = "recurring"
+    SCHEDULE_KIND_CHOICES = [
+        (SCHEDULE_KIND_NONE, "No schedule - always in force"),
+        (SCHEDULE_KIND_NON_RECURRING, "Non-recurring date range"),
+        (SCHEDULE_KIND_RECURRING, "Recurring weekly or daily window"),
+    ]
+
     SOURCE_LOCAL = "local"
     SOURCE_PUSHED_PRE = "pushed_pre"
     SOURCE_PUSHED_POST = "pushed_post"
@@ -302,6 +355,164 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     negate_source = models.BooleanField(default=False)
     negate_destination = models.BooleanField(default=False)
     raw_rule = models.JSONField(default=dict, blank=True)
+
+    # ======================================================================================
+    # THE SECURITY-POLICY DOMAIN'S COLUMNS (PAN-POL-003, 006, 008, 011, 012, 013, 015, 020,
+    # 021, 022, 024). Two read a key; the rest are worked out at normalization.
+    #
+    # EVERY DEFAULT BELOW IS CHOSEN BY THE DIRECTION OF THE ERROR, not by what reads tidily:
+    # a row nobody has recomputed must not look like a row somebody checked and found fine.
+    # Where a default lands on the reassuring side anyway, the comment says so and names the
+    # companion column that fires on the same rows - because a reassuring default with no
+    # companion is a clean estate reported on the strength of nothing.
+    # ======================================================================================
+
+    #: The single tag the rule is GROUPED BY in the policy list. A DIFFERENT KEY from the tag
+    #: list beside it (`securityruletags`), and a consumer joining tags to rules has to read
+    #: both or it drops the grouping. MEASURED on 013201001475: absent from all 666 firewall
+    #: rules, no group header in the grid, and a positive control wrote it, committed, and read
+    #: back the BARE SCALAR `'group-tag': 'Production'`. Empty is the reportable state for
+    #: PAN-POL-021's third clause, so an unfilled column raises rather than hides.
+    group_tag = models.CharField(max_length=255, blank=True, default="")
+
+    #: The name of the time window attached to the rule, or empty for a rule that is always in
+    #: force. MEASURED on 013201001475: absent from all 666 firewall rules and all 630 Panorama
+    #: rules, with the dialog rendering Schedule as `None` - which is RENDERED TEXT and not a
+    #: placeholder, so a normalizer must never store a schedule object named `None`. Empty is
+    #: PAN-POL-022's FINDING rather than its pass: a permanent rule is the thing it reports.
+    schedule = models.CharField(max_length=255, blank=True, default="")
+
+    #: How many of the three inspection kinds PAN-POL-008 names are in force on this rule, 0-3.
+    #: A count rather than three clauses because the control's GRADING turns on how many are
+    #: missing, and a predicate has no arithmetic over three booleans of one row. ZERO on an
+    #: unrecomputed row, which is both the worst real configuration and the firing side.
+    threat_profile_kinds_in_force = models.PositiveSmallIntegerField(default=0)
+
+    #: The fourth profile kind, which `PROFILE_COVERAGE_COLUMNS` did not carry: PAN-POL-008
+    #: excludes URL filtering by name and PAN-POL-020 asserts it. Same resolution as the three
+    #: beside it - the rule's own `profile-setting/profiles/url-filtering` member OR the
+    #: `url-filtering` member of the profile GROUP it names, resolved by name and scope. FALSE
+    #: on an unrecomputed row, which means no site inspection and therefore fires.
+    has_url_filtering_profile = models.BooleanField(default=False)
+
+    #: Which of three site-inspection states this rule is in. See URL_INSPECTION_POSTURE_CHOICES
+    #: for why empty is not one of them.
+    url_inspection_posture = models.CharField(
+        max_length=32, choices=URL_INSPECTION_POSTURE_CHOICES, blank=True, default="")
+
+    #: How many distinct TCP and UDP ports this rule opens, over the UNION of both transport
+    #: branches after expanding every service object and group it names, recursively.
+    #:
+    #: NULL MEANS INDETERMINATE AND NEVER ZERO - zero ports is the narrowest rule there is, so a
+    #: rule whose services could not be expanded must not score as the tightest on the device.
+    #: It is null for a member this pass cannot resolve to ports: `application-default`, whose
+    #: ports are the ports of whatever applications the rule names and are vendor content rather
+    #: than configuration; a service name that resolves to nothing; and a group this pass could
+    #: not walk. `permitted_port_count_known` is the companion that fires on exactly those rows.
+    permitted_port_count = models.BigIntegerField(null=True, blank=True)
+
+    #: Whether any application this rule permits carries a published characteristic the control
+    #: treats as hostile.
+    #:
+    #: NULL RATHER THAN FALSE, because FALSE HERE MEANS CHECKED AND CLEAN. Nothing computes this
+    #: today: it needs `/config/predefined/application`, which no collector reads, and an
+    #: application FILTER is a PREDICATE evaluated against a content release rather than a
+    #: property of the rule - so the same rule can pass and then fail with no configuration
+    #: change. Null is the state of every row in the estate and it is on the REASSURING side of
+    #: PAN-POL-006's clause; what makes the gap visible is the characteristic column below being
+    #: empty and placed as UNRANKED, not a companion boolean. See the stage 7 artifact.
+    permits_high_risk_application = models.BooleanField(null=True, blank=True)
+
+    #: Which published characteristic the finding turns on, as the vendor's own leaf name - the
+    #: axis PAN-POL-006's severity varies with. EMPTY on an unrecomputed row, and empty is
+    #: graded as UNRANKED rather than acceptable, so a rule whose applications nobody resolved
+    #: produces a finding with no severity band rather than no finding.
+    high_risk_application_characteristic = models.CharField(
+        max_length=64, blank=True, default="")
+
+    #: How many of this rule's two zone sides are left open - a side is open when its member
+    #: list is exactly the keyword `any`. TWO on an unrecomputed row, which is the worst band: a
+    #: zero would report every rule in the estate as correctly zoned before anything looked.
+    open_zone_side_count = models.PositiveSmallIntegerField(default=2)
+
+    #: Whether some rule evaluated BEFORE this one matches everything this one matches with the
+    #: same decision, so this rule can never match traffic.
+    #:
+    #: NULL IS NOT `NOT SHADOWED`: a false here is a claim that the whole rulebase was compared.
+    #: The device's own answer is unreachable - the firewall's shadow-rule warning comes only
+    #: from pre-commit validation, which is a COMMIT GATE and not a view, so no collector can
+    #: issue it. This column is therefore a DIFFERENT CLAIM made against a different definition
+    #: of shadowing, computed from the stored rules, and `shadow_relation_computed` beside it is
+    #: what says whether the comparison ran at all.
+    is_shadowed_by_earlier_rule = models.BooleanField(null=True, blank=True)
+
+    #: Whether the per-vsys shadowing pass completed for this rule's rulebase. FALSE until it
+    #: has, which fires.
+    shadow_relation_computed = models.BooleanField(default=False)
+
+    #: Whether another rule reaching the same vsys has the same resolved match tuple AND the
+    #: same action.
+    #:
+    #: FALSE IS THE REASSURING SIDE AND IT IS THE DEFAULT, which is stated here rather than
+    #: hidden: a rulebase nobody compared reports as duplicate-free. A boolean has no third
+    #: state and the search layer has no is-null operator, so the containment is entirely
+    #: `duplicate_comparison_computed`, which fires on exactly the same rows.
+    has_exact_duplicate = models.BooleanField(default=False)
+
+    #: Whether the per-vsys duplicate pass completed for this rule's rulebase. FALSE until it
+    #: has, which fires.
+    duplicate_comparison_computed = models.BooleanField(default=False)
+
+    #: How many days since this rule last matched traffic, from `show rule-hit-count`.
+    #:
+    #: NULL IS `NOT ESTABLISHED` AND NEVER ZERO: a rule nobody counted is not a rule that
+    #: matched traffic today. MEASURED 2026-10-29 on 013201001475 and 691665AC334B458: the read
+    #: answers `last-hit-timestamp: 0` for a rule that has never matched, so an epoch of 0 is
+    #: parsed as NULL rather than as 1970 - which would read as the oldest rule on the device.
+    days_since_last_hit = models.IntegerField(null=True, blank=True)
+
+    #: Whether a hit-count reading for this rule can be believed at all.
+    #:
+    #: THIS IS WHERE A ZERO THAT IS REALLY AN UNKNOWN IS CAUGHT, and it is measured rather than
+    #: argued. On 691665AC334B458, whose `rule-hit-count` key reads `no`, the hit-count read
+    #: SUCCEEDS and returns `hit-count: 0, last-hit-timestamp: 0, latest: yes` for every rule -
+    #: byte-identical to a counting appliance whose rules have never matched. So the reading
+    #: alone cannot tell "nothing matched" from "nothing is counting", and this column is false
+    #: wherever `PolicyRuleSettings.rule_hit_count_enabled` is not TRUE, wherever no reading was
+    #: taken, and wherever the counter was reset inside the window being judged. FALSE fires.
+    hit_count_reading_known = models.BooleanField(default=False)
+
+    #: Whether this rule carries enough traffic to belong nearer the top of its rulebase while
+    #: sitting near the bottom. NULL IS `NOT ESTABLISHED`: false would claim the ranking was run
+    #: over every rule in the rulebase and found nothing out of place. A decile over all-zero
+    #: hit counts is no answer rather than a weak one, so this stays null wherever
+    #: `hit_count_reading_known` is false - which is every rule in this lab.
+    busy_rule_placed_late = models.BooleanField(null=True, blank=True)
+
+    #: Which kind of time window the rule's schedule carries. See SCHEDULE_KIND_CHOICES for why
+    #: empty and `none` are different values.
+    schedule_kind = models.CharField(
+        max_length=32, choices=SCHEDULE_KIND_CHOICES, blank=True, default="")
+
+    #: Whether the end of the schedule's date range is in the past. NULL IS `NO WINDOW, OR NOT
+    #: COMPARED`; false would claim the window is still open, which is a claim about a date
+    #: nobody parsed. Only the non-recurring branch has an end, so a RECURRING schedule is null
+    #: here on purpose - and that is the false pass to watch for: a temporary rule carrying a
+    #: repeating daily window looks time-bounded and never expires.
+    schedule_window_expired = models.BooleanField(null=True, blank=True)
+
+    @property
+    def permitted_port_count_known(self) -> bool:
+        """Whether this rule's open-port count was established at all.
+
+        The same shape as `source_breadth_known` and for the same two reasons: the search layer
+        filters it with an inverted `__isnull` on the column because a property cannot appear in
+        a WHERE clause, and it has to exist as an ATTRIBUTE as well because the findings sheet
+        resolves a tested field against the subject model and refuses a name the model can
+        neither store nor compute. Not a stored column: the count's NULL *is* this false, and a
+        second stored copy could disagree with it.
+        """
+        return self.permitted_port_count is not None
 
     class Meta:
         ordering = ["effective_order", "name", "id"]
@@ -659,6 +870,26 @@ class SecurityRuleDestinationAddressRef(SecurityRuleAddressRef):
                 name="integrations_valid_destination_address_ref_shape",
             ),
         ]
+
+
+class SecurityRuleTag(SecurityRuleValue):
+    """The tags on one rule, one row per member - PAN-POL-021 and PAN-POL-022.
+
+    A MEMBER SATELLITE rather than a column, because the key is a member list and that is how
+    every other member list on this model is stored. It carries the plain `prov = CharField` the
+    member models use, per CLAUDE.md's provenance section, not a `FieldProvenance` row.
+
+    AN EMPTY SET IS THE STATE PAN-POL-021 REPORTS, so a rule nobody tagged and a rule nobody
+    normalized read the same way and the finding is raised either way. MEASURED on 013201001475:
+    `tag` is absent from all 666 firewall rules with the grid's Tags cell empty for every one,
+    and a positive control wrote `tag=Production`, committed, read it back and deleted it.
+
+    WHAT THE TAG ITSELF CARRIES IS NOT HERE AND IS THE DOMAIN'S REAL GAP: five of this domain's
+    controls ask for a business reason, an approver or an expiry, and the tag ENTRY has two
+    fields and none of them is an owner, an expiry or a type. So a bypass and a deliberate,
+    bounded exception are the same configuration, and every finding on those controls is
+    qualified rather than decided.
+    """
 
 
 class SecurityRuleSourceUser(SecurityRuleValue):

@@ -134,6 +134,7 @@ from .policy import (
     DataFilteringPosture,
     PolicyObjectBase,
     PolicyObjectNamespace,
+    PolicyRuleSettings,
     PolicyObjectPrecedence,
     PolicyObjectScope,
     precedence_for,
@@ -168,8 +169,10 @@ from .policy import (
     SecurityRuleSourceHip,
     SecurityRuleSourceUser,
     SecurityRuleAddressRef,
+    SecurityRuleTag,
     SecurityRuleToZone,
     SecurityRuleValue,
+    VsysRulePosture,
 )
 
 __all__ = [
@@ -299,6 +302,9 @@ __all__ = [
     "SecurityRuleSourceAddressRef",
     "SecurityRuleSourceHip",
     "SecurityRuleSourceUser",
+    "SecurityRuleTag",
+    "PolicyRuleSettings",
+    "VsysRulePosture",
     "SecurityRuleToZone",
     "SecurityRuleValue",
     "ALARM_MECHANISM_STATES",

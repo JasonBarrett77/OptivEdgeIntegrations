@@ -24,6 +24,11 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_
     NormalizedDynamicAddressContent,
     normalize_enforcement_point_dynamic_address_content,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.security_policy import (
+    normalize_policy_rule_settings,
+    normalize_security_rule_policy_posture,
+    normalize_vsys_rule_posture,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     normalize_security_rules,
 )
@@ -195,6 +200,52 @@ def normalize_enforcement_point_decryption_policy(
     raise. The per-rule grain has no row for it.
     """
     return normalize_decryption_policy(enforcement_point)
+
+
+def normalize_appliance_policy_rule_settings(appliance: Appliance) -> dict:
+    """The two device-wide policy-rule switches. PAN-POL-011 and PAN-POL-013.
+
+    Reads the same merged device entry as its neighbours in the appliance tuple and depends on
+    nothing else in it. It must run BEFORE `normalize_enforcement_point_security_rule_posture`
+    on the same appliance's points, which reads `rule_hit_count_enabled` off the row this writes
+    to decide whether a hit-count reading can be believed - the appliance loop runs before the
+    point loops, so that order comes for free rather than needing to be arranged.
+    """
+    return normalize_policy_rule_settings(appliance)
+
+
+def normalize_enforcement_point_security_rule_posture(
+    enforcement_point: EnforcementPoint,
+) -> dict:
+    """Fifteen per-rule columns for the security-policy domain. PAN-POL-003 and nine others.
+
+    MUST RUN AFTER `normalize_enforcement_point_security_rules`, for the reason
+    `normalize_enforcement_point_rulebase_device_match` must: the shadowing and duplicate
+    columns are computed over the whole rulebase's stored rows, so run first it would compare
+    last run's rules or none at all.
+
+    MUST ALSO RUN AFTER `normalize_security_rule_profile_coverage`, which is a second ordering
+    obligation and a weaker one - nothing here reads a profile column, but the two passes write
+    to the same rows through `save(update_fields=...)` and reading the rules once they are
+    settled keeps the two sets of columns describing the same instant.
+    """
+    return normalize_security_rule_policy_posture(enforcement_point)
+
+
+def normalize_enforcement_point_vsys_rule_posture(
+    enforcement_point: EnforcementPoint,
+) -> dict:
+    """Eight verdicts over one vsys's whole effective policy. PAN-POL-007, 009, 010, 017 to 019.
+
+    MUST RUN AFTER `normalize_enforcement_point_security_rule_posture`, which is the last of
+    this domain's three passes to write the rows these verdicts are taken over.
+
+    A ROW IS WRITTEN FOR A VSYS WITH NO RULEBASE AT ALL, which is the opposite choice from
+    `normalize_enforcement_point_rulebase_device_match` and the right one for this subject: such
+    a vsys still enforces the two rules PAN-OS ships, and three of nine vsys on one lab
+    appliance are in exactly that state.
+    """
+    return normalize_vsys_rule_posture(enforcement_point)
 
 
 def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
@@ -670,6 +721,9 @@ __all__ = [
     "normalize_log_alarm_settings",
     "normalize_platform_content_streams",
     "normalize_enforcement_point_rulebase_device_match",
+    "normalize_appliance_policy_rule_settings",
+    "normalize_enforcement_point_security_rule_posture",
+    "normalize_enforcement_point_vsys_rule_posture",
     "normalize_enforcement_point_zones",
     "normalize_rulebase_device_match",
     "normalize_collected_response",
