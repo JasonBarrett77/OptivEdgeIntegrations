@@ -397,6 +397,38 @@ def ensure_list(value: Any) -> list[Any]:
     return [value]
 
 
+def choice_child(node: Any, valid: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+    """(which child is present, its content) for a node PAN-OS models as a CHOICE.
+
+    PAN-OS spells several settings as WHICH CHILD EXISTS rather than as a value - `type` is
+    `{"static": None}` or `{"dhcp-client": {...}}`, `authentication-type` is `{"none": None}`,
+    `high-availability/group/mode` is `{"active-passive": None}`, and
+    `secure-conn-client/certificate-type` is `{"local": {...}}` or `{"none": None}`. A reader of
+    a text value gets nothing from any of them.
+
+    Returns ("", {}) when the node is absent or holds none of `valid`, which the caller must
+    resolve to a default it has measured rather than guessing here.
+
+    `valid` is ordered and the FIRST match wins. That matters only for a payload holding two
+    branches at once, which the device's own schema does not permit and nobody has seen; the
+    caller controls the order either way.
+
+    MOVED HERE FROM `device_services.py` on 2026-10-29, which is where it was written and which
+    now calls this. Its docstring already named two earlier private copies -
+    `security_profiles._choice` and `management_ssh._host_key` - and said both were left alone
+    because each is load-bearing for a shipped control and neither is broken. That judgement is
+    unchanged; what changed is that a FOURTH caller arrived, so the shared one lives in the
+    shared module instead of being copied again.
+    """
+    if not isinstance(node, dict):
+        return "", {}
+    for name in valid:
+        if name in node:
+            child = node[name]
+            return name, child if isinstance(child, dict) else {}
+    return "", {}
+
+
 def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Merge overlapping/adjacent (start, end) integer intervals into the minimal sorted,
     disjoint set. Shared by dynamic_address_content.py (EDL/FQDN resolved entries) and

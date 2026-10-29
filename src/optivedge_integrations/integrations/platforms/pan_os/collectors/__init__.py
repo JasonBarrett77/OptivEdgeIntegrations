@@ -36,6 +36,16 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.logging_sta
     SHOW_LOGGING_STATUS_COMMAND,
     collect_show_logging_status,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.high_availability import (
+    HIGH_AVAILABILITY_SOURCE_TYPE,
+    SHOW_HIGH_AVAILABILITY_ALL_COMMAND,
+    collect_show_high_availability_all,
+)
+from optivedge_integrations.integrations.platforms.pan_os.collectors.panorama_status import (
+    PANORAMA_STATUS_SOURCE_TYPE,
+    SHOW_PANORAMA_STATUS_COMMAND,
+    collect_show_panorama_status,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
     SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND,
     SHOW_PREDEFINED_URL_LISTS_COMMAND,
@@ -52,15 +62,19 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.types impor
 )
 
 __all__ = [
+    "HIGH_AVAILABILITY_SOURCE_TYPE",
     "LIST_TYPE_CUSTOM",
     "LIST_TYPE_PREDEFINED",
     "NUM_RECORDS_PER_PAGE",
+    "PANORAMA_STATUS_SOURCE_TYPE",
     "PANOSCollectedResponse",
     "PANOSOperationRequest",
     "SHOW_DNS_PROXY_FQDN_ALL_COMMAND",
+    "SHOW_HIGH_AVAILABILITY_ALL_COMMAND",
     "SHOW_LOGGING_STATUS_COMMAND",
     "SHOW_MERGED_CONFIG_COMMAND",
     "SHOW_MANAGED_DEVICES_COMMAND",
+    "SHOW_PANORAMA_STATUS_COMMAND",
     "SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND",
     "SHOW_PREDEFINED_URL_LISTS_COMMAND",
     "SHOW_PUSHED_SHARED_POLICY_COMMAND",
@@ -76,11 +90,13 @@ __all__ = [
     "collect_predefined_certificates",
     "collect_predefined_log_forwarding_profiles",
     "collect_predefined_security_profiles",
+    "collect_show_high_availability_all",
     "collect_show_logging_status",
     "collect_show_masterkey_properties",
     "collect_predefined_ssl_tls_service_profiles",
     "collect_show_predefined_ip_block_lists",
     "collect_show_predefined_url_lists",
+    "collect_show_panorama_status",
     "collect_show_pushed_shared_policy",
     "collect_show_pushed_shared_policy_vsys",
     "set_target_vsys",

@@ -39,6 +39,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.authenti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.login_banner import (
     normalize_login_banner,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.high_availability import (
+    normalize_high_availability,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.panorama_registration import (
+    normalize_panorama_registration,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_ssh import (
     normalize_management_ssh,
 )
@@ -146,6 +152,28 @@ def normalize_appliance_management_tls(appliance: Appliance) -> dict:
 def normalize_appliance_management_ssh(appliance: Appliance) -> dict:
     """The management SSH server's configured offer. PAN-MCR-001 and 003."""
     return normalize_management_ssh(appliance)
+
+
+def normalize_appliance_high_availability(appliance: Appliance) -> dict:
+    """The appliance's HA relationship and its pair's runtime state. PAN-HAP-001 to 004.
+
+    Depends on nothing else in the appliance normalizer tuple. It reads the same merged device
+    entry as its neighbours, plus the `show_high_availability_all` snapshot if one exists - and
+    where none does, every verdict that rests on it holds its FIRING default and
+    `ha_runtime_state_collected` is false.
+    """
+    return normalize_high_availability(appliance)
+
+
+def normalize_appliance_panorama_registration(appliance: Appliance) -> dict:
+    """The appliance's channel to its management estate. PAN-HAP-005.
+
+    Depends on nothing else in the tuple. The certificate NAME it stores is deliberately NOT
+    resolved against the certificate rows: an unresolvable name means the firewall presents no
+    customer certificate, which is the same verdict as no name at all, so the hardening column
+    is computed from this node alone and does not need the certificate normalizer to have run.
+    """
+    return normalize_panorama_registration(appliance)
 
 
 def normalize_appliance_master_key(appliance: Appliance) -> dict:
@@ -267,10 +295,12 @@ __all__ = [
     "normalize_appliance_log_settings",
     "normalize_appliance_login_banner",
     "normalize_appliance_management_tls",
+    "normalize_appliance_high_availability",
     "normalize_appliance_management_ssh",
     "normalize_appliance_master_key",
     "normalize_appliance_services_settings",
     "normalize_appliance_device_services",
+    "normalize_appliance_panorama_registration",
     "normalize_appliance_password_complexity",
     "normalize_appliance_password_profiles",
     "normalize_appliance_certificate_objects",
