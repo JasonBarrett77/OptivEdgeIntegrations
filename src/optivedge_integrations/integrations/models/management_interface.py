@@ -32,9 +32,11 @@ from .provenance import ProvenancedMixin
 
 class ManagementInterface(ProvenancedMixin, SyncTrackedModel):
 
-    #: Computed here: referenced but never defined. See ProvenancedMixin.DERIVED_FIELDS.
+    #: Computed here: referenced but never defined, and a verdict over this surface's own
+    #: service rows. See ProvenancedMixin.DERIVED_FIELDS.
     DERIVED_FIELDS = (
         "is_missing",
+        "is_management_surface",
     )
     PLANE_MGT = "mgt"
     PLANE_AUX1 = "aux-1"
@@ -76,6 +78,24 @@ class ManagementInterface(ProvenancedMixin, SyncTrackedModel):
     #: node to populate PermittedSource. Do that when a control asks "which interfaces does
     #: this profile expose", and not before.
     profile_name = models.CharField(max_length=64, blank=True)
+
+    #: Does this surface offer a way to ADMINISTER the device at all? PAN-MGT-003's
+    #: applicability.
+    #:
+    #: True on the three deviceconfig planes unconditionally - their permitted-source list
+    #: governs every service on the port, the monitoring ones included - and on a data-plane
+    #: surface only where the bound profile enables one of `ADMINISTRATIVE_SERVICE_NAMES`.
+    #:
+    #: A DISJUNCTION, which is why it is a column: a plane test OR a quantifier over the
+    #: related `services` rows, and the consumer's clause grammar is one conjunction with no
+    #: OR and no quantifier over related rows.
+    #:
+    #: DEFAULT TRUE, deliberately, and it is the FIRING side: a row nobody has recomputed is
+    #: treated as administrable, so PAN-MGT-003's applicability clause lets it through and the
+    #: control reports it. The opposite default would turn that applicability clause into a
+    #: SUPPRESSION - the same field read the other way silencing exactly the rows nobody
+    #: measured, which reads as the careful choice and is not.
+    is_management_surface = models.BooleanField(default=True)
 
 
     class Meta:
@@ -202,6 +222,24 @@ SERVICE_NAMES = (
     "userid-syslog-listener-ssl",
     "userid-syslog-listener-udp",
 )
+
+#: The five services whose presence makes a surface an ADMINISTRATION surface, as against a
+#: reachability or monitoring one. Read by `ManagementInterface.is_management_surface` and by
+#: `InterfaceManagementProfile.unbound_exposure_class`, both of which are stored verdicts.
+#:
+#: THIS SET IS ALSO DECLARED IN OptivEdgeAssessments, as `ADMINISTRATIVE_SERVICES` in
+#: `assessments/search/management_interface/fields/services.py`, whose module docstring says
+#: it "deliberately does not live in OptivEdgeIntegrations" because "whether a service
+#: constitutes administrative access is an assessment question, not a collection one".
+#:
+#: That boundary is crossed here and the crossing is not this module's choice: stage 5's
+#: `management-services` artifact declares two columns computed at NORMALISATION whose
+#: definition is this set, because each is a disjunction the consumer's clause grammar cannot
+#: express. Implemented as declared and reported, per the pipeline rule that a defect is
+#: recorded and not fixed mid-run. The two copies can drift, and the drift would move what a
+#: finding counts as administrative without either side failing; whoever reconciles them owns
+#: that decision. The members are identical as of 2026-10-29.
+ADMINISTRATIVE_SERVICE_NAMES = ("http", "https", "ssh", "telnet", "snmp")
 
 
 class ManagementService(ProvenancedMixin, models.Model):

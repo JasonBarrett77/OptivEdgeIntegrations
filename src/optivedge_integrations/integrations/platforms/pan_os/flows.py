@@ -89,6 +89,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_device_identification,
     normalize_appliance_master_key,
     normalize_appliance_panorama_registration,
+    normalize_appliance_management_plane,
     normalize_appliance_services_settings,
     normalize_appliance_wildfire_settings,
     normalize_appliance_device_services,
@@ -918,6 +919,10 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # snapshots and one merged leaf; depends on nothing else in this tuple.
     ("device identification", normalize_appliance_device_identification),
     ("services settings", normalize_appliance_services_settings),
+    # Device > Setup > Management > Management Interface Settings, and the operational mode the
+    # appliance reports when asked. Reads the same merged device entry as its neighbours plus
+    # its own `show system info` snapshot, and depends on nothing else in this tuple.
+    ("management plane", normalize_appliance_management_plane),
     # AFTER services settings, which owns the other column on the same LoggingSettings row.
     # The two write disjoint column sets and each deletes only its own provenance rows, so the
     # order is about PAN-MGT-011 keeping its behaviour if this one fails rather than about the

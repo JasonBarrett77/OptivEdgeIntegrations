@@ -50,8 +50,15 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
 
+    # RE-CHAINED WHEN WAVE 3 WAS MERGED, 2026-10-29. Built by one of four concurrent stage 7
+    # runs, each told to depend on the head it found - `0100_decryption_policy` for all four, because none
+    # could see a sibling's work. Four leaf nodes is a state Django refuses outright, so they were
+    # put in a line at merge time; they touch different models, so the order carries no meaning
+    # beyond the filenames they were assigned.
+    # SO THE `dependencies` LINE BELOW IS NOT WHAT THE RUN WROTE: it was rewritten from
+    # `0100_decryption_policy` to `0101_av_wildfire` here, at merge time.
     dependencies = [
-        ('integrations', '0100_decryption_policy'),
+        ('integrations', '0101_av_wildfire'),
     ]
 
     operations = [

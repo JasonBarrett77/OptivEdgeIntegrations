@@ -43,7 +43,25 @@ class InterfaceManagementProfile(ProvenancedMixin, SyncTrackedModel):
         "is_missing",
         "bound_interface_names",
         "bound_interface_count",
+        "unbound_exposure_class",
     )
+
+    #: What attaching this profile WOULD permit, as a class rather than a service list.
+    #: PAN-MGT-013's severity. Counterfactual on purpose: an unattached profile grants no
+    #: access today, which is why `bound_interface_count` is the control's baseline and this is
+    #: the grade.
+    #:
+    #: The precedence is strict - an unencrypted administrative service beats an encrypted one
+    #: beats everything else - so this is a three-way classification over eleven keys and not
+    #: anything a clause comparing one column to one literal reaches.
+    EXPOSURE_UNENCRYPTED = "unencrypted_administrative_login"
+    EXPOSURE_ENCRYPTED = "encrypted_administrative_login"
+    EXPOSURE_MONITORING = "monitoring_or_nothing"
+    EXPOSURE_CLASS_CHOICES = [
+        (EXPOSURE_UNENCRYPTED, "Would permit an unencrypted administrative login"),
+        (EXPOSURE_ENCRYPTED, "Would permit an encrypted administrative login"),
+        (EXPOSURE_MONITORING, "Would permit monitoring or reachability only"),
+    ]
 
     management_station = models.ForeignKey(
         "integrations.ManagementStation", on_delete=models.CASCADE,
@@ -67,6 +85,20 @@ class InterfaceManagementProfile(ProvenancedMixin, SyncTrackedModel):
     #: Zero is the whole point of this model. Stored rather than derived so that "unused"
     #: is a scalar a control query can filter on without a join.
     bound_interface_count = models.PositiveIntegerField(default=0)
+
+    #: The counterfactual class above. The profile's own service keys ARE read in the same pass
+    #: for the bound case, so this is a classification and not a new read - but the keys
+    #: themselves are deliberately not stored for this row: `ManagementService` holds a
+    #: profile's services keyed to the SURFACE where they matter, and an unattached profile
+    #: creates no surface. So nothing anywhere said what an unused profile would have enabled.
+    #:
+    #: DEFAULT IS THE WORST CLASS, deliberately: a profile nobody has classified has not been
+    #: shown to be harmless. The baseline clause fires on `bound_interface_count` regardless, so
+    #: the window between the migration and the pass affects the SEVERITY and not whether the
+    #: finding is raised - the one place in this domain where a default on the firing side buys
+    #: an over-statement rather than a report.
+    unbound_exposure_class = models.CharField(
+        max_length=32, choices=EXPOSURE_CLASS_CHOICES, default=EXPOSURE_UNENCRYPTED)
 
     class Meta:
         ordering = ["appliance__hostname", "name"]

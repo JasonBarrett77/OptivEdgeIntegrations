@@ -34,10 +34,63 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.device_c
     device_entry_from_snapshot,
     latest_merged_snapshot,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
+    profile_service_states,
+)
 
 #: The entry-level provenance record, as FieldProvenance documents it: the `@ptpl` on a
 #: named PAN-OS entry rather than on one of its fields.
 ENTRY_FIELD = "__entry__"
+
+#: The two services whose presence makes the counterfactual an UNENCRYPTED administrative
+#: login. Keyed to the two controls stage 3 named when it placed this class one grade above
+#: the row's baseline: "attaching it creates in ONE ACTION the exposure PAN-MGT-001 (telnet)
+#: and PAN-MGT-002 (http) exist to report". The same pair is `INSECURE_SERVICES` in
+#: OptivEdgeAssessments' presentation layer.
+_UNENCRYPTED_ADMINISTRATIVE = ("telnet", "http")
+#: The two that give real administrative reach over a sound transport - the baseline class.
+_ENCRYPTED_ADMINISTRATIVE = ("https", "ssh")
+
+
+def classify_unbound_exposure(profile_entry: dict) -> str:
+    """What attaching this profile WOULD permit, as one of three classes.
+
+    Strict precedence, which is what makes it a classification rather than three tests: an
+    unencrypted administrative service beats an encrypted one beats everything else.
+
+    `snmp` IS DELIBERATELY NOT AN ADMINISTRATIVE LOGIN HERE, and it IS one for
+    `ManagementInterface.is_management_surface` - the two columns genuinely differ, and the
+    difference is in their inputs rather than a slip:
+
+    - `is_management_surface` asks "does this surface offer a way to administer the device at
+      all", over `ADMINISTRATIVE_SERVICE_NAMES`, which is the five-member set
+      OptivEdgeAssessments' search layer declares and whose docstring calls them services that
+      "accept an administrative session or management protocol exchange". SNMP is one.
+    - this column grades an administrative LOGIN, and its third class is named
+      `monitoring_or_nothing`: "attaching it makes the interface answerable but not
+      administrable". SNMP is monitoring - a community-string read, not a login - and it is
+      neither of the two controls the worst class is keyed to, nor administrative reach over a
+      sound transport.
+
+    So a profile enabling SNMP alone makes a surface administrable and grades at the mildest
+    class. Both readings are defensible and nothing upstream settles it: stage 5's
+    `unbound_exposure_class` value set is three tokens it minted out of stage 3's three ranks
+    and says nothing about SNMP, while stage 5's `is_management_surface.stores` says "the five
+    administrative services" explicitly. The asymmetry is recorded rather than smoothed over,
+    because smoothing it would mean changing one of those two readings without saying which.
+    The lab exercises exactly this case - an snmp-only profile bound to one loopback.
+    """
+    states = profile_service_states(profile_entry)
+    if any(states.get(name, (False, None, None))[0]
+           for name in _UNENCRYPTED_ADMINISTRATIVE):
+        return InterfaceManagementProfile.EXPOSURE_UNENCRYPTED
+    if any(states.get(name, (False, None, None))[0]
+           for name in _ENCRYPTED_ADMINISTRATIVE):
+        return InterfaceManagementProfile.EXPOSURE_ENCRYPTED
+    # The mildest class, and stage 3's one unplaced case is folded in here: a profile that
+    # permits NOTHING AT ALL grades the same as one permitting only monitoring, because the
+    # hygiene claim is identical and the row's severity is already the lowest that fires.
+    return InterfaceManagementProfile.EXPOSURE_MONITORING
 
 #: Attributes that state where an entry came from. Measured 2026-08-31: a template-pushed
 #: profile carries `@ptpl` on the entry AND on each service leaf; a locally-created one carries
@@ -128,6 +181,11 @@ def normalize_interface_management_profiles(
                 name=name,
                 bound_interface_names=bound,
                 bound_interface_count=len(bound),
+                # Counterfactual and computed for EVERY profile, bound or not. PAN-MGT-013
+                # grades only the unbound ones, but storing it on all of them keeps the column
+                # meaningful rather than leaving a null that means two things, and the keys are
+                # already in hand from this same entry.
+                unbound_exposure_class=classify_unbound_exposure(entry),
             )
             provenance_type, raw_key, raw_value = _entry_provenance(entry)
             FieldProvenance.objects.create(

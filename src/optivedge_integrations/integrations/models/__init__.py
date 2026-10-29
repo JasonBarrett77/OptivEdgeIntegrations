@@ -30,6 +30,7 @@ from .interface_management_profile import InterfaceManagementProfile
 from .ike import IkeCryptoProfile, IkeGateway
 from .interfaces import Interface
 from .management_interface import (
+    ADMINISTRATIVE_SERVICE_NAMES,
     ManagementInterface,
     ManagementService,
     SERVICE_NAMES,
@@ -53,6 +54,11 @@ from .log_settings import (
 from .authentication_settings import AuthenticationSettings
 from .login_banner import LoginBanner
 from .management_tls import ManagementTlsBinding
+from .management_plane import (
+    ApplianceOperationalMode,
+    ManagementPlaneAddressing,
+    address_is_globally_routable,
+)
 from .management_ssh import ManagementSshSettings
 from .high_availability import HighAvailabilityConfig
 from .panorama_registration import PanoramaRegistration
@@ -186,6 +192,9 @@ __all__ = [
     "GlobalProtectEnforcementPoint",
     "GlobalProtectPortal",
     "GlobalProtectPortalClientAuthRow",
+    "ManagementPlaneAddressing",
+    "ApplianceOperationalMode",
+    "address_is_globally_routable",
     "HighAvailabilityConfig",
     "ManagementSshSettings",
     "PanoramaRegistration",
@@ -209,6 +218,7 @@ __all__ = [
     "SslTlsServiceProfile",
     "ManagementInterface",
     "ManagementService",
+    "ADMINISTRATIVE_SERVICE_NAMES",
     "SERVICE_NAMES",
     "PermittedSource",
     "parse_permitted_source",
