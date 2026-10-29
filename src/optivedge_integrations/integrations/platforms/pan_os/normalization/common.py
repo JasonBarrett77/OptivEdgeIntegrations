@@ -429,6 +429,53 @@ def choice_child(node: Any, valid: tuple[str, ...]) -> tuple[str, dict[str, Any]
     return "", {}
 
 
+def entry_container(node: Any, *path: str) -> tuple[str, list[dict[str, Any]]]:
+    """(state, entries) for a PAN-OS collection, telling its THREE states apart.
+
+    `state` is "absent", "empty" or "populated"; `entries` is always a list, so a SINGLE entry -
+    which arrives as a bare dict and not a list of one - iterates like any other count.
+
+    A READER TESTING TRUTHINESS REPORTS "absent" AND "empty" IDENTICALLY, and they mean different
+    things everywhere this shape occurs:
+
+        absent              the node does not exist                -> `None`
+        present and empty   the node exists and holds no entry     -> `{"<container>": None}`
+        populated           the node holds entries                 -> `{"<container>": {...}}`
+
+    For a decryption rulebase the difference is the whole control: an absent
+    `rulebase/decryption` is an enforcement point with no decryption policy, which stage 4
+    measured as the commonest state in the estate and PAN-DEC-001 exists to raise, while a
+    present-but-empty `rules` is a container somebody emptied. The two also need keeping apart
+    when a lab fixture is torn down - deleting `rules` alone leaves `decryption` present and
+    reads as present.
+
+    A FOURTH COPY OF THIS IDEA IS WHAT THIS IS HERE TO PREVENT. `normalization/ike.py` carries a
+    private `_ike_container` with the same signature and the same three states, and its docstring
+    records that five earlier passes over this estate each got the distinction wrong in the same
+    direction - making a device look emptier than it is. That copy is DELIBERATELY LEFT ALONE: it
+    is load-bearing for a shipped domain and it is not broken, which is the same judgement
+    `choice_child`'s own note records about `security_profiles._choice` and
+    `management_ssh._host_key`. Before writing a third, this is the one to import.
+    """
+    if not path:
+        raise ValueError("entry_container needs at least one path step")
+    for step in path[:-1]:
+        if not isinstance(node, dict):
+            return "absent", []
+        node = node.get(step)
+        if node is None:
+            return "absent", []
+    leaf = path[-1]
+    if not isinstance(node, dict) or leaf not in node:
+        return "absent", []
+    holder = node.get(leaf)
+    if not isinstance(holder, dict):
+        # PRESENT AND EMPTY: the key exists and carries nothing, which xmltodict gives as None.
+        return "empty", []
+    entries = [e for e in ensure_list(holder.get("entry")) if isinstance(e, dict)]
+    return ("populated" if entries else "empty"), entries
+
+
 def merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Merge overlapping/adjacent (start, end) integer intervals into the minimal sorted,
     disjoint set. Shared by dynamic_address_content.py (EDL/FQDN resolved entries) and

@@ -111,6 +111,11 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.ike impo
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
     normalize_management_interfaces,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.decryption import (
+    normalize_decryption_policy,
+    normalize_ssl_decryption_exclusions,
+    normalize_ssl_decryption_vendor_exclusion_optout,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.zones import (
     normalize_zones,
 )
@@ -147,6 +152,24 @@ def normalize_appliance_group_shared_scope(appliance_group) -> PANOSNormalizedCo
     return normalize_appliance_group_shared_objects(appliance_group)
 
 
+def normalize_enforcement_point_decryption_policy(
+    enforcement_point: EnforcementPoint,
+) -> dict:
+    """One enforcement point's decryption rules AND its rulebase verdict. PAN-DEC-001 to 010.
+
+    DEPENDS ON NOTHING ELSE IN THIS MODULE, deliberately. The verdict is computed from the rules
+    this same call parsed rather than from the rows it just wrote, so unlike
+    `normalize_enforcement_point_rulebase_device_match` it carries no ordering obligation on its
+    caller - running it first or last gives the same answer, and there is no first collection on
+    which it could read nothing.
+
+    A verdict row is written even where the enforcement point holds NO decryption rulebase at
+    all, which is the commonest state in this estate and is the finding PAN-DEC-001 exists to
+    raise. The per-rule grain has no row for it.
+    """
+    return normalize_decryption_policy(enforcement_point)
+
+
 def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
     return normalize_zones(enforcement_point)
 
@@ -162,6 +185,38 @@ def normalize_enforcement_point_rulebase_device_match(
     the firing side. The dependency is on the caller's order, not on an import.
     """
     return normalize_rulebase_device_match(enforcement_point)
+
+
+def normalize_appliance_ssl_decryption_exclusions(appliance: Appliance) -> dict:
+    """Every SSL decryption exclusion the ORGANISATION added, in both writable scopes. PAN-DEC-004.
+
+    Depends on nothing else in the appliance tuple: it reads the same merged device entry as its
+    neighbours. The vendor's own 330 or 385 shipped exclusions are NOT here - they live at
+    /config/predefined/ssl-exclude-cert and are a separate object, which the sibling normalizer
+    below reads for its set difference.
+
+    COUNTS AND NOT ROWS, because `APPLIANCE_OBJECT_NORMALIZERS`' loop does `dict(counts or {})`
+    on whatever a member returns and a list of model instances is not a mapping. The underlying
+    normalizer returns the rows, which is what a test and a readback want.
+    """
+    rows = normalize_ssl_decryption_exclusions(appliance)
+    return {
+        "ssl_decryption_exclusions": len(rows),
+        "vsys_scoped": sum(1 for r in rows if r.scope == r.SCOPE_VSYS),
+        "shared_scoped": sum(1 for r in rows if r.scope == r.SCOPE_SHARED),
+        "in_force": sum(1 for r in rows if r.exclude),
+    }
+
+
+def normalize_appliance_ssl_decryption_vendor_exclusion_optout(appliance: Appliance) -> dict:
+    """Which VENDOR SSL decryption exclusions somebody switched off on this appliance. PAN-DEC-004.
+
+    Depends on nothing else in the tuple, and its stale-residue count depends on a `show
+    predefined ssl-exclude-cert` SNAPSHOT existing. Where it does not the count is zero, which is
+    stage 5's declared default and which no column distinguishes from "no departure is stale" -
+    the returned dict carries `predefined_list_collected` for a caller that needs the difference.
+    """
+    return normalize_ssl_decryption_vendor_exclusion_optout(appliance)
 
 
 def normalize_appliance_management_tls(appliance: Appliance) -> dict:

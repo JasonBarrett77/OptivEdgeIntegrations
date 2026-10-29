@@ -9505,6 +9505,16 @@ class ImplicitDeclarationTests(TestCase):
     #: next - each entry is a claim about a customer's firewall that nobody has checked.
     ASSUMED_DEFAULTS = {
         "authentication.py": 3,       # profile lockout pair, mfa-enable
+        # negate-source / negate-destination on a DECRYPTION rule, inferred from the security
+        # rulebase's measured ABSENT MEANS NO plus a commit-validation refusal on this one; and
+        # the reading of an absent `disabled-ssl-exclude-cert-from-predefined` node as the empty
+        # list, where stage 4 could not establish whether an EMPTY node and an ABSENT one differ.
+        # THE FIRST OF THE THREE IS NOW MEASURABLE, 2026-10-29: `show running decryption-policy`,
+        # read with the API's `vsys` parameter, renders `negate-source` as a `(negate)` suffix on
+        # the source member, which stage 5's basis says no oracle does. It is left inferred here
+        # deliberately - this stage implements what stage 5 declared and reports the difference -
+        # so this entry is the queue item it is meant to be rather than a stale one.
+        "decryption.py": 3,
         "certificates.py": 1,         # certificate `ca`; the three timeouts were PROMOTED to
                                       # measured on 2026-10-25 - see the module constant and
                                       # the note there on why the old declaration is described
@@ -13776,3 +13786,502 @@ class AdminUserCredentialAndRosterColumnTests(TestCase):
         rows = self._normalize([{"@name": "a", "phash": "$1$abc"}])
         self.assertEqual(
             rows["a"].provenance_for("has_local_credential").provenance_type, "derived")
+
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    DecryptionPolicyRule as _DecryptionPolicyRule,
+    DecryptionPolicyRuleCategory as _DecryptionCategory,
+    DecryptionPolicyRuleService as _DecryptionService,
+    DecryptionPolicyRuleSourceUser as _DecryptionSourceUser,
+    DecryptionRulebaseVerdict as _DecryptionRulebaseVerdict,
+    SslDecryptionExclusion as _SslDecryptionExclusion,
+    SslDecryptionVendorExclusionOptOut as _SslVendorOptOut)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (  # noqa: E402
+    entry_container as _entry_container)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.decryption import (  # noqa: E402
+    normalize_decryption_policy as _normalize_decryption,
+    normalize_ssl_decryption_exclusions as _normalize_exclusions,
+    normalize_ssl_decryption_vendor_exclusion_optout as _normalize_optout,
+    predefined_exclusion_names as _predefined_names,
+    rulebase_verdict as _rulebase_verdict,
+    source_user_is_keyword_population as _keyword_population,
+    success_record_disposition as _record_disposition)
+
+
+class EntryContainerThreeStateTests(SimpleTestCase):
+    """`absent`, `empty` and `populated` told apart - the distinction a truthiness test loses.
+
+    It is the distinction `DecryptionRulebaseVerdict.rule_count` rests on: an absent
+    `rulebase/decryption` is an enforcement point with no decryption policy, which is the
+    commonest state in the lab estate and PAN-DEC-001's finding, and a present-but-empty `rules`
+    is a container somebody emptied.
+    """
+
+    def test_an_absent_branch_is_absent_and_not_empty(self):
+        self.assertEqual(_entry_container({}, "decryption", "rules"), ("absent", []))
+        self.assertEqual(
+            _entry_container({"decryption": None}, "decryption", "rules"), ("absent", []))
+
+    def test_a_present_but_empty_container_is_empty_and_not_absent(self):
+        # What xmltodict gives for `<rules/>`: the key exists and carries None.
+        self.assertEqual(
+            _entry_container({"decryption": {"rules": None}}, "decryption", "rules"),
+            ("empty", []))
+
+    def test_a_single_entry_arrives_as_a_list_of_one(self):
+        state, entries = _entry_container(
+            {"decryption": {"rules": {"entry": {"@name": "r1"}}}}, "decryption", "rules")
+        self.assertEqual(state, "populated")
+        self.assertEqual(entries, [{"@name": "r1"}])
+
+    def test_a_path_with_no_steps_refuses_rather_than_guessing(self):
+        with self.assertRaises(ValueError):
+            _entry_container({})
+
+
+class DecryptionPureVerdictTests(SimpleTestCase):
+    """The three computations, against the states the lab actually holds."""
+
+    def _rule(self, **kwargs):
+        base = dict(
+            source_snapshot=None, config_source="local", rule_position=1, rule_name="r",
+            rule_uuid="", action="no-decrypt", type_branch="ssl-forward-proxy",
+            negate_source=False, negate_destination=False, disabled=False, log_fail=True,
+            log_success=False, profile_name="", description="", log_setting="",
+            source_user_is_keyword_population=True,
+            success_record_disposition="no-record", opens_session=False)
+        base.update(kwargs)
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.decryption import (  # noqa: E501
+            NormalizedDecryptionRule)
+        return NormalizedDecryptionRule(**base)
+
+    def test_an_empty_rulebase_yields_the_firing_value_on_every_column(self):
+        """The whole reason the verdict grain exists beside the per-rule one."""
+        self.assertEqual(_rulebase_verdict([]), {
+            "rule_count": 0,
+            "outbound_web_disposition": "no-rule-opens-outbound-web",
+            "inbound_inspection_posture": "no-inbound-inspection-rule",
+            "opens_outbound_web": False})
+
+    def test_rules_that_all_leave_traffic_encrypted_are_not_no_rule_at_all(self):
+        """fw-core-tpa-a/vsys2's measured state: thirteen rules, twelve in force, none opening
+        a session. The baseline fires on both states and the disposition tells them apart."""
+        verdict = _rulebase_verdict([self._rule(), self._rule(rule_name="r2")])
+
+        self.assertEqual(verdict["outbound_web_disposition"], "no-decrypt")
+        self.assertFalse(verdict["opens_outbound_web"])
+        self.assertEqual(verdict["rule_count"], 2)
+
+    def test_a_disabled_rule_is_not_in_force_and_does_not_move_the_verdict(self):
+        verdict = _rulebase_verdict([
+            self._rule(disabled=True, action="decrypt"), self._rule(rule_name="r2")])
+
+        self.assertEqual(verdict["rule_count"], 1)
+        self.assertEqual(verdict["outbound_web_disposition"], "no-decrypt")
+
+    def test_decrypt_and_forward_satisfies_the_baseline(self):
+        """Stage 3 asked for this in as many words: the session IS opened, so that value meets
+        the assertion and must not be reported as a coverage failure."""
+        verdict = _rulebase_verdict([self._rule(action="decrypt-and-forward")])
+
+        self.assertTrue(verdict["opens_outbound_web"])
+        self.assertEqual(verdict["outbound_web_disposition"], "decrypt-and-forward")
+
+    def test_an_inbound_rule_does_not_open_the_outbound_web(self):
+        verdict = _rulebase_verdict([
+            self._rule(action="decrypt", type_branch="ssl-inbound-inspection")])
+
+        self.assertEqual(verdict["inbound_inspection_posture"], "inbound-inspection-present")
+        self.assertFalse(verdict["opens_outbound_web"])
+        self.assertEqual(verdict["outbound_web_disposition"], "no-rule-opens-outbound-web")
+
+    def test_the_record_disposition_has_three_states_over_two_keys(self):
+        self.assertEqual(_record_disposition(log_success=False, log_setting="default"),
+                         "no-record")
+        self.assertEqual(_record_disposition(log_success=True, log_setting=""),
+                         "kept-not-forwarded")
+        self.assertEqual(_record_disposition(log_success=True, log_setting="default"),
+                         "kept-and-forwarded")
+
+    def test_an_absent_user_criterion_is_a_keyword_population(self):
+        """An absent key means `any`, and `any` IS one of the four keywords - so the empty list
+        and the materialised default give the same answer, which is the firing side."""
+        self.assertTrue(_keyword_population([]))
+        self.assertTrue(_keyword_population(["any"]))
+        self.assertTrue(_keyword_population(["known-user", "unknown", "pre-logon"]))
+        self.assertFalse(_keyword_population(["oep-dec6-principal"]))
+        self.assertFalse(_keyword_population(["any", "oep-dec6-principal"]))
+
+
+class _DecryptionBase(TestCase):
+    """Shared fixture for the four `decryption-policy` models.
+
+    EVERY PAYLOAD BELOW IS A LAB SHAPE, read off the four appliances on 2026-10-29 through
+    Panorama's `target=` proxy, not a shape invented to make a column pass.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.dec")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-dec",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-DEC", hostname="fw-dec", software_version="11.2.5")
+        self.group.active_appliance = self.appliance
+        self.group.save()
+        self.point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            vsys_name="vsys1", vsys_display_name="vsys1")
+
+    def _merged(self, *, vsys=None, shared=None):
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {
+                "shared": shared or {},
+                "devices": {"entry": [{
+                    "@name": "localhost.localdomain",
+                    "vsys": {"entry": [dict({"@name": "vsys1"}, **(vsys or {}))]}}]}}})
+
+    def _pushed(self, *, pre=None, post=None):
+        """The lab's measured shape: both rulebases hold `security` and NO `decryption` child."""
+        return Snapshot.objects.create(
+            management_station=self.station, enforcement_point=self.point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {
+                "pre-rulebase": pre if pre is not None else {"security": {"rules": None}},
+                "post-rulebase": post if post is not None else {"security": {"rules": None}},
+            }}})
+
+    def _predefined(self, names):
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_predefined_ssl_exclude_cert", collected_at=timezone.now(),
+            payload={"ssl-exclude-cert": {
+                "@minver": "8.0.0",
+                "entry": [{"@name": n, "exclude": "yes", "description": f"{n}: pinned-cert"}
+                          for n in names]}})
+
+    #: oep-dec6-r01 verbatim: the bare rule, every optional key absent. `action=get` at
+    #: fw-core-tpa-a/vsys2, 2026-10-29.
+    LAB_BARE_RULE = {
+        "@name": "oep-dec6-r01", "@uuid": "e98c4f17-feb3-4e25-b75d-3436f63e247c",
+        "from": {"member": ["any"]}, "to": {"member": ["any"]},
+        "source": {"member": ["any"]}, "destination": {"member": ["any"]},
+        "action": "no-decrypt", "type": {"ssl-forward-proxy": None},
+    }
+
+
+class DecryptionRuleNormalizationTests(_DecryptionBase):
+    """PAN-DEC-002 to 008 and 010's subject: one entry of one decryption rulebase."""
+
+    def _rules(self, entries):
+        self._merged(vsys={"rulebase": {"decryption": {"rules": {"entry": entries}}}})
+        self._pushed()
+        return _normalize_decryption(self.point)
+
+    def test_the_bare_lab_rule_stores_every_measured_implicit(self):
+        self._rules([self.LAB_BARE_RULE])
+        row = _DecryptionPolicyRule.objects.get(rule_name="oep-dec6-r01")
+
+        self.assertEqual(row.rule_uuid, "e98c4f17-feb3-4e25-b75d-3436f63e247c")
+        self.assertEqual(row.action, "no-decrypt")
+        self.assertEqual(row.type_branch, "ssl-forward-proxy")
+        self.assertEqual(row.rule_position, 1)
+        self.assertEqual(row.config_source, "local")
+        # THE TWO LOG FLAGS DEFAULT OPPOSITE WAYS, two keys apart.
+        self.assertTrue(row.log_fail)
+        self.assertFalse(row.log_success)
+        self.assertFalse(row.disabled)
+        self.assertFalse(row.negate_source)
+        self.assertEqual(row.success_record_disposition, "no-record")
+        self.assertFalse(row.opens_session)
+        # Nothing is materialised for the conditional profile implicit.
+        self.assertEqual(row.profile_name, "")
+        self.assertEqual(row.description, "")
+        self.assertEqual(row.log_setting, "")
+
+    def test_the_absent_criteria_materialise_any_and_the_present_ones_do_not(self):
+        self._rules([self.LAB_BARE_RULE])
+        row = _DecryptionPolicyRule.objects.get(rule_name="oep-dec6-r01")
+
+        # category, source-user and service are ABSENT on this rule and mean EVERY one.
+        self.assertEqual(
+            list(_DecryptionCategory.objects.filter(decryption_rule=row)
+                 .values_list("value", flat=True)), ["any"])
+        self.assertEqual(
+            list(_DecryptionSourceUser.objects.filter(decryption_rule=row)
+                 .values_list("value", flat=True)), ["any"])
+        self.assertEqual(
+            list(_DecryptionService.objects.filter(decryption_rule=row)
+                 .values_list("value", flat=True)), ["any"])
+
+    def test_an_absent_criterion_records_the_vendor_default_and_a_written_one_records_local(self):
+        """The list NODE's own provenance row, which the member rows' plain `prov` cannot carry:
+        without it "the rule says any" and "the key was absent and PAN-OS means any" share one
+        reading, and for `category` that difference is the unbounded-exemption finding."""
+        self._rules([self.LAB_BARE_RULE,
+                     dict(self.LAB_BARE_RULE, **{
+                         "@name": "oep-dec6-r02", "@uuid": "73fd6ffb",
+                         "category": {"member": ["gambling", "malware"]},
+                         "source-user": {"member": ["known-user"]}})])
+        bare = _DecryptionPolicyRule.objects.get(rule_name="oep-dec6-r01")
+        written = _DecryptionPolicyRule.objects.get(rule_name="oep-dec6-r02")
+        ct = ContentType.objects.get_for_model(_DecryptionPolicyRule)
+
+        def prov(row, name):
+            return FieldProvenance.objects.get(
+                content_type=ct, object_id=row.pk, field_name=name)
+
+        self.assertEqual(prov(bare, "category").provenance_type, "pan_os_default")
+        self.assertEqual(prov(bare, "category").raw_value, "['any']")
+        self.assertEqual(prov(written, "category").provenance_type, "local")
+        self.assertEqual(
+            list(_DecryptionCategory.objects.filter(decryption_rule=written)
+                 .order_by("position").values_list("value", flat=True)),
+            ["gambling", "malware"])
+
+    def test_the_negate_keys_record_an_assumption_and_never_a_vendor_default(self):
+        """Stage 4 reached no oracle that renders them and this layer must not claim one."""
+        self._rules([self.LAB_BARE_RULE])
+        row = _DecryptionPolicyRule.objects.get(rule_name="oep-dec6-r01")
+        ct = ContentType.objects.get_for_model(_DecryptionPolicyRule)
+
+        for name in ("negate_source", "negate_destination"):
+            self.assertEqual(
+                FieldProvenance.objects.get(
+                    content_type=ct, object_id=row.pk, field_name=name).provenance_type,
+                "assumed_default")
+
+    def test_a_negated_source_is_stored_with_the_vendors_own_polarity(self):
+        """oep-dec6-r04: true means the device's key is `yes`, which means the match is
+        INVERTED. The column name reads negative and the value negates nothing."""
+        self._rules([dict(self.LAB_BARE_RULE, **{
+            "@name": "oep-dec6-r04", "negate-source": "yes",
+            "source": {"member": ["ao-analytics-ingestion-services-01-loc"]}})])
+
+        self.assertTrue(_DecryptionPolicyRule.objects.get().negate_source)
+
+    def test_two_type_branches_in_one_element_read_as_the_first_valid_one(self):
+        """A caller writing two branches gets a SILENT REPLACEMENT from the device, and a
+        consumer must read which branch is PRESENT rather than assume one write left the
+        others alone."""
+        self._rules([dict(self.LAB_BARE_RULE,
+                          type={"ssl-forward-proxy": None, "ssh-proxy": None})])
+
+        self.assertEqual(_DecryptionPolicyRule.objects.get().type_branch, "ssl-forward-proxy")
+
+    def test_a_staged_rule_with_no_mandatory_keys_records_not_configured(self):
+        """The read is CANDIDATE-DERIVED, so a rule that is not yet committable reaches here.
+        An absent `action` is not a default anybody applied."""
+        self._rules([{"@name": "oep-staged"}])
+        row = _DecryptionPolicyRule.objects.get()
+        ct = ContentType.objects.get_for_model(_DecryptionPolicyRule)
+
+        self.assertEqual(row.action, "")
+        self.assertEqual(row.type_branch, "")
+        self.assertEqual(
+            FieldProvenance.objects.get(
+                content_type=ct, object_id=row.pk, field_name="action").provenance_type,
+            "not_configured")
+        # An unknown action keeps the row INSIDE the control's population.
+        self.assertTrue(row.opens_session)
+
+    def test_a_rule_with_no_name_raises_rather_than_writing_an_unkeyable_row(self):
+        self._merged(vsys={"rulebase": {"decryption": {"rules": {"entry": [{"action": "decrypt"}]}}}})
+        self._pushed()
+
+        with self.assertRaises(ValueError):
+            _normalize_decryption(self.point)
+
+    def test_declared_derived_fields_never_carry_a_stored_row(self):
+        self._rules([self.LAB_BARE_RULE])
+        row = _DecryptionPolicyRule.objects.get()
+        ct = ContentType.objects.get_for_model(_DecryptionPolicyRule)
+        stored = set(FieldProvenance.objects.filter(
+            content_type=ct, object_id=row.pk).values_list("field_name", flat=True))
+
+        self.assertEqual(stored & set(_DecryptionPolicyRule.DERIVED_FIELDS), set())
+
+
+class DecryptionRulebaseVerdictNormalizationTests(_DecryptionBase):
+    """PAN-DEC-001 and 009's subject: the row that reports an absence."""
+
+    def test_an_absent_rulebase_still_writes_a_row_and_it_fires(self):
+        """pan-fw-111/vsys1's measured state, and the state of every vsys in the estate before
+        stage 6 wrote one. The per-entry grain has no row for it."""
+        self._merged(vsys={})
+        self._pushed()
+        _normalize_decryption(self.point)
+        row = _DecryptionRulebaseVerdict.objects.get(enforcement_point=self.point)
+
+        self.assertEqual(row.rule_count, 0)
+        self.assertEqual(row.outbound_web_disposition, "no-rule-opens-outbound-web")
+        self.assertEqual(row.inbound_inspection_posture, "no-inbound-inspection-rule")
+        self.assertFalse(row.opens_outbound_web)
+        self.assertEqual(_DecryptionPolicyRule.objects.count(), 0)
+
+    def test_a_present_but_empty_container_also_writes_a_firing_row(self):
+        self._merged(vsys={"rulebase": {"decryption": {"rules": None}}})
+        self._pushed()
+
+        self.assertEqual(
+            _normalize_decryption(self.point)["local_container_state"], "empty")
+        self.assertEqual(
+            _DecryptionRulebaseVerdict.objects.get().outbound_web_disposition,
+            "no-rule-opens-outbound-web")
+
+    def test_the_verdict_is_replaced_and_never_duplicated(self):
+        self._merged(vsys={})
+        self._pushed()
+        _normalize_decryption(self.point)
+        _normalize_decryption(self.point)
+
+        self.assertEqual(
+            _DecryptionRulebaseVerdict.objects.filter(
+                enforcement_point=self.point).count(), 1)
+
+    def test_a_pushed_decryption_rule_counts_into_the_verdict(self):
+        """UNEXERCISED IN THE LAB - no appliance in it holds a pushed decryption rule - so this
+        is the shape asserted against the two pushed rulebase paths and not against a device.
+        It is here because `decrypt-and-forward` is accepted ONLY at device-group scope, so the
+        only rows that could ever carry that action arrive this way."""
+        self._merged(vsys={})
+        self._pushed(pre={"decryption": {"rules": {"entry": [dict(
+            self.LAB_BARE_RULE, **{"@name": "dg-pre-1",
+                                   "action": "decrypt-and-forward"})]}}})
+        _normalize_decryption(self.point)
+
+        row = _DecryptionPolicyRule.objects.get()
+        self.assertEqual(row.config_source, "pushed_pre")
+        verdict = _DecryptionRulebaseVerdict.objects.get()
+        self.assertTrue(verdict.opens_outbound_web)
+        self.assertEqual(verdict.outbound_web_disposition, "decrypt-and-forward")
+
+
+class SslDecryptionExclusionNormalizationTests(_DecryptionBase):
+    """PAN-DEC-004's first half: what the organisation added itself, in both writable scopes."""
+
+    def test_both_writable_scopes_are_collected_and_kept_apart(self):
+        """The web interface renders both collections in ONE grid distinguished only by a
+        Location column, so a collector reading one scope reports half the screen."""
+        self._merged(
+            vsys={"ssl-decrypt": {"ssl-exclude-cert": {
+                "entry": [{"@name": "oep-dec6-x01", "exclude": "yes"}]}}},
+            shared={"ssl-decrypt": {"ssl-exclude-cert": {
+                "entry": [{"@name": "oep-dec6-x02", "exclude": "no"}]}}})
+        rows = _normalize_exclusions(self.appliance)
+
+        self.assertEqual(len(rows), 2)
+        vsys_row = _SslDecryptionExclusion.objects.get(name="oep-dec6-x01")
+        shared_row = _SslDecryptionExclusion.objects.get(name="oep-dec6-x02")
+        self.assertEqual(vsys_row.scope, _SslDecryptionExclusion.SCOPE_VSYS)
+        self.assertEqual(vsys_row.vsys_name, "vsys1")
+        self.assertTrue(vsys_row.exclude)
+        self.assertEqual(shared_row.scope, _SslDecryptionExclusion.SCOPE_SHARED)
+        self.assertEqual(shared_row.vsys_name, "")
+        self.assertFalse(shared_row.exclude)
+        # The name stage 5 gave the column resolves, so a findings sheet can print it.
+        self.assertEqual(vsys_row.exclusion_name, "oep-dec6-x01")
+
+    def test_an_absent_branch_writes_no_row_and_raises_nothing(self):
+        """The measured state of all four lab appliances at both scopes before stage 6."""
+        self._merged()
+
+        self.assertEqual(_normalize_exclusions(self.appliance), [])
+
+    def test_an_undocumented_exclusion_stores_the_empty_string_and_says_why(self):
+        """`is_empty` compiles to `filter(field="")`, so the column a control asserts on is
+        blank-defaulted and the REASON it is blank is the provenance row beside it."""
+        self._merged(shared={"ssl-decrypt": {"ssl-exclude-cert": {
+            "entry": [{"@name": "x", "exclude": "yes"}]}}})
+        _normalize_exclusions(self.appliance)
+        row = _SslDecryptionExclusion.objects.get()
+        ct = ContentType.objects.get_for_model(_SslDecryptionExclusion)
+
+        self.assertEqual(row.description, "")
+        self.assertEqual(
+            FieldProvenance.objects.get(
+                content_type=ct, object_id=row.pk,
+                field_name="description").provenance_type, "not_configured")
+
+
+class SslVendorExclusionOptOutNormalizationTests(_DecryptionBase):
+    """PAN-DEC-004's second half: which VENDOR exclusions somebody switched off here."""
+
+    def test_an_absent_node_records_the_empty_list_as_an_ASSUMPTION(self):
+        """Stage 4 could not establish whether an EMPTY node and an ABSENT node differ, so an
+        absent node is evidence of an absent node and not of a clean list."""
+        self._merged()
+        self._predefined(["*.whatsapp.net"])
+        _normalize_optout(self.appliance)
+        row = _SslVendorOptOut.objects.get()
+        ct = ContentType.objects.get_for_model(_SslVendorOptOut)
+
+        self.assertEqual(row.disabled_vendor_exclusions, [])
+        self.assertEqual(row.disabled_vendor_exclusion_count, 0)
+        self.assertEqual(
+            FieldProvenance.objects.get(
+                content_type=ct, object_id=row.pk,
+                field_name="disabled_vendor_exclusions").provenance_type,
+            "assumed_default")
+
+    def test_a_switched_off_entry_the_vendor_still_ships_is_not_stale(self):
+        """pan-fw-201's measured state: one member, `*.whatsapp.net`, which the vendor ships -
+        so the departure is current rather than residue."""
+        self._merged(shared={"ssl-decrypt": {
+            "disabled-ssl-exclude-cert-from-predefined": {
+                "member": ["*.whatsapp.net"]}}})
+        self._predefined(["*.whatsapp.net", "gs.apple.com"])
+        counts = _normalize_optout(self.appliance)
+        row = _SslVendorOptOut.objects.get()
+
+        self.assertEqual(row.disabled_vendor_exclusions, ["*.whatsapp.net"])
+        self.assertEqual(row.disabled_vendor_exclusion_count, 1)
+        self.assertEqual(row.stale_disabled_vendor_exclusion_count, 0)
+        self.assertTrue(counts["predefined_list_collected"])
+
+    def test_a_switched_off_entry_the_vendor_no_longer_ships_is_the_finding(self):
+        self._merged(shared={"ssl-decrypt": {
+            "disabled-ssl-exclude-cert-from-predefined": {
+                "member": ["gone.example.net", "*.whatsapp.net"]}}})
+        self._predefined(["*.whatsapp.net"])
+        _normalize_optout(self.appliance)
+
+        self.assertEqual(
+            _SslVendorOptOut.objects.get().stale_disabled_vendor_exclusion_count, 1)
+
+    def test_with_no_vendor_snapshot_the_stale_count_is_zero_and_the_caller_is_told(self):
+        """THE DIRECTION THAT MATTERS: a `set()` right-hand side would make every switched-off
+        entry look stale, which is the loudest possible false finding on exactly the appliances
+        that are configured correctly. No column distinguishes it, which is stage 5's own
+        recorded concession - the return value is where a caller can see it."""
+        self._merged(shared={"ssl-decrypt": {
+            "disabled-ssl-exclude-cert-from-predefined": {
+                "member": ["gone.example.net"]}}})
+        counts = _normalize_optout(self.appliance)
+
+        self.assertEqual(
+            _SslVendorOptOut.objects.get().stale_disabled_vendor_exclusion_count, 0)
+        self.assertFalse(counts["predefined_list_collected"])
+
+    def test_the_vendor_list_is_read_as_distinct_NAMES_and_the_device_ships_duplicates(self):
+        """Measured on all four lab appliances 2026-10-29: 330 entries and 327 distinct names on
+        a PA-5220, 385 and 382 on a PA-VM - three names shipped twice with two descriptions. A
+        set is the right shape for the membership test; a name-keyed row count is not."""
+        snapshot = self._predefined(["a.example", "a.example", "b.example"])
+
+        self.assertEqual(_predefined_names(snapshot), {"a.example", "b.example"})
+
+    def test_a_bare_string_payload_does_not_raise(self):
+        """`Snapshot.payload` is a JSONField and an op reply that answers plain text stores a
+        `str` in it, which round-trips. `payload or {}` does not save a reader: a non-empty
+        string is truthy."""
+        snapshot = Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_predefined_ssl_exclude_cert", collected_at=timezone.now(),
+            payload="No data found. Verify xpath and retry")
+
+        self.assertEqual(_predefined_names(snapshot), set())

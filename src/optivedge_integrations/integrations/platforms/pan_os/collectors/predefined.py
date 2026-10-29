@@ -168,3 +168,48 @@ def collect_predefined_security_profiles(session: PANSession) -> PANOSCollectedR
         source_type="config_predefined_security_profiles",
         request=request,
     )
+
+
+#: The vendor's own SSL decryption exclusion list. PAN-DEC-004's second half.
+#:
+#: AN OP READ AND NOT A CONFIG ONE, which is the opposite choice from the four `/config/
+#: predefined/...` reads above and is measured rather than stylistic. On all four lab appliances,
+#: 2026-10-29: `type=config&action=get` at /config/predefined/ssl-exclude-cert answers
+#: `{"@total-count": "0", "@count": "0"}` - a well-formed, TRUTHY, EMPTY count envelope - for a
+#: list this command returns 330 or 385 entries of, and `action=show` at the same xpath answers
+#: `status=error, "No such node"`. So the config read a collector naturally reaches for is
+#: silence that looks like data: `if result:` passes and a length check reports zero.
+#:
+#: This is the SET-DIFFERENCE right-hand side for
+#: `SslDecryptionVendorExclusionOptOut.stale_disabled_vendor_exclusion_count`: a switched-off
+#: entry the vendor no longer ships is residue that accumulates silently, and without this read
+#: that column is zero on every row and the control reports nothing.
+SHOW_PREDEFINED_SSL_EXCLUDE_CERT_COMMAND = (
+    "<show><predefined><xpath>/predefined/ssl-exclude-cert</xpath></predefined></show>"
+)
+
+#: The snapshot source type the normalizer filters on. A constant beside the command because
+#: nothing maps a source type to a reader - the normalizer that wants it writes its own
+#: `latest_*_snapshot` helper and imports this.
+PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE = "show_predefined_ssl_exclude_cert"
+
+
+def collect_show_predefined_ssl_exclude_cert(session: PANSession) -> PANOSCollectedResponse:
+    """Collect the vendor-shipped SSL decryption exclusion list for one appliance. PAN-DEC-004.
+
+    Appliance-wide, like every other predefined catalog. The count differs by appliance GROUP in
+    this estate - 330 on both PA-5220s and 385 on both PA-VMs, measured twice - and nothing here
+    can attribute that to a platform, a PAN-OS major version or a content release, because all
+    three differ together between the two groups. So it is collected per appliance and never
+    carried between them.
+    """
+    request = PANOSOperationRequest(
+        command_xml=SHOW_PREDEFINED_SSL_EXCLUDE_CERT_COMMAND,
+        target=session.target,
+        metadata={"command_name": "show predefined ssl-exclude-cert"},
+    )
+    return collect_op_response(
+        session,
+        source_type=PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE,
+        request=request,
+    )

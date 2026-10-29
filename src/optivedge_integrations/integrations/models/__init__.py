@@ -67,6 +67,18 @@ from .device_services import NtpSettings, SnmpSettings, SystemIdentity
 from .password_complexity import PasswordComplexityPolicy
 from .password_profile import PasswordProfile, expiration_weakens
 from .notes import Note
+from .decryption import (
+    DecryptionPolicyRule,
+    DecryptionPolicyRuleCategory,
+    DecryptionPolicyRuleDestination,
+    DecryptionPolicyRuleService,
+    DecryptionPolicyRuleSource,
+    DecryptionPolicyRuleSourceUser,
+    DecryptionPolicyRuleValue,
+    DecryptionRulebaseVerdict,
+    SslDecryptionExclusion,
+    SslDecryptionVendorExclusionOptOut,
+)
 from .zones import Zone, ZoneInterface
 from .policy import (
     AddressGroup,
@@ -118,6 +130,16 @@ from .policy import (
 )
 
 __all__ = [
+    "DecryptionPolicyRule",
+    "DecryptionPolicyRuleCategory",
+    "DecryptionPolicyRuleDestination",
+    "DecryptionPolicyRuleService",
+    "DecryptionPolicyRuleSource",
+    "DecryptionPolicyRuleSourceUser",
+    "DecryptionPolicyRuleValue",
+    "DecryptionRulebaseVerdict",
+    "SslDecryptionExclusion",
+    "SslDecryptionVendorExclusionOptOut",
     "Appliance",
     "DataFilteringPosture",
     "FieldProvenance",
