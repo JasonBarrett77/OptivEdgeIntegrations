@@ -75,6 +75,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_authentication_profiles,
     normalize_appliance_authentication_sequences,
     normalize_appliance_certificate_objects,
+    normalize_appliance_certificate_settings,
     normalize_appliance_interface_management_profiles,
     normalize_appliance_authentication_settings,
     normalize_appliance_log_settings,
@@ -912,6 +913,10 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # function's order rather than on this tuple's, and moving it within the tuple is safe.
     ("device services", normalize_appliance_device_services),
     ("certificate objects", normalize_appliance_certificate_objects),
+    # Device > Setup > Management > General Settings, one leaf. Reads the same merged device
+    # entry as its neighbours and depends on nothing else in this tuple - placed beside the
+    # certificate objects because they are one domain's controls and not because of an order.
+    ("certificate settings", normalize_appliance_certificate_settings),
     # AFTER certificate objects, and it must stay after: the binding resolves over the
     # SslTlsServiceProfile rows that normalizer writes. Run first, it would find last run's
     # rows - or none - and record a binding against a profile that no longer matches.

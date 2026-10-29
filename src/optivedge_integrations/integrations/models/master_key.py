@@ -22,6 +22,23 @@ from .provenance import ProvenancedMixin
 class MasterKey(ProvenancedMixin, SyncTrackedModel):
     """The master key state on one appliance."""
 
+    #: Computed here, and the tuple was EMPTY until 2026-10-29 while `state` was a verdict
+    #: computed from `expire-at` and `expires_at` was carried out of an operational reply with
+    #: no configuration node anywhere. So `provenance_for('state')` answered None - "nothing
+    #: tracks this field" - on the one column PAN-CRT-007 rests on, and the Master Key tab
+    #: printed "Not recorded" for it. No row is written for either, and none can be: an
+    #: operational reply carries no @ptpl and never will, and `ProvenanceType` has no member
+    #: for a runtime reading at all. `derived` is not accurate about where the value came from
+    #: and it IS accurate about the thing a reader must not get wrong - that it did not come
+    #: from the configuration - which is the answer `LoggingSettings` already takes for its two
+    #: runtime columns. `auto_renew_hours` is NOT here: it reads a real configuration leaf.
+    #: See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "state",
+        "expires_at",
+    )
+
     #: Read from the reply, not decided here. DEFAULT means the factory key is still in use,
     #: which is what `expire-at` of 0 says; SET means one was configured.
     STATE_DEFAULT = "default"

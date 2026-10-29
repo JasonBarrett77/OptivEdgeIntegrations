@@ -190,7 +190,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     num_hosts_from_intervals,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
+    _algorithms,
+    _scep_verdicts,
     decode_certificate,
+    key_strength_band,
+    min_version_rank,
+    signature_hash_is_weak,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     ResolvedAddressRef,
@@ -1365,6 +1370,139 @@ class CertificateDecodeNonConformanceTests(SimpleTestCase):
 
         self.assertNotEqual(decoded["parse_error"], "")
         self.assertNotIn("serial_number", decoded)
+
+
+class CertificateVerdictColumnTests(TestCase):
+    """The five certificate-domain verdicts, including the states the LAB CANNOT REACH.
+
+    Every one of these columns was proved on a device - four appliances, 2026-10-29 - and four
+    of their value sets have members no lab appliance holds, which is exactly what a unit test
+    is for. Named here so the gap is visible rather than implied:
+
+      * `key_strength_band` reached at_or_above_floor, below_floor and far_below_floor on the
+        device and NOT `undecodable` or `algorithm_has_no_floor` - every certificate in the lab
+        decodes and every one is RSA or EC.
+      * `min_version_rank` reached 0, 1, 2 and 3 and NOT the -1 sentinel; the device refuses a
+        token outside its own four.
+      * `ScepProfile.rsa_key_bits` reached 512, 1024, 2048 and 3072 and NOT null; the
+        `algorithm` container is mandatory at commit on all four appliances.
+      * `signature_hash` reached md5, sha1, sha256, sha384 and sha512 and NOT the empty string;
+        no PSS, SHA-3 or Ed25519 certificate exists in the lab.
+    """
+
+    def test_the_band_is_against_the_floor_for_the_keys_own_algorithm(self):
+        """The reason this column exists: 256-bit EC passes and 256-bit RSA does not."""
+        self.assertEqual(key_strength_band("EC (secp256r1)", 256, ""), "at_or_above_floor")
+        self.assertEqual(key_strength_band("RSA", 256, ""), "far_below_floor")
+        # The two cases stage 3 grades apart - 1024 at high, 512 at critical.
+        self.assertEqual(key_strength_band("RSA", 1024, ""), "below_floor")
+        self.assertEqual(key_strength_band("RSA", 512, ""), "far_below_floor")
+        self.assertEqual(key_strength_band("RSA", 2048, ""), "at_or_above_floor")
+        self.assertEqual(key_strength_band("DSA", 1024, ""), "below_floor")
+
+    def test_the_two_members_that_keep_an_unreadable_key_off_the_passing_side(self):
+        """Both FIRE under `is not at_or_above_floor`, which is the whole point of the column.
+
+        An Ed25519 certificate is the live shape for the second: the decoder returns the
+        algorithm name with a NULL size, and stage 0 measured that the shipped query then
+        excludes it from every numeric group and passes it.
+        """
+        self.assertEqual(key_strength_band("RSA", 2048, "ValueError: boom"), "undecodable")
+        self.assertEqual(key_strength_band("", None, ""), "undecodable")
+        self.assertEqual(key_strength_band("Ed25519", None, ""), "algorithm_has_no_floor")
+        self.assertEqual(key_strength_band("Ed448", None, ""), "algorithm_has_no_floor")
+
+    def test_an_unresolved_signature_hash_is_weak_and_sha3_is_not(self):
+        """Stage 5's rule verbatim: md5, sha1, or unresolved - and nothing wider.
+
+        `sha3-256` is the case the wider reading would get wrong. It is not reachable in the
+        lab and it is reachable in the world.
+        """
+        self.assertTrue(signature_hash_is_weak("md5"))
+        self.assertTrue(signature_hash_is_weak("sha1"))
+        self.assertTrue(signature_hash_is_weak(""))
+        self.assertFalse(signature_hash_is_weak("sha256"))
+        self.assertFalse(signature_hash_is_weak("sha3-256"))
+
+    def test_an_rsassa_pss_certificate_resolves_a_hash_its_identifier_does_not_name(self):
+        """The measurement this column was added for, reproduced against the library.
+
+        For PSS the hash lives in the signature PARAMETERS, so the stored identifier is
+        `rsassaPss` and names no hash at all - a PSS certificate signed with SHA-1 matches
+        neither `contains md5` nor `contains sha1`, carries an empty parse error, and passes.
+        """
+        import datetime
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+        from cryptography.x509.oid import NameOID
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "pss")])
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(1)
+            .not_valid_before(datetime.datetime(2020, 1, 1))
+            .not_valid_after(datetime.datetime(2030, 1, 1))
+            .sign(key, hashes.SHA256(), rsa_padding=padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()), salt_length=32))
+        )
+        decoded = decode_certificate(
+            certificate.public_bytes(serialization.Encoding.PEM).decode())
+
+        self.assertEqual(decoded["signature_algorithm"], "rsassaPss")
+        self.assertNotIn("sha", decoded["signature_algorithm"].lower())
+        self.assertEqual(decoded["signature_hash"], "sha256")
+        self.assertFalse(signature_hash_is_weak(decoded["signature_hash"]))
+
+    def test_the_rank_sentinel_sorts_below_every_real_version(self):
+        self.assertEqual([min_version_rank(t) for t in
+                          ("tls1-0", "tls1-1", "tls1-2", "tls1-3")], [0, 1, 2, 3])
+        for token in ("", "max", "tls1-4", "TLSv1.2"):
+            with self.subTest(token):
+                self.assertEqual(min_version_rank(token), -1)
+                self.assertLess(min_version_rank(token), 0)
+
+    def test_the_scep_verdicts_read_the_literal_and_not_the_completion_set(self):
+        """512 and md5 are both OUTSIDE the leaf's own completion set and both committable."""
+        self.assertEqual(_scep_verdicts("2048", "sha256"), (False, False))
+        self.assertEqual(_scep_verdicts("3072", "sha512"), (False, False))
+        self.assertEqual(_scep_verdicts("1024", "sha1"), (True, True))
+        self.assertEqual(_scep_verdicts("512", "md5"), (True, True))
+        # Absent, and a literal that is not a number: both unproven, so both fire.
+        self.assertEqual(_scep_verdicts(None, ""), (True, True))
+        self.assertEqual(_scep_verdicts("not-a-number", "whirlpool"), (True, True))
+
+    def test_an_absent_algorithm_key_is_enabled_only_for_the_range_it_renders_in(self):
+        """The correction of 2026-10-29. Measured over four objects on pan-fw-201.
+
+        Eleven algorithms at the implicit tls1-2..tls1-3 range; TEN with the ceiling at tls1-2,
+        the missing one being chacha; SIX pinned to tls1-3 at both ends, with SHA1 out of that
+        set - and nothing saying which six, so the rest read as not established.
+        """
+        wide, explicit = _algorithms({}, "tls1-2", "tls1-3")
+        self.assertEqual(explicit, [])
+        self.assertEqual(sum(1 for v in wide.values() if v is True), 11)
+        self.assertTrue(wide["auth-algo-sha1"])
+
+        capped, _ = _algorithms({}, "tls1-2", "tls1-2")
+        self.assertEqual(sum(1 for v in capped.values() if v is True), 10)
+        self.assertFalse(capped["enc-algo-aes-chacha20-poly1305"])
+        self.assertTrue(capped["auth-algo-sha1"])
+
+        pinned, _ = _algorithms({}, "tls1-3", "tls1-3")
+        self.assertFalse(pinned["auth-algo-sha1"])
+        self.assertIsNone(pinned["keyxchg-algo-rsa"])
+        # Every key the dialog exposes is still named, so a reader loses nothing.
+        self.assertEqual(len(pinned), 11)
+
+    def test_a_key_written_on_outside_the_range_is_still_off(self):
+        """The device refuses the write inside the range and stops rendering it, so the row
+        records what the device does rather than what the configuration reads."""
+        pinned, explicit = _algorithms({"auth-algo-sha1": "yes"}, "tls1-3", "tls1-3")
+        self.assertEqual(explicit, ["auth-algo-sha1"])
+        self.assertFalse(pinned["auth-algo-sha1"])
 
 
 class DynamicAddressContentNormalizationTests(TestCase):
@@ -8018,9 +8156,24 @@ class ManagementTlsBindingNormalizationTests(TestCase):
             appliance=self.appliance, kind="ssl_tls_service_profile_unresolved").exists())
 
     def test_nothing_bound_is_blank_not_unresolved(self):
+        """The binding is blank, and the TRUST is classified rather than left blank with it.
+
+        Changed 2026-10-29. An unbound management interface presents an RSA-2048,
+        sha256WithRSAEncryption, one-year, SELF-SIGNED certificate whose common name is the
+        chassis serial - measured on all four lab appliances - so the verdict is a reading and
+        not a guess. The baseline clause `is not ca_issued` matched the blank too, so the
+        finding fired either way, but by the accident of a negated equality rather than by
+        design, and the severity a grading places depended on that accident.
+
+        THE EVIDENCE COLUMNS STAY BLANK and that is deliberate: the certificate the interface
+        actually serves is in no configuration namespace reachable from the appliance, so there
+        is no scope to record and no issuer to print.
+        """
         binding = self._normalize()
         self.assertEqual((binding.profile_name, binding.profile_scope), ("", ""))
-        self.assertEqual(binding.certificate_trust, "")
+        self.assertEqual(binding.certificate_trust,
+                         ManagementTlsBinding.TRUST_SELF_SIGNED)
+        self.assertEqual((binding.certificate_scope, binding.certificate_issuer), ("", ""))
         self.assertFalse(NormalizationIssue.objects.filter(
             appliance=self.appliance, kind="ssl_tls_service_profile_unresolved").exists())
 
@@ -9352,7 +9505,14 @@ class ImplicitDeclarationTests(TestCase):
     #: next - each entry is a claim about a customer's firewall that nobody has checked.
     ASSUMED_DEFAULTS = {
         "authentication.py": 3,       # profile lockout pair, mfa-enable
-        "certificates.py": 2,         # certificate-profile timeouts, certificate `ca`
+        "certificates.py": 1,         # certificate `ca`; the three timeouts were PROMOTED to
+                                      # measured on 2026-10-25 - see the module constant and
+                                      # the note there on why the old declaration is described
+                                      # rather than quoted
+        # MERGED FROM TWO CONCURRENT RUNS, 2026-10-29: `certificates.py` fell to 1
+        # because that domain promoted three timeouts to measured, and
+        # `device_configuration.py` rose to 7 because admin-authentication demoted
+        # five. Neither run could see the other's edit; both are below.
         # master key auto-renew and on-hsm; the three authentication-settings keys whose
         # zero-ish value is the WEAKEST (idle timeout, failed attempts, API key lifetime); and
         # the two branches of the password-complexity loop, which covers eleven keys between

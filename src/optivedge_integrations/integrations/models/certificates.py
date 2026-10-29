@@ -1,4 +1,4 @@
-"""Certificate-domain objects: SSL/TLS service profiles and certificate profiles.
+"""Certificate-domain objects: certificates, SSL/TLS service, certificate and SCEP profiles.
 
 Both are assessed as OBJECTS here, which is the difference from PAN-MGT-010. That control
 asks what the management interface has BOUND, and the answer is resolved onto
@@ -56,6 +56,12 @@ class Certificate(ApplianceScopedObject):
     """
 
     #: Computed here: decoded from the public key blob - `is_ca` reads the `ca` KEY and has a row of its own. See ProvenancedMixin.DERIVED_FIELDS.
+    #:
+    #: `not_valid_before` and `not_valid_after` were MISSING from this tuple while being
+    #: computed from the PEM, so `provenance_for('not_valid_after')` answered None - which
+    #: since 2026-09-21 means "nothing tracks this field" and not "we worked it out". The
+    #: report therefore had no way to say the date was decoded rather than read, on the one
+    #: column PAN-CRT-001 rests on. Added 2026-10-29 with the five verdict columns below.
     DERIVED_FIELDS = (
         "is_missing",
         "is_self_signed",
@@ -63,7 +69,37 @@ class Certificate(ApplianceScopedObject):
         "key_size_bits",
         "signature_algorithm",
         "parse_error",
+        "not_valid_before",
+        "not_valid_after",
+        "key_strength_band",
+        "signature_hash",
+        "weak_signature_hash",
+        "is_expired",
+        "not_relied_on",
+        "relied_on_by",
     )
+
+    #: Where this key sits against the floor for ITS OWN algorithm. The VERDICT, and the column
+    #: a control clauses on - `key_size_bits` is the evidence beside it and must not be
+    #: clauseed: measured by stage 0, a certificate whose algorithm matches none of a query's
+    #: paired literals has a NULL size, the integer compiler excludes nulls from both sides of
+    #: an inequality explicitly, its parse error is empty, and it PASSES every threshold.
+    #:
+    #: Five members, and the two that exist to stop that happening are `algorithm_has_no_floor`
+    #: - an algorithm this assessment carries no floor for, which an Ed25519 certificate is -
+    #: and `undecodable`. Both are on the FIRING side of `is not at_or_above_floor`.
+    BAND_AT_OR_ABOVE = "at_or_above_floor"
+    BAND_BELOW = "below_floor"
+    BAND_FAR_BELOW = "far_below_floor"
+    BAND_NO_FLOOR = "algorithm_has_no_floor"
+    BAND_UNDECODABLE = "undecodable"
+    BAND_CHOICES = [
+        (BAND_AT_OR_ABOVE, "At or above the floor for its algorithm"),
+        (BAND_BELOW, "Below the floor"),
+        (BAND_FAR_BELOW, "Far below the floor"),
+        (BAND_NO_FLOOR, "No floor is carried for this algorithm"),
+        (BAND_UNDECODABLE, "Could not be decoded"),
+    ]
 
     #: As PAN-OS reports them. `subject` and `issuer` are stored because an engineer reads
     #: them, and are NEVER compared: they are formatted three ways depending on where they are
@@ -97,6 +133,43 @@ class Certificate(ApplianceScopedObject):
     #: control must report rather than pass - an unreadable certificate is not a compliant one.
     parse_error = models.CharField(max_length=255, blank=True)
 
+    #: PAN-CRT-002's column. Default UNDECODABLE, which is the FIRING side: a certificate
+    #: nobody has decoded has not been shown to meet any floor, so a row written before the
+    #: decode pass reports itself instead of passing.
+    key_strength_band = models.CharField(
+        max_length=32, choices=BAND_CHOICES, default=BAND_UNDECODABLE)
+
+    #: The hash the signature ACTUALLY uses, resolved to a bare name. Not recoverable from
+    #: `signature_algorithm`: measured, an RSASSA-PSS certificate stores the identifier
+    #: `rsassaPss`, which names NO hash - for PSS the hash lives in the signature parameters -
+    #: so a PSS certificate signed with SHA-1 matches neither `contains md5` nor `contains
+    #: sha1`, carries an empty parse error, and passes. Every SHA-3 variant has the same shape.
+    #: Empty means the hash could not be resolved, which `weak_signature_hash` reads as weak.
+    signature_hash = models.CharField(max_length=16, blank=True)
+    #: PAN-CRT-003's column: md5, sha1, or unresolved. Default True - the firing side - for the
+    #: same reason `SslTlsServiceProfile.allows_sha1` defaults True.
+    weak_signature_hash = models.BooleanField(default=True)
+
+    #: PAN-CRT-001's column, and a SNAPSHOT of a comparison against a clock: it goes stale
+    #: between passes, which is why `not_valid_after` is kept beside it as the evidence a
+    #: reader checks. Default True, the firing side: a certificate whose validity nobody has
+    #: checked has not been shown to be current.
+    is_expired = models.BooleanField(default=True)
+
+    #: True ONLY where the reference walk completed and found nothing. False covers both
+    #: "something names it" and "the walk could not be completed", and that is deliberate in
+    #: BOTH directions at once, which is why this is one column and not two:
+    #: PAN-CRT-001 clauses on `equals false`, so an expired certificate whose reliance is
+    #: unknown FIRES; PAN-CRT-008 clauses on `equals true`, so it is SILENT until the walk has
+    #: run - and the finding it would produce is "delete this authority", whose remediation is
+    #: irreversible. The map is a FLOOR and not a census: 65 of 69 known reference locations
+    #: are covered by no model at all.
+    not_relied_on = models.BooleanField(default=False)
+    #: The referrers the walk found, by kind and name - the evidence a deletion decision rests
+    #: on. NOTHING MAY CLAUSE ON IT: a JSON lookup is unindexed and silently matches nothing
+    #: when a key is renamed, so the control would stop finding anything instead of breaking.
+    relied_on_by = models.JSONField(default=list, blank=True)
+
     class Meta:
         ordering = ["appliance__hostname", "scope", "name"]
         constraints = [
@@ -129,7 +202,19 @@ class SslTlsServiceProfile(ApplianceScopedObject):
         "allows_sha1",
         "explicit_algorithms",
         "protocol_algorithms",
+        "min_version_rank",
     )
+
+    #: The ORDER of the four version tokens the device offers, measured identical on all four
+    #: lab appliances by `action=complete`. `max` is NOT a member here - it is real PAN-OS and
+    #: belongs to the decryption profile's ceiling and the GlobalProtect portal's; writing it
+    #: to this leaf is refused, code=12, "'max' is not an allowed keyword".
+    VERSION_ORDER = ("tls1-0", "tls1-1", "tls1-2", "tls1-3")
+    #: A stored token that is none of the four. It sorts BELOW tls1-0 so every "the floor is
+    #: too low" comparison FIRES on it - which is the direction stage 0 measured the enumerated
+    #: query gets wrong: a list of the forbidden values reads an unrecognised token as
+    #: compliant. The magnitude is not the meaning here; the meaning is the firing side.
+    RANK_UNRECOGNISED = -1
 
     certificate_name = models.CharField(max_length=255, blank=True)
     min_version = models.CharField(max_length=16, blank=True)
@@ -156,6 +241,12 @@ class SslTlsServiceProfile(ApplianceScopedObject):
     #: and a column per key would be eleven migrations ahead of a requirement. The rest stay
     #: readable in `protocol_algorithms` for display and inspection.
     allows_sha1 = models.BooleanField(default=True)
+
+    #: The floor as an ORDERED number, which is the only shape the assertion can be written in
+    #: at all: the grammar has no ordering over text, no `in` and no `between`, and a clause
+    #: list is ONE conjunction. -1 is the sentinel and the migration default, so a profile
+    #: nobody has ranked fires.
+    min_version_rank = models.IntegerField(default=RANK_UNRECOGNISED)
 
     #: Which of those keys the configuration actually WROTE. The difference matters and is not
     #: recoverable from the effective values: tpa-b's profile omits every algorithm key and
@@ -184,6 +275,11 @@ class SslTlsServiceProfile(ApplianceScopedObject):
         if effective is not None and bool(effective) != self.allows_sha1:
             raise ValidationError(
                 "allows_sha1 must match protocol_algorithms['auth-algo-sha1'].")
+        # The rank is derived from the token, so they cannot be allowed to disagree either.
+        expected = (self.VERSION_ORDER.index(self.min_version)
+                    if self.min_version in self.VERSION_ORDER else self.RANK_UNRECOGNISED)
+        if expected != self.min_version_rank:
+            raise ValidationError("min_version_rank must be min_version's position in VERSION_ORDER.")
 
 
 class CertificateProfile(ApplianceScopedObject):
@@ -199,7 +295,24 @@ class CertificateProfile(ApplianceScopedObject):
     #: Computed here: `ca_certificate_names` is the payload's CA list rather than a verdict. See ProvenancedMixin.DERIVED_FIELDS.
     DERIVED_FIELDS = (
         "is_missing",
+        "checks_revocation",
+        "fail_open_mode",
     )
+
+    #: Which of the two INCONCLUSIVE revocation outcomes this profile still lets through. One
+    #: column over two measured booleans, because stage 3 grades the two outcomes SEPARATELY
+    #: and a grading names ONE column - the severity cannot vary with which of two columns is
+    #: false. `both_allowed` is the worst value and the migration default.
+    FAIL_OPEN_NONE = "none"
+    FAIL_OPEN_UNKNOWN = "unknown_allowed"
+    FAIL_OPEN_TIMEOUT = "timeout_allowed"
+    FAIL_OPEN_BOTH = "both_allowed"
+    FAIL_OPEN_CHOICES = [
+        (FAIL_OPEN_NONE, "Neither outcome is allowed through"),
+        (FAIL_OPEN_UNKNOWN, "An unknown status is allowed through"),
+        (FAIL_OPEN_TIMEOUT, "A timed-out status is allowed through"),
+        (FAIL_OPEN_BOTH, "Both inconclusive outcomes are allowed through"),
+    ]
 
     use_crl = models.BooleanField(default=False)
     use_ocsp = models.BooleanField(default=False)
@@ -207,6 +320,16 @@ class CertificateProfile(ApplianceScopedObject):
     block_unknown_cert = models.BooleanField(default=False)
     block_timeout_cert = models.BooleanField(default=False)
     block_unauthenticated_cert = models.BooleanField(default=False)
+
+    #: Revocation checked by EITHER method - the disjunction, computed once so a clause can
+    #: name it. The ASSERTION half of PAN-CRT-004 survives without it (the failing condition is
+    #: the conjunction of both negations, which is what the shipped baseline writes), but its
+    #: APPLICABILITY half is the disjunction in its POSITIVE sense and a one-conjunction clause
+    #: list cannot hold that at all. Default False: a profile whose keys nobody read has not
+    #: been shown to check revocation.
+    checks_revocation = models.BooleanField(default=False)
+    fail_open_mode = models.CharField(
+        max_length=16, choices=FAIL_OPEN_CHOICES, default=FAIL_OPEN_BOTH)
 
     #: All three default to 5 seconds, measured from the same form.
     crl_receive_timeout = models.PositiveIntegerField(default=5)
@@ -226,5 +349,105 @@ class CertificateProfile(ApplianceScopedObject):
         ]
         indexes = [
             models.Index(fields=["appliance", "use_crl", "use_ocsp"]),
+            models.Index(fields=["appliance", "fail_open_mode"]),
+            models.Index(fields=["management_station"]),
+        ]
+
+    def clean(self) -> None:
+        super().clean()
+        # Both verdicts are derived from the booleans beside them, so they cannot be allowed to
+        # disagree - the same guard `SslTlsServiceProfile.allows_sha1` carries.
+        if self.checks_revocation != (self.use_crl or self.use_ocsp):
+            raise ValidationError("checks_revocation must match use_crl or use_ocsp.")
+        expected = {
+            (True, True): self.FAIL_OPEN_NONE,
+            (False, True): self.FAIL_OPEN_UNKNOWN,
+            (True, False): self.FAIL_OPEN_TIMEOUT,
+            (False, False): self.FAIL_OPEN_BOTH,
+        }[(bool(self.block_unknown_cert), bool(self.block_timeout_cert))]
+        if self.fail_open_mode != expected:
+            raise ValidationError(
+                "fail_open_mode must follow block_unknown_cert and block_timeout_cert.")
+
+
+class ScepProfile(ApplianceScopedObject):
+    """One SCEP enrolment profile as an object. PAN-CRT-002 and PAN-CRT-003's second subject.
+
+    What it names is the profile that will mint the NEXT certificate, not any certificate
+    already on the box - so the two halves of those controls sit on two models on purpose.
+
+    NOTHING NAMED `scep` EXISTED ANYWHERE IN EITHER CONSUMER REPO before this, and no SCEP
+    profile existed anywhere in the lab before stage 6 built one. So every reading behind the
+    declarations below is from objects that run created and deleted, and the scope-collision
+    behaviour was never measured on this object type - it is inherited from
+    `ApplianceScopedObject` as the shape the store already keys on, which is a decision and not
+    a measurement. There is also no predefined SCEP namespace and no template-contributed SCEP
+    profile sighted on any of the four appliances, which is an absence of SIGHTINGS and not a
+    demonstration that a template cannot supply one.
+
+    The config key is `scep` and the screen is `SCEP`. Six of the fourteen settable keys are
+    MANDATORY at commit validation, enumerated one commit at a time, so a committed profile
+    carries all six and an absence asserts nothing about any of them.
+
+    SCOPING: appliance, with the scope recorded on the row - the same answer
+    `InterfaceManagementProfile` and the three classes above it reached, for the same reasons.
+    Measured: a vsys-scoped enrolment profile RENDERS on a single-vsys firewall in the same
+    grid as a shared one with LOCATION empty, which is the certificate-profile screen's answer
+    and the OPPOSITE of the SSL/TLS profile screen's. Which way a screen goes is not
+    predictable from the platform, the tab or the config path, so the scope is stored.
+    """
+
+    #: Computed here: the two verdicts. The two literals beside them are read keys. See
+    #: ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "enrolment_key_below_floor",
+        "csr_digest_weak",
+    )
+
+    #: The RSA key length the profile asks the authority for, nested two containers down at
+    #: `algorithm/rsa/rsa-nbits`.
+    #:
+    #: NULL where the key is absent, which is this model's one nullable column and is
+    #: deliberate against the convention: nothing clauses on it - the clause names
+    #: `enrolment_key_below_floor` - so it is an input to a verdict and a literal a finding
+    #: prints, which is the case `null=True` is reserved for. The exposure is bounded by a
+    #: measurement rather than an argument: `algorithm` is mandatory at commit on all four
+    #: appliances, so no committed profile in the lab can reach the null state.
+    #:
+    #: A STRING and not an integer, because the DEVICE WILL OFFER THREE VALUES AND ACCEPT MORE:
+    #: `action=complete` returns exactly 2048, 1024 and 3072 on all four appliances with no
+    #: @default, and stage 4 WROTE AND COMMITTED 512 here. The literal is stored as the device
+    #: spells it and the verdict is computed from it with no assumption that it is in the
+    #: completion set.
+    rsa_key_bits = models.CharField(max_length=8, null=True, blank=True)
+    #: True for any stored literal under the floor AND for a literal this assessment carries no
+    #: floor for. Default True - the firing side - because a profile nobody has evaluated has
+    #: not been shown to ask for a compliant key.
+    enrolment_key_below_floor = models.BooleanField(default=True)
+
+    #: The signing hash the profile asks for. MANDATORY at commit validation - "Validation
+    #: Error: scep -> ... is missing digest" - so no committed profile lacks it and an absence
+    #: asserts nothing; blank here means the read did not carry the key.
+    #:
+    #: MD5 IS ABSENT FROM THE COMPLETION SET ON ALL FOUR APPLIANCES AND IS STILL WRITABLE:
+    #: stage 4 wrote `digest: md5`, committed it in job 149, and `show config running` returns
+    #: it. The mirror image of `username-field` on the sibling object, where completion offers a
+    #: value the write refuses - so neither direction can be inferred from the other.
+    csr_digest = models.CharField(max_length=16, blank=True)
+    #: True for sha1 and md5 and for any literal this assessment does not recognise. Default
+    #: True, the firing side.
+    csr_digest_weak = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["appliance__hostname", "scope", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["appliance", "scope", "vsys_name", "name"],
+                name="integrations_unique_scep_profile_per_scope"),
+        ]
+        indexes = [
+            models.Index(fields=["appliance", "enrolment_key_below_floor"]),
+            models.Index(fields=["appliance", "csr_digest"]),
             models.Index(fields=["management_station"]),
         ]

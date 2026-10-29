@@ -34,6 +34,35 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.device_c
 #: Resolution order over rows. Predefined first - see the module docstring.
 _ORDER = (ManagementTlsBinding.SCOPE_PREDEFINED, ManagementTlsBinding.SCOPE_SHARED)
 
+#: NOTHING IS ASSUMED, and the reason is an instruction rather than an omission: writing this
+#: leaf was forbidden, because a wrong value here is a management-interface lockout and on a
+#: Panorama-managed appliance the recovery is a console session. So the positive control - the
+#: third point of the five-point bar - was never paid and the status cannot be `measured`.
+#:
+#: What IS held: the config is silent in every view on two appliances; the key is absent by
+#: construction on both, which have never held it; a second oracle is paid in full by the WIRE
+#: TEST, which is behavioural and independent of every config read - an unbound interface
+#: refuses TLS 1.0 and ACCEPTS 1.1, 1.2 and 1.3, measured on four appliances; and no sibling
+#: moves the reading.
+#:
+#: It was declared `Implicit.measured(None, '... an absent key binds no profile')`, which is
+#: wrong the same way the SSL/TLS profile's `certificate` was: a `measured` Implicit whose value
+#: is None has `stores_nothing` true, so it persists as `not_configured` - the declaration
+#: claiming a vendor fact while the row records "nobody configured it", and nothing notices.
+#: The vendor's own Help ("If you select none (default), the firewall or Panorama uses a
+#: predefined certificate") is a LEAD and not evidence, and it was measured WRONG in one
+#: direction: the certificate an unbound interface presents is NOT the one in
+#: /config/predefined/certificate.
+#:
+#: EMPTY IS A STATE AND NOT A GAP. It is the COMMONEST FAILING STATE in the estate - two of the
+#: four lab appliances - which is why the row is keyed on the appliance: keyed on the profile
+#: there would be no row at all for it, and the most common failure would be unreportable.
+BINDING_IMPLICIT = Implicit.not_assumed(
+    "deviceconfig/system/ssl-tls-service-profile holds a NAME and an absent key binds no "
+    "profile - but the positive control was never paid, writing this leaf being forbidden, so "
+    "nothing is assumed about the absence beyond the wire test's reading that such an "
+    "interface accepts TLS 1.1")
+
 
 def resolve_profile_row(appliance: Appliance, name: str):
     """(scope, row) for the bound name, or (UNRESOLVED, None).
@@ -74,11 +103,7 @@ def normalize_management_tls(appliance: Appliance) -> dict[str, int]:
     # PAN-MGT-010 fires when nothing is bound, so "no key" is the finding and has to be
     # recorded as a state rather than left as a gap in the table.
     name, name_rk, name_rv = parse_text_field(
-        system.get("ssl-tls-service-profile"),
-        implicit=Implicit.measured(
-            None,
-            "payload contract, ssl-tls-service-profile.ssl-tls-service-profile: implicit None - "
-            "deviceconfig/system holds a NAME and an absent key binds no profile"))
+        system.get("ssl-tls-service-profile"), implicit=BINDING_IMPLICIT)
 
     scope, row = ("", None)
     trust, cert_scope, issuer = "", "", ""
@@ -91,6 +116,30 @@ def normalize_management_tls(appliance: Appliance) -> dict[str, int]:
                     latest_predefined_certificate_snapshot(appliance)),
                 shared=shared_certificates(snapshot),
             )
+    else:
+        # NOTHING IS BOUND, and the measured truth is sharper than a blank. An unbound
+        # management interface presents an RSA-2048, sha256WithRSAEncryption, one-year,
+        # SELF-SIGNED certificate whose common name is the chassis serial, on all four lab
+        # appliances - so classifying it is reporting what the device does rather than guessing.
+        #
+        # It is NOT the predefined certificate, which is the obvious wrong answer and was
+        # measured apart from it: /config/predefined/certificate's TLSv1.3_Default is EC
+        # prime256v1, ecdsa-with-SHA256 and valid ten years, and the two were generated four
+        # seconds apart at first boot with identical subject DNs.
+        #
+        # THE EVIDENCE COLUMNS STAY BLANK AND THAT IS THE POINT: the certificate the interface
+        # actually serves is in NO configuration namespace reachable from the appliance -
+        # `show config running` carries one BEGIN CERTIFICATE block and it is a leftover,
+        # "Palo Alto Networks" appears nowhere in it, `request certificate show` answers
+        # "Command succeeded with no output" for four plausible names including the chassis
+        # serial, and `show system state filter *cert*` is NO_MATCHES. So there is no scope to
+        # record and no issuer to print, and inventing either would be the invention this
+        # classification exists to avoid.
+        #
+        # The baseline clause `is not ca_issued` matched the blank too, so the finding fired
+        # either way - but by the accident of a negated equality rather than by design, and the
+        # SEVERITY the grading places depended on that accident. Changed 2026-10-29.
+        trust = ManagementTlsBinding.TRUST_SELF_SIGNED
 
     content_type = ContentType.objects.get_for_model(ManagementTlsBinding)
     with transaction.atomic():

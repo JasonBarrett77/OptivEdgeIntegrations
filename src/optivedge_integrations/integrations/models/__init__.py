@@ -19,7 +19,13 @@ from .events import IntegrationEvent, IntegrationRun
 from .panorama import DeviceGroup, DeviceGroupBinding
 from .authentication import AuthenticationProfile
 from .authentication_sequence import AuthenticationSequence
-from .certificates import Certificate, CertificateProfile, SslTlsServiceProfile
+from .certificates import (
+    Certificate,
+    CertificateProfile,
+    ScepProfile,
+    SslTlsServiceProfile,
+)
+from .certificate_settings import CertificateSettings
 from .interface_management_profile import InterfaceManagementProfile
 from .ike import IkeCryptoProfile, IkeGateway
 from .interfaces import Interface
@@ -165,6 +171,8 @@ __all__ = [
     "expiration_weakens",
     "Certificate",
     "CertificateProfile",
+    "CertificateSettings",
+    "ScepProfile",
     "InterfaceManagementProfile",
     "IkeCryptoProfile",
     "IkeGateway",

@@ -91,6 +91,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.authenti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.server_profiles import (
     normalize_server_profiles,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.certificate_settings import (
+    normalize_certificate_settings,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     normalize_certificate_objects,
 )
@@ -296,8 +299,13 @@ def normalize_appliance_authentication_sequences(appliance: Appliance) -> dict:
 
 
 def normalize_appliance_certificate_objects(appliance: Appliance) -> dict:
-    """Every SSL/TLS service profile and certificate profile on one appliance, in every scope."""
+    """Every certificate, SSL/TLS service, certificate and SCEP profile, in every scope."""
     return normalize_certificate_objects(appliance)
+
+
+def normalize_appliance_certificate_settings(appliance: Appliance) -> dict:
+    """The appliance's certificate-expiry check. Depends on nothing else in the tuple."""
+    return normalize_certificate_settings(appliance)
 
 
 def normalize_appliance_interface_management_profiles(appliance: Appliance) -> list:
@@ -340,6 +348,7 @@ __all__ = [
     "normalize_appliance_password_complexity",
     "normalize_appliance_password_profiles",
     "normalize_appliance_certificate_objects",
+    "normalize_appliance_certificate_settings",
     "normalize_appliance_interface_management_profiles",
     "normalize_appliance_interfaces",
     "normalize_appliance_management_interfaces",

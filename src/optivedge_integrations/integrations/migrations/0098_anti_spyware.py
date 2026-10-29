@@ -43,8 +43,13 @@ import django.db.models.deletion
 
 class Migration(migrations.Migration):
 
+    # RE-CHAINED WHEN WAVE 2 WAS MERGED, 2026-10-29. Built by one of four concurrent stage 7
+    # runs, each told to depend on the head it found - `0096_file_data_filtering` for all four,
+    # because none could see a sibling's work. Four leaf nodes is a state Django refuses outright,
+    # so the four were put in a line at merge time; they touch different models, so the order
+    # carries no meaning beyond the filenames they were assigned.
     dependencies = [
-        ("integrations", "0096_file_data_filtering"),
+        ("integrations", "0097_admin_authentication"),
     ]
 
     operations = [
