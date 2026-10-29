@@ -18,6 +18,9 @@ from django.urls import reverse
 from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
+    GlobalProtectEnforcementPoint,
+    GlobalProtectPortal,
+    GlobalProtectPortalClientAuthRow,
     WildfireSettings,
     ServerProfile,
     Interface,
@@ -77,6 +80,15 @@ from optivedge_integrations.integrations.platforms.pan_os import (
     PANOSInScopeRefreshCollection,
     PANOSInScopeRenormalizationResult,
     PANOSDynamicContentRefreshResult,
+)
+from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
+    PREDEFINED_GP_APP_CONFIG_SOURCE_TYPE,
+    PREDEFINED_GP_APP_CONFIG_XPATH,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.globalprotect import (
+    gp_app_setting_dictionary,
+    latest_gp_app_config_dictionary_snapshot,
+    normalize_globalprotect,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
     build_normalized_addresses,
@@ -14285,3 +14297,632 @@ class SslVendorExclusionOptOutNormalizationTests(_DecryptionBase):
             payload="No data found. Verify xpath and retry")
 
         self.assertEqual(_predefined_names(snapshot), set())
+
+
+# ---------------------------------------------------------------------------
+# globalprotect-portal - PAN-GPP-001 to PAN-GPP-006
+# ---------------------------------------------------------------------------
+
+
+class _GlobalProtectBase(TestCase):
+    """Shared fixture for the three `globalprotect-portal` models.
+
+    EVERY PAYLOAD BELOW IS A LAB SHAPE, read off the four appliances on 2026-10-29 through
+    Panorama's `target=` proxy with no write of any kind, not a shape invented to make a column
+    pass. Where a test needs a state the estate does not hold - a second member on a
+    single-valued app setting, a portal missing a mandatory key - it is marked as constructed
+    and the measurement that licenses it is named.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.gpp")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-gpp",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-GPP", hostname="fw-gpp", software_version="11.2.5")
+        self.group.active_appliance = self.appliance
+        self.group.save()
+
+    def _merged(self, vsys_entries):
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [{
+                "@name": "localhost.localdomain", "vsys": {"entry": vsys_entries}}]}}})
+
+    def _licence(self, payload):
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="request_license_info", collected_at=timezone.now(), payload=payload)
+
+    #: oep-p1v-gp verbatim, vsys3 of 013201001085: the estate's one PRE-EXISTING portal. No
+    #: certificate profile, no client-config and no clientless-vpn, which is what makes it
+    #: evidence about what a real portal omits rather than about what a lab run writes.
+    LAB_PRE_EXISTING_PORTAL = {
+        "@name": "oep-p1v-gp",
+        "portal-config": {
+            "log-success": "yes",
+            "local-address": {"interface": "ethernet1/1.1301",
+                              "ip": {"ipv4": "10.130.1.1/24"}},
+            "ssl-tls-service-profile": "oep-tpl-tls",
+            "custom-login-page": "factory-default",
+            "custom-home-page": "factory-default",
+            "client-auth": {"entry": [{"@name": "a1", "os": "Any",
+                                       "authentication-profile": "oep-p1-auth"}]},
+        },
+    }
+
+    #: oep-gpp6-a verbatim, vsys4: a clientless-vpn branch floored at the weakest value the
+    #: node offers, one agent configuration disallowing upgrades and keeping both factors.
+    LAB_PUBLISHING_PORTAL = {
+        "@name": "oep-gpp6-a",
+        "portal-config": {
+            "local-address": {"interface": "ethernet1/1.1401",
+                              "ip": {"ipv4": "10.140.1.1/24"}},
+            "ssl-tls-service-profile": "oep-p1e-s-tls",
+            "custom-login-page": "factory-default",
+            "custom-home-page": "factory-default",
+            "client-auth": {"entry": [{
+                "@name": "r1", "os": "Any",
+                "authentication-profile": "oep-gpp6-auth",
+                "user-credential-or-client-cert-required": "yes"}]},
+        },
+        "client-config": {"configs": {"entry": [{
+            "@name": "c1",
+            "gateways": {"external": {"list": {"entry": [{
+                "@name": "gw1", "ip": {"ipv4": "10.140.1.1"}, "manual": "no"}]}}},
+            "save-user-credentials": "1",
+            "gp-app-config": {"config": {"entry": [{
+                "@name": "client-upgrade", "value": {"member": ["disabled"]}}]}},
+        }]}},
+        "clientless-vpn": {"dns-proxy": "oep-gpp6-dnsproxy",
+                           "crypto-settings": {"ssl-protocol": {"min-version": "sslv3"}}},
+    }
+
+    #: oep-gpp6-c verbatim: the branch EXISTS and names no transport floor at all -
+    #: `crypto-settings/ssl-protocol` carries only an auth algorithm. The shape
+    #: `clientless_vpn_floor_known` exists for.
+    LAB_PORTAL_WITH_NO_FLOOR = {
+        "@name": "oep-gpp6-c",
+        "portal-config": {
+            "local-address": {"interface": "ethernet1/1.1403",
+                              "ip": {"ipv4": "10.140.3.1/24"}},
+            "ssl-tls-service-profile": "oep-p1e-s-tls",
+            "custom-login-page": "factory-default",
+            "custom-home-page": "factory-default",
+            "client-auth": {"entry": [{"@name": "r1", "os": "Any",
+                                       "authentication-profile": "oep-gpp6-auth"}]},
+        },
+        "client-config": {"configs": {"entry": [{
+            "@name": "c1",
+            "save-user-credentials": "3",
+            "gp-app-config": {"config": {"entry": [{
+                "@name": "client-upgrade", "value": {"member": ["manual"]}}]}},
+        }]}},
+        "clientless-vpn": {"dns-proxy": "oep-gpp6-dnsproxy",
+                           "crypto-settings": {"ssl-protocol": {"auth-algo-sha256": "yes"}}},
+    }
+
+    #: oep-gpp6-e verbatim, vsys1 of 6A9C0A9904E7D6E: the only portal in the estate that BINDS
+    #: a certificate profile, with two rows at different `os` and opposite switch values.
+    LAB_PORTAL_WITH_CERT_PROFILE = {
+        "@name": "oep-gpp6-e",
+        "portal-config": {
+            "local-address": {"interface": "ethernet1/1", "ip": {"ipv4": "10.0.1.4/24"}},
+            "ssl-tls-service-profile": "default",
+            "certificate-profile": "quick-cert-profile",
+            "custom-login-page": "factory-default",
+            "custom-home-page": "factory-default",
+            "client-auth": {"entry": [
+                {"@name": "r1", "os": "Any", "authentication-profile": "auth_profile",
+                 "user-credential-or-client-cert-required": "yes"},
+                {"@name": "r2", "os": "Browser", "authentication-profile": "auth_profile",
+                 "user-credential-or-client-cert-required": "no"},
+            ]},
+        },
+    }
+
+    #: oep-gpp6-hip-a verbatim: the matcher has exactly three children, every one a string
+    #: match, so a version FLOOR is not something this object can express.
+    LAB_HIP_OBJECT = {
+        "@name": "oep-gpp6-hip-a",
+        "host-info": {"criteria": {"client-version": {"contains": "6.2"}}},
+    }
+
+    #: 691665AC334B458 vsys1 verbatim: `global-protect` PRESENT holding `global-protect-portal`
+    #: PRESENT and null, committed and undecorated. The state a truthiness test calls a portal.
+    LAB_COMMITTED_EMPTY_CONTAINER = {"global-protect": {"global-protect-portal": None}}
+
+
+class GlobalProtectPortalNormalizationTests(_GlobalProtectBase):
+    """The portal grain: what each measured leaf reads as and what each verdict resolves to."""
+
+    def test_the_pre_existing_portal_reads_as_the_estate_measured_it(self):
+        self._merged([{"@name": "vsys3", "global-protect": {
+            "global-protect-portal": {"entry": [self.LAB_PRE_EXISTING_PORTAL]}}}])
+        counts = normalize_globalprotect(self.appliance)
+
+        self.assertEqual(counts["globalprotect_portals"], 1)
+        portal = GlobalProtectPortal.objects.get()
+        self.assertEqual(portal.scope, GlobalProtectPortal.SCOPE_VSYS)
+        self.assertEqual(portal.vsys_name, "vsys3")
+        self.assertEqual(portal.name, "oep-p1v-gp")
+        # The base's `name` under the name the spec, the finding and the artifact layer use.
+        self.assertEqual(portal.portal_name, "oep-p1v-gp")
+        self.assertTrue(portal.mandatory_keys_present)
+        self.assertEqual(portal.ssl_tls_service_profile, "oep-tpl-tls")
+        self.assertFalse(portal.tls_profile_binding_missing)
+        # ABSENT IS A REAL COMMITTED STATE HERE and it is the permissive one.
+        self.assertIsNone(portal.certificate_profile)
+        self.assertEqual(portal.custom_login_page, "factory-default")
+        self.assertEqual(portal.clientless_vpn_state, "absent")
+        self.assertEqual(portal.client_auth_row_count, 1)
+        # No `client-config` AT ALL, which is not the same fact as an empty one.
+        self.assertIsNone(portal.agent_configurations)
+        self.assertEqual(portal.upgrade_posture, "no_agent_configuration")
+        self.assertEqual(portal.saved_credentials_posture, "no_agent_configuration")
+
+    def test_a_publishing_portal_carries_its_floor_and_its_postures(self):
+        self._merged([{"@name": "vsys4", "global-protect": {
+            "global-protect-portal": {"entry": [self.LAB_PUBLISHING_PORTAL]}}}])
+        normalize_globalprotect(self.appliance)
+
+        portal = GlobalProtectPortal.objects.get()
+        self.assertEqual(portal.clientless_vpn_state, "present")
+        self.assertEqual(portal.clientless_vpn_min_version, "sslv3")
+        self.assertTrue(portal.clientless_vpn_floor_known)
+        # Nothing in the estate writes a ceiling, and the absent state is stored as NULL rather
+        # than as the schema default `max`, whose own meaning is unestablished.
+        self.assertIsNone(portal.clientless_vpn_max_version)
+        self.assertEqual(portal.upgrade_posture, "disabled")
+        self.assertEqual(portal.saved_credentials_posture, "1")
+        self.assertEqual([e["@name"] for e in portal.agent_configurations], ["c1"])
+
+    def test_a_branch_with_no_min_version_is_floor_known_false_and_min_version_null(self):
+        """The shape PAN-GPP-006's second group exists for: `is not tls1-2` matches nothing."""
+        self._merged([{"@name": "vsys4", "global-protect": {
+            "global-protect-portal": {"entry": [self.LAB_PORTAL_WITH_NO_FLOOR]}}}])
+        normalize_globalprotect(self.appliance)
+
+        portal = GlobalProtectPortal.objects.get()
+        self.assertEqual(portal.clientless_vpn_state, "present")
+        self.assertIsNone(portal.clientless_vpn_min_version)
+        self.assertFalse(portal.clientless_vpn_floor_known)
+
+    def test_a_portal_missing_a_mandatory_key_reads_as_unknown_not_as_absent(self):
+        """CONSTRUCTED: the device refuses to commit this, which is the point.
+
+        Such a row can only be a read that did not carry the portal, and reading its missing
+        `clientless-vpn` as `absent` would narrow it out of PAN-GPP-006 through the
+        applicability clause - a row nobody collected recorded as a row that complied.
+        """
+        incomplete = {"@name": "oep-gpp6-partial",
+                      "portal-config": {"ssl-tls-service-profile": "oep-p1e-s-tls"}}
+        self._merged([{"@name": "vsys4", "global-protect": {
+            "global-protect-portal": {"entry": [incomplete]}}}])
+        normalize_globalprotect(self.appliance)
+
+        portal = GlobalProtectPortal.objects.get()
+        self.assertFalse(portal.mandatory_keys_present)
+        self.assertEqual(portal.clientless_vpn_state, "unknown")
+        self.assertEqual(portal.custom_login_page, "")
+        self.assertFalse(portal.clientless_vpn_floor_known)
+
+    def test_an_absent_mandatory_key_records_not_configured_rather_than_nothing(self):
+        """A tracked field read through bare `scalar_value` writes no row, which would then
+        state "nothing tracks this field" about a field nobody configured."""
+        self._merged([{"@name": "vsys3", "global-protect": {
+            "global-protect-portal": {"entry": [self.LAB_PRE_EXISTING_PORTAL]}}}])
+        normalize_globalprotect(self.appliance)
+
+        portal = GlobalProtectPortal.objects.get()
+        self.assertEqual(
+            portal.provenance_for("certificate_profile").provenance_type, "not_configured")
+        self.assertEqual(
+            portal.provenance_for("ssl_tls_service_profile").provenance_type, "local")
+        # A computed column may never carry a row; `DERIVED_FIELDS` is what answers for it.
+        self.assertEqual(
+            portal.provenance_for("tls_profile_binding_missing").provenance_type, "derived")
+
+    def test_the_binding_verdict_and_the_name_it_came_from_cannot_disagree(self):
+        portal = GlobalProtectPortal(
+            management_station=self.station, appliance=self.appliance,
+            appliance_group=self.group, scope=GlobalProtectPortal.SCOPE_VSYS,
+            vsys_name="vsys4", name="oep-gpp6-x",
+            ssl_tls_service_profile="oep-p1e-s-tls", tls_profile_binding_missing=True)
+        with self.assertRaises(ValidationError):
+            portal.clean()
+
+    def test_a_second_pass_rewrites_rather_than_duplicates(self):
+        self._merged([{"@name": "vsys4", "global-protect": {
+            "global-protect-portal": {"entry": [self.LAB_PUBLISHING_PORTAL]}}}])
+        first = normalize_globalprotect(self.appliance)
+        second = normalize_globalprotect(self.appliance)
+        self.assertEqual(first, second)
+        self.assertEqual(GlobalProtectPortal.objects.count(), 1)
+        self.assertEqual(GlobalProtectPortalClientAuthRow.objects.count(), 1)
+
+
+class GlobalProtectUpgradePostureTests(_GlobalProtectBase):
+    """The three sentinels, each of which a single value cannot express."""
+
+    def _portal_with_configs(self, configs):
+        portal = {
+            "@name": "oep-gpp6-u",
+            "portal-config": {
+                "local-address": {"interface": "ethernet1/1"},
+                "ssl-tls-service-profile": "oep-p1e-s-tls",
+                "custom-login-page": "factory-default",
+                "custom-home-page": "factory-default",
+            },
+        }
+        if configs is not None:
+            portal["client-config"] = {"configs": configs}
+        self._merged([{"@name": "vsys4", "global-protect": {
+            "global-protect-portal": {"entry": [portal]}}}])
+        normalize_globalprotect(self.appliance)
+        return GlobalProtectPortal.objects.get()
+
+    def test_no_client_config_is_the_sentinel_and_not_the_form_default(self):
+        portal = self._portal_with_configs(None)
+        self.assertEqual(portal.upgrade_posture, "no_agent_configuration")
+        self.assertEqual(portal.saved_credentials_posture, "no_agent_configuration")
+
+    def test_a_configuration_silent_about_upgrades_is_not_set(self):
+        """The dictionary's form default is `prompt`, this control's ACCEPTABLE rank, so
+        collapsing this onto it turns "says nothing about upgrades" into a pass."""
+        portal = self._portal_with_configs({"entry": [{"@name": "c1"}]})
+        self.assertEqual(portal.upgrade_posture, "not_set")
+        self.assertEqual(portal.saved_credentials_posture, "not_set")
+
+    def test_two_members_on_a_single_valued_setting_read_as_several_members(self):
+        """CONSTRUCTED from a measurement: a second write APPENDS rather than replaces, so the
+        stored list can hold values the vendor's own schema marks single-valued."""
+        portal = self._portal_with_configs({"entry": [{
+            "@name": "c1",
+            "gp-app-config": {"config": {"entry": [{
+                "@name": "client-upgrade",
+                "value": {"member": ["prompt", "oep-not-a-value"]}}]}}}]})
+        self.assertEqual(portal.upgrade_posture, "several_members")
+
+    def test_the_first_configuration_in_document_order_decides_and_nothing_sorts(self):
+        """The vendor states the portal delivers the FIRST match and stops, and the collection
+        has no priority key - so the document order IS the semantics. A reader taking the best
+        configuration it found reports the opposite of the truth."""
+        portal = self._portal_with_configs({"entry": [
+            {"@name": "permissive", "save-user-credentials": "1",
+             "gp-app-config": {"config": {"entry": [{
+                 "@name": "client-upgrade", "value": {"member": ["disabled"]}}]}}},
+            {"@name": "hardened", "save-user-credentials": "0",
+             "gp-app-config": {"config": {"entry": [{
+                 "@name": "client-upgrade", "value": {"member": ["transparent"]}}]}}},
+        ]})
+        self.assertEqual(portal.upgrade_posture, "disabled")
+        self.assertEqual(portal.saved_credentials_posture, "1")
+
+    def test_saved_credentials_is_the_device_s_numeric_string_and_not_an_integer(self):
+        portal = self._portal_with_configs({"entry": [{
+            "@name": "c1", "save-user-credentials": "3"}]})
+        self.assertEqual(portal.saved_credentials_posture, "3")
+        self.assertNotEqual(portal.saved_credentials_posture, 3)
+
+
+class GlobalProtectClientAuthRowNormalizationTests(_GlobalProtectBase):
+    """The row grain, and the four arms of `admission_demand`."""
+
+    def test_the_four_arms_of_the_admission_verdict(self):
+        self._merged([
+            {"@name": "vsys3", "global-protect": {"global-protect-portal": {"entry": [
+                self.LAB_PRE_EXISTING_PORTAL]}}},
+            {"@name": "vsys4", "global-protect": {"global-protect-portal": {"entry": [
+                self.LAB_PUBLISHING_PORTAL]}}},
+            {"@name": "vsys1", "global-protect": {"global-protect-portal": {"entry": [
+                self.LAB_PORTAL_WITH_CERT_PROFILE]}}},
+        ])
+        normalize_globalprotect(self.appliance)
+
+        def demand(vsys, portal, row):
+            return GlobalProtectPortalClientAuthRow.objects.get(
+                vsys_name=vsys, portal_name=portal, name=row).admission_demand
+
+        # The switch is ABSENT on a committed row and the portal binds no certificate profile:
+        # one of the two inputs is missing, and `unknown` is the firing side.
+        self.assertEqual(demand("vsys3", "oep-p1v-gp", "a1"), "unknown")
+        # The switch says `yes` - a password OR a certificate - and there is NO certificate
+        # profile for the OR to reach, so a password is the whole of the admission test.
+        self.assertEqual(demand("vsys4", "oep-gpp6-a", "r1"), "password_only")
+        # `yes` with a profile bound: whichever factor the endpoint can produce.
+        self.assertEqual(demand("vsys1", "oep-gpp6-e", "r1"), "password_or_certificate")
+        # `no` IS THE HARDENED VALUE - the device's own help string spells it "No (User
+        # Credentials AND Client Certificate Required)".
+        self.assertEqual(demand("vsys1", "oep-gpp6-e", "r2"), "password_and_certificate")
+
+    def test_the_row_carries_its_portal_as_a_key_and_as_a_foreign_key(self):
+        self._merged([{"@name": "vsys1", "global-protect": {
+            "global-protect-portal": {"entry": [self.LAB_PORTAL_WITH_CERT_PROFILE]}}}])
+        normalize_globalprotect(self.appliance)
+
+        portal = GlobalProtectPortal.objects.get()
+        rows = GlobalProtectPortalClientAuthRow.objects.order_by("name")
+        self.assertEqual([r.name for r in rows], ["r1", "r2"])
+        self.assertEqual([r.row_name for r in rows], ["r1", "r2"])
+        for row in rows:
+            self.assertEqual(row.portal_id, portal.pk)
+            self.assertEqual(row.portal_name, "oep-gpp6-e")
+            self.assertTrue(row.certificate_profile_bound)
+
+    def test_two_portals_of_one_vsys_may_carry_rows_of_the_same_name(self):
+        """Measured: four portals of vsys4 each carry a row called `r1`. The portal is part of
+        the row's identity for exactly this reason - keyed on the name alone, the second write
+        would overwrite the first and the count would come out short."""
+        second = dict(self.LAB_PUBLISHING_PORTAL, **{"@name": "oep-gpp6-b"})
+        self._merged([{"@name": "vsys4", "global-protect": {
+            "global-protect-portal": {"entry": [self.LAB_PUBLISHING_PORTAL, second]}}}])
+        counts = normalize_globalprotect(self.appliance)
+
+        self.assertEqual(counts["globalprotect_portal_client_auth_rows"], 2)
+        self.assertEqual(
+            sorted(GlobalProtectPortalClientAuthRow.objects.values_list(
+                "portal_name", "name")),
+            [("oep-gpp6-a", "r1"), ("oep-gpp6-b", "r1")])
+
+    def test_a_portal_with_no_client_auth_table_produces_no_row_and_a_zero_count(self):
+        """The weakest admission state the device permits, and it is reportable only through
+        the portal's own count: a control's queries all compile against ONE model."""
+        bare = {"@name": "oep-gpp6-norows", "portal-config": {
+            "local-address": {"interface": "ethernet1/1"},
+            "ssl-tls-service-profile": "oep-p1e-s-tls",
+            "custom-login-page": "factory-default",
+            "custom-home-page": "factory-default"}}
+        self._merged([{"@name": "vsys4", "global-protect": {
+            "global-protect-portal": {"entry": [bare]}}}])
+        normalize_globalprotect(self.appliance)
+
+        self.assertEqual(GlobalProtectPortalClientAuthRow.objects.count(), 0)
+        self.assertEqual(GlobalProtectPortal.objects.get().client_auth_row_count, 0)
+
+
+class GlobalProtectEnforcementPointNormalizationTests(_GlobalProtectBase):
+    """The vsys grain: counts over entries, the feature verdict, and the licence question."""
+
+    def test_a_row_exists_for_every_vsys_including_one_with_no_globalprotect_node(self):
+        self._merged([
+            {"@name": "vsys3", "global-protect": {"global-protect-portal": {"entry": [
+                self.LAB_PRE_EXISTING_PORTAL]}}},
+            {"@name": "vsys7"},
+        ])
+        counts = normalize_globalprotect(self.appliance)
+
+        self.assertEqual(counts["globalprotect_enforcement_points"], 2)
+        empty = GlobalProtectEnforcementPoint.objects.get(vsys_name="vsys7")
+        self.assertEqual(empty.portal_count, 0)
+        self.assertEqual(empty.clientless_vpn_feature_state, "absent")
+
+    def test_a_committed_empty_container_counts_zero_portals(self):
+        """NODE PRESENCE IS THE WRONG TEST, measured: this exact shape is committed and
+        undecorated on one appliance of this estate, and a truthiness test reports it as a
+        portal."""
+        self._merged([dict({"@name": "vsys1"}, **self.LAB_COMMITTED_EMPTY_CONTAINER)])
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.portal_count, 0)
+        self.assertEqual(point.clientless_vpn_feature_state, "absent")
+
+    def test_the_feature_is_live_latent_or_absent(self):
+        self._merged([
+            # A portal publishing, and a definition: LIVE.
+            {"@name": "vsys4", "global-protect": {
+                "global-protect-portal": {"entry": [self.LAB_PUBLISHING_PORTAL]},
+                "clientless-app": {"entry": [{"@name": "oep-gpp6-app-a",
+                                              "application-home-url": "https://10.140.1.50/"}]}}},
+            # A definition and NO portal: LATENT, which is the rank this grain exists for -
+            # there is no portal row for it to be reported on.
+            {"@name": "vsys6", "global-protect": {
+                "clientless-app": {"entry": [{"@name": "oep-gpp6-app-b",
+                                              "application-home-url": "https://10.160.1.50/"}]}}},
+            # A portal that does not publish and no definitions: ABSENT, which SATISFIES the
+            # control rather than making it inapplicable.
+            {"@name": "vsys3", "global-protect": {
+                "global-protect-portal": {"entry": [self.LAB_PRE_EXISTING_PORTAL]}}},
+        ])
+        normalize_globalprotect(self.appliance)
+
+        def state(vsys):
+            return GlobalProtectEnforcementPoint.objects.get(
+                vsys_name=vsys).clientless_vpn_feature_state
+
+        self.assertEqual(state("vsys4"), "live")
+        self.assertEqual(state("vsys6"), "latent")
+        self.assertEqual(state("vsys3"), "absent")
+        live = GlobalProtectEnforcementPoint.objects.get(vsys_name="vsys4")
+        self.assertEqual(live.portals_publishing_clientless_apps, 1)
+        self.assertEqual(live.clientless_app_count, 1)
+        self.assertEqual(live.clientless_app_group_count, 0)
+
+    def test_a_clientless_app_group_is_counted_beside_the_definitions(self):
+        """The vendor's own sentence names TWO screens, and for an assertion whose content is
+        ABSENCE an application reachable only through a group would make the estate look
+        clean. CONSTRUCTED: no group exists anywhere in this estate."""
+        self._merged([{"@name": "vsys6", "global-protect": {
+            "clientless-app-group": {"entry": [{"@name": "oep-gpp6-grp"}]}}}])
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.clientless_app_group_count, 1)
+        self.assertEqual(point.clientless_vpn_feature_state, "latent")
+
+    def test_a_hip_object_testing_the_client_version_is_counted_and_its_criterion_kept(self):
+        self._merged([{"@name": "vsys4",
+                       "profiles": {"hip-objects": {"entry": [self.LAB_HIP_OBJECT]}}}])
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.hip_objects_testing_client_version, 1)
+        self.assertEqual(point.hip_client_version_criteria, [
+            {"hip_object": "oep-gpp6-hip-a", "operator": "contains", "value": "6.2"}])
+
+    def test_a_hip_object_with_no_client_version_criterion_is_not_counted(self):
+        self._merged([{"@name": "vsys4", "profiles": {"hip-objects": {"entry": [
+            {"@name": "oep-gpp6-hip-b",
+             "host-info": {"criteria": {"domain": {"contains": "corp"}}}}]}}}])
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.hip_objects_testing_client_version, 0)
+        self.assertIsNone(point.hip_client_version_criteria)
+
+    def test_an_empty_licence_envelope_is_unknown_and_does_not_suppress(self):
+        """Measured on both PA-5220s: `{'licenses': None}` arrives with status=success. It is a
+        read that HAPPENED and reported nothing, which is not the same fact as a read nobody
+        took - and suppressing a control on it is the applicability trap."""
+        self._merged([{"@name": "vsys4"}])
+        self._licence({"licenses": None})
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertTrue(point.licence_reply_collected)
+        self.assertEqual(point.licence_entry_count, 0)
+        self.assertEqual(point.globalprotect_portal_licensed, "unknown")
+        self.assertFalse(point.licence_excludes_globalprotect)
+
+    def test_a_populated_reply_without_the_feature_is_the_one_suppressing_state(self):
+        """Measured on 6A9C0A9904E7D6E: three features, none of them GlobalProtect."""
+        self._merged([{"@name": "vsys1"}])
+        self._licence({"licenses": {"entry": [
+            {"feature": "Adv Threat Prevention", "expires": "Never", "expired": "no"},
+            {"feature": "PA-VM", "expires": "Never", "expired": "no"},
+            {"feature": "Threat Prevention", "expires": "Never", "expired": "no"}]}})
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.licence_entry_count, 3)
+        self.assertEqual(point.globalprotect_portal_licensed, "no")
+        self.assertTrue(point.licence_excludes_globalprotect)
+
+    def test_a_reply_naming_the_feature_is_licensed_and_stays_in_play(self):
+        """Measured on 691665AC334B458: ten features including GlobalProtect Portal."""
+        self._merged([{"@name": "vsys1"}])
+        self._licence({"licenses": {"entry": [
+            {"feature": "GlobalProtect Portal", "expires": "Never", "expired": "no"},
+            {"feature": "GlobalProtect Gateway", "expires": "Never", "expired": "no"}]}})
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.globalprotect_portal_licensed, "yes")
+        self.assertFalse(point.licence_excludes_globalprotect)
+
+    def test_no_licence_snapshot_at_all_reads_as_never_asked(self):
+        self._merged([{"@name": "vsys1"}])
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertFalse(point.licence_reply_collected)
+        self.assertEqual(point.globalprotect_portal_licensed, "unknown")
+        self.assertFalse(point.licence_excludes_globalprotect)
+
+    def test_an_expired_licence_entry_still_counts_as_licensed(self):
+        """DELIBERATE, and the opposite of what the IoT domain's own feature test does: an
+        expired entitlement reading as `no` would make `licence_excludes_globalprotect` true,
+        which is the one value that SUPPRESSES the control - silencing a finding about a portal
+        that is still configured. CONSTRUCTED: every lab entry carries `expired: no`."""
+        self._merged([{"@name": "vsys1"}])
+        self._licence({"licenses": {"entry": [
+            {"feature": "GlobalProtect Portal", "expires": "2025/01/01", "expired": "yes"}]}})
+        normalize_globalprotect(self.appliance)
+
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.globalprotect_portal_licensed, "yes")
+        self.assertFalse(point.licence_excludes_globalprotect)
+
+    def test_the_licence_verdicts_cannot_disagree_with_the_reply_they_came_from(self):
+        point = GlobalProtectEnforcementPoint(
+            management_station=self.station, appliance=self.appliance,
+            appliance_group=self.group, vsys_name="vsys1",
+            licence_reply_collected=True, licence_entry_count=0,
+            globalprotect_portal_licensed="unknown",
+            licence_excludes_globalprotect=True)
+        with self.assertRaises(ValidationError):
+            point.clean()
+
+    def test_a_vsys_removed_from_the_device_loses_its_verdict_row(self):
+        self._merged([{"@name": "vsys4"}, {"@name": "vsys6"}])
+        normalize_globalprotect(self.appliance)
+        self.assertEqual(GlobalProtectEnforcementPoint.objects.count(), 2)
+
+        Snapshot.objects.filter(appliance=self.appliance).delete()
+        self._merged([{"@name": "vsys4"}])
+        normalize_globalprotect(self.appliance)
+        self.assertEqual(
+            list(GlobalProtectEnforcementPoint.objects.values_list("vsys_name", flat=True)),
+            ["vsys4"])
+
+    def test_no_merged_snapshot_returns_zeros_rather_than_raising(self):
+        self.assertEqual(normalize_globalprotect(self.appliance), {
+            "globalprotect_portals": 0,
+            "globalprotect_portal_client_auth_rows": 0,
+            "globalprotect_enforcement_points": 0})
+
+
+class GlobalProtectAppSettingDictionaryTests(_GlobalProtectBase):
+    """The one read this domain adds, and what an absent one costs."""
+
+    #: `client-upgrade` verbatim, identical on all four appliances 2026-10-29. The regex is
+    #: ADVISORY: a value outside it was accepted into the member list without comment.
+    LAB_CLIENT_UPGRADE_ENTRY = {
+        "@name": "client-upgrade", "type": "string", "category": "Important",
+        "label": "Allow User to Upgrade GlobalProtect App", "optional": "true",
+        "multi-value": "false",
+        "regex": "^(prompt|disabled|manual|transparent|internal)$", "default": "prompt",
+        "value": {"entry": [{"@name": "prompt", "label": "Allow with Prompt"},
+                            {"@name": "disabled", "label": "Disallow"},
+                            {"@name": "manual", "label": "Allow Manually"},
+                            {"@name": "transparent", "label": "Allow Transparently"},
+                            {"@name": "internal", "label": "Internal"}]},
+        "gen-gp-agent-config-under-xpath": "agent-config",
+    }
+
+    def test_the_dictionary_is_keyed_by_setting_name(self):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="config_predefined_gp_app_config", collected_at=timezone.now(),
+            payload={"@total-count": "89", "@count": "89",
+                     "config": {"entry": [self.LAB_CLIENT_UPGRADE_ENTRY]}})
+
+        dictionary = gp_app_setting_dictionary(
+            latest_gp_app_config_dictionary_snapshot(self.appliance))
+        self.assertEqual(set(dictionary), {"client-upgrade"})
+        self.assertEqual(dictionary["client-upgrade"]["default"], "prompt")
+        self.assertEqual(
+            dictionary["client-upgrade"]["regex"],
+            "^(prompt|disabled|manual|transparent|internal)$")
+
+    def test_an_absent_dictionary_answers_empty_rather_than_raising(self):
+        """It is a DECODING input, not a grading one: without it a stored member list cannot be
+        LABELLED, and no column of this domain changes value."""
+        self.assertEqual(
+            gp_app_setting_dictionary(
+                latest_gp_app_config_dictionary_snapshot(self.appliance)), {})
+
+    def test_the_collector_reads_only_and_names_the_predefined_xpath(self):
+        self.assertEqual(PREDEFINED_GP_APP_CONFIG_XPATH,
+                         "/config/predefined/dynamic-schema/gp-app-config/config")
+        self.assertEqual(PREDEFINED_GP_APP_CONFIG_SOURCE_TYPE,
+                         "config_predefined_gp_app_config")
+
+    def test_the_collector_is_wired_into_the_predefined_catalog_flow(self):
+        """Nothing fails if a collector is written and never called: the snapshot never exists
+        and every column resting on it holds its default for ever. The only thing that catches
+        that is a reader of the flow, which is what this is."""
+        import inspect
+
+        from optivedge_integrations.integrations.platforms.pan_os import flows
+
+        source = inspect.getsource(flows.collect_appliance_predefined_catalogs)
+        self.assertIn("collect_predefined_gp_app_config_dictionary", source)
+        self.assertIn(
+            ("globalprotect portals", flows.normalize_appliance_globalprotect),
+            flows.APPLIANCE_OBJECT_NORMALIZERS)

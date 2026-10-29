@@ -79,6 +79,11 @@ from .decryption import (
     SslDecryptionExclusion,
     SslDecryptionVendorExclusionOptOut,
 )
+from .globalprotect import (
+    GlobalProtectEnforcementPoint,
+    GlobalProtectPortal,
+    GlobalProtectPortalClientAuthRow,
+)
 from .zones import Zone, ZoneInterface
 from .policy import (
     AddressGroup,
@@ -178,6 +183,9 @@ __all__ = [
     "LoggingSettings",
     "LoginBanner",
     "ManagementTlsBinding",
+    "GlobalProtectEnforcementPoint",
+    "GlobalProtectPortal",
+    "GlobalProtectPortalClientAuthRow",
     "HighAvailabilityConfig",
     "ManagementSshSettings",
     "PanoramaRegistration",
