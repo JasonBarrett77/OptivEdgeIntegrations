@@ -1517,32 +1517,45 @@ class CertificateVerdictColumnTests(TestCase):
         self.assertEqual(explicit, ["auth-algo-sha1"])
         self.assertFalse(pinned["auth-algo-sha1"])
 
-    def test_the_graded_sha1_column_reports_the_configuration_not_the_rendered_set(self):
-        """Decided 2026-10-29, and it splits the two readings apart on purpose.
+    def test_allows_sha1_means_SELECTED_and_a_written_value_always_wins(self):
+        """Decided 2026-10-29 from the UI, and it turns on the word "selected".
 
-        `protocol_algorithms` is the RENDERED set and goes on saying SHA-1 is out at a
-        tls1-3-only range, which is what the dialog shows and what was measured on pan-fw-201.
-        `allows_sha1` is the column a control clauses on, and it reports the CONFIGURATION: a
-        TLS 1.3 session still validates a certificate chain, and certificate signatures and
-        self-signed root CA signatures may use SHA-1 whatever the cipher suite negotiates. With
-        no insight into every TLS 1.3 operation, a profile that has not turned the key off is
-        reported as permitting it.
+        The web interface GREYS SHA1 OUT and unticks it once Min Version is TLSv1.3 - it
+        validates the combination. The XML API does not, so a profile CAN be made carrying
+        a tls1-3 floor and `auth-algo-sha1 yes`. That is a vendor validation gap, it should
+        be rare, and nobody can say how the device behaves in a state its own UI forbids -
+        which is the reason to report it.
 
-        The two assertions in the first block are the whole decision: same profile, same range,
-        and the two columns deliberately disagree.
+        So a WRITTEN value wins at every range, and an ABSENT key is read against the range,
+        because the range is what decides how the dialog renders the box.
         """
-        self.assertTrue(_permits_sha1({}))
-        self.assertFalse(_algorithms({}, "tls1-3", "tls1-3")[0]["auth-algo-sha1"])
+        rank = min_version_rank
+        def selected(settings, lo, hi):
+            return _permits_sha1(settings, rank(lo), rank(hi))
 
-        # Only an explicit OFF clears the graded column, and the range never enters into it -
-        # `_permits_sha1` does not take one.
-        self.assertFalse(_permits_sha1({"auth-algo-sha1": "no"}))
-        self.assertTrue(_permits_sha1({"auth-algo-sha1": "yes"}))
+        # THE ANOMALY, and the only row where the graded column departs from the rendered
+        # set: written on at a tls1-3 floor is SELECTED even though nothing renders it.
+        self.assertTrue(selected({"auth-algo-sha1": "yes"}, "tls1-3", "tls1-3"))
+        self.assertFalse(_algorithms({"auth-algo-sha1": "yes"}, "tls1-3", "tls1-3")[0][
+            "auth-algo-sha1"])
 
-        # Never None, at any range: the column is a BooleanField and this reading leaves no
-        # state unestablished.
+        # THE UI-NORMAL TLS 1.3 PROFILE DOES NOT FIRE, whichever way PAN-OS stores a greyed
+        # box. This is what keeps the vendor's own TLSv1.3_Default off the report: it writes
+        # no algorithm key, and a blanket "absent means enabled" would report every 1.3
+        # profile in the estate for a box the UI shows as off.
+        self.assertFalse(selected({}, "tls1-3", "tls1-3"))
+        self.assertFalse(selected({"auth-algo-sha1": "no"}, "tls1-3", "tls1-3"))
+
+        # BELOW a tls1-3 floor the box renders TICKED, so absent still means selected - which
+        # is the state almost every profile in the estate is actually in.
+        self.assertTrue(selected({}, "tls1-2", "tls1-3"))
+        self.assertTrue(selected({}, "tls1-2", "tls1-2"))
+        self.assertFalse(selected({"auth-algo-sha1": "no"}, "tls1-2", "tls1-2"))
+
+        # Never None, at any range: the column is a BooleanField.
         for settings in ({}, {"auth-algo-sha1": "no"}, {"auth-algo-sha1": "yes"}):
-            self.assertIn(_permits_sha1(settings), (True, False))
+            for lo, hi in (("tls1-2", "tls1-3"), ("tls1-3", "tls1-3")):
+                self.assertIn(selected(settings, lo, hi), (True, False))
 
 
 class DynamicAddressContentNormalizationTests(TestCase):

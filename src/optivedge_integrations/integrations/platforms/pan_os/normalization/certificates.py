@@ -380,29 +380,41 @@ def _excluded_by_range(min_rank: int, max_rank: int) -> set[str]:
     return excluded
 
 
-def _permits_sha1(protocol_settings: dict[str, Any]) -> bool:
-    """Whether the profile's CONFIGURATION leaves SHA-1 enabled, whatever the version range.
+def _permits_sha1(protocol_settings: dict[str, Any], min_rank: int, max_rank: int) -> bool:
+    """Whether SHA-1 is SELECTED on this profile. A written value always wins.
 
-    READS THE CONFIGURATION AND NOT THE RENDERED SET, decided 2026-10-29. An earlier version of
-    this function read the range-narrowed map, so a tls1-3-only profile reported as not
-    permitting SHA-1 - the range takes SHA-1 out of the algorithm dialog, which is measured and
-    which `protocol_algorithms` still records. That reading treats cipher negotiation as the
-    whole of what an SSL/TLS service profile governs, and it is not: a TLS 1.3 session still
-    validates a certificate chain, and certificate signatures and self-signed root CA
-    signatures may use SHA-1 whatever the cipher suite does. Without insight into every TLS 1.3
-    operation, the safe reading is the one the configuration states.
+    "Selected" rather than "on the wire", decided 2026-10-29, and the distinction is the whole
+    of this function. A TLS 1.3 session still validates a certificate chain, and certificate
+    signatures and self-signed root CA signatures may use SHA-1 whatever the cipher suite
+    negotiates - so what the handshake can use is not the whole of what the profile governs,
+    and we do not have insight into every TLS 1.3 operation. What we CAN state is what the
+    configuration selects.
 
-    So the key written OFF is False, the key written ON is True, and an ABSENT key is True
-    because absent means enabled for every algorithm key the dialog exposes
-    (`ALGORITHM_IMPLICIT`, measured 2026-09-02). NEVER None: the column is a BooleanField, and
-    under this reading there is no range in which the configuration is unestablished - which is
-    a second reason to read it here rather than off the rendered set.
+    TWO CASES, and only the second looks at the range:
+
+      * THE KEY IS WRITTEN -> that value, at every range. `yes` is True even at a tls1-3-only
+        range, where the dialog greys the box out. That combination cannot be made in the web
+        interface, which validates it; it CAN be made over the XML API, which does not. So it
+        is a vendor validation gap, it should be rare, and WE CANNOT KNOW HOW THE DEVICE
+        BEHAVES IN A STATE ITS OWN UI FORBIDS - which is the reason to report it rather than
+        the reason to hide it.
+      * THE KEY IS ABSENT -> read against the range, because that is what the dialog renders.
+        Below a tls1-3 floor the box renders TICKED, so absent means selected (True).  At
+        tls1-3..tls1-3 it renders unticked and greyed, so absent means NOT selected (False).
+
+    That second case is what stops this firing on every TLS 1.3 profile in the estate,
+    including the vendor's own `TLSv1.3_Default`: none of them writes an algorithm key, and a
+    blanket "absent means enabled" would report each one for a box the UI shows as off. It also
+    does not matter whether PAN-OS writes `no` or writes nothing for a greyed box - a written
+    `no` is False by the first case and an absence is False by the second.
+
+    NEVER None: the column is a BooleanField and every path above returns a bool.
     """
     raw = protocol_settings.get("auth-algo-sha1", ABSENT)
-    if raw is ABSENT:
-        return bool(ALGORITHM_IMPLICIT.value)
-    value, _, _ = parse_yes_no_field(raw, implicit=ALGORITHM_IMPLICIT)
-    return bool(value)
+    if raw is not ABSENT:
+        value, _, _ = parse_yes_no_field(raw, implicit=ALGORITHM_IMPLICIT)
+        return bool(value)
+    return "auth-algo-sha1" not in _excluded_by_range(min_rank, max_rank)
 
 
 def _algorithms(protocol_settings: dict[str, Any], min_version: str,
@@ -775,8 +787,10 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
             "protocol_algorithms": effective,
             "explicit_algorithms": explicit,
             # Promoted to a column so a control can rest on it. Reads `settings` - the
-            # CONFIGURATION - rather than `effective`, the rendered set: see `_permits_sha1`.
-            "allows_sha1": _permits_sha1(settings),
+            # CONFIGURATION - rather than `effective`, the rendered set, and takes the range
+            # only to resolve an ABSENT key: see `_permits_sha1`.
+            "allows_sha1": _permits_sha1(
+                settings, min_version_rank(min_version), min_version_rank(max_version)),
         }, [
             ("certificate_name", cert_rk, cert_rv),
             ("min_version", min_rk, min_rv),
