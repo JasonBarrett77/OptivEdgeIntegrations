@@ -35,8 +35,10 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_merged_config,
     collect_predefined_certificates,
     collect_predefined_security_profiles,
+    collect_show_high_availability_all,
     collect_show_logging_status,
     collect_show_masterkey_properties,
+    collect_show_panorama_status,
     collect_predefined_log_forwarding_profiles,
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
@@ -72,8 +74,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_log_settings,
     normalize_appliance_login_banner,
     normalize_appliance_management_tls,
+    normalize_appliance_high_availability,
     normalize_appliance_management_ssh,
     normalize_appliance_master_key,
+    normalize_appliance_panorama_registration,
     normalize_appliance_services_settings,
     normalize_appliance_wildfire_settings,
     normalize_appliance_device_services,
@@ -337,6 +341,18 @@ class PANOSInScopeConfigCollection:
     logging_status_collections: list[PANOSApplianceCollectedSnapshot] = field(
         default_factory=list)
     logging_status_failures: list[PANOSApplianceCollectionFailure] = field(
+        default_factory=list)
+    #: `show high-availability all` and `show panorama-status`, the two operational reads
+    #: PAN-HAP-001 to 005 rest on. Their own lists for the same reason the logging one has its
+    #: own: a failure here leaves a verdict holding its firing default - which a reader has to
+    #: be able to tell from a verdict that was computed - and not a column wrong.
+    high_availability_collections: list[PANOSApplianceCollectedSnapshot] = field(
+        default_factory=list)
+    high_availability_failures: list[PANOSApplianceCollectionFailure] = field(
+        default_factory=list)
+    panorama_status_collections: list[PANOSApplianceCollectedSnapshot] = field(
+        default_factory=list)
+    panorama_status_failures: list[PANOSApplianceCollectionFailure] = field(
         default_factory=list)
     management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = field(
         default_factory=list)
@@ -632,6 +648,52 @@ def collect_appliance_logging_status(
     )
 
 
+def collect_appliance_high_availability(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> PANOSPersistedCollection:
+    """PAN-HAP-001 to 004's runtime source. No configuration read can answer what it answers.
+
+    One op call per appliance. Until this snapshot exists,
+    `HighAvailabilityConfig.ha_runtime_state_collected` is false on every row and the four
+    verdicts that rest on it hold their firing defaults - which is the deliberate direction, and
+    is NOT the same as a finding: that column is what tells the two apart.
+    """
+    return collect_appliance_and_persist(
+        appliance,
+        collector=collect_show_high_availability_all,
+        credentials_provider=credentials_provider,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+
+
+def collect_appliance_panorama_status(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> PANOSPersistedCollection:
+    """PAN-HAP-005's only reading of whether the registration WORKS.
+
+    One op call per appliance. Without it
+    `PanoramaRegistration.panorama_address_in_force_unverified` stays true, which is accurate
+    rather than merely safe: three different nodes can hold a Panorama address and nothing in
+    the configuration says which one is live.
+    """
+    return collect_appliance_and_persist(
+        appliance,
+        collector=collect_show_panorama_status,
+        credentials_provider=credentials_provider,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+
+
 def collect_appliance_predefined_catalogs(
     appliance: Appliance,
     *,
@@ -765,7 +827,11 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # SslTlsServiceProfile rows that normalizer writes. Run first, it would find last run's
     # rows - or none - and record a binding against a profile that no longer matches.
     ("management TLS", normalize_appliance_management_tls),
-    ("management SSH", normalize_appliance_management_ssh),
+    ("management SSH", normalize_appliance_management_ssh),    # Both read the same merged device entry as their neighbours and depend on nothing else in
+    # this tuple. Each additionally reads its own operational snapshot where one exists; a
+    # missing one is a reading in its own right rather than an ordering problem.
+    ("high availability", normalize_appliance_high_availability),
+    ("Panorama registration", normalize_appliance_panorama_registration),
 )
 
 
@@ -1037,6 +1103,10 @@ def collect_in_scope_configuration_snapshots(
     predefined_lists_failures: list[PANOSApplianceCollectionFailure] = []
     logging_status_collections: list[PANOSApplianceCollectedSnapshot] = []
     logging_status_failures: list[PANOSApplianceCollectionFailure] = []
+    high_availability_collections: list[PANOSApplianceCollectedSnapshot] = []
+    high_availability_failures: list[PANOSApplianceCollectionFailure] = []
+    panorama_status_collections: list[PANOSApplianceCollectedSnapshot] = []
+    panorama_status_failures: list[PANOSApplianceCollectionFailure] = []
     shared_policy_collections: list[PANOSApplianceGroupCollectedSnapshot] = []
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure] = []
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot] = []
@@ -1115,6 +1185,44 @@ def collect_in_scope_configuration_snapshots(
             PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
         )
 
+    # THE TWO HA/PANORAMA OPERATIONAL READS, each with its own loop and its own failure list,
+    # on the same grounds as the logging one above: a failure leaves a verdict at its firing
+    # default rather than leaving a configuration column wrong, and the two outcomes are
+    # different things for a reader to act on.
+    for appliance in appliances:
+        try:
+            persisted = collect_appliance_high_availability(
+                appliance,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            high_availability_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=str(exc))
+            )
+            continue
+        high_availability_collections.append(
+            PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
+        )
+
+    for appliance in appliances:
+        try:
+            persisted = collect_appliance_panorama_status(
+                appliance,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            panorama_status_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=str(exc))
+            )
+            continue
+        panorama_status_collections.append(
+            PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
+        )
+
     for appliance_group in appliance_groups:
         try:
             persisted = collect_appliance_group_pushed_shared_policy(
@@ -1173,6 +1281,10 @@ def collect_in_scope_configuration_snapshots(
         predefined_lists_failures=predefined_lists_failures,
         logging_status_collections=logging_status_collections,
         logging_status_failures=logging_status_failures,
+        high_availability_collections=high_availability_collections,
+        high_availability_failures=high_availability_failures,
+        panorama_status_collections=panorama_status_collections,
+        panorama_status_failures=panorama_status_failures,
         shared_policy_collections=shared_policy_collections,
         shared_policy_failures=shared_policy_failures,
         vsys_policy_collections=vsys_policy_collections,

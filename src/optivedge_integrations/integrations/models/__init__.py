@@ -47,6 +47,8 @@ from .authentication_settings import AuthenticationSettings
 from .login_banner import LoginBanner
 from .management_tls import ManagementTlsBinding
 from .management_ssh import ManagementSshSettings
+from .high_availability import HighAvailabilityConfig
+from .panorama_registration import PanoramaRegistration
 from .master_key import MasterKey
 from .wildfire_settings import WildfireSettings
 from .services_settings import LoggingSettings, UpdateServerSettings
@@ -139,7 +141,9 @@ __all__ = [
     "LoggingSettings",
     "LoginBanner",
     "ManagementTlsBinding",
+    "HighAvailabilityConfig",
     "ManagementSshSettings",
+    "PanoramaRegistration",
     "MasterKey",
     "NtpSettings",
     "SnmpSettings",

@@ -23,7 +23,7 @@ from optivedge_integrations.integrations.models import (
     Appliance, FieldProvenance, ManagementService, NtpSettings, SnmpSettings, SystemIdentity)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     Implicit,
-    ABSENT, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, entry_provenance, parse_text_field, parse_yes_no_field, scalar_value)
+    ABSENT, choice_child, classify_prov_type, provenance_raw_key, provenance_value, ensure_list, entry_provenance, parse_text_field, parse_yes_no_field, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot, latest_merged_snapshot)
 
@@ -37,25 +37,10 @@ DEFAULT_COMMUNITY_STRINGS = frozenset({"public", "private"})
 AUTH_TYPES = ("symmetric-key", "autokey", "none")
 
 
-def _choice_child(node: Any, valid: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
-    """(which child is present, its content) for a node PAN-OS models as a choice.
-
-    PAN-OS spells several of these settings as WHICH CHILD EXISTS rather than as a value -
-    `type` is `{"static": None}` or `{"dhcp-client": {...}}`, and `authentication-type` is
-    `{"none": None}`. Returns ("", {}) when the node is absent or holds none of them, which the
-    caller must resolve to a default it has measured rather than guessing here.
-
-    Two private copies of this idea already exist - `security_profiles._choice` and
-    `management_ssh._host_key` - and they are left alone: both are load-bearing for shipped
-    controls and neither is broken. This one is written against the same shape.
-    """
-    if not isinstance(node, dict):
-        return "", {}
-    for name in valid:
-        if name in node:
-            child = node[name]
-            return name, child if isinstance(child, dict) else {}
-    return "", {}
+#: MOVED TO `common.py::choice_child` on 2026-10-29, when a fourth caller arrived. Kept as a
+#: module-level alias rather than renamed at the two call sites below so that the move is one
+#: line to read and nothing in this module's behaviour changed with it.
+_choice_child = choice_child
 
 
 def _server(node: Any) -> tuple[str, str, str, Any, str | None]:

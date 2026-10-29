@@ -11863,3 +11863,635 @@ class DefaultRuleSourcePanoramaFlagTests(TestCase):
         self.assertEqual(source, SecurityRule.SOURCE_DEFAULT)
         self.assertIs(rule, merged)
 
+
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    HighAvailabilityConfig as _HighAvailabilityConfig,
+    PanoramaRegistration as _PanoramaRegistration)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.high_availability import (  # noqa: E402
+    normalize_high_availability as _normalize_ha)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.panorama_registration import (  # noqa: E402
+    normalize_panorama_registration as _normalize_pano,
+    parse_panorama_status as _parse_panorama_status)
+
+
+class _HaPanoramaBase(TestCase):
+    """Shared fixture for the two `ha-panorama` models.
+
+    EVERY PAYLOAD BELOW IS A LAB SHAPE, read off the four appliances on 2026-10-29 through
+    Panorama's `target=` proxy, not a shape invented to make a column pass. Where a test needs a
+    state the lab is not in - a formed pair, a populated link group, a hardened channel - it says
+    so and builds it, because the only HA-enabled appliances in the estate are the two members of
+    one live pair and writing to them to manufacture a band is not this layer's business.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.hap")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-hap",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-HAP", hostname="fw-hap", software_version="11.1.13-h3")
+
+    def _merged(self, deviceconfig):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [
+                {"@name": "localhost.localdomain", "deviceconfig": deviceconfig}]}}})
+
+    def _runtime(self, source_type, result):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type=source_type, collected_at=timezone.now(),
+            payload={"response": {"@status": "success", "result": result}})
+
+    def _provenance(self, model, row):
+        return {r.field_name: r for r in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(model), object_id=row.pk)}
+
+    # --- the lab's own shapes -------------------------------------------------------------
+    #: fw-core-tpa-a's committed `deviceconfig/high-availability`, verbatim from
+    #: `show config merged` on 2026-10-29. NOTE `ha1-backup`: present with a NULL value, and
+    #: `port`, `ip-address` and `netmask` all absent beneath it.
+    LAB_HA_CONFIG = {
+        "interface": {
+            "ha1": {"ip-address": "172.30.19.101", "netmask": "255.255.255.0"},
+            "ha1-backup": None, "ha2": None, "ha2-backup": None, "ha3": None,
+        },
+        "group": {
+            "group-id": "44", "peer-ip": "172.30.19.102",
+            "state-synchronization": {"enabled": "no"},
+            "configuration-synchronization": {"enabled": "yes"},
+            "mode": {"active-passive": None},
+        },
+        "enabled": "yes",
+    }
+    #: The same appliance's `show high-availability all`, trimmed to the keys this layer reads.
+    LAB_HA_RUNTIME = {
+        "enabled": "yes",
+        "group": {
+            "mode": "Active-Passive",
+            "local-info": {
+                "state": "active", "ha1-encrypt-imported": "no", "state-sync": "User-disabled",
+                "ha1-ipaddr": "172.30.19.101/24", "ha1-port": "ha1-a",
+                "ha1-encrypt-enable": "no",
+            },
+            "peer-info": {"conn-ha1": {"conn-status": "up"}, "conn-status": "up",
+                          "state": "passive"},
+            "link-monitoring": {"enabled": "yes", "failure-condition": "any", "groups": None},
+            "path-monitoring": {"enabled": "yes", "failure-condition": "any",
+                                "virtual-wire": None, "vlan": None, "virtual-router": None},
+            "running-sync": "synchronized", "running-sync-enabled": "yes",
+        },
+    }
+    #: What a PA-VM with no HA node answers to the same command. The only instrument in this
+    #: estate that can tell "HA is off" from "nobody collected it".
+    LAB_HA_RUNTIME_OFF = {"enabled": "no",
+                          "group": {"local-info": {"ha1-encrypt-imported": "no"}}}
+    LAB_PANORAMA_STATUS_TWO_SLOTS = (
+        "Panorama Server 1 : 20.185.152.225\n"
+        "    Connected     : yes\n"
+        "    HA state      : Unknown\n"
+        "Panorama Server 2 : 192.0.2.1\n"
+        "    Connected     : no\n"
+        "    HA state      : disconnected")
+    LAB_PANORAMA_STATUS_ONE_SLOT = (
+        "Panorama Server 1 : 20.185.152.225\n"
+        "    Connected     : yes\n"
+        "    HA state      : Unknown")
+
+
+class HighAvailabilityNormalizationTests(_HaPanoramaBase):
+    """PAN-HAP-001 to 004's subject: one appliance's HA relationship, configured and live."""
+
+    def _normalize(self, ha=None, runtime=None):
+        self._merged({"high-availability": ha} if ha is not None else {})
+        if runtime is not None:
+            self._runtime("show_high_availability_all", runtime)
+        _normalize_ha(self.appliance)
+        return _HighAvailabilityConfig.objects.get(appliance=self.appliance)
+
+    def test_the_lab_pair_reads_as_configured_and_not_as_exchanging_state(self):
+        """THE MEASUREMENT THIS DOMAIN TURNS ON. Both members hold `enabled: yes` and
+        `configuration-synchronization/enabled: yes` while the runtime read answers
+        `state-sync: User-disabled`, so a verdict over the configuration switches alone passes a
+        pair that is not exchanging state. `no_live_redundant_peer` has to fire here.
+        """
+        row = self._normalize(self.LAB_HA_CONFIG, self.LAB_HA_RUNTIME)
+
+        self.assertTrue(row.ha_enabled)
+        self.assertTrue(row.config_sync_enabled)
+        self.assertFalse(row.state_sync_enabled)
+        self.assertEqual(row.ha_mode, "active-passive")
+        self.assertTrue(row.ha_config_collected)
+        self.assertTrue(row.ha_runtime_state_collected)
+        self.assertTrue(row.no_live_redundant_peer)
+
+    def test_the_two_monitoring_enables_are_true_from_absent_keys_and_the_verdict_still_fires(self):
+        """The reading most likely to be got backwards. There is no `group/monitoring` node at
+        all on either PA-5220, and the device reports BOTH enables as `yes` with `groups: null`.
+        So the enables reassure and `ha_monitors_nothing` is what PAN-HAP-004 clauses on.
+        """
+        row = self._normalize(self.LAB_HA_CONFIG, self.LAB_HA_RUNTIME)
+        prov = self._provenance(_HighAvailabilityConfig, row)
+
+        self.assertTrue(row.link_monitoring_enabled)
+        self.assertTrue(row.path_monitoring_enabled)
+        self.assertEqual(prov["link_monitoring_enabled"].provenance_type, "pan_os_default")
+        self.assertEqual(prov["path_monitoring_enabled"].provenance_type, "pan_os_default")
+        self.assertEqual(row.monitored_link_group_count, 0)
+        self.assertTrue(row.ha_monitors_nothing)
+        self.assertEqual(row.ha_monitoring_state,
+                         _HighAvailabilityConfig.MONITORING_ENABLED_NO_GROUP)
+
+    def test_a_link_group_carrying_no_interface_still_monitors_nothing(self):
+        """Stage 4 wrote `<entry name='...'/>` at the container and `validate full` job 536
+        answered "Configuration is valid", so the state the vendor warns about twice on this
+        control's own screen passes commit-time validation. A COUNT cannot report it: the count
+        is one and nothing is watched.
+        """
+        ha = {**self.LAB_HA_CONFIG, "group": {
+            **self.LAB_HA_CONFIG["group"],
+            "monitoring": {"link-monitoring": {"link-group": {"entry": [{"@name": "lg-empty"}]}}}}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertEqual(row.monitored_link_group_count, 1)
+        self.assertEqual(row.monitored_link_groups, ["lg-empty"])
+        self.assertTrue(row.ha_monitors_nothing)
+        self.assertEqual(row.ha_monitoring_state,
+                         _HighAvailabilityConfig.MONITORING_ENABLED_NO_GROUP)
+
+    def test_a_link_group_with_an_interface_monitors_something(self):
+        ha = {**self.LAB_HA_CONFIG, "group": {
+            **self.LAB_HA_CONFIG["group"],
+            "monitoring": {"link-monitoring": {"link-group": {"entry": [
+                {"@name": "lg", "interface": {"member": ["ethernet1/1"]}}]}}}}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertFalse(row.ha_monitors_nothing)
+        self.assertEqual(row.ha_monitoring_state, _HighAvailabilityConfig.MONITORING_LINK_ONLY)
+
+    def test_a_populated_path_group_beside_a_populated_link_group_is_the_top_band(self):
+        ha = {**self.LAB_HA_CONFIG, "group": {
+            **self.LAB_HA_CONFIG["group"],
+            "monitoring": {
+                "link-monitoring": {"link-group": {"entry": [
+                    {"@name": "lg", "interface": {"member": "ethernet1/1"}}]}},
+                "path-monitoring": {"virtual-router": {"entry": [
+                    {"@name": "vr", "destination-ip": {"member": ["10.0.0.1"]}}]}}}}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertFalse(row.ha_monitors_nothing)
+        self.assertEqual(row.ha_monitoring_state,
+                         _HighAvailabilityConfig.MONITORING_LINK_AND_PATH)
+
+    def test_both_enables_off_is_its_own_band(self):
+        ha = {**self.LAB_HA_CONFIG, "group": {
+            **self.LAB_HA_CONFIG["group"],
+            "monitoring": {"link-monitoring": {"enabled": "no"},
+                           "path-monitoring": {"enabled": "no"}}}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertFalse(row.link_monitoring_enabled)
+        self.assertFalse(row.path_monitoring_enabled)
+        self.assertEqual(row.ha_monitoring_state,
+                         _HighAvailabilityConfig.MONITORING_NEITHER_ENABLED)
+
+    def test_the_present_and_empty_backup_container_is_a_half_built_second_path(self):
+        """`interface/ha1-backup` answers as a key with a NULL value on both PA-5220s while
+        `port`, `ip-address` and `netmask` are all absent beneath it. `if node:` there reports a
+        backup control link that does not exist; the container's KEY is the evidence, and it is
+        what puts this estate in stage 3's second rank.
+        """
+        row = self._normalize(self.LAB_HA_CONFIG, self.LAB_HA_RUNTIME)
+
+        self.assertEqual(row.ha1_backup_port, "")
+        self.assertEqual(row.peer_ip_backup, "")
+        self.assertTrue(row.no_independent_second_keepalive_path)
+        self.assertEqual(row.second_keepalive_path_state,
+                         _HighAvailabilityConfig.KEEPALIVE_BACKUP_WITHOUT_PEER)
+
+    def test_no_backup_container_at_all_is_the_bottom_band(self):
+        ha = {**self.LAB_HA_CONFIG,
+              "interface": {"ha1": {"ip-address": "172.30.19.101", "netmask": "255.255.255.0"}}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertEqual(row.second_keepalive_path_state,
+                         _HighAvailabilityConfig.KEEPALIVE_NEITHER)
+
+    def test_a_complete_independent_backup_link_satisfies_the_control(self):
+        ha = {**self.LAB_HA_CONFIG,
+              "interface": {"ha1": {"port": "ha1-a", "ip-address": "172.30.19.101",
+                                    "netmask": "255.255.255.0"},
+                            "ha1-backup": {"port": "ha1-b", "ip-address": "172.30.20.101",
+                                           "netmask": "255.255.255.0"}},
+              "group": {**self.LAB_HA_CONFIG["group"], "peer-ip-backup": "172.30.20.102"}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertEqual(row.ha1_backup_port, "ha1-b")
+        self.assertEqual(row.peer_ip_backup, "172.30.20.102")
+        self.assertFalse(row.no_independent_second_keepalive_path)
+        self.assertEqual(row.second_keepalive_path_state,
+                         _HighAvailabilityConfig.KEEPALIVE_ONE_COMPLETE)
+
+    def test_a_backup_link_on_the_primary_subnet_is_not_independent(self):
+        """The vendor's own independence test, and the reason this is a normalization-time
+        verdict rather than a query: it compares the backup link's subnet AGAINST the primary's,
+        which is a field-to-field comparison the search layer cannot express at all.
+        """
+        ha = {**self.LAB_HA_CONFIG,
+              "interface": {"ha1": {"port": "ha1-a", "ip-address": "172.30.19.101",
+                                    "netmask": "255.255.255.0"},
+                            "ha1-backup": {"port": "ha1-b", "ip-address": "172.30.19.201",
+                                           "netmask": "255.255.255.0"}},
+              "group": {**self.LAB_HA_CONFIG["group"], "peer-ip-backup": "172.30.19.202"}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertTrue(row.no_independent_second_keepalive_path)
+
+    def test_heartbeat_backup_over_the_primarys_own_management_port_is_not_a_second_path(self):
+        """The branch that REVERSES MEANING. "Use the management port as a backup path" is a
+        second route only while the primary control link is not already on it; where it is, the
+        switch buys one path described twice.
+        """
+        ha = {**self.LAB_HA_CONFIG,
+              "interface": {"ha1": {"port": "management", "ip-address": "192.168.250.2",
+                                    "netmask": "255.255.255.0"}},
+              "group": {**self.LAB_HA_CONFIG["group"],
+                        "election-option": {"heartbeat-backup": "yes"}}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertTrue(row.heartbeat_backup_enabled)
+        self.assertTrue(row.no_independent_second_keepalive_path)
+        self.assertEqual(row.second_keepalive_path_state,
+                         _HighAvailabilityConfig.KEEPALIVE_NEITHER)
+
+    def test_heartbeat_backup_beside_a_dedicated_control_port_is_a_second_path(self):
+        ha = {**self.LAB_HA_CONFIG,
+              "group": {**self.LAB_HA_CONFIG["group"],
+                        "election-option": {"heartbeat-backup": "yes"}}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertFalse(row.no_independent_second_keepalive_path)
+        self.assertEqual(row.second_keepalive_path_state,
+                         _HighAvailabilityConfig.KEEPALIVE_ONE_COMPLETE)
+
+    def test_the_control_link_is_unencrypted_and_the_band_names_the_port_the_runtime_read_gave(self):
+        """`interface/ha1/port` is ABSENT from the configuration on both PA-5220s while the
+        operational read answers `ha1-port: ha1-a`. The band uses the runtime value where the
+        configuration has none - stage 3 places `unencrypted-dedicated-ha-port` and
+        `unencrypted-port-unknown` at the same baseline severity, so this is accuracy at no
+        severity cost.
+        """
+        row = self._normalize(self.LAB_HA_CONFIG, self.LAB_HA_RUNTIME)
+
+        self.assertFalse(row.ha1_encryption_key_imported)
+        self.assertTrue(row.ha1_control_link_not_encrypted)
+        self.assertEqual(row.ha1_control_link_exposure,
+                         _HighAvailabilityConfig.EXPOSURE_DEDICATED_HA_PORT)
+        # Read off the runtime reply and carrying no provenance row, deliberately.
+        self.assertNotIn("ha1_encryption_key_imported",
+                         self._provenance(_HighAvailabilityConfig, row))
+
+    def test_the_encryption_switch_alone_does_not_make_the_link_encrypted(self):
+        """`validate full` job 535 refused an HA1 encryption commit with "requires an import of
+        the high-availability-key", so the switch can read `yes` on a link that is not
+        encrypted. All three have to hold.
+        """
+        ha = {**self.LAB_HA_CONFIG,
+              "interface": {**self.LAB_HA_CONFIG["interface"],
+                            "ha1": {**self.LAB_HA_CONFIG["interface"]["ha1"],
+                                    "encryption": {"enabled": "yes"}}}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+
+        self.assertTrue(row.ha1_encryption_enabled)
+        self.assertTrue(row.ha1_control_link_not_encrypted)
+
+    def test_all_three_encryption_conditions_make_the_link_encrypted(self):
+        ha = {**self.LAB_HA_CONFIG,
+              "interface": {**self.LAB_HA_CONFIG["interface"],
+                            "ha1": {**self.LAB_HA_CONFIG["interface"]["ha1"],
+                                    "encryption": {"enabled": "yes"}}}}
+        runtime = {"enabled": "yes", "group": {**self.LAB_HA_RUNTIME["group"], "local-info": {
+            **self.LAB_HA_RUNTIME["group"]["local-info"],
+            "ha1-encrypt-imported": "yes", "ha1-encrypt-enable": "yes"}}}
+        row = self._normalize(ha, runtime)
+
+        self.assertFalse(row.ha1_control_link_not_encrypted)
+        self.assertEqual(row.ha1_control_link_exposure,
+                         _HighAvailabilityConfig.EXPOSURE_ENCRYPTED)
+
+    def test_a_formed_state_exchanging_pair_has_a_live_redundant_peer(self):
+        """Not a lab state: both members hold `state-synchronization/enabled: no` and the lab's
+        pair is not exchanging state. Built here so the verdict is tested in both directions.
+        """
+        ha = {**self.LAB_HA_CONFIG,
+              "group": {**self.LAB_HA_CONFIG["group"],
+                        "state-synchronization": {"enabled": "yes"}}}
+        runtime = {"enabled": "yes", "group": {**self.LAB_HA_RUNTIME["group"], "local-info": {
+            **self.LAB_HA_RUNTIME["group"]["local-info"], "state-sync": "synchronized"}}}
+        row = self._normalize(ha, runtime)
+
+        self.assertFalse(row.no_live_redundant_peer)
+
+    def test_a_suspended_member_has_no_live_redundant_peer(self):
+        ha = {**self.LAB_HA_CONFIG,
+              "group": {**self.LAB_HA_CONFIG["group"],
+                        "state-synchronization": {"enabled": "yes"}}}
+        runtime = {"enabled": "yes", "group": {**self.LAB_HA_RUNTIME["group"], "local-info": {
+            **self.LAB_HA_RUNTIME["group"]["local-info"],
+            "state": "suspended", "state-sync": "synchronized"}}}
+        row = self._normalize(ha, runtime)
+
+        self.assertTrue(row.no_live_redundant_peer)
+
+    def test_an_appliance_with_no_ha_node_reads_as_not_in_a_relationship_and_was_collected(self):
+        """Three different shapes for one absence, measured on pan-fw-201: `action=get` returns
+        None, `action=show` RAISES `No such node`, and the operational read answers a VALUE -
+        `enabled: no`. The merged config simply has no `high-availability` key, which is a
+        READING and not a failed collection: `ha_config_collected` stays TRUE.
+        """
+        row = self._normalize(None, self.LAB_HA_RUNTIME_OFF)
+        prov = self._provenance(_HighAvailabilityConfig, row)
+
+        self.assertTrue(row.ha_config_collected)
+        self.assertFalse(row.ha_enabled)
+        self.assertEqual(prov["ha_enabled"].provenance_type, "pan_os_default")
+        self.assertEqual(prov["ha_enabled"].raw_value, "no")
+        self.assertEqual(row.ha_mode, "")
+        self.assertTrue(row.no_live_redundant_peer)
+
+    def test_with_no_runtime_snapshot_the_verdicts_hold_their_firing_defaults(self):
+        """The state of every estate until the collector runs. `ha_runtime_state_collected` is
+        what tells this apart from four findings, and the key-imported column is NULL with a
+        `not_configured` row rather than False - because `ha1-encrypt-imported` is never absent
+        from the reply, so a False here would claim a reading nobody took.
+        """
+        row = self._normalize(self.LAB_HA_CONFIG)
+        prov = self._provenance(_HighAvailabilityConfig, row)
+
+        self.assertFalse(row.ha_runtime_state_collected)
+        self.assertIsNone(row.ha1_encryption_key_imported)
+        # NO PROVENANCE ROW, EITHER WAY ROUND. The first readback of this stage wrote one, and on
+        # all four appliances it classified as `local` - which asserts an administrator
+        # configured a key with no configuration node anywhere. The provenance vocabulary has no
+        # member for a runtime reply's always-present key, so the column is declared in
+        # `DERIVED_FIELDS` with the reason, which is the answer `LoggingSettings` already takes
+        # for its two runtime columns.
+        self.assertNotIn("ha1_encryption_key_imported", prov)
+        self.assertIn("ha1_encryption_key_imported",
+                      _HighAvailabilityConfig.DERIVED_FIELDS)
+        self.assertTrue(row.no_live_redundant_peer)
+        self.assertTrue(row.ha1_control_link_not_encrypted)
+        self.assertTrue(row.ha_monitors_nothing)
+        self.assertTrue(row.no_independent_second_keepalive_path)
+        # The config port is absent and there is no runtime read to fall back on.
+        self.assertEqual(row.ha1_control_link_exposure,
+                         _HighAvailabilityConfig.EXPOSURE_PORT_UNKNOWN)
+
+    def test_a_runtime_reply_of_an_unknown_shape_counts_as_not_collected(self):
+        """A reply shape nobody has seen is not evidence that the relationship is fine."""
+        self._merged({"high-availability": self.LAB_HA_CONFIG})
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_high_availability_all", collected_at=timezone.now(),
+            payload={"response": {"result": "an unparsed string"}})
+        _normalize_ha(self.appliance)
+        row = _HighAvailabilityConfig.objects.get(appliance=self.appliance)
+
+        self.assertFalse(row.ha_runtime_state_collected)
+        self.assertTrue(row.no_live_redundant_peer)
+
+    def test_the_five_unmeasured_switches_are_null_and_say_why(self):
+        """Each one is `not_assumed` for its own measured reason - no oracle, no payable
+        positive control, or a position a PA-VM's schema does not have. A stored guess on any of
+        them would decide a control on nothing.
+        """
+        ha = {"enabled": "yes", "interface": {}, "group": {}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+        prov = self._provenance(_HighAvailabilityConfig, row)
+
+        for field in ("cluster_participation_enabled", "config_sync_enabled",
+                      "state_sync_enabled", "ha1_encryption_enabled",
+                      "heartbeat_backup_enabled"):
+            with self.subTest(field):
+                self.assertIsNone(getattr(row, field))
+                self.assertEqual(prov[field].provenance_type, "not_configured")
+
+    def test_a_template_supplied_value_keeps_its_marker(self):
+        """So a finding on an HA setting can say which template to change. `@ptpl` names a
+        template OR a template STACK and this layer does not disambiguate them - the model layer
+        records that, and a remediation that says "in the template" may name the wrong container.
+        """
+        ha = {**self.LAB_HA_CONFIG,
+              "enabled": {"@ptpl": "ptpl_fw-core-tpa", "#text": "yes"}}
+        row = self._normalize(ha, self.LAB_HA_RUNTIME)
+        prov = self._provenance(_HighAvailabilityConfig, row)
+
+        self.assertTrue(row.ha_enabled)
+        self.assertEqual(prov["ha_enabled"].provenance_type, "template")
+        self.assertEqual(prov["ha_enabled"].raw_value, "ptpl_fw-core-tpa")
+
+    def test_normalizing_twice_replaces_the_row_and_its_provenance(self):
+        self._normalize(self.LAB_HA_CONFIG, self.LAB_HA_RUNTIME)
+        self._merged({})
+        _normalize_ha(self.appliance)
+
+        self.assertEqual(
+            _HighAvailabilityConfig.objects.filter(appliance=self.appliance).count(), 1)
+        row = _HighAvailabilityConfig.objects.get(appliance=self.appliance)
+        self.assertFalse(row.ha_enabled)
+        self.assertEqual(FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_HighAvailabilityConfig),
+            object_id=row.pk, field_name="ha_enabled").count(), 1)
+
+    def test_no_merged_snapshot_writes_nothing(self):
+        """Rather than replacing a real reading with a row of defaults."""
+        self.assertEqual(_normalize_ha(self.appliance), {"high_availability_configs": 0})
+        self.assertFalse(_HighAvailabilityConfig.objects.filter(
+            appliance=self.appliance).exists())
+
+
+class PanoramaRegistrationNormalizationTests(_HaPanoramaBase):
+    """PAN-HAP-005's subject: the firewall's half of the management channel."""
+
+    def _normalize(self, local_panorama=None, secure=None, initcfg=None, status=None):
+        management = {}
+        if secure is not None:
+            management["secure-conn-client"] = secure
+        if initcfg is not None:
+            management["initcfg"] = initcfg
+        deviceconfig = {"setting": {"management": management}}
+        if local_panorama is not None:
+            deviceconfig["system"] = {"panorama": {"local-panorama": local_panorama}}
+        self._merged(deviceconfig)
+        if status is not None:
+            self._runtime("show_panorama_status", status)
+        _normalize_pano(self.appliance)
+        return _PanoramaRegistration.objects.get(appliance=self.appliance)
+
+    def test_an_absent_second_slot_is_stored_as_blank_so_the_shipped_clause_can_match_it(self):
+        """THE DECISION THIS TEST EXISTS FOR. Stage 5 declared this a materialised NULL on the
+        ground that PAN-HAP-005[0]'s `is empty` clause matches a null. Measured 2026-10-29: every
+        per-model `build_text_compiler` in OptivEdgeAssessments compiles `is_empty` to
+        `filter(field="")`, so a NULL matches nothing and the control would never fire on the
+        estate it exists to report. The MEANING stage 5 declared is preserved - nothing is bound,
+        and that is the finding side - and the provenance row records it as the measured vendor
+        default rather than as a field nobody read.
+        """
+        row = self._normalize({"panorama-server": "20.185.152.225"},
+                              status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+        prov = self._provenance(_PanoramaRegistration, row)
+
+        self.assertEqual(row.panorama_server_secondary, "")
+        self.assertIsNotNone(row.panorama_server_secondary)
+        self.assertEqual(prov["panorama_server_secondary"].provenance_type, "pan_os_default")
+        # The clause the control is written with, run as the consumer compiles it.
+        self.assertTrue(_PanoramaRegistration.objects.filter(
+            pk=row.pk, panorama_server_secondary="").exists())
+
+    def test_a_named_second_slot_is_not_empty(self):
+        row = self._normalize(
+            {"panorama-server": "20.185.152.225", "panorama-server-2": "192.0.2.1"},
+            status=self.LAB_PANORAMA_STATUS_TWO_SLOTS)
+
+        self.assertEqual(row.panorama_server_secondary, "192.0.2.1")
+        self.assertFalse(_PanoramaRegistration.objects.filter(
+            pk=row.pk, panorama_server_secondary="").exists())
+
+    def test_the_applicability_predicate_applies_until_somebody_says_otherwise(self):
+        """It cannot be computed from a firewall at all: the station's own HA configuration is
+        out of scope, so no collector exists and none may. TRUE is the APPLYING side - a false
+        would suppress the control on every firewall, which is the reassuring failure an
+        applicability clause makes look careful.
+        """
+        row = self._normalize({"panorama-server": "20.185.152.225"},
+                              status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+
+        self.assertTrue(row.management_estate_is_a_pair)
+
+    def test_a_bound_certificate_with_nothing_switched_on_is_not_hardened(self):
+        """pan-fw-111's committed state, verbatim: the certificate is bound and
+        `enable-secure-panorama-communication` and its four siblings are all absent, so the
+        management conversation runs on the predefined certificate pair the appliance shipped
+        with and the binding configures nothing the device presents.
+        """
+        row = self._normalize(
+            {"panorama-server": "20.185.152.225"},
+            secure={"certificate-type": {"local": {"certificate": "pan-fw-111"}}},
+            status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+
+        self.assertEqual(row.client_certificate_type, "local")
+        self.assertEqual(row.client_certificate_name, "pan-fw-111")
+        self.assertIsNone(row.secure_panorama_communication_enabled)
+        self.assertIsNone(row.check_server_identity_enabled)
+        self.assertTrue(row.management_channel_not_hardened)
+
+    def test_the_explicit_none_branch_reads_as_a_choice_node_and_not_as_text(self):
+        """pan-fw-201's committed state, and it survived this morning's power cycle: the running
+        view answers `{"secure-conn-client": {"certificate-type": {"none": null}}}`, so a reader
+        of a text value gets nothing and the normalizer has to read WHICH CHILD is present.
+        `none` is a settable branch AND the documented default, so this and an absent key are two
+        stored states with one meaning.
+        """
+        row = self._normalize({"panorama-server": "20.185.152.225"},
+                              secure={"certificate-type": {"none": None}},
+                              status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+
+        self.assertEqual(row.client_certificate_type, "none")
+        self.assertEqual(row.client_certificate_name, "")
+        self.assertTrue(row.management_channel_not_hardened)
+
+    def test_an_absent_secure_conn_client_node_reads_the_same_as_the_none_branch(self):
+        row = self._normalize({"panorama-server": "20.185.152.225"},
+                              status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+        prov = self._provenance(_PanoramaRegistration, row)
+
+        self.assertEqual(row.client_certificate_type, "")
+        self.assertEqual(prov["client_certificate_type"].provenance_type, "not_configured")
+        self.assertTrue(row.management_channel_not_hardened)
+
+    def test_all_three_firewall_side_conditions_harden_the_channel(self):
+        """Not a lab state. And even this does NOT make the channel authenticated: the station
+        may still accept the shipped certificate from anybody, which is `secure-conn-server` on
+        Panorama and on no firewall.
+        """
+        row = self._normalize(
+            {"panorama-server": "20.185.152.225"},
+            secure={"certificate-type": {"local": {"certificate": "oep-tpl-mgmt"}},
+                    "enable-secure-panorama-communication": "yes",
+                    "check-server-identity": "yes"},
+            status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+
+        self.assertFalse(row.management_channel_not_hardened)
+
+    def test_a_switched_on_surface_with_no_certificate_bound_is_still_not_hardened(self):
+        row = self._normalize(
+            {"panorama-server": "20.185.152.225"},
+            secure={"enable-secure-panorama-communication": "yes",
+                    "check-server-identity": "yes"},
+            status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+
+        self.assertTrue(row.management_channel_not_hardened)
+
+    def test_the_status_reply_parses_into_slots_from_plain_text(self):
+        """Every other collected reply in this estate parses to a dict; this one arrives as
+        pre-formatted text, so a consumer splits lines and reads labels.
+        """
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_panorama_status", collected_at=timezone.now(),
+            payload={"response": {"result": self.LAB_PANORAMA_STATUS_TWO_SLOTS}})
+        slots = _parse_panorama_status(Snapshot.objects.filter(
+            appliance=self.appliance, source_type="show_panorama_status").first())
+
+        self.assertEqual(slots, [
+            {"address": "20.185.152.225", "connected": "yes", "ha_state": "Unknown"},
+            {"address": "192.0.2.1", "connected": "no", "ha_state": "disconnected"}])
+
+    def test_a_connected_primary_with_no_conflicting_bootstrap_address_is_verified(self):
+        row = self._normalize({"panorama-server": "20.185.152.225"},
+                              status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+
+        self.assertFalse(row.panorama_address_in_force_unverified)
+
+    def test_a_bootstrap_address_that_differs_from_the_live_setting_leaves_it_unverified(self):
+        """Stage 4 measured three shapes on four appliances - pan-fw-201 holds an
+        `initcfg/panorama-server` with the SAME address as the live setting, pan-fw-111 holds an
+        `initcfg` with none, and the two PA-5220s hold neither. A differing one is the
+        stale-bootstrap case a predicate over the configured slot alone cannot see.
+        """
+        row = self._normalize({"panorama-server": "20.185.152.225"},
+                              initcfg={"panorama-server": "198.51.100.7"},
+                              status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+
+        self.assertTrue(row.panorama_address_in_force_unverified)
+
+    def test_a_matching_bootstrap_address_does_not_leave_it_unverified(self):
+        row = self._normalize({"panorama-server": "20.185.152.225"},
+                              initcfg={"panorama-server": "20.185.152.225"},
+                              status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+
+        self.assertFalse(row.panorama_address_in_force_unverified)
+
+    def test_with_no_status_snapshot_the_registration_is_unverified(self):
+        row = self._normalize({"panorama-server": "20.185.152.225"})
+
+        self.assertTrue(row.panorama_address_in_force_unverified)
+
+    def test_an_unmanaged_firewall_names_no_management_appliance(self):
+        row = self._normalize(status=self.LAB_PANORAMA_STATUS_ONE_SLOT)
+        prov = self._provenance(_PanoramaRegistration, row)
+
+        self.assertTrue(row.management_config_collected)
+        self.assertEqual(row.panorama_server_primary, "")
+        self.assertEqual(prov["panorama_server_primary"].provenance_type, "not_configured")
+        self.assertTrue(row.panorama_address_in_force_unverified)
+
+    def test_no_merged_snapshot_writes_nothing(self):
+        self.assertEqual(_normalize_pano(self.appliance), {"panorama_registrations": 0})
+        self.assertFalse(_PanoramaRegistration.objects.filter(
+            appliance=self.appliance).exists())
