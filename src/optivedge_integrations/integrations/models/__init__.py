@@ -48,6 +48,10 @@ from .login_banner import LoginBanner
 from .management_tls import ManagementTlsBinding
 from .management_ssh import ManagementSshSettings
 from .master_key import MasterKey
+from .device_identification import (
+    DeviceIdentificationState,
+    RulebaseDeviceMatchVerdict,
+)
 from .wildfire_settings import WildfireSettings
 from .services_settings import LoggingSettings, UpdateServerSettings
 from .device_services import NtpSettings, SnmpSettings, SystemIdentity
@@ -140,7 +144,9 @@ __all__ = [
     "LoginBanner",
     "ManagementTlsBinding",
     "ManagementSshSettings",
+    "DeviceIdentificationState",
     "MasterKey",
+    "RulebaseDeviceMatchVerdict",
     "NtpSettings",
     "SnmpSettings",
     "SystemIdentity",

@@ -45,6 +45,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.manageme
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_tls import (
     normalize_management_tls,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.device_identification import (
+    normalize_device_identification_state,
+    normalize_rulebase_device_match,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.master_key import (
     normalize_master_key,
 )
@@ -135,6 +139,19 @@ def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> li
     return normalize_zones(enforcement_point)
 
 
+def normalize_enforcement_point_rulebase_device_match(
+    enforcement_point: EnforcementPoint,
+) -> dict:
+    """Whether this point's rule set names what a device IS. PAN-IOT-004.
+
+    MUST RUN AFTER `normalize_enforcement_point_security_rules`: the verdict is taken over the
+    `SecurityRule` rows that normalizer writes, so run first it would find last run's rules or
+    none at all - and a point with no rules reads as a point with no device dimension, which is
+    the firing side. The dependency is on the caller's order, not on an import.
+    """
+    return normalize_rulebase_device_match(enforcement_point)
+
+
 def normalize_appliance_management_tls(appliance: Appliance) -> dict:
     """The management interface's SSL/TLS binding. PAN-MGT-010 and PAN-CRT-006.
 
@@ -151,6 +168,16 @@ def normalize_appliance_management_ssh(appliance: Appliance) -> dict:
 def normalize_appliance_master_key(appliance: Appliance) -> dict:
     """The master key state. PAN-CRT-007."""
     return normalize_master_key(appliance)
+
+
+def normalize_appliance_device_identification(appliance: Appliance) -> dict:
+    """The appliance's device-identification service state. PAN-IOT-001 and PAN-IOT-003.
+
+    Three operational reads and one configuration leaf, all device-wide, so this produces a row
+    per HA NODE rather than per pair: a licence is per serial and the two peers can legitimately
+    differ. Depends on nothing else in the appliance tuple.
+    """
+    return normalize_device_identification_state(appliance)
 
 
 def normalize_appliance_services_settings(appliance: Appliance) -> dict:
@@ -280,7 +307,11 @@ __all__ = [
     "normalize_enforcement_point_addresses",
     "normalize_enforcement_point_dynamic_address_content",
     "normalize_enforcement_point_security_rules",
+    "normalize_appliance_device_identification",
+    "normalize_device_identification_state",
+    "normalize_enforcement_point_rulebase_device_match",
     "normalize_enforcement_point_zones",
+    "normalize_rulebase_device_match",
     "normalize_collected_response",
     "normalize_security_profiles",
     "normalize_security_rule_profile_coverage",

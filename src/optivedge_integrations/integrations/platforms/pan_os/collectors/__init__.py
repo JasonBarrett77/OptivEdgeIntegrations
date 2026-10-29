@@ -2,7 +2,15 @@
 
 from optivedge_integrations.integrations.platforms.pan_os.collectors.merged_config import (
     SHOW_MERGED_CONFIG_COMMAND,
+    SHOW_SYSTEM_INFO_COMMAND,
     collect_show_merged_config,
+)
+from optivedge_integrations.integrations.platforms.pan_os.collectors.device_identification import (
+    REQUEST_LICENSE_INFO_COMMAND,
+    SHOW_IOT_ICD_VERSION_COMMAND,
+    collect_request_license_info,
+    collect_show_iot_icd_version,
+    collect_show_system_info,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.managed_devices import (
     SHOW_MANAGED_DEVICES_COMMAND,
@@ -57,13 +65,16 @@ __all__ = [
     "NUM_RECORDS_PER_PAGE",
     "PANOSCollectedResponse",
     "PANOSOperationRequest",
+    "REQUEST_LICENSE_INFO_COMMAND",
     "SHOW_DNS_PROXY_FQDN_ALL_COMMAND",
+    "SHOW_IOT_ICD_VERSION_COMMAND",
     "SHOW_LOGGING_STATUS_COMMAND",
     "SHOW_MERGED_CONFIG_COMMAND",
     "SHOW_MANAGED_DEVICES_COMMAND",
     "SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND",
     "SHOW_PREDEFINED_URL_LISTS_COMMAND",
     "SHOW_PUSHED_SHARED_POLICY_COMMAND",
+    "SHOW_SYSTEM_INFO_COMMAND",
     "build_clear_target_vsys_command",
     "build_set_target_vsys_command",
     "build_show_external_list_command",
@@ -71,7 +82,10 @@ __all__ = [
     "clear_target_vsys",
     "collect_show_dns_proxy_fqdn_all",
     "collect_show_external_list",
+    "collect_request_license_info",
+    "collect_show_iot_icd_version",
     "collect_show_merged_config",
+    "collect_show_system_info",
     "collect_show_managed_devices",
     "collect_predefined_certificates",
     "collect_predefined_log_forwarding_profiles",
