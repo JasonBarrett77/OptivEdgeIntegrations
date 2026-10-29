@@ -211,6 +211,16 @@ def _text(node: Any) -> str:
     return scalar_value(node)[0]
 
 
+def _text_or_none(node: Any) -> str | None:
+    """The text, or None where the key is absent. For a column stage 5 declared `stores: null`.
+
+    `_text` cannot answer this: it reads an absent key and an empty element alike as `''`. On the
+    keys this is used for the device REFUSES an empty element, so the absent case is the only one
+    reachable and the two cannot be told apart from the store either way.
+    """
+    return _text(node) or None
+
+
 def _is_any_text(value: str) -> bool:
     # An absent threat-name or category is read as any. Unmeasured: every rule the device and
     # the predefined profiles store carries both explicitly.
@@ -1489,9 +1499,11 @@ def profile_wildfire_rules(entry: dict[str, Any]) -> list[tuple]:
     three accepted. So an empty list is a real answer meaning "analyses nothing", and inventing
     a permissive default row would hide exactly the profile the control exists to find.
 
-    `covers_both_directions` is None where `direction` is absent. The device stores nothing and
-    no oracle establishes what it then does: the UI writes `both` when a rule is added through
-    the form, so no instance of the absent case exists to read. Unestablished, not false.
+    `direction`, `analysis` AND `covers_both_directions` ARE ALL None WHERE THE KEY IS ABSENT.
+    The device stores nothing and no oracle establishes what it then does: the UI writes `both`
+    and `public-cloud` when a rule is added through the form, so no instance of the absent case
+    exists to read. Unestablished, not false - and not the empty string either, which is a value a
+    query can match. Stage 5 declared both columns `stores: null`, `rests_on: not_assumed`.
     """
     node = entry.get("rules")
     rows = []
@@ -1500,10 +1512,10 @@ def profile_wildfire_rules(entry: dict[str, Any]) -> list[tuple]:
             continue
         applications = _members(rule.get("application"))
         file_types = _members(rule.get("file-type"))
-        direction = _text(rule.get("direction"))
+        direction = _text_or_none(rule.get("direction"))
         rows.append((
             str(rule["@name"]), applications, file_types, direction,
-            _text(rule.get("analysis")),
+            _text_or_none(rule.get("analysis")),
             SecurityProfileWildfireRule.ANY in file_types,
             SecurityProfileWildfireRule.ANY in applications,
             None if not direction else direction == "both",

@@ -11813,16 +11813,30 @@ class WildfireAnalysisRuleTests(SimpleTestCase):
         self.assertFalse(rows[0][5])
         self.assertTrue(rows[0][6])
 
-    def test_an_absent_direction_is_UNESTABLISHED_rather_than_false(self):
-        """The device accepts a rule with no direction and stores none - measured 2026-10-09.
-        The UI writes `both` when a rule is added through the form, so no instance of the
-        absent case exists to read and nothing establishes what the device then does."""
+    def test_an_absent_direction_and_analysis_STORE_NULL_rather_than_a_blank(self):
+        """The device accepts a rule with neither key and stores neither - measured 2026-10-09.
+        The UI writes `both` and `public-cloud` when a rule is added through the form, so no
+        instance of the absent case exists to read and nothing establishes what the device then
+        does. Stage 5 declared both columns `stores: null`, `rests_on: not_assumed`; until
+        2026-10-29 this stored the empty string, which is a VALUE: `is_empty` compiles to
+        `filter(field="")`, which matches `''` and does not match NULL, so a query written
+        against the declaration and one written against the blank find different rows."""
         rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": [
             {"@name": "r", "file-type": {"member": ["any"]},
              "application": {"member": ["any"]}}]}})
 
-        self.assertEqual(rows[0][3], "")
+        self.assertIsNone(rows[0][3])
+        self.assertIsNone(rows[0][4])
+        self.assertNotEqual(rows[0][3], "")
+        self.assertNotEqual(rows[0][4], "")
         self.assertIsNone(rows[0][7])
+
+    def test_a_written_direction_and_analysis_are_stored_as_written(self):
+        """The other side of the NULL: nothing is swallowed where the keys ARE written."""
+        rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": [
+            {"@name": "r", "direction": "download", "analysis": "private-cloud"}]}})
+
+        self.assertEqual((rows[0][3], rows[0][4]), ("download", "private-cloud"))
 
     def test_upload_only_does_not_cover_both_directions(self):
         rows = profile_wildfire_rules({"@name": "p", "rules": {"entry": [

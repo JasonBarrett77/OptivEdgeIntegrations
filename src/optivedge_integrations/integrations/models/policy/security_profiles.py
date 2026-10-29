@@ -1107,7 +1107,7 @@ class SecurityProfileWildfireRule(models.Model):
     carries them, but the API accepts a rule with neither and stores neither. What the device
     DOES with an absent direction is NOT established - no instance exists to read and the UI
     cannot show a value that is not there - so `covers_both_directions` is null in that case
-    rather than guessed.
+    rather than guessed, AND SO ARE THE TWO COLUMNS THEMSELVES.
     """
 
     #: Measured 2026-10-09 by writing each one: 12 real types plus `any`. The device refuses
@@ -1127,8 +1127,16 @@ class SecurityProfileWildfireRule(models.Model):
     #: - an engineer looking at a finding needs to see what the rule actually says.
     applications = models.JSONField(default=list, blank=True)
     file_types = models.JSONField(default=list, blank=True)
-    direction = models.CharField(max_length=16, blank=True)
-    analysis = models.CharField(max_length=16, blank=True)
+    #: NULL WHERE THE KEY IS ABSENT, which is what stage 5 declared for both -
+    #: `default.stores: null`, `rests_on: not_assumed`. Stage 4 could not settle what the device
+    #: does with an absent `direction`, and declined to promote the schema's `public-cloud` for an
+    #: absent `analysis`, so nothing is established and nothing is stored. The empty string these
+    #: held until 2026-10-29 WAS a value: `is_empty` compiles to `filter(field="")`, which matches
+    #: `''` and does NOT match NULL, so a query written against stage 5's declaration and one
+    #: written against a blank column find different rows. The device refuses an empty element on
+    #: either key, so `''` was only ever the absent case wearing a value's clothes.
+    direction = models.CharField(max_length=16, blank=True, null=True)
+    analysis = models.CharField(max_length=16, blank=True, null=True)
 
     #: Derived at normalization because the search layer cannot look inside a JSON list.
     covers_all_file_types = models.BooleanField(default=False)
