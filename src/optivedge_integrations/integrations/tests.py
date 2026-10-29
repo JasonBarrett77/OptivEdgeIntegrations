@@ -171,7 +171,9 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.external_li
     LIST_TYPE_PREDEFINED,
     build_show_external_list_command,
     collect_show_external_list,
+    invalid_members_from_result,
     members_from_result,
+    total_invalid_from_result,
     total_valid_from_result,
 )
 from optivedge_integrations.integrations.platforms.pan_os.flows import _candidate_edl_names
@@ -192,9 +194,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     side_num_hosts,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.dynamic_address_content import (
+    NEVER_FETCHED_PLACEHOLDER_MEMBER,
     _edl_members_from_snapshot,
     _fqdn_addresses_by_name,
     _intervals_from_values,
+    content_shortfall_band_for,
+    content_was_fetched_from_result,
 )
 from optivedge_integrations.integrations.platforms.pan_os.persistence.common import extract_result_payload
 from optivedge_integrations.integrations.orchestration import refresh_panorama_in_scope_data
@@ -459,6 +464,81 @@ class AddressNormalizationTests(TestCase):
         self.assertEqual(any_obj.ipv4_end_int, 4_294_967_295)
         self.assertEqual(any_obj.num_hosts, 4_294_967_296)
         self.assertTrue(any_obj.is_any)
+
+    def test_a_firewall_local_external_list_reaches_a_row_at_both_local_scopes(self):
+        """Every firewall-local EDL used to be dropped, at both local scopes.
+
+        `external-list` was normalized from the PUSHED reads only, so the only EDL rows an
+        estate held were the ones Panorama pushes, and a list committed on the firewall itself
+        - in a vsys or at /config/shared - reached no row at all. The failure is an ABSENCE of
+        rows, which is why nothing caught it: a list with no row is indistinguishable from an
+        appliance with no lists, and a coverage statement made over the rows that do exist
+        reads as complete.
+
+        MEASURED 2026-10-29 on serial 6A9C0A9904E7D6E: `show config merged` carries
+        `external-list` under both the vsys entry and `shared`, with nine firewall-local lists
+        across six kind branches, and normalization produced ONE EDL row for the appliance.
+        """
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-LOCAL-EDL",
+            appliance_hostname="fw-local-edl",
+        )
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {
+                "devices": {"entry": {"vsys": {"entry": {
+                    "@name": "vsys1",
+                    "external-list": {"entry": [
+                        {"@name": "local-ip-edl",
+                         "type": {"ip": {"url": "http://192.0.2.60/ip.txt"}}},
+                        {"@name": "local-domain-edl",
+                         "type": {"domain": {"url": "http://192.0.2.60/dom.txt"}}},
+                    ]},
+                }}}},
+                "shared": {"external-list": {"entry": {
+                    "@name": "shared-ip-edl",
+                    "type": {"ip": {"url": "http://192.0.2.60/shared.txt"}},
+                }}},
+            }},
+        )
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=enforcement_point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {}}},
+        )
+
+        # Two passes, because the two scopes have two owners: the shared pass runs first and
+        # writes to the GROUP, the point pass writes the point's own rows. The group pass
+        # iterates `in_scope` points only, which is what collection follows.
+        enforcement_point.in_scope = True
+        enforcement_point.save(update_fields=["in_scope"])
+        group = enforcement_point.appliance_group or appliance.appliance_group
+        normalize_appliance_group_shared_scope(group)
+        normalized = normalize_enforcement_point_addresses(enforcement_point)
+        by_name = {obj.name: obj for obj in normalized.address_objects}
+        by_name.update({obj.name: obj for obj in group.address_objects.all()})
+
+        self.assertIn("local-ip-edl", by_name)
+        self.assertIn("local-domain-edl", by_name)
+        self.assertIn("shared-ip-edl", by_name)
+
+        vsys_edl = by_name["local-ip-edl"]
+        self.assertEqual(vsys_edl.address_type, AddressObject.TYPE_EDL)
+        self.assertTrue(vsys_edl.is_edl)
+        self.assertEqual(vsys_edl.edl_list_type, "ip")
+        self.assertEqual(vsys_edl.namespace_type, PolicyObjectNamespace.LOCAL_VSYS)
+        self.assertEqual(vsys_edl.namespace_value, "vsys1")
+
+        # The kind branch is read, not guessed: a domain list is an EDL row whose content read
+        # is never issued, which is a different coverage answer from an ip list's.
+        self.assertEqual(by_name["local-domain-edl"].edl_list_type, "domain")
+
+        # /config/shared belongs to the appliance GROUP, not to the point - the group is the
+        # unit holding one shared configuration.
+        self.assertEqual(by_name["shared-ip-edl"].namespace_type,
+                         PolicyObjectNamespace.LOCAL_SHARED)
+        self.assertEqual(by_name["shared-ip-edl"].namespace_value, "shared")
 
     def test_normalize_enforcement_point_security_rules_builds_address_refs(self):
         station, appliance, enforcement_point = _create_panorama_enforcement_point(
@@ -1178,7 +1258,8 @@ sinkhole.paloaltonetworks.com
 """
 
 
-def _external_list_payload(*, name, members, total_invalid=0, reported_total=None):
+def _external_list_payload(*, name, members, total_invalid=0, reported_total=None,
+                           invalid_members=None):
     """A `request system external-list show` result in the shape a real device returns.
 
     Measured on pan-fw-111: members live under external-list > valid-members > member, and the
@@ -1195,6 +1276,10 @@ def _external_list_payload(*, name, members, total_invalid=0, reported_total=Non
     }
     if members:
         payload["external-list"]["valid-members"] = {"member": list(members)}
+    if invalid_members:
+        # MEASURED on pan-fw-111: the device puts its REASON here, not an address -
+        # `web request failed to complete, error:28` for a source it cannot reach.
+        payload["external-list"]["invalid-members"] = {"member": list(invalid_members)}
     return payload
 
 
@@ -1799,6 +1884,341 @@ class DynamicAddressContentNormalizationTests(TestCase):
         )
 
 
+class CoverageContentVerdictTests(TestCase):
+    """The columns that tell the device's three answers about an EDL's content apart.
+
+    Every number in these fixtures was read off pan-fw-111 on 2026-10-29 in one pass, through
+    `request system external-list show type ip` after the connection-scoped target-vsys
+    setting. The lists are the ones stage 6 left standing plus the two the vendor ships.
+    """
+
+    def _build_enforcement_point(self):
+        station, appliance, enforcement_point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-COV-001",
+            appliance_hostname="fw-cov-01",
+        )
+        return station, appliance, enforcement_point
+
+    def _edl(self, station, appliance, enforcement_point, *, name="my-edl", **extra):
+        obj = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station, appliance=appliance,
+                source_type="show_pushed_shared_policy_vsys",
+                collected_at=timezone.now(), payload={},
+            ),
+            config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            name=name, namespace_type="pushed_vsys_effective", namespace_value="vsys1",
+            precedence_rank=30, address_type=AddressObject.TYPE_EDL, is_edl=True,
+            edl_list_type="ip", value="ip", normalized_value="ip", **extra
+        )
+        self._reference(enforcement_point, obj)
+        return obj
+
+    def _fqdn(self, station, appliance, enforcement_point, *, name, fqdn):
+        obj = AddressObject.objects.create(
+            management_station=station,
+            enforcement_point=enforcement_point,
+            source_snapshot=Snapshot.objects.create(
+                management_station=station, appliance=appliance,
+                source_type="show_merged_config",
+                collected_at=timezone.now(), payload={},
+            ),
+            config_source=SecurityRule.SOURCE_LOCAL,
+            name=name, namespace_type="local_vsys", namespace_value="vsys1",
+            precedence_rank=40, address_type=AddressObject.TYPE_FQDN,
+            value=fqdn, normalized_value=fqdn.lower(),
+        )
+        self._reference(enforcement_point, obj)
+        return obj
+
+    def _reference(self, enforcement_point, address_object):
+        """Put the object into the rule address-ref tables.
+
+        Not decoration: `_candidate_dynamic_address_objects` yields only objects a rule in this
+        point names, so an unreferenced object never reaches a refresh at all - which is where
+        `referenced_by_policy` enters the content verdict without being an argument to it.
+        """
+        rule = SecurityRule.objects.create(
+            management_station=enforcement_point.management_station,
+            enforcement_point=enforcement_point,
+            source_snapshot=address_object.source_snapshot,
+            config_source=SecurityRule.SOURCE_LOCAL,
+            effective_order=100000 + address_object.pk,
+            rule_position=address_object.pk,
+            name=f"rule-for-{address_object.name}",
+            action="allow",
+        )
+        SecurityRuleSourceAddressRef.objects.create(
+            security_rule=rule, raw_value=address_object.name, position=0,
+            ref_type=SecurityRuleSourceAddressRef.RefType.ADDRESS_OBJECT,
+            address_object=address_object,
+        )
+
+    def _content_snapshot(self, appliance, *, name, **payload_kwargs):
+        return Snapshot.objects.create(
+            appliance=appliance, source_type="show_external_list",
+            scope_name=f"vsys1:{name}", collected_at=timezone.now(),
+            payload=_external_list_payload(name=name, **payload_kwargs),
+        )
+
+    def test_a_list_the_firewall_never_fetched_is_not_recorded_as_collected(self):
+        """The reply that makes every count-derived column lie.
+
+        MEASURED on pan-fw-111 2026-10-29 at four lists on two scopes: a list the firewall has
+        never fetched answers total-valid 1 with the single member 0.0.0.0/32. So
+        resolved_content_source_total is 1, num_hosts is 1, truncated is false, and BOTH
+        shipped properties - size_known and collection_attempted - answer True. This asserts
+        the trap as well as the fix, because the trap is the reason the columns exist.
+        """
+        station, appliance, point = self._build_enforcement_point()
+        edl = self._edl(station, appliance, point)
+        self._content_snapshot(appliance, name="my-edl",
+                               members=[NEVER_FETCHED_PLACEHOLDER_MEMBER], reported_total=1)
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        edl.refresh_from_db()
+
+        # The trap, asserted so a later change cannot quietly remove the reason for the fix.
+        self.assertEqual(edl.resolved_content_source_total, 1)
+        self.assertEqual(edl.num_hosts, 1)
+        self.assertFalse(edl.resolved_content_truncated)
+        self.assertTrue(edl.size_known)
+        self.assertTrue(edl.collection_attempted)
+
+        # What tells it apart.
+        self.assertFalse(edl.content_was_fetched)
+        self.assertEqual(edl.content_shortfall_band, AddressObject.BAND_CONTENT_NOT_FETCHED)
+        self.assertEqual(edl.resolved_member_count, 1)
+
+    def test_a_fetch_the_firewall_attempted_and_failed_is_not_recorded_as_collected(self):
+        """MEASURED on pan-fw-111 2026-10-29: `prod_west_edl`, a device-group list pushed from
+        Panorama, answers total-valid 0 / total-invalid 1 with `web request failed to complete,
+        error:28` in invalid-members. The reason is a sentence and no column holds it; what the
+        columns have to carry is that this is not a collection."""
+        station, appliance, point = self._build_enforcement_point()
+        edl = self._edl(station, appliance, point)
+        self._content_snapshot(
+            appliance, name="my-edl", members=[], total_invalid=1,
+            invalid_members=["web request failed to complete, error:28"],
+        )
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        edl.refresh_from_db()
+
+        self.assertFalse(edl.content_was_fetched)
+        self.assertEqual(edl.content_shortfall_band, AddressObject.BAND_CONTENT_NOT_FETCHED)
+        # Zero members kept, which is a true statement about the collection, and NULL addresses
+        # covered, which is a true statement about the list. The two units differ and that is
+        # the whole reason both columns exist.
+        self.assertEqual(edl.resolved_member_count, 0)
+        self.assertIsNone(edl.num_hosts)
+
+    def test_a_reply_with_every_counter_zero_and_no_members_fires_rather_than_passes(self):
+        """The fourth state, which the three-state reading does not cover.
+
+        MEASURED on pan-fw-111 2026-10-29: `panw-auth-portal-exclude-list`, a vendor-shipped
+        predefined URL list, answers total-valid 0, total-ignored 0, total-invalid 0 and NO
+        member key at all. Nothing in the reply separates "fetched an empty list" from "never
+        fetched", so it is the unknown, and per the pipeline's own rule an unknown fires.
+        """
+        station, appliance, point = self._build_enforcement_point()
+        edl = self._edl(station, appliance, point)
+        self._content_snapshot(appliance, name="my-edl", members=[], reported_total=0)
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        edl.refresh_from_db()
+
+        self.assertFalse(edl.content_was_fetched)
+        self.assertEqual(edl.content_shortfall_band, AddressObject.BAND_CONTENT_NOT_FETCHED)
+
+    def test_a_fetched_list_is_banded_on_members_and_not_on_addresses(self):
+        """The unit error this column exists to remove.
+
+        The device's total-valid is a MEMBER count; num_hosts is the ADDRESS total of the merged
+        intervals. Two /24 members kept out of four reported is a shortfall of two times - while
+        num_hosts is 512, which against a reported 4 reads as a surplus of 128 times.
+        """
+        station, appliance, point = self._build_enforcement_point()
+        edl = self._edl(station, appliance, point)
+        self._content_snapshot(appliance, name="my-edl",
+                               members=["10.0.0.0/24", "10.0.2.0/24"], reported_total=4)
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        edl.refresh_from_db()
+
+        self.assertTrue(edl.content_was_fetched)
+        self.assertEqual(edl.resolved_member_count, 2)
+        self.assertEqual(edl.resolved_content_source_total, 4)
+        self.assertEqual(edl.num_hosts, 512)
+        self.assertEqual(edl.content_shortfall_band, AddressObject.BAND_UP_TO_TWO_TIMES)
+        self.assertTrue(edl.resolved_content_truncated)
+
+    def test_a_complete_collection_is_banded_equal_and_the_band_clears(self):
+        station, appliance, point = self._build_enforcement_point()
+        edl = self._edl(station, appliance, point)
+        snapshot = self._content_snapshot(appliance, name="my-edl",
+                                          members=["1.2.3.4", "1.2.3.5"], reported_total=200)
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        edl.refresh_from_db()
+        self.assertEqual(edl.content_shortfall_band, AddressObject.BAND_MORE_THAN_TEN_TIMES)
+
+        # A later refresh that captures the whole list must clear the band, not leave the row
+        # permanently graded - the same requirement resolved_content_truncated already carries.
+        snapshot.delete()
+        self._content_snapshot(appliance, name="my-edl", members=["1.2.3.4", "1.2.3.5"])
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        edl.refresh_from_db()
+        self.assertEqual(edl.content_shortfall_band, AddressObject.BAND_EQUAL)
+        self.assertEqual(edl.resolved_member_count, 2)
+
+    def test_a_list_no_snapshot_reached_keeps_the_firing_defaults(self):
+        """No snapshot is not a reading, and this is the migration window: a row nobody has
+        recomputed must report itself as uncollected rather than as clean."""
+        station, appliance, point = self._build_enforcement_point()
+        edl = self._edl(station, appliance, point,
+                        resolved_member_count=99, content_was_fetched=True,
+                        content_shortfall_band=AddressObject.BAND_EQUAL)
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        edl.refresh_from_db()
+
+        self.assertFalse(edl.content_was_fetched)
+        self.assertEqual(edl.content_shortfall_band, AddressObject.BAND_CONTENT_NOT_FETCHED)
+        self.assertIsNone(edl.resolved_member_count)
+
+    def test_an_fqdn_the_table_holds_records_that_its_resolution_was_read(self):
+        station, appliance, point = self._build_enforcement_point()
+        fqdn = self._fqdn(station, appliance, point, name="host", fqdn="example.com")
+        Snapshot.objects.create(
+            appliance=appliance, source_type="show_dns_proxy_fqdn_all",
+            collected_at=timezone.now(), payload=REAL_FQDN_CACHE_TABLE,
+        )
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        fqdn.refresh_from_db()
+
+        self.assertTrue(fqdn.resolution_was_read)
+        self.assertEqual(fqdn.num_hosts, 2)
+
+    def test_an_fqdn_the_table_does_not_hold_records_that_nothing_resolved_it(self):
+        """MEASURED on pan-fw-111 2026-10-29: three committed fqdn objects in the reserved
+        .invalid TLD are absent from `show dns-proxy fqdn all` entirely, while a fourth that a
+        pushed rule references resolves. So an absent stanza means the firewall does not
+        resolve this name - and this column is what separates that from "nobody looked"."""
+        station, appliance, point = self._build_enforcement_point()
+        fqdn = self._fqdn(station, appliance, point, name="host",
+                          fqdn="oep-cov6-unref.invalid")
+        Snapshot.objects.create(
+            appliance=appliance, source_type="show_dns_proxy_fqdn_all",
+            collected_at=timezone.now(), payload=REAL_FQDN_CACHE_TABLE,
+        )
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        fqdn.refresh_from_db()
+
+        self.assertFalse(fqdn.resolution_was_read)
+        self.assertIsNone(fqdn.num_hosts)
+
+    def test_an_fqdn_with_no_cache_snapshot_at_all_records_that_nobody_looked(self):
+        station, appliance, point = self._build_enforcement_point()
+        fqdn = self._fqdn(station, appliance, point, name="host", fqdn="example.com")
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        fqdn.refresh_from_db()
+
+        self.assertFalse(fqdn.resolution_was_read)
+
+    def test_a_stanza_that_resolved_no_ipv4_still_counts_as_read(self):
+        """TRUE DOES NOT MEAN THE REACH IS KNOWN, and that is deliberate. A stanza answering
+        only AAAA leaves num_hosts null with this column true: somebody asked, and the firewall
+        holds no IPv4 answer. num_hosts alone collapses that into "never looked"."""
+        station, appliance, point = self._build_enforcement_point()
+        fqdn = self._fqdn(station, appliance, point, name="host", fqdn="v6only.example")
+        Snapshot.objects.create(
+            appliance=appliance, source_type="show_dns_proxy_fqdn_all",
+            collected_at=timezone.now(),
+            payload="FQDN Table : Request time 2026-10-29 05:39:51\n\n"
+                    "v6only.example\n\t2606:4700:10::6814:179a\n\t::  unknown\n",
+        )
+
+        normalize_enforcement_point_dynamic_address_content(point)
+        fqdn.refresh_from_db()
+
+        self.assertTrue(fqdn.resolution_was_read)
+        self.assertIsNone(fqdn.num_hosts)
+
+    def test_a_band_cannot_be_stored_that_contradicts_the_fetch_verdict(self):
+        """The constraint is in the database because normalization writes these columns through
+        save(update_fields=...), which never runs full_clean(). A row banded `equal` with
+        nothing fetched would report the state the coverage controls exist to find as the most
+        compliant object on the device, and a query over it would look correct."""
+        station, appliance, point = self._build_enforcement_point()
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self._edl(station, appliance, point, name="bad-band",
+                          content_was_fetched=False,
+                          content_shortfall_band=AddressObject.BAND_EQUAL)
+
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                self._edl(station, appliance, point, name="bad-band-2",
+                          content_was_fetched=True,
+                          content_shortfall_band=AddressObject.BAND_CONTENT_NOT_FETCHED)
+
+
+class CoverageContentVerdictPureTests(SimpleTestCase):
+    """The two verdict helpers on their own, against the replies measured 2026-10-29."""
+
+    def test_the_never_fetched_placeholder_is_not_content(self):
+        self.assertFalse(content_was_fetched_from_result(
+            _external_list_payload(name="oep-cov6-el-ref",
+                                   members=[NEVER_FETCHED_PLACEHOLDER_MEMBER],
+                                   reported_total=1)))
+
+    def test_a_single_real_member_with_a_count_of_one_is_content(self):
+        """The discrimination is narrow and this is its edge: the placeholder is recognised by
+        the member LITERAL together with the count, not by the count alone."""
+        self.assertTrue(content_was_fetched_from_result(
+            _external_list_payload(name="x", members=["203.0.113.9"], reported_total=1)))
+
+    def test_a_failed_fetch_is_not_content(self):
+        self.assertFalse(content_was_fetched_from_result(
+            _external_list_payload(name="prod_west_edl", members=[], total_invalid=1,
+                                   invalid_members=["web request failed to complete, error:28"])))
+
+    def test_real_members_are_content(self):
+        self.assertTrue(content_was_fetched_from_result(
+            _external_list_payload(name="panw-highrisk-ip-list",
+                                   members=["95.131.76.200", "178.83.122.52"],
+                                   reported_total=2776)))
+
+    def test_an_unparseable_result_is_not_content(self):
+        self.assertFalse(content_was_fetched_from_result(None))
+        self.assertFalse(content_was_fetched_from_result({"entry": [{"member": "1.2.3.4"}]}))
+
+    def test_the_bands_are_the_ratio_of_the_device_count_to_what_was_kept(self):
+        def band(source_total, kept, fetched=True):
+            return content_shortfall_band_for(
+                content_was_fetched=fetched, source_total=source_total, kept=kept)
+
+        self.assertEqual(band(10, 10), AddressObject.BAND_EQUAL)
+        self.assertEqual(band(10, 20), AddressObject.BAND_EQUAL)
+        self.assertEqual(band(20, 10), AddressObject.BAND_UP_TO_TWO_TIMES)
+        self.assertEqual(band(21, 10), AddressObject.BAND_TWO_TO_TEN_TIMES)
+        self.assertEqual(band(100, 10), AddressObject.BAND_TWO_TO_TEN_TIMES)
+        self.assertEqual(band(101, 10), AddressObject.BAND_MORE_THAN_TEN_TIMES)
+        self.assertEqual(band(None, 10), AddressObject.BAND_NO_DEVICE_COUNT)
+        self.assertEqual(band(10, 0), AddressObject.BAND_MORE_THAN_TEN_TIMES)
+        # Not fetched wins over every arithmetic: the device's never-fetched reply computes a
+        # ratio of exactly 1.0, which would otherwise wear the gentlest band there is.
+        self.assertEqual(band(1, 1, fetched=False), AddressObject.BAND_CONTENT_NOT_FETCHED)
+
+
 class DynamicAddressContentPayloadParsingTests(SimpleTestCase):
     """Parsing guards on the two real payload shapes, measured 2026-09-22 on pan-fw-111.
 
@@ -1844,6 +2264,26 @@ class DynamicAddressContentPayloadParsingTests(SimpleTestCase):
             members_from_result(_external_list_payload(name="prod_west_edl", members=[], total_invalid=1)),
             [],
         )
+
+    def test_the_invalid_count_and_its_reason_are_readable(self):
+        """`members_from_result` deliberately drops these and that is right - a cURL error is
+        not an address. But they are the only keys separating a fetch the firewall ATTEMPTED
+        AND FAILED from one it never attempted, so something has to read them.
+
+        MEASURED on pan-fw-111 2026-10-29 at `prod_west_edl`.
+        """
+        result = _external_list_payload(
+            name="prod_west_edl", members=[], total_invalid=1,
+            invalid_members=["web request failed to complete, error:28"],
+        )
+
+        self.assertEqual(total_invalid_from_result(result), 1)
+        self.assertEqual(invalid_members_from_result(result),
+                         ["web request failed to complete, error:28"])
+        # Absent is not zero-with-a-reason: a reply with no such key answers None and [].
+        clean = _external_list_payload(name="x", members=["1.2.3.4"])
+        self.assertEqual(invalid_members_from_result(clean), [])
+        self.assertEqual(total_invalid_from_result(None), None)
 
 
 class ExternalListCollectorPaginationTests(SimpleTestCase):
@@ -1978,6 +2418,33 @@ class ExternalListCollectorPaginationTests(SimpleTestCase):
             _edl_members_from_snapshot(SimpleNamespace(payload=payload)),
             ["1.2.3.4", "10.0.0.0/24"],
         )
+
+    def test_the_stored_payload_carries_the_invalid_count_and_its_reason(self):
+        """The aggregation used to drop total-invalid and invalid-members, so a stored snapshot
+        could not tell a failed fetch from one that never happened - while the test fixture
+        beside it had carried total-invalid from the day it was written, which is how the
+        normalizer came to be proved against a shape the collector did not produce.
+
+        Nothing extra is read from the device: both keys are in the first page's own reply.
+        """
+        def fake_collect(session, *, source_type, request):
+            return SimpleNamespace(response={"response": {"result": _external_list_payload(
+                name="prod_west_edl", members=[], total_invalid=1,
+                invalid_members=["web request failed to complete, error:28"],
+            )}})
+
+        with patch(
+            "optivedge_integrations.integrations.platforms.pan_os.collectors.external_list.collect_op_response",
+            side_effect=fake_collect,
+        ):
+            collected = collect_show_external_list(SimpleNamespace(target=None), name="prod_west_edl")
+
+        payload = extract_result_payload(collected)
+
+        self.assertEqual(total_invalid_from_result(payload), 1)
+        self.assertEqual(invalid_members_from_result(payload),
+                         ["web request failed to complete, error:28"])
+        self.assertFalse(content_was_fetched_from_result(payload))
 
 
 class NegatedComplementNormalizationTests(TestCase):

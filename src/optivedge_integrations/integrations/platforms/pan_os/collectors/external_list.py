@@ -125,6 +125,48 @@ def total_valid_from_result(result: Any) -> int | None:
         return None
 
 
+def total_invalid_from_result(result: Any) -> int | None:
+    """How many entries the DEVICE rejected in one `external-list show` result.
+
+    Read for the same reason total-valid is: it is the device's own number and it is the only
+    key that separates a fetch the firewall ATTEMPTED AND FAILED from one it never attempted.
+    MEASURED on pan-fw-111 2026-10-29: `prod_west_edl` answers total-valid 0 / total-invalid 1,
+    and every list the firewall has never fetched answers total-valid 1 / total-invalid 0 with
+    the single member 0.0.0.0/32. total-valid alone cannot tell those apart in the direction
+    that matters - the second is non-zero.
+    """
+    if not isinstance(result, dict):
+        return None
+    external_list = result.get("external-list")
+    if not isinstance(external_list, dict):
+        return None
+    try:
+        return int(str(external_list.get("total-invalid")).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def invalid_members_from_result(result: Any) -> list[str]:
+    """The device's own reasons for the entries it rejected.
+
+    MEASURED on pan-fw-111 2026-10-29: `prod_west_edl` carries
+    `['web request failed to complete, error:28']` here - a cURL failure and not an address, so
+    this must never reach interval parsing. It is kept because it is the only place the device
+    says WHY a fetch failed, and a coverage finding whose remediation is "the firewall cannot
+    reach the source" needs that sentence rather than a count.
+    """
+    if not isinstance(result, dict):
+        return []
+    external_list = result.get("external-list")
+    if not isinstance(external_list, dict):
+        return []
+    invalid = external_list.get("invalid-members")
+    if not isinstance(invalid, dict):
+        return []
+    return [member.strip() for member in _ensure_list(invalid.get("member"))
+            if isinstance(member, str) and member.strip()]
+
+
 def set_target_vsys(session: PANSession, *, vsys_name: str) -> None:
     """Switch this connection's operational context to vsys_name.
 
@@ -202,6 +244,8 @@ def collect_show_external_list(
     """
     all_entries: list[str] = []
     reported_total = None
+    reported_invalid = None
+    invalid_reasons: list[str] = []
     anchor = 1
     while True:
         command_xml = build_show_external_list_command(name=name, anchor=anchor, list_type=list_type)
@@ -220,6 +264,9 @@ def collect_show_external_list(
         result = response_root.get("result", {}) if isinstance(response_root, dict) else {}
         if reported_total is None:
             reported_total = total_valid_from_result(result)
+        if reported_invalid is None:
+            reported_invalid = total_invalid_from_result(result)
+            invalid_reasons = invalid_members_from_result(result)
         page_members = members_from_result(result)
         all_entries.extend(page_members)
         if len(all_entries) >= MAX_MEMBERS_COLLECTED:
@@ -240,11 +287,24 @@ def collect_show_external_list(
                     # The DEVICE's count, not len(all_entries). Overwriting it with what we
                     # kept would erase the only evidence that anything was dropped.
                     "total-valid": str(reported_total if reported_total is not None else len(all_entries)),
+                    # ADDED 2026-10-29. The reply carries total-invalid and invalid-members and
+                    # this aggregation used to discard both, so a stored snapshot could not tell
+                    # "the firewall tried to fetch this and failed" from "the firewall has never
+                    # tried" - the two answers a coverage statement over an EDL turns on. The
+                    # test fixture `_external_list_payload` had carried total-invalid since it
+                    # was written, so the normalizer was being proved against a shape the real
+                    # collector did not produce. Nothing is re-read from the device for this:
+                    # the keys were already in the first page's reply.
+                    "total-invalid": str(reported_invalid if reported_invalid is not None else 0),
                     "valid-members": {"member": all_entries},
                 }
             },
         }
     }
+    if invalid_reasons:
+        aggregated_response["response"]["result"]["external-list"]["invalid-members"] = {
+            "member": invalid_reasons
+        }
     return PANOSCollectedResponse(
         source_type="show_external_list",
         request=PANOSOperationRequest(
