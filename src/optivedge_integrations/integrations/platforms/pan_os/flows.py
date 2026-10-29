@@ -94,6 +94,11 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_password_profiles,
     normalize_appliance_server_profiles,
     normalize_appliance_interfaces,
+    normalize_appliance_session_settings,
+    normalize_appliance_lldp_global_settings,
+    normalize_appliance_dhcp_interface_configs,
+    normalize_appliance_tunnel_inspection_coverage,
+    normalize_appliance_routing_adjacencies,
     normalize_appliance_management_interfaces,
     normalize_appliance_ssl_decryption_exclusions,
     normalize_appliance_ssl_decryption_vendor_exclusion_optout,
@@ -945,6 +950,19 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     ("SSL decryption exclusions", normalize_appliance_ssl_decryption_exclusions),
     ("SSL decryption vendor exclusion opt-outs",
      normalize_appliance_ssl_decryption_vendor_exclusion_optout),
+    # Network hardening: Device > Setup > Session, Network > LLDP, Network > DHCP,
+    # Policies > Tunnel Inspection and Network > Virtual Routers. All five read the same
+    # merged device entry as their neighbours and depend on nothing else in this tuple -
+    # including the per-interface LLDP and residue columns, which are written by
+    # `normalize_appliance_interfaces` above this loop and not read back here. The tunnel
+    # coverage one additionally reads the per-vsys pushed-shared-policy snapshot where one
+    # was collected; a missing one is a reading in its own right rather than an ordering
+    # problem.
+    ("session settings", normalize_appliance_session_settings),
+    ("LLDP global settings", normalize_appliance_lldp_global_settings),
+    ("DHCP interface configurations", normalize_appliance_dhcp_interface_configs),
+    ("tunnel inspection coverage", normalize_appliance_tunnel_inspection_coverage),
+    ("routing adjacencies", normalize_appliance_routing_adjacencies),
 )
 
 

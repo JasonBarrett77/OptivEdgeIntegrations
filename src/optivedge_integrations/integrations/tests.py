@@ -14285,3 +14285,993 @@ class SslVendorExclusionOptOutNormalizationTests(_DecryptionBase):
             payload="No data found. Verify xpath and retry")
 
         self.assertEqual(_predefined_names(snapshot), set())
+
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    PanOsDhcpInterfaceConfig as _NhDhcp,
+    PanOsLldpGlobalSettings as _NhLldpGlobal,
+    PanOsRoutingAdjacency as _NhAdjacency,
+    PanOsSessionSettings as _NhSession,
+    PanOsTunnelInspectionCoverage as _NhTunnel)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.network_hardening import (  # noqa: E402
+    announced_content as _nh_announced,
+    authentication_strength as _nh_strength,
+    coverage_state as _nh_coverage,
+    normalize_dhcp_interface_configs as _nh_dhcp,
+    normalize_lldp_global_settings as _nh_lldp_global,
+    normalize_routing_adjacencies as _nh_adjacencies,
+    normalize_session_settings as _nh_session,
+    normalize_tunnel_inspection_coverage as _nh_tunnel,
+    out_of_service_residue as _nh_residue,
+    prefix_limit_state as _nh_prefix_limit,
+    relay_state as _nh_relay_state,
+    restricts_sources as _nh_restricts,
+    routing_engine as _nh_engine,
+    zone_membership as _nh_zones)
+
+
+class _NetworkHardeningBase(TestCase):
+    """Shared fixture for the five `network-hardening` models and the eight Interface columns.
+
+    EVERY PAYLOAD IN THIS AND THE FOLLOWING CLASSES IS A LAB SHAPE, read off the four
+    appliances on 2026-10-29 through Panorama's `target=` proxy, not a shape invented to make
+    a column pass. Appliances are named by SERIAL in the comments, because 691665AC334B458
+    answers to the factory-default hostname `PA-VM` while every artifact calls it
+    `pan-fw-201`.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.net")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-net",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-NET", hostname="fw-net", software_version="11.1.13-h3")
+        self.group.active_appliance = self.appliance
+        self.group.save()
+
+    def _merged(self, *, network=None, deviceconfig=None, vsys=None):
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "network": network or {},
+                "deviceconfig": deviceconfig or {},
+                "vsys": {"entry": vsys if vsys is not None else [{"@name": "vsys1"}]},
+            }]}}})
+
+
+class SessionSettingsNormalizationTests(_NetworkHardeningBase):
+    """PAN-NET-002 and PAN-NET-005 - two sibling leaves, one row, opposite provenance."""
+
+    def test_the_two_lab_states_are_read_off_the_two_sibling_nodes(self):
+        """013201001475's measured shape: both keys present and both `no`."""
+        self._merged(deviceconfig={"setting": {
+            "config": {"rematch": "no"}, "session": {"ipv6-firewalling": "no"}}})
+        _nh_session(self.appliance)
+        row = _NhSession.objects.get()
+
+        self.assertFalse(row.session_rematch)
+        self.assertFalse(row.ipv6_firewalling)
+
+    def test_an_absent_rematch_key_stores_NOTHING_and_the_row_says_not_configured(self):
+        """The vendor documents this one as enabled by default and nobody has measured it, so
+        the honest answer is NULL - and the provenance row is what makes an unmeasured null
+        distinguishable from a measured default sitting next to it on the same row."""
+        self._merged(deviceconfig={"setting": {"session": {"ipv6-firewalling": "no"}}})
+        _nh_session(self.appliance)
+        row = _NhSession.objects.get()
+
+        self.assertIsNone(row.session_rematch)
+        self.assertEqual(
+            row.provenance_for("session_rematch").provenance_type, "not_configured")
+
+    def test_an_absent_ipv6_key_UNDER_A_PRESENT_CONTAINER_stores_the_measured_default(self):
+        """6A9C0A9904E7D6E's measured shape and the third state a truthiness test loses: the
+        `session` container EXISTS and carries a sibling key, so `ipv6-firewalling` is an
+        absent key beneath a present node rather than an absent node."""
+        self._merged(deviceconfig={"setting": {
+            "config": {"rematch": "yes"}, "session": {"tcp-reject-non-syn": "no"}}})
+        _nh_session(self.appliance)
+        row = _NhSession.objects.get()
+
+        self.assertTrue(row.ipv6_firewalling)
+        self.assertEqual(
+            row.provenance_for("ipv6_firewalling").provenance_type, "pan_os_default")
+
+    def test_an_absent_deviceconfig_subtree_still_writes_a_row(self):
+        """"We collected this appliance and it holds neither key" has to be distinguishable
+        from "nobody collected this appliance", and the only thing that says so is the row."""
+        self._merged()
+        _nh_session(self.appliance)
+        row = _NhSession.objects.get()
+
+        self.assertIsNone(row.session_rematch)
+        self.assertTrue(row.ipv6_firewalling)
+
+    def test_no_merged_snapshot_writes_no_row_at_all(self):
+        self.assertEqual(_nh_session(self.appliance), {"pan_os_session_settings": 0})
+        self.assertEqual(_NhSession.objects.count(), 0)
+
+    def test_the_row_is_replaced_and_never_duplicated(self):
+        self._merged(deviceconfig={"setting": {"config": {"rematch": "no"}}})
+        _nh_session(self.appliance)
+        _nh_session(self.appliance)
+
+        self.assertEqual(_NhSession.objects.count(), 1)
+        self.assertEqual(
+            FieldProvenance.objects.filter(
+                content_type=ContentType.objects.get_for_model(_NhSession)).count(), 2)
+
+    def test_a_template_decorated_leaf_reads_its_text_and_not_the_marker(self):
+        """`deviceconfig/setting` is template-supplied on 013201001475 (@ptpl=shared-base) while
+        its two children are firewall-local. A leaf arriving as a dict is the pushed shape."""
+        self._merged(deviceconfig={"setting": {
+            "@ptpl": "shared-base",
+            "session": {"ipv6-firewalling": {"@ptpl": "shared-base", "#text": "no"}}}})
+        _nh_session(self.appliance)
+        row = _NhSession.objects.get()
+
+        self.assertFalse(row.ipv6_firewalling)
+        self.assertEqual(
+            row.provenance_for("ipv6_firewalling").provenance_type, "template")
+
+
+class LldpGlobalSettingsNormalizationTests(_NetworkHardeningBase):
+    """PAN-NET-003's preferred value - the one leaf whose absence nobody has measured."""
+
+    def test_the_three_lab_states(self):
+        for payload, expected in (
+            ({"lldp": {"enable": "yes"}}, True),       # 013201001475
+            ({"lldp": {"enable": "no"}}, False),       # 691665AC334B458
+            ({}, None),                                # 6A9C0A9904E7D6E - node absent
+        ):
+            with self.subTest(network=payload):
+                _NhLldpGlobal.objects.all().delete()
+                Snapshot.objects.filter(appliance=self.appliance).delete()
+                self._merged(network=payload)
+                _nh_lldp_global(self.appliance)
+
+                self.assertEqual(
+                    _NhLldpGlobal.objects.get().lldp_global_enable, expected)
+
+    def test_an_absent_node_is_not_configured_rather_than_untracked(self):
+        """A missing provenance row would say "nothing tracks this field" about a leaf nobody
+        configured, which is the reverse of the truth."""
+        self._merged()
+        _nh_lldp_global(self.appliance)
+
+        self.assertEqual(
+            _NhLldpGlobal.objects.get().provenance_for(
+                "lldp_global_enable").provenance_type, "not_configured")
+
+
+class DhcpInterfaceConfigNormalizationTests(_NetworkHardeningBase):
+    """PAN-NET-004 - a row only where DHCP is configured, and the relay verdict."""
+
+    #: 691665AC334B458's `network/dhcp/interface` verbatim, 2026-10-29.
+    LAB_DHCP = [
+        {"@name": "ethernet1/3", "server": {
+            "mode": "enabled", "ip-pool": {"member": ["10.98.3.100-10.98.3.200"]}}},
+        {"@name": "ethernet1/4", "server": {
+            "mode": "auto", "ip-pool": {"member": ["10.98.4.100-10.98.4.200"]}}},
+        {"@name": "ethernet1/5", "server": {
+            "mode": "disabled", "ip-pool": {"member": ["10.98.5.100-10.98.5.200"]}}},
+        {"@name": "ethernet1/6", "relay": {
+            "ip": {"enabled": "yes", "server": {"member": ["10.98.250.10"]}}}},
+    ]
+
+    def test_the_four_lab_entries_read_exactly_as_the_device_holds_them(self):
+        self._merged(network={"dhcp": {"interface": {"entry": self.LAB_DHCP}}})
+
+        self.assertEqual(_nh_dhcp(self.appliance),
+                         {"pan_os_dhcp_interface_configs": 4})
+        rows = {r.interface_name: r for r in _NhDhcp.objects.all()}
+        self.assertEqual(
+            [(n, rows[n].dhcp_server_configured, rows[n].dhcp_server_mode,
+              rows[n].dhcp_relay_ipv4_enabled, rows[n].dhcp_relay_state)
+             for n in sorted(rows)],
+            [("ethernet1/3", True, "enabled", None, "not_configured"),
+             ("ethernet1/4", True, "auto", None, "not_configured"),
+             ("ethernet1/5", True, "disabled", None, "not_configured"),
+             ("ethernet1/6", False, None, True, "relaying")])
+
+    def test_an_absent_dhcp_container_writes_NO_ROW_which_is_the_passing_state(self):
+        """6A9C0A9904E7D6E's measured state. The finding names the configuration that should
+        not be there, so the compliant appliance needs no representation at all."""
+        self._merged()
+
+        self.assertEqual(_nh_dhcp(self.appliance),
+                         {"pan_os_dhcp_interface_configs": 0})
+
+    def test_a_removed_entry_stops_being_reported(self):
+        """Delete-and-recreate, not update_or_create: a leftover row would report a DHCP
+        server somebody has removed, which is a finding against a fixed estate."""
+        self._merged(network={"dhcp": {"interface": {"entry": self.LAB_DHCP}}})
+        _nh_dhcp(self.appliance)
+        Snapshot.objects.filter(appliance=self.appliance).delete()
+        self._merged(network={"dhcp": {"interface": {"entry": self.LAB_DHCP[:1]}}})
+        _nh_dhcp(self.appliance)
+
+        self.assertEqual([r.interface_name for r in _NhDhcp.objects.all()],
+                         ["ethernet1/3"])
+        self.assertEqual(
+            FieldProvenance.objects.filter(
+                content_type=ContentType.objects.get_for_model(_NhDhcp)).count(), 2)
+
+    def test_a_mode_is_never_stored_for_a_branch_that_does_not_exist(self):
+        """The model's own `clean()` rule, and the normalizer has to satisfy it: an entry with
+        a relay and no server has no mode to store."""
+        self._merged(network={"dhcp": {"interface": {"entry": [self.LAB_DHCP[3]]}}})
+        _nh_dhcp(self.appliance)
+        row = _NhDhcp.objects.get()
+        row.clean()
+
+        self.assertIsNone(row.dhcp_server_mode)
+
+    def test_a_server_branch_with_no_mode_key_stores_null_and_stays_configured(self):
+        """The branch's EXISTENCE is what the assertion rests on, and it does not depend on
+        the mode - which is the whole reason the first half does not clause on the mode."""
+        self._merged(network={"dhcp": {"interface": {"entry": [
+            {"@name": "ethernet1/9", "server": {"ip-pool": {"member": ["10.0.0.1-10.0.0.9"]}}},
+        ]}}})
+        _nh_dhcp(self.appliance)
+        row = _NhDhcp.objects.get()
+
+        self.assertTrue(row.dhcp_server_configured)
+        self.assertIsNone(row.dhcp_server_mode)
+        self.assertEqual(
+            row.provenance_for("dhcp_server_mode").provenance_type, "not_configured")
+
+    def test_a_present_but_EMPTY_server_branch_is_still_a_server(self):
+        """`{"server": null}` is the shape of a branch somebody emptied. Truthiness reports it
+        as no server, which is the reassuring direction on a control about servers that should
+        not be there."""
+        self._merged(network={"dhcp": {"interface": {"entry": [
+            {"@name": "ethernet1/9", "server": None}]}}})
+        _nh_dhcp(self.appliance)
+
+        self.assertTrue(_NhDhcp.objects.get().dhcp_server_configured)
+
+    def test_the_relay_verdict_over_both_address_families(self):
+        self.assertEqual(_nh_relay_state({"@name": "e"}, None), "not_configured")
+        self.assertEqual(
+            _nh_relay_state({"relay": None}, None), "configured_and_off")
+        self.assertEqual(
+            _nh_relay_state({"relay": {"ip": {"enabled": "yes"}}}, True), "relaying")
+        self.assertEqual(
+            _nh_relay_state({"relay": {"ip": {"enabled": "no"}}}, False),
+            "configured_and_off")
+        # An `ip` branch whose `enabled` key is absent: unknown, and an unknown fires.
+        self.assertEqual(
+            _nh_relay_state({"relay": {"ip": {"server": {"member": ["10.0.0.1"]}}}}, None),
+            "relaying")
+        # THE IPv6 FAMILY, which has no column: a relay configured for IPv6 only would read
+        # as `not_configured` from the IPv4 key alone, which is the one place in this domain
+        # where a gap produces SILENCE rather than a firing default.
+        self.assertEqual(
+            _nh_relay_state({"relay": {"ipv6": {"enabled": "yes"}}}, None), "relaying")
+        self.assertEqual(
+            _nh_relay_state({"relay": {"ipv6": {"enabled": "no"}}}, None),
+            "configured_and_off")
+        self.assertEqual(
+            _nh_relay_state({"relay": {"ip": {"enabled": "no"},
+                                       "ipv6": {"enabled": "yes"}}}, False), "relaying")
+
+
+class TunnelInspectionCoverageNormalizationTests(_NetworkHardeningBase):
+    """PAN-NET-006 - a verdict per enforcement point over a rulebase that is usually absent."""
+
+    #: oep-nhd6-t1 verbatim from 013201001475/vsys2, 2026-10-29.
+    LAB_ENABLED_RULE = {
+        "@name": "oep-nhd6-t1", "@uuid": "47bef40c-d1ca-41ec-b6ac-8e1e2ec0721d",
+        "from": {"member": ["any"]}, "to": {"member": ["any"]},
+        "source": {"member": ["any"]}, "destination": {"member": ["any"]},
+        "source-user": {"member": ["any"]},
+        "application": {"member": ["gre", "vxlan", "ipsec", "gtp"]},
+    }
+    #: oep-nhd6-t2 verbatim from vsys3: populated, and opening nothing.
+    LAB_DISABLED_RULE = dict(LAB_ENABLED_RULE, **{
+        "@name": "oep-nhd6-t2", "disabled": "yes"})
+
+    def test_a_row_is_written_for_every_vsys_including_a_template_contributed_one(self):
+        """`action=get` on 013201001475 reports NINE vsys and `action=show` reports eight - the
+        ninth, vsys8, is contributed by a template. The merged read carries it, so it gets a
+        verdict like any other; omitting it would leave an enforcement point unassessed."""
+        self._merged(vsys=[{"@name": f"vsys{n}"} for n in (1, 2, 8)])
+
+        self.assertEqual(_nh_tunnel(self.appliance),
+                         {"pan_os_tunnel_inspection_coverages": 3})
+        self.assertEqual(sorted(_NhTunnel.objects.values_list("vsys_name", flat=True)),
+                         ["vsys1", "vsys2", "vsys8"])
+
+    def test_an_absent_rulebase_fires_at_the_worst_rank(self):
+        """The state of every vsys in the lab bar three, and the one object in this domain whose
+        absence fires rather than passes."""
+        self._merged(vsys=[{"@name": "vsys1"}])
+        _nh_tunnel(self.appliance)
+        row = _NhTunnel.objects.get()
+
+        self.assertEqual(row.tunnel_inspect_rule_count, 0)
+        self.assertEqual(row.tunnel_inspection_coverage_state, "no_policy")
+        self.assertTrue(row.tunnel_inspect_rules_collected)
+        self.assertEqual(row.scope, "vsys")
+
+    def test_the_did_we_collect_it_flag_separates_the_two_zeroes(self):
+        """A zero count means "no rules" only because this flag says the rulebase was read. The
+        flag is reported and NOT claused on: an applicability clause on it would SUPPRESS the
+        control when the answer is no, which reads as careful and is the exact inversion of
+        what an unknown is supposed to do."""
+        self._merged(vsys=[{"@name": "vsys1"}])
+        _nh_tunnel(self.appliance)
+
+        self.assertTrue(_NhTunnel.objects.get().tunnel_inspect_rules_collected)
+        # A row nobody has recomputed carries the default, which is the firing side.
+        self.assertFalse(_NhTunnel._meta.get_field(
+            "tunnel_inspect_rules_collected").default)
+
+    def test_the_three_states_a_configuration_read_can_reach(self):
+        self.assertEqual(_nh_coverage([], "absent"), "no_policy")
+        self.assertEqual(_nh_coverage([], "empty"), "no_policy")
+        self.assertEqual(_nh_coverage([self.LAB_DISABLED_RULE], "populated"),
+                         "all_rules_disabled")
+        self.assertEqual(_nh_coverage([self.LAB_ENABLED_RULE], "populated"),
+                         "coverage_unverified_without_traffic_answer")
+        # One enabled rule among disabled ones is not "all disabled".
+        self.assertEqual(
+            _nh_coverage([self.LAB_DISABLED_RULE, self.LAB_ENABLED_RULE], "populated"),
+            "coverage_unverified_without_traffic_answer")
+
+    def test_an_enabled_rule_naming_every_protocol_is_still_unverified(self):
+        """THE REFINEMENT IS NOT A SUPPRESSION. `fully_opened` is a claim that everything
+        transiting IS opened, and nothing in any configuration read says what transited - so a
+        rule from any zone to any zone naming all four protocols still fires at the baseline."""
+        self._merged(vsys=[{"@name": "vsys1", "rulebase": {"tunnel-inspect": {
+            "rules": {"entry": [self.LAB_ENABLED_RULE]}}}}])
+        _nh_tunnel(self.appliance)
+
+        self.assertEqual(_NhTunnel.objects.get().tunnel_inspection_coverage_state,
+                         "coverage_unverified_without_traffic_answer")
+
+    def test_a_present_but_empty_rulebase_container_is_not_a_populated_one(self):
+        self._merged(vsys=[{"@name": "vsys1",
+                            "rulebase": {"tunnel-inspect": {"rules": None}}}])
+        _nh_tunnel(self.appliance)
+
+        self.assertEqual(_NhTunnel.objects.get().tunnel_inspection_coverage_state,
+                         "no_policy")
+
+    def test_a_null_rulebase_key_does_not_raise(self):
+        """vsys10 on 013201001475 holds `rulebase: null` - the key exists and carries nothing."""
+        self._merged(vsys=[{"@name": "vsys10", "rulebase": None}])
+
+        self.assertEqual(_nh_tunnel(self.appliance),
+                         {"pan_os_tunnel_inspection_coverages": 1})
+
+    def test_tunnel_acceleration_absent_asserts_ENABLED_which_narrows_the_assertion(self):
+        """The direction that matters: a query treating a missing node as "acceleration off"
+        would assert a GTP-U rule is required on every appliance that has never touched the
+        setting."""
+        self._merged(vsys=[{"@name": "vsys1"}])
+        _nh_tunnel(self.appliance)
+        row = _NhTunnel.objects.get()
+
+        self.assertTrue(row.tunnel_acceleration)
+        self.assertEqual(
+            row.provenance_for("tunnel_acceleration").provenance_type, "pan_os_default")
+
+    def test_tunnel_acceleration_no_is_read_and_recorded_as_local(self):
+        """6A9C0A9904E7D6E is the only appliance in the estate where the leaf has a value."""
+        self._merged(vsys=[{"@name": "vsys1"}],
+                     deviceconfig={"setting": {"tunnel-acceleration": "no"}})
+        _nh_tunnel(self.appliance)
+        row = _NhTunnel.objects.get()
+
+        self.assertFalse(row.tunnel_acceleration)
+        self.assertEqual(
+            row.provenance_for("tunnel_acceleration").provenance_type, "local")
+
+    def test_a_pushed_rulebase_produces_a_SECOND_row_at_device_group_scope(self):
+        """THE OMISSION THIS EXISTS FOR: the merged view carries no pushed policy, so a vsys
+        whose coverage comes entirely from Panorama reads as having no policy at all - a wrong
+        finding on exactly the estates that are centrally managed. The pushed payload spells
+        the rulebase `policy/panorama/pre-rulebase`, NOT `rulebase`, and both pushed rulebases
+        are read because a vsys evaluates both."""
+        self._merged(vsys=[{"@name": "vsys1"}])
+        point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            vsys_name="vsys1", vsys_display_name="vsys1")
+        Snapshot.objects.create(
+            management_station=self.station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {
+                "pre-rulebase": {"tunnel-inspect": {
+                    "rules": {"entry": [self.LAB_ENABLED_RULE]}}},
+                "post-rulebase": {"security": {"rules": None}}}}})
+        _nh_tunnel(self.appliance)
+
+        rows = {r.scope: r for r in _NhTunnel.objects.all()}
+        self.assertEqual(sorted(rows), ["device-group", "vsys"])
+        self.assertEqual(rows["vsys"].tunnel_inspection_coverage_state, "no_policy")
+        self.assertEqual(rows["device-group"].tunnel_inspect_rule_count, 1)
+        self.assertEqual(rows["device-group"].tunnel_inspection_coverage_state,
+                         "coverage_unverified_without_traffic_answer")
+
+    def test_a_pushed_read_with_NO_tunnel_inspect_key_writes_no_second_row(self):
+        """The lab's measured shape - each pushed rulebase holds `security` and nothing else,
+        on three vsys across two appliances. A second row saying `no_policy` would double every
+        finding this control raises while telling nobody anything new; the cost is that "the
+        device group pushes none" and "nobody asked Panorama" both produce no row."""
+        self._merged(vsys=[{"@name": "vsys1"}])
+        point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            vsys_name="vsys1", vsys_display_name="vsys1")
+        Snapshot.objects.create(
+            management_station=self.station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload={"policy": {"panorama": {
+                "pre-rulebase": {"security": {"rules": None}},
+                "post-rulebase": {"default-security-rules": None,
+                                  "security": {"rules": None}}}}})
+        _nh_tunnel(self.appliance)
+
+        self.assertEqual(list(_NhTunnel.objects.values_list("scope", flat=True)), ["vsys"])
+
+    def test_a_vsys_with_no_device_group_assignment_does_not_raise(self):
+        """`show config pushed-shared-policy` answers a plain string for a vsys Panorama does
+        not push to, which `Snapshot.payload` stores as a `str`. The shipped reader answers {}
+        for it, which is a legitimate operational state rather than an error."""
+        self._merged(vsys=[{"@name": "vsys1"}])
+        point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            vsys_name="vsys1", vsys_display_name="vsys1")
+        Snapshot.objects.create(
+            management_station=self.station, enforcement_point=point,
+            source_type="show_pushed_shared_policy_vsys", collected_at=timezone.now(),
+            payload="No shared policy pushed to device")
+
+        self.assertEqual(_nh_tunnel(self.appliance),
+                         {"pan_os_tunnel_inspection_coverages": 1})
+
+    def test_every_derived_column_carries_no_provenance_row(self):
+        self._merged(vsys=[{"@name": "vsys1"}])
+        _nh_tunnel(self.appliance)
+        row = _NhTunnel.objects.get()
+        stored = set(FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_NhTunnel),
+            object_id=row.pk).values_list("field_name", flat=True))
+
+        self.assertEqual(stored & set(_NhTunnel.DERIVED_FIELDS), set())
+        self.assertEqual(stored, {"tunnel_acceleration"})
+
+
+class RoutingAdjacencyNormalizationTests(_NetworkHardeningBase):
+    """PAN-NET-007 - the adjacencies that carry authentication, and what each one amounts to."""
+
+    #: `oep-nhd6-vr1` on 013201001475 verbatim, 2026-10-29, trimmed to the keys this reads.
+    LAB_ROUTER = {
+        "@name": "oep-nhd6-vr1",
+        "interface": {"member": ["ethernet1/22", "ethernet1/23"]},
+        "protocol": {
+            "bgp": {
+                "enable": "no", "router-id": "10.99.0.1", "local-as": "64999",
+                "auth-profile": {"entry": [
+                    {"@name": "oep-nhd6-ba1", "secret": "-AQ==REDACTED="}]},
+                "peer-group": {"entry": [{
+                    "@name": "oep-nhd6-g1", "enable": "no", "type": {"ebgp": None},
+                    "peer": {"entry": [
+                        {"@name": "oep-nhd6-p1", "enable": "no", "peer-as": "64801"},
+                        {"@name": "oep-nhd6-p2", "enable": "no", "peer-as": "64802",
+                         "connection-options": {"authentication": "oep-nhd6-ba1"},
+                         "max-prefixes": "5000"},
+                        {"@name": "oep-nhd6-p3", "enable": "no", "peer-as": "64803",
+                         "connection-options": {"authentication": "oep-nhd6-ba1"},
+                         "max-prefixes": "unlimited"},
+                    ]}}]}},
+            "ospf": {
+                "enable": "no", "router-id": "10.99.0.1",
+                "auth-profile": {"entry": [
+                    {"@name": "oep-nhd6-oa1", "password": "-AQ==REDACTED="},
+                    {"@name": "oep-nhd6-oa2", "md5": {"entry": [
+                        {"@name": "1", "key": "-AQ==REDACTED=", "preferred": "yes"}]}}]},
+                "area": {"entry": [
+                    {"@name": "0.0.0.9", "type": {"normal": None}},
+                    {"@name": "0.0.0.0", "type": {"normal": None},
+                     "virtual-link": {"entry": [
+                         {"@name": "oep-nhd6-v1", "enable": "no",
+                          "authentication": "oep-nhd6-oa1"},
+                         {"@name": "oep-nhd6-v2", "enable": "no",
+                          "authentication": "oep-nhd6-oa2"},
+                         {"@name": "oep-nhd6-v3", "enable": "no"},
+                     ]}}]}},
+            "ospfv3": {"enable": "no", "auth-profile": None},
+        },
+    }
+
+    def test_the_six_lab_adjacencies_and_what_each_one_amounts_to(self):
+        """Three BGP peers and three OSPF virtual links. The virtual links are read because
+        they are where this estate's only OSPF authentication stands: both areas carry NO
+        `interface` entries at all, so reading area interfaces alone would leave
+        `ospf_authentication_profile` empty on every row in the estate and `cleartext_password`
+        with no device proof anywhere."""
+        self._merged(network={"virtual-router": {"entry": [self.LAB_ROUTER]}})
+
+        self.assertEqual(_nh_adjacencies(self.appliance),
+                         {"pan_os_routing_adjacencies": 6})
+        rows = {r.adjacency_name: r for r in _NhAdjacency.objects.all()}
+        self.assertEqual(
+            [(n, rows[n].protocol, rows[n].authentication_profile,
+              rows[n].authentication_strength, rows[n].max_prefixes,
+              rows[n].prefix_limit_state)
+             for n in sorted(rows)],
+            [("oep-nhd6-p1", "bgp", "", "none", None, "no_ceiling"),
+             ("oep-nhd6-p2", "bgp", "oep-nhd6-ba1", "weak_digest", "5000", "enforcing"),
+             ("oep-nhd6-p3", "bgp", "oep-nhd6-ba1", "weak_digest", "unlimited",
+              "unlimited"),
+             ("oep-nhd6-v1", "ospf", "oep-nhd6-oa1", "cleartext_password", None,
+              "no_ceiling"),
+             ("oep-nhd6-v2", "ospf", "oep-nhd6-oa2", "weak_digest", None, "no_ceiling"),
+             ("oep-nhd6-v3", "ospf", "", "none", None, "no_ceiling")])
+
+    def test_the_per_protocol_columns_keep_their_own_measurement(self):
+        """The coalesced column sits on TOP of the two measured references rather than
+        replacing them, so no measurement is thrown away by having a verdict above it."""
+        self._merged(network={"virtual-router": {"entry": [self.LAB_ROUTER]}})
+        _nh_adjacencies(self.appliance)
+        peer = _NhAdjacency.objects.get(adjacency_name="oep-nhd6-p2")
+        link = _NhAdjacency.objects.get(adjacency_name="oep-nhd6-v1")
+
+        self.assertEqual(peer.bgp_authentication_profile, "oep-nhd6-ba1")
+        self.assertEqual(peer.ospf_authentication_profile, "")
+        self.assertEqual(link.ospf_authentication_profile, "oep-nhd6-oa1")
+        self.assertEqual(link.bgp_authentication_profile, "")
+        self.assertEqual(
+            peer.provenance_for("bgp_authentication_profile").provenance_type, "local")
+        self.assertEqual(
+            _NhAdjacency.objects.get(adjacency_name="oep-nhd6-p1").provenance_for(
+                "bgp_authentication_profile").provenance_type, "pan_os_default")
+
+    def test_a_reference_resolves_within_its_OWN_router_and_nowhere_else(self):
+        """Measured: the pool is per router. A name that exists on another router does not
+        satisfy the adjacency, and treating it as satisfied would report an unauthenticated
+        peer as authenticated."""
+        other = {"@name": "vr_other", "protocol": {"bgp": {
+            "auth-profile": {"entry": [{"@name": "shared-name", "secret": "x"}]}}}}
+        mine = {"@name": "vr_mine", "protocol": {"bgp": {"peer-group": {"entry": [
+            {"@name": "g", "peer": {"entry": [
+                {"@name": "p", "connection-options": {"authentication": "shared-name"}}]}}]}}}}
+        self._merged(network={"virtual-router": {"entry": [other, mine]}})
+        _nh_adjacencies(self.appliance)
+        row = _NhAdjacency.objects.get(router_name="vr_mine")
+
+        self.assertEqual(row.authentication_profile, "shared-name")
+        self.assertEqual(row.authentication_strength, "none")
+
+    def test_an_unresolvable_name_is_no_authentication_and_not_unknown(self):
+        """A null join sits on the compliant side of a plain comparison and would be dropped,
+        so the graded column has to decide it. `none` fires."""
+        self.assertEqual(_nh_strength("bgp", "missing", {"bgp": {}}), "none")
+        self.assertEqual(_nh_strength("bgp", "", {"bgp": {}}), "none")
+
+    def test_the_strength_ladder_over_what_a_profile_actually_holds(self):
+        profiles = {
+            "bgp": {"md5-only": {"secret": "x"}, "bare": {}},
+            "ospf": {"clear": {"password": "x"}, "digest": {"md5": {"entry": []}},
+                     "both": {"password": "x", "md5": {"entry": []}}, "bare": {}},
+        }
+        self.assertEqual(_nh_strength("bgp", "md5-only", profiles), "weak_digest")
+        self.assertEqual(_nh_strength("bgp", "bare", profiles), "none")
+        self.assertEqual(_nh_strength("ospf", "clear", profiles), "cleartext_password")
+        self.assertEqual(_nh_strength("ospf", "digest", profiles), "weak_digest")
+        # WEAKEST WINS where a profile carries both, which is the ordering the vendor's own
+        # "narrower attachment overrides the wider" statement implies.
+        self.assertEqual(_nh_strength("ospf", "both", profiles), "cleartext_password")
+        self.assertEqual(_nh_strength("ospf", "bare", profiles), "none")
+
+    def test_the_prefix_ceiling_states_a_configuration_read_can_reach(self):
+        self.assertEqual(_nh_prefix_limit(None), "no_ceiling")
+        self.assertEqual(_nh_prefix_limit(""), "no_ceiling")
+        self.assertEqual(_nh_prefix_limit("unlimited"), "unlimited")
+        self.assertEqual(_nh_prefix_limit("5000"), "enforcing")
+        # `warn_only` is unreachable: no measured key says whether the limit warns or stops,
+        # so a ceiling that only warns is stored as `enforcing`. Same severity, wrong
+        # remediation text.
+        self.assertNotIn("warn_only", {_nh_prefix_limit(v)
+                                       for v in (None, "", "unlimited", "1", "99999")})
+
+    def test_the_routing_engine_has_three_answers_and_the_absence_is_UNKNOWN(self):
+        """Resolving the absence to `legacy` would assert a vendor fact nobody measured. The
+        leaf is absent on all four lab appliances."""
+        self.assertEqual(_nh_engine({}), "unknown")
+        self.assertEqual(
+            _nh_engine({"deviceconfig": {"setting": {}}}), "unknown")
+        self.assertEqual(
+            _nh_engine({"deviceconfig": {"setting": {"advance-routing": "yes"}}}),
+            "advanced")
+        self.assertEqual(
+            _nh_engine({"deviceconfig": {"setting": {"advance-routing": "no"}}}),
+            "legacy")
+
+    def test_an_advanced_routing_tree_with_entries_is_REPORTED_and_not_read(self):
+        """The silent zero this exists to prevent: nothing normalizes `network/logical-router`,
+        so an estate running the Advanced Routing Engine would produce no adjacency row at all
+        - which is the reassuring direction on every assertion in this domain. No instance of
+        that tree exists on any appliance this was measured against, so reading it would be a
+        guess at a shape nobody has seen."""
+        self._merged(network={"logical-router": {"entry": [{"@name": "lr1"}]}})
+        _nh_adjacencies(self.appliance)
+        issue = NormalizationIssue.objects.get(kind="routing_adjacency")
+
+        self.assertEqual(issue.name, "network/logical-router")
+        self.assertEqual(issue.disposition, NormalizationIssue.Disposition.SKIPPED)
+        self.assertIn("NOT represented", issue.reason)
+
+    def test_an_empty_logical_router_container_reports_nothing(self):
+        """`network/logical-router` is ABSENT on all four lab appliances. Reporting that would
+        put a permanent warning on every device in every estate."""
+        self._merged(network={"logical-router": None,
+                              "virtual-router": {"entry": [self.LAB_ROUTER]}})
+        _nh_adjacencies(self.appliance)
+
+        self.assertEqual(
+            NormalizationIssue.objects.filter(kind="routing_adjacency").count(), 0)
+
+    def test_a_removed_adjacency_stops_being_reported(self):
+        self._merged(network={"virtual-router": {"entry": [self.LAB_ROUTER]}})
+        _nh_adjacencies(self.appliance)
+        Snapshot.objects.filter(appliance=self.appliance).delete()
+        self._merged(network={"virtual-router": {"entry": [
+            {"@name": "oep-nhd6-vr1", "protocol": {"bgp": {"peer-group": {"entry": [
+                {"@name": "oep-nhd6-g1", "peer": {"entry": [
+                    {"@name": "oep-nhd6-p1"}]}}]}}}}]}})
+        _nh_adjacencies(self.appliance)
+
+        self.assertEqual([r.adjacency_name for r in _NhAdjacency.objects.all()],
+                         ["oep-nhd6-p1"])
+
+    def test_a_router_with_no_protocol_branch_produces_no_row(self):
+        """`oep-nhd6-vr2` on 691665AC334B458 holds five interfaces and no routing protocol at
+        all - it exists only because PAN-OS will not commit a DHCP configuration on an
+        interface that is in no virtual router."""
+        self._merged(network={"virtual-router": {"entry": [
+            {"@name": "oep-nhd6-vr2", "interface": {"member": ["ethernet1/3"]}}]}})
+
+        self.assertEqual(_nh_adjacencies(self.appliance),
+                         {"pan_os_routing_adjacencies": 0})
+
+    def test_a_template_decorated_router_is_read_and_nothing_says_it_is_pushed(self):
+        """`vr_pan-fw-111` is supplied entirely by template `ptpl-pan-fw-111`. It is stored as
+        the firewall's own, which is this model's known limitation: a remediation would tell an
+        engineer to attach a profile at a node the firewall will not accept the edit on."""
+        self._merged(network={"virtual-router": {"@ptpl": "ptpl-pan-fw-111", "entry": [{
+            "@name": "vr_pan-fw-111", "@ptpl": "ptpl-pan-fw-111",
+            "protocol": {"@ptpl": "ptpl-pan-fw-111", "bgp": {
+                "@ptpl": "ptpl-pan-fw-111",
+                "enable": {"@ptpl": "ptpl-pan-fw-111", "#text": "no"},
+                "peer-group": {"entry": [{"@name": "g", "peer": {"entry": [
+                    {"@name": "p", "connection-options": {
+                        "authentication": {"@ptpl": "ptpl-pan-fw-111",
+                                           "#text": "tpl-profile"}}}]}}]}}}}]}})
+        _nh_adjacencies(self.appliance)
+        row = _NhAdjacency.objects.get()
+
+        self.assertEqual(row.bgp_authentication_profile, "tpl-profile")
+        self.assertEqual(
+            row.provenance_for("bgp_authentication_profile").provenance_type, "template")
+
+    def test_every_derived_column_carries_no_provenance_row(self):
+        self._merged(network={"virtual-router": {"entry": [self.LAB_ROUTER]}})
+        _nh_adjacencies(self.appliance)
+        ct = ContentType.objects.get_for_model(_NhAdjacency)
+        stored = set(FieldProvenance.objects.filter(content_type=ct)
+                     .values_list("field_name", flat=True))
+
+        self.assertEqual(stored & set(_NhAdjacency.DERIVED_FIELDS), set())
+
+
+class InterfaceNetworkHardeningColumnTests(_NetworkHardeningBase):
+    """PAN-NET-001 and PAN-NET-003's eight columns on the shipped `Interface` model."""
+
+    #: 013201001475's ethernet container, 2026-10-29, trimmed to the shapes this reads.
+    LAB_ETHERNET = [
+        {"@name": "ethernet1/9", "layer3": {
+            "lldp": {"enable": "yes", "profile": "oep-nhd6-lp1"}}},
+        {"@name": "ethernet1/13", "layer3": {"lldp": {"enable": "yes"}}},
+        {"@name": "ethernet1/14", "layer3": {
+            "lldp": {"enable": "yes", "profile": "oep-nhd6-lp5"}}},
+        {"@name": "ethernet1/15", "layer3": {"lldp": {"enable": "no"}}},
+        {"@name": "ethernet1/16", "layer3": None},
+        {"@name": "ethernet1/17", "link-state": "down", "layer3": None},
+        {"@name": "ethernet1/18", "link-state": "auto", "link-speed": "1000",
+         "layer3": None},
+        {"@name": "ethernet1/19", "link-state": "auto", "layer3": {
+            "ip": {"entry": [{"@name": "10.99.19.1/30"}]}}},
+        {"@name": "ethernet1/20", "link-state": "down", "layer3": {
+            "interface-management-profile": "oep-nhd6-mp1"}},
+        {"@name": "ethernet1/21", "link-state": "down", "layer3": {
+            "interface-management-profile": "oep-p2-imp"}},
+        {"@name": "ethernet1/22", "link-state": "down", "layer3": None},
+        {"@name": "ethernet1/24", "link-state": "down", "layer3": None},
+    ]
+    #: The lab's five LLDP profiles verbatim. NOTE THE TWO SPELLINGS: `management-address`
+    #: arrives as a CONTAINER with its own `enabled` child while `system-description` and
+    #: `system-name` arrive as the bare string "yes". Measured on 013201001475.
+    LAB_LLDP_PROFILES = [
+        {"@name": "oep-nhd6-lp1", "mode": "transmit-receive",
+         "option-tlvs": {"management-address": {"enabled": "yes"}}},
+        {"@name": "oep-nhd6-lp2", "mode": "transmit-receive",
+         "option-tlvs": {"system-description": "yes"}},
+        {"@name": "oep-nhd6-lp3", "mode": "transmit-receive",
+         "option-tlvs": {"system-name": "yes"}},
+        {"@name": "oep-nhd6-lp4", "mode": "transmit-receive"},
+        {"@name": "oep-nhd6-lp5", "mode": "receive-only"},
+    ]
+    #: `oep-nhd6-mp1` sets no permitted-ip; `oep-p2-imp` sets two. Both verbatim.
+    LAB_PROFILES = [
+        {"@name": "oep-nhd6-mp1", "https": "yes"},
+        {"@name": "oep-p2-imp", "@ptpl": "shared-base",
+         "ping": {"@ptpl": "shared-base", "#text": "yes"},
+         "permitted-ip": {"@ptpl": "shared-base", "entry": [
+             {"@name": "10.77.1.0/24", "@ptpl": "shared-base"},
+             {"@name": "10.77.2.0/24", "@ptpl": "shared-base"}]}},
+        # The third state: present and EMPTY, which exists on 6A9C0A9904E7D6E.
+        {"@name": "oep-mgt6-p02", "https": "yes", "permitted-ip": None},
+    ]
+
+    def _lab(self, *, vsys=None):
+        return self._merged(
+            network={
+                "interface": {"ethernet": {"entry": self.LAB_ETHERNET}},
+                "virtual-router": {"entry": [{
+                    "@name": "oep-nhd6-vr1",
+                    "interface": {"member": ["ethernet1/22"]}}]},
+                "profiles": {
+                    "interface-management-profile": {"entry": self.LAB_PROFILES},
+                    "lldp-profile": {"entry": self.LAB_LLDP_PROFILES}},
+            },
+            vsys=vsys if vsys is not None else [{"@name": "vsys1"}])
+
+    def _rows(self):
+        return {i.name: i for i in Interface.objects.filter(appliance=self.appliance)}
+
+    def test_the_residue_ranking_over_the_twelve_lab_ports(self):
+        """Every one of these ports was committed by stage 6 to stand for one rank, and the
+        ranking is a precedence rather than a set of flags - the WORST thing held wins."""
+        self._lab()
+        normalize_interfaces(self.appliance)
+        rows = self._rows()
+
+        self.assertEqual(
+            {n: rows[n].out_of_service_residue for n in sorted(rows)},
+            {"ethernet1/9": "administrative_state_unknown",
+             "ethernet1/13": "administrative_state_unknown",
+             "ethernet1/14": "administrative_state_unknown",
+             "ethernet1/15": "administrative_state_unknown",
+             "ethernet1/16": "administrative_state_unknown",
+             "ethernet1/17": "stripped_and_shut_down",
+             "ethernet1/18": "comment_or_link_settings_only",
+             "ethernet1/19": "address_only",
+             "ethernet1/20": "unrestricted_management_binding",
+             "ethernet1/21": "restricted_management_binding",
+             "ethernet1/22": "routing_instance_without_address",
+             "ethernet1/24": "stripped_and_shut_down"})
+
+    def test_link_state_is_the_CONFIGURED_state_and_null_where_the_key_is_absent(self):
+        """Nothing is assumed: the only oracle for the administrative state conflates it with
+        the physical link, so guessing `auto` would assert that every port with no key is not
+        shut down - the reassuring direction on the one key the fourth clause turns on."""
+        self._lab()
+        normalize_interfaces(self.appliance)
+        rows = self._rows()
+
+        self.assertIsNone(rows["ethernet1/16"].link_state)
+        self.assertEqual(rows["ethernet1/17"].link_state, "down")
+        self.assertEqual(rows["ethernet1/18"].link_state, "auto")
+
+    def test_a_port_holding_nothing_and_NOT_shut_down_still_fires(self):
+        """THE PLACE THE VOCABULARY RUNS OUT: stripped but administratively enabled is the
+        second half of what the control asks for and has no token. It reads
+        `administrative_state_unknown`, which fires, because the one member that reads as
+        fully compliant would say "shut down" about a port that is not - and `link_state`
+        beside it is what separates the two states this token carries."""
+        self.assertEqual(
+            _nh_residue(profile_name="", restricted=False, zone_name="", addressing="none",
+                        ipv4=[], ipv6=[], link_state="auto", in_routing_instance=False,
+                        has_link_settings=False),
+            "administrative_state_unknown")
+        self.assertEqual(
+            _nh_residue(profile_name="", restricted=False, zone_name="", addressing="none",
+                        ipv4=[], ipv6=[], link_state="down", in_routing_instance=False,
+                        has_link_settings=False),
+            "stripped_and_shut_down")
+
+    def test_a_dhcp_addressed_port_is_address_only_despite_holding_no_address(self):
+        """`ipv4_addresses` is empty for a DHCP client because the lease is runtime state, so a
+        residue reading the address list alone would report the port as holding nothing."""
+        self.assertEqual(
+            _nh_residue(profile_name="", restricted=False, zone_name="",
+                        addressing="dhcp-client", ipv4=[], ipv6=[], link_state="down",
+                        in_routing_instance=False, has_link_settings=False),
+            "address_only")
+
+    def test_the_source_restriction_has_three_states_and_two_of_them_restrict_nothing(self):
+        profiles = {p["@name"]: p for p in self.LAB_PROFILES}
+
+        self.assertTrue(_nh_restricts("oep-p2-imp", profiles))
+        self.assertFalse(_nh_restricts("oep-nhd6-mp1", profiles))
+        # Present and EMPTY: `{"permitted-ip": null}` restricts nothing, and a truthiness
+        # test on the container cannot tell it from a populated one.
+        self.assertFalse(_nh_restricts("oep-mgt6-p02", profiles))
+        # A binding naming a profile that does not exist still permits whatever the port's
+        # own surface permits, so the unrestricted reading is the right one.
+        self.assertFalse(_nh_restricts("gone", profiles))
+        self.assertFalse(_nh_restricts("", profiles))
+
+    def test_the_zone_is_read_from_the_ZONE_end_across_every_member_list(self):
+        """The zone names its members and the interface does not name its zone. Every one of
+        the six subtrees a zone can carry is walked, not only layer3."""
+        device_entry = {"vsys": {"entry": [{
+            "@name": "vsys1", "zone": {"entry": [
+                {"@name": "oep-nhd6-z2", "network": {"layer3": {
+                    "member": ["ethernet1/1", "ethernet1/3"]}}},
+                {"@name": "l2zone", "network": {"layer2": {"member": ["ethernet1/8"]}}},
+                {"@name": "vwzone", "network": {
+                    "virtual-wire": {"member": ["ethernet1/11"]}}},
+                # Template-supplied and carrying no member key at all, which is what both
+                # PA-VMs' `Private` and `Public` look like.
+                {"@name": "Private", "@ptpl": "creds_tpl",
+                 "network": {"@ptpl": "creds_tpl", "layer3": {"@ptpl": "creds_tpl"}}},
+                # Present and empty.
+                {"@name": "oep-iot6-z2", "network": None},
+            ]}}]}}
+
+        self.assertEqual(_nh_zones(device_entry),
+                         {"ethernet1/1": "oep-nhd6-z2", "ethernet1/3": "oep-nhd6-z2",
+                          "ethernet1/8": "l2zone", "ethernet1/11": "vwzone"})
+
+    def test_a_zone_member_arriving_as_a_decorated_dict_is_read(self):
+        """A pushed member list is `[{"@ptpl": "...", "#text": "ethernet1/1"}]`, not a list of
+        strings, and a reader taking the dict's str() would store the whole mapping."""
+        device_entry = {"vsys": {"entry": [{"@name": "vsys1", "zone": {"entry": [
+            {"@name": "untrust", "network": {"layer3": {"member": [
+                {"@ptpl": "ptpl-pan-fw-111", "#text": "ethernet1/1"}]}}}]}}]}}
+
+        self.assertEqual(_nh_zones(device_entry), {"ethernet1/1": "untrust"})
+
+    def test_the_announced_content_ladder_over_the_five_lab_profiles(self):
+        """The five profiles stage 6 committed, one per rank, plus the two states that need no
+        profile at all."""
+        profiles = {p["@name"]: p for p in self.LAB_LLDP_PROFILES}
+
+        self.assertEqual(_nh_announced(True, "oep-nhd6-lp1", profiles),
+                         "management_address")
+        self.assertEqual(_nh_announced(True, "oep-nhd6-lp2", profiles),
+                         "system_description")
+        self.assertEqual(_nh_announced(True, "oep-nhd6-lp3", profiles),
+                         "hostname_or_role")
+        # Transmitting with every optional TLV unset still puts the MANDATORY chassis
+        # identifier and port name on the wire, which is why this is not "nothing".
+        self.assertEqual(_nh_announced(True, "oep-nhd6-lp4", profiles),
+                         "port_and_chassis_only")
+        self.assertEqual(_nh_announced(True, "oep-nhd6-lp5", profiles),
+                         "receive_only_or_off")
+        # Running the protocol with no profile: the vendor says the firewall uses its global
+        # defaults and no document says what those transmit, so what the port leaks is
+        # UNKNOWN rather than low - and an unknown fires.
+        self.assertEqual(_nh_announced(True, "", profiles), "unknown_global_defaults")
+        # A dangling reference is treated the same way rather than as a pass.
+        self.assertEqual(_nh_announced(True, "gone", profiles), "unknown_global_defaults")
+        self.assertEqual(_nh_announced(False, "oep-nhd6-lp1", profiles),
+                         "receive_only_or_off")
+
+    def test_a_TLV_is_read_in_BOTH_of_the_two_spellings_the_device_uses(self):
+        """Measured 2026-10-29: `management-address` is a container with its own `enabled`
+        child while `system-description` is the bare string "yes". A reader of one shape gets
+        nothing from the other, and getting nothing reads as "not announced"."""
+        self.assertEqual(
+            _nh_announced(True, "p", {"p": {"mode": "transmit-receive", "option-tlvs": {
+                "management-address": {"enabled": "yes"}}}}),
+            "management_address")
+        self.assertEqual(
+            _nh_announced(True, "p", {"p": {"mode": "transmit-receive", "option-tlvs": {
+                "management-address": "yes"}}}),
+            "management_address")
+        # And a container whose `enabled` child says no, or is absent, is not announced.
+        self.assertEqual(
+            _nh_announced(True, "p", {"p": {"mode": "transmit-receive", "option-tlvs": {
+                "management-address": {"enabled": "no"}}}}),
+            "port_and_chassis_only")
+        self.assertEqual(
+            _nh_announced(True, "p", {"p": {"mode": "transmit-receive", "option-tlvs": {
+                "management-address": None}}}),
+            "port_and_chassis_only")
+
+    def test_the_lldp_node_presence_is_element_presence_and_not_a_value(self):
+        """An empty `<lldp/>` serialises as None, so a truthiness test reports a port that HAS
+        a node as having none - and the distinction is behavioural: `show lldp config all`
+        lists an interface if and only if the node exists."""
+        self._merged(network={"interface": {"ethernet": {"entry": [
+            {"@name": "ethernet1/1", "layer3": {"lldp": None}},
+            {"@name": "ethernet1/2", "layer3": {}},
+        ]}}})
+        normalize_interfaces(self.appliance)
+        rows = self._rows()
+
+        self.assertTrue(rows["ethernet1/1"].lldp_node_present)
+        self.assertFalse(rows["ethernet1/1"].lldp_enabled)
+        self.assertFalse(rows["ethernet1/2"].lldp_node_present)
+
+    def test_a_template_supplied_lldp_node_reads_its_text(self):
+        """6A9C0A9904E7D6E's ethernet1/1, ethernet1/2 and ethernet1/7 all carry
+        `lldp: {enable: no}`, the first two of them decorated down to the leaf."""
+        self._merged(network={"interface": {"ethernet": {"entry": [
+            {"@name": "ethernet1/1", "@ptpl": "ptpl-pan-fw-111", "layer3": {
+                "@ptpl": "ptpl-pan-fw-111", "lldp": {
+                    "@ptpl": "ptpl-pan-fw-111",
+                    "enable": {"@ptpl": "ptpl-pan-fw-111", "#text": "no"}}}},
+        ]}}})
+        normalize_interfaces(self.appliance)
+
+        row = self._rows()["ethernet1/1"]
+        self.assertTrue(row.lldp_node_present)
+        self.assertFalse(row.lldp_enabled)
+
+    def test_a_subinterface_gets_its_own_eight_columns_from_its_own_entry(self):
+        """A unit carries its addressing and its bindings directly rather than under a type
+        key - the type key is on the parent - so a reader that looked under the subtree would
+        find nothing on every subinterface on the device."""
+        self._merged(
+            network={"interface": {"ethernet": {"entry": [{
+                "@name": "ethernet1/1", "layer3": {"units": {"entry": [
+                    {"@name": "ethernet1/1.1101",
+                     "ip": {"entry": [{"@name": "10.110.1.1/24"}]},
+                     "lldp": {"enable": "yes"}}]}}}]}}},
+            vsys=[{"@name": "vsys1", "zone": {"entry": [
+                {"@name": "extranet", "network": {
+                    "layer3": {"member": ["ethernet1/1.1101"]}}}]}}])
+        normalize_interfaces(self.appliance)
+        unit = self._rows()["ethernet1/1.1101"]
+
+        self.assertEqual(unit.security_zone_name, "extranet")
+        self.assertTrue(unit.lldp_node_present)
+        self.assertTrue(unit.lldp_enabled)
+        self.assertEqual(unit.lldp_announced_content, "unknown_global_defaults")
+        self.assertEqual(unit.out_of_service_residue, "security_zone_membership")
+
+    def test_the_zone_beats_the_address_and_the_binding_beats_the_zone(self):
+        """The precedence, tested where two residues sit on one port - which is the ordinary
+        case on a real firewall and the thing a set of flags cannot express."""
+        self._merged(
+            network={"interface": {"ethernet": {"entry": [
+                {"@name": "ethernet1/1", "layer3": {
+                    "ip": {"entry": [{"@name": "10.0.0.1/24"}]}}},
+                {"@name": "ethernet1/2", "layer3": {
+                    "ip": {"entry": [{"@name": "10.0.1.1/24"}]},
+                    "interface-management-profile": "oep-nhd6-mp1"}},
+            ]}}, "profiles": {"interface-management-profile": {
+                "entry": self.LAB_PROFILES}}},
+            vsys=[{"@name": "vsys1", "zone": {"entry": [{
+                "@name": "z", "network": {"layer3": {
+                    "member": ["ethernet1/1", "ethernet1/2"]}}}]}}])
+        normalize_interfaces(self.appliance)
+        rows = self._rows()
+
+        self.assertEqual(rows["ethernet1/1"].out_of_service_residue,
+                         "security_zone_membership")
+        self.assertEqual(rows["ethernet1/2"].out_of_service_residue,
+                         "unrestricted_management_binding")
+
+    def test_this_model_records_NO_provenance_for_any_of_the_eight(self):
+        """`Interface` carries no `ProvenancedMixin`, so a missing row here means the model is
+        not tracked and nothing more - which is the REVERSE of the reading a normalizer author
+        finds written down elsewhere. The eight derived columns cannot be declared either."""
+        self._lab()
+        normalize_interfaces(self.appliance)
+
+        self.assertFalse(hasattr(Interface, "DERIVED_FIELDS"))
+        self.assertEqual(
+            FieldProvenance.objects.filter(
+                content_type=ContentType.objects.get_for_model(Interface)).count(), 0)
