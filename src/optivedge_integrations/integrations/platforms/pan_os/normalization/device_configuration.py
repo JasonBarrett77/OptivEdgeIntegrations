@@ -63,6 +63,30 @@ def device_entry_from_snapshot(snapshot: Snapshot) -> dict[str, Any]:
     return entries[0]
 
 
+def management_node(snapshot: Snapshot) -> dict[str, Any]:
+    """`deviceconfig/setting/management` of the merged snapshot, or {}.
+
+    SIX private copies of this four-line walk already existed when this was added - in
+    `authentication_settings.py`, `panorama_registration.py`, `services_settings.py`,
+    `log_settings.py`, `wildfire_settings.py` (its sibling `setting/wildfire`) and
+    `device_identification.py`. They are deliberately left alone: each is load-bearing for a
+    shipped control and none is broken, which is the judgement `common.py::choice_child`
+    recorded when it was promoted. This exists so the SEVENTH caller does not write an eighth
+    copy, and it lives here rather than in `common.py` because its two consumers -
+    `login_banner_from_node` and `authentication_settings_from_node` - already take the node
+    this returns.
+
+    The shape worth knowing: the PARENT is present and a child is absent. Nobody reads a single
+    boolean leaf, they read this node, which carries 46 or 47 other children with no error and
+    no empty structure a caller could notice - so an absent child is a reading and not a failure.
+    """
+    entry = device_entry_from_snapshot(snapshot)
+    deviceconfig = entry.get("deviceconfig") if isinstance(entry, dict) else None
+    setting = deviceconfig.get("setting") if isinstance(deviceconfig, dict) else None
+    management = setting.get("management") if isinstance(setting, dict) else None
+    return management if isinstance(management, dict) else {}
+
+
 def latest_predefined_ssl_tls_snapshot(appliance: Appliance) -> Snapshot | None:
     """The vendor-shipped SSL/TLS profiles, collected separately from the merged config.
 
