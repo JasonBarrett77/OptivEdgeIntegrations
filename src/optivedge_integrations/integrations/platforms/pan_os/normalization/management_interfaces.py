@@ -27,6 +27,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
 from optivedge_integrations.integrations.models import (
+    ADMINISTRATIVE_SERVICE_NAMES,
     Appliance,
     FieldProvenance,
     ManagementInterface,
@@ -184,6 +185,24 @@ def _profile_services(profile_entry: dict) -> dict[str, tuple[bool, Any, str | N
     return out
 
 
+#: The PUBLIC name for the reader above, so a second module does not need a second copy of
+#: the eleven profile service keys and their measured implicit. `interface_management_profiles`
+#: reads them to classify what an UNBOUND profile would permit, which has no surface at all.
+#: Same shape as `device_services.py`'s one-line `_choice_child = choice_child` alias: the
+#: existing call site and the behaviour are untouched.
+profile_service_states = _profile_services
+
+
+def any_administrative_service(states: dict[str, tuple[bool, Any, str | None]]) -> bool:
+    """Is any of the five administrative services ON, over a surface's service states?
+
+    `states` is what `_mgt_services` or `profile_service_states` returns, so this answers the
+    same question for either plane - the polarity difference is already resolved in them.
+    """
+    return any(enabled for name, (enabled, _, _) in states.items()
+               if name in ADMINISTRATIVE_SERVICE_NAMES)
+
+
 def _profile_entry(device_entry: dict, profile_name: str) -> dict:
     profiles = (((device_entry.get("network") or {}).get("profiles") or {})
                 .get("interface-management-profile") or {})
@@ -263,6 +282,14 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
         ManagementInterface.objects.filter(appliance=appliance).delete()
         for (plane, interface_name, profile_name, surface_prov, entries, services,
              binding_prov) in surfaces:
+            # PAN-MGT-003's applicability, computed here rather than claused: the three
+            # deviceconfig planes are administrative surfaces unconditionally, because their
+            # permitted-source list governs every service on the port including the monitoring
+            # ones, while a data-plane surface is one only where the bound profile enables an
+            # administrative service. A plane test OR a quantifier over the service rows is a
+            # disjunction the consumer's clause grammar has no form for.
+            is_surface = (plane != ManagementInterface.PLANE_DATAPLANE
+                          or any_administrative_service(services))
             surface = ManagementInterface.objects.create(
                 management_station=appliance.management_station,
                 appliance=appliance,
@@ -270,6 +297,7 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
                 plane=plane,
                 interface_name=interface_name,
                 profile_name=profile_name,
+                is_management_surface=is_surface,
             )
             _record(surface, *surface_prov)
             # The binding is a field OF the surface, so it is a named field rather than

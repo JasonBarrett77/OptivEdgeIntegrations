@@ -64,6 +64,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.wildfire
 from optivedge_integrations.integrations.platforms.pan_os.normalization.services_settings import (
     normalize_services_settings,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.management_plane import (
+    normalize_management_plane,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_services import (
     normalize_device_services,
 )
@@ -274,6 +277,22 @@ def normalize_appliance_services_settings(appliance: Appliance) -> dict:
     return normalize_services_settings(appliance)
 
 
+def normalize_appliance_management_plane(appliance: Appliance) -> dict:
+    """The management plane's own addressing, and the appliance's operational mode.
+
+    PAN-MGT-004 and PAN-MGT-012. Two models, both one row per APPLIANCE and therefore a row per
+    HA node rather than per pair - the peers have different management addresses and are
+    separately reachable, and the mode is set per appliance from maintenance mode and is
+    synchronised by nothing.
+
+    Reads the same merged device entry as its neighbours and additionally the appliance's own
+    `show system info` snapshot where one exists; a missing one is a reading in its own right -
+    the operational-mode column holds the blank that FIRES - rather than an ordering problem.
+    Depends on nothing else in the appliance tuple.
+    """
+    return normalize_management_plane(appliance)
+
+
 def normalize_appliance_log_settings(appliance: Appliance) -> dict:
     """Device > Log Settings, the log-settings server profiles and per-vsys Log Forwarding.
 
@@ -398,6 +417,8 @@ __all__ = [
     "normalize_appliance_management_ssh",
     "normalize_appliance_master_key",
     "normalize_appliance_services_settings",
+    "normalize_appliance_management_plane",
+    "normalize_management_plane",
     "normalize_appliance_device_services",
     "normalize_appliance_panorama_registration",
     "normalize_appliance_password_complexity",

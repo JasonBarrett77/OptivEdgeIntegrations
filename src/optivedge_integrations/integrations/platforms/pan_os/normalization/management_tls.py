@@ -91,6 +91,44 @@ def resolve_profile_row(appliance: Appliance, name: str):
     return ManagementTlsBinding.SCOPE_UNRESOLVED, None
 
 
+def floor_below_minimum(profile_row) -> bool:
+    """Is the protocol floor in force below the generation PAN-MGT-010 requires?
+
+    A DISJUNCTION over three states, and true is the firing side in all three:
+
+        the floor is tls1-0                 a withdrawn generation
+        the floor is tls1-1                 a withdrawn generation
+        no floor could be resolved at all   nothing bound, a name resolving nowhere, or a
+                                            resolved profile with no protocol-settings
+
+    The third is why this is a column rather than a clause. `min_version` is a PROPERTY read
+    through `ssl_tls_service_profile`, so with no profile row there is nothing for a comparison
+    to compare, and the text compiler has no ordering operator to express the first two as one
+    clause either.
+
+    IT ASKS `min_version_rank` RATHER THAN THE TOKEN, which is the existing mechanism for
+    exactly this: `SslTlsServiceProfile.min_version_rank` is the floor as an ordered integer
+    with `RANK_UNRECOGNISED = -1` as its sentinel and its migration default, and its own comment
+    says that sentinel "sorts BELOW tls1-0 so every 'the floor is too low' comparison FIRES on
+    it - which is the direction stage 0 measured the enumerated query gets wrong: a list of the
+    forbidden values reads an unrecognised token as compliant". Comparing tokens here would
+    rebuild that defect beside the column built to prevent it.
+
+    IT CANNOT TELL THE TWO NO-FLOOR CASES APART, and that is a real limit rather than an
+    omission: a bound profile that EXISTS and omits `protocol-settings` stores the same empty
+    floor as a binding resolving to nothing. Both are the firing side, so the verdict is right
+    and the EVIDENCE a finding prints is thinner than an assessor would want - `profile_name`
+    and `profile_scope` beside it are what separate them.
+    """
+    if profile_row is None:
+        return True
+    try:
+        required = SslTlsServiceProfile.VERSION_ORDER.index(ManagementTlsBinding.FLOOR_MINIMUM)
+    except ValueError:  # pragma: no cover - a spelling change would be a migration
+        return True
+    return profile_row.min_version_rank < required
+
+
 def normalize_management_tls(appliance: Appliance) -> dict[str, int]:
     snapshot = latest_merged_snapshot(appliance)
     if snapshot is None:
@@ -157,6 +195,7 @@ def normalize_management_tls(appliance: Appliance) -> dict[str, int]:
                 # evidence worth keeping; one that was never looked up has no scope at all.
                 "certificate_scope": cert_scope,
                 "certificate_issuer": issuer,
+                "floor_below_minimum": floor_below_minimum(row),
             },
         )
         # Only the BINDING has provenance. The resolved values live on another object and carry

@@ -38,7 +38,23 @@ class ManagementTlsBinding(ProvenancedMixin, SyncTrackedModel):
         "certificate_trust",
         "certificate_scope",
         "certificate_issuer",
+        "floor_below_minimum",
     )
+
+    #: The protocol generation PAN-MGT-010 requires, as the DEVICE spells it.
+    #:
+    #: The control's assertion is a DISJUNCTION over three values - the two withdrawn
+    #: generations and no floor at all - and the consumer's text compiler serves eq, contains,
+    #: is_empty, starts_with and ends_with, so "the floor is below tls1-2" is an operator
+    #: nothing offers. The verdict is folded into `floor_below_minimum` below, which also folds
+    #: in the null join no comparison on `min_version` reaches, that being a property read
+    #: through `ssl_tls_service_profile`.
+    #:
+    #: THE SPELLING IS THE DEVICE'S AND NOT THE CATALOGUE'S. `SslTlsServiceProfile.VERSION_ORDER`
+    #: is `("tls1-0", "tls1-1", "tls1-2", "tls1-3")`, measured identical on four lab appliances
+    #: by `action=complete`; the catalogue and the UI say `TLSv1.2`. Comparing a stored value
+    #: against the catalogue spelling matches nothing, silently, on every appliance.
+    FLOOR_MINIMUM = "tls1-2"
 
     #: Which definition the bound name resolved to. PREDEFINED BEATS SHARED - measured
     #: 2026-09-02, a shared entry written under a predefined name was accepted, committed and
@@ -99,6 +115,18 @@ class ManagementTlsBinding(ProvenancedMixin, SyncTrackedModel):
     #: a classification an assessor cannot check is a classification they must take on trust.
     certificate_scope = models.CharField(max_length=16, blank=True, choices=SCOPE_CHOICES)
     certificate_issuer = models.CharField(max_length=255, blank=True)
+
+    #: PAN-MGT-010's verdict: the floor actually in force is below `FLOOR_MINIMUM`. True where
+    #: the resolved floor is a withdrawn generation and true where no floor could be resolved at
+    #: all - nothing bound, a name resolving nowhere, or a resolved profile carrying no
+    #: protocol-settings. True is the firing side.
+    #:
+    #: DEFAULT TRUE, deliberately: a binding nobody has recomputed is reported as serving a
+    #: withdrawn protocol generation. The opposite default would pass every appliance in the
+    #: estate during the window between the migration and the normalization pass, on the column
+    #: an administrator's own session is negotiated against, and nothing would error, nothing
+    #: would render empty and the finding count would look ordinary.
+    floor_below_minimum = models.BooleanField(default=True)
 
     class Meta:
         constraints = [
