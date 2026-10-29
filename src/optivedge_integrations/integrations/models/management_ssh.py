@@ -165,6 +165,27 @@ class ManagementSshSettings(ProvenancedMixin, SyncTrackedModel):
     rekey_data_mb = models.PositiveIntegerField(null=True, blank=True, default=None)
     rekey_packets_exponent = models.PositiveIntegerField(null=True, blank=True, default=None)
 
+    @property
+    def rekey_interval_known(self) -> bool:
+        """Whether a time-based rekey interval was established at all.
+
+        Mirrors the search layer's `rekey_interval_seconds__isnull` inverted, so a control can
+        both FILTER on this and read it back when presenting the finding - the findings sheet
+        refuses a tested field the model can neither store nor compute, which is how PAN-COV-001
+        broke the coverage page. `AddressObject.size_known` is the same shape for the same reason.
+
+        WHY IT EXISTS, which is a defect worth naming. Migration 0089 made the column nullable on
+        2026-10-20 and argued its own safety: "No control and no template reads these three
+        fields (grep, 2026-10-20: the model, this normalizer, migration 0055 and the tests)."
+        That grep covered THIS repo. OptivEdgeAssessments ships PAN-MCR-005 with the baseline
+        clause `rekey_interval_seconds eq 0`, and its search layer has no is-null operator - so
+        from that day the control matched nothing on any appliance with no `session-rekey` key,
+        which is the state it exists to report. Three red tests said so and were carried forward
+        for nine days under a label that explained them away. A nullability change has to be
+        grepped in the CONSUMER repo too.
+        """
+        return self.rekey_interval_seconds is not None
+
     class Meta:
         constraints = [
             models.UniqueConstraint(
