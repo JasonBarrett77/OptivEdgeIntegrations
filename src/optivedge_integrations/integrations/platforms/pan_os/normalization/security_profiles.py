@@ -75,6 +75,16 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_vsys_profiles,
     scalar_value, parse_text_field, parse_yes_no_field, Implicit, was_absent,
     DESCRIPTION_ABSENT)
+# THE SAME FUNCTION THIS DOMAIN NEEDS, ALREADY WRITTEN AND ALREADY MEASURED, under a private
+# name in another domain's module: weakest-by-an-explicit-order, None where nothing was
+# collected, and an unranked member returned AS THE DEVICE GAVE IT rather than silently dropped.
+# Imported rather than copied - six flatteners taught this repo what a redundant private helper
+# costs. It belongs in `common.py` and this is its second caller; promoting it would be a
+# refactor of code this domain did not add, so the move is recorded in
+# reference/consumer-repo-notes.md instead.
+from optivedge_integrations.integrations.platforms.pan_os.normalization.ike import (
+    _weakest as weakest_member,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     effective_in_scope_order,
 )
@@ -1036,6 +1046,94 @@ def inline_detector_catalogue(profiles: list, kind: str) -> list[str]:
     return sorted(names)
 
 
+def antivirus_posture_aggregates(
+    decoders: list[tuple], application_overrides: list[tuple],
+    ml_models: dict[str, str], ml_catalogue: list[str],
+) -> dict[str, str]:
+    """The three antivirus aggregates for one profile, as {column: token}. PAN-AVW-001 and 002.
+
+    COMPUTED FROM THE ROWS AND NOT FROM THE PAYLOAD, which is the point: the arguments are the
+    same tuples `replace_security_profiles` is about to write as satellite rows, so the aggregate
+    on the profile and the detail beneath it cannot disagree. Re-walking the entry would be a
+    second reading of the same question that could drift from the first.
+
+    WHY AN AGGREGATE EXISTS AT ALL. The three satellite models are in no search registry, so no
+    clause can name a column of theirs; the booleans on the profile - `has_non_blocking_decoder`
+    and the rest - carry the assertion, and these carry the SEVERITY, because a grading places
+    values and a boolean has only two.
+
+    `ml_catalogue` is passed rather than taken from `ml_models` because the ML rows are
+    SYNTHESIZED for every catalogue member and an absent model means DISABLED - the weakest
+    state. Reading only what the config names would miss exactly the profile that mentions no
+    model at all.
+
+    THE DECODER AGGREGATE READS `effective_action`, not the configured string: every decoder of
+    an unedited profile says `default`, and on smtp, imap and pop3 that means alert. The
+    APPLICATION-EXCEPTION aggregate reads the CONFIGURED one, because `default` on an exception
+    resolves per signature and there is nothing to resolve it to - it comes back unranked.
+
+    A BLANK IS AN EMPTY COLLECTION AND NOT A WEAK ONE. An antivirus profile naming no
+    application exception is the compliant state, measured; grading it at the weakest token would
+    report every clean profile at the worst severity on the strength of rows that do not exist.
+    """
+    # AN OVERRIDE WITH NO ACTION ELEMENT AT ALL STORES THE EMPTY STRING, and an absent action
+    # means `allow` - measured, and what the row's own `blocks: False` already says. Mapping it
+    # here keeps the blank token meaning ONE thing: the collection has no rows.
+    override_actions = [configured or SecurityProfileDecoder.ABSENT_ACTION
+                        for _application, configured, _blocks in application_overrides]
+    # The ROWS' own view of an absent model, so this agrees with what is written beneath it.
+    ml_states = [ml_models.get(name) or SecurityProfileMlModel.ABSENT_STATE
+                 for name in ml_catalogue]
+    return {
+        "weakest_decoder_action": weakest_member(
+            [row[2] for row in decoders], SecurityProfileDecoder.ACTION_STRENGTH_ORDER) or "",
+        "weakest_application_override_action": weakest_member(
+            override_actions, SecurityProfileDecoder.ACTION_STRENGTH_ORDER) or "",
+        "weakest_ml_model_state": weakest_member(
+            ml_states, SecurityProfileMlModel.STATE_STRENGTH_ORDER) or "",
+    }
+
+
+def wildfire_coverage_aggregates(wildfire_rules: list[tuple]) -> dict[str, Any]:
+    """The three WildFire-analysis coverage aggregates for one profile. PAN-AVW-003.
+
+    A UNION OVER THE RULES AND NOT A PROPERTY OF ANY ONE OF THEM. A profile can reach `any` file
+    type through one rule and both directions through another, so no single rule satisfies the
+    control - and TWO RULES CAN SUM TO `both`, one `upload` and one `download`, with neither row
+    saying so.
+
+    AN EMPTY RULE LIST IS A REAL ANSWER and is the commonest failing state: a profile with no
+    `rules` node is valid committed configuration that submits nothing, measured. It yields
+    False, False and a NULL direction, which is what a profile covering nothing should report -
+    not an absence of information.
+
+    The two booleans answer `some rule names any` and cannot answer more. The accepted file-type
+    set moves with the content release and the application set is a content catalogue of some
+    1400 entries; neither is in any configuration read or in this store, so there is no
+    denominator to compare a list of named members against.
+
+    THE DIRECTION IS NULL RATHER THAN BLANK where no rule reaches either direction, because a
+    grading places values and a null matches no placement - so such a row reports at the baseline
+    severity, which is what stage 3 prescribes for a profile that loses both directions. A rule's
+    own `direction` can be absent, and what the device then does was never established, so the
+    union of nothing is a null and not a guess.
+    """
+    directions = {row[3] for row in wildfire_rules if row[3]}
+    if "both" in directions or {"upload", "download"} <= directions:
+        direction = "both"
+    elif "download" in directions:
+        direction = "download"
+    elif "upload" in directions:
+        direction = "upload"
+    else:
+        direction = None
+    return {
+        "submits_all_file_types": any(row[5] for row in wildfire_rules),
+        "covers_all_applications": any(row[6] for row in wildfire_rules),
+        "direction_coverage": direction,
+    }
+
+
 def profile_wildfire_rules(entry: dict[str, Any]) -> list[tuple]:
     """(name, applications, file_types, direction, analysis, all_ft, all_app, both) per rule.
 
@@ -1715,6 +1813,18 @@ def replace_security_profiles(
             reference_reach_resolved=(reach_resolved or {}).get(normalized.key, False),
             **normalized.file_blocking,
             **normalized.data_filtering,
+            # THE AGGREGATES OVER THE SATELLITE ROWS THIS LOOP IS ABOUT TO WRITE, computed from
+            # the same tuples so the summary and the detail cannot disagree. EMPTY for a kind
+            # that does not answer the question, so the model's own defaults stand - which are
+            # the firing side, kept off the wrong rows by the `kind` clause every query over
+            # this model carries. Same convention as `file_blocking` above.
+            **(antivirus_posture_aggregates(
+                normalized.decoders, normalized.application_overrides,
+                normalized.ml_models,
+                catalogue if normalized.kind == SecurityProfile.KIND_VIRUS else [])
+               if normalized.kind == SecurityProfile.KIND_VIRUS else {}),
+            **(wildfire_coverage_aggregates(normalized.wildfire_rules)
+               if normalized.kind == SecurityProfile.KIND_WILDFIRE_ANALYSIS else {}),
             raw_profile=normalized.raw_profile, last_synced_at=normalized.source_snapshot.collected_at,
         )
         # One row per severity the profile actually answers for. A kind with no threat rules

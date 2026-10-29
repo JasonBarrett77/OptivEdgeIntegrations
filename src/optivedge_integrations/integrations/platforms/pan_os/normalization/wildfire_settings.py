@@ -90,13 +90,73 @@ def untuned(limits: dict[str, int], defaults: dict[str, int]) -> list[str]:
 
 
 def exclusions(node: dict, key: str) -> list[str]:
-    """The `exclude-*` members in force. Empty means nothing is withheld."""
+    """The `exclude-*` items in force. Empty means nothing is withheld.
+
+    TWO WIRE SHAPES, AND THE DEVICE ONLY WRITES ONE OF THEM. Read on fw-core-tpa-a,
+    serial 013201001475, 2026-10-29:
+
+        <session-info-select>
+          <exclude-username>yes</exclude-username>
+          <exclude-src-ip>yes</exclude-src-ip>
+        </session-info-select>
+
+    They are TWELVE CHILD NODES EACH TAKING ITS OWN yes/no, not members of a list. Stage 4
+    settled it by writing both forms at the same container: `<member>exclude-username</member>`
+    is REFUSED and `<exclude-username>yes</exclude-username>` is ACCEPTED and reads back under
+    both `get` and `show`.
+
+    THE MEMBER-LIST BRANCH WAS THE ONLY BRANCH UNTIL 2026-10-29, and on the one appliance in
+    this lab that withholds anything it returned the empty list - so `shares_full_session_info`
+    read True, which is PAN-AVW-005's COMPLIANT side, on a firewall that withholds a username
+    and a source address. The payload contract calls the twelve enum members and is wrong about
+    the shape; the member branch is kept because nothing has measured that no PAN-OS release or
+    sibling container uses it, and because reading it costs nothing when it is absent.
+
+    A child set to `no` is NOT withheld and is not listed: the key is present and explicitly
+    says the item is shared.
+    """
     container = node.get(key)
     if not isinstance(container, dict):
         return []
-    return sorted(
-        _text(member) for member in ensure_list(container.get("member"))
-        if _text(member))
+    names = {_text(member) for member in ensure_list(container.get("member")) if _text(member)}
+    names |= {child for child, value in container.items()
+              if child.startswith("exclude-") and _text(value) == "yes"}
+    return sorted(names)
+
+
+def wholly_untuned(limits: dict[str, int], defaults: dict[str, int]) -> bool:
+    """Whether NO asserted file type has been moved off the size the release ships.
+
+    THE ALL QUANTIFIER, and the one PAN-AVW-004 asserts, as against `size_limits_untuned`'s ANY.
+    An appliance that moved one of ten types has answered the control's question; an appliance
+    that moved none has never sized this platform at all.
+
+    An ABSENT entry counts as untouched, which is why this quantifies over `defaults` rather
+    than over `limits`: walking only what the config names would report a device that configures
+    nothing as fully sized.
+
+    `defaults` EMPTY RETURNS TRUE, which fires, and that is deliberate - a release with no
+    established table is indistinguishable here from an estate nobody sized, and
+    `defaults_established` on the model is the column that says which.
+    """
+    return all(limits.get(file_type, default) == default
+               for file_type, default in defaults.items())
+
+
+def verdict_reporting_gap(benign: bool, grayware: bool) -> str:
+    """WHICH of the two verdict-reporting settings is left off, as one token.
+
+    The assertion is a DISJUNCTION over two booleans with a different severity on each half, and
+    a clause list is one conjunction with no OR - so the only shape that is both one clause and
+    one graded column is a single token naming which half is missing.
+    """
+    if benign and grayware:
+        return WildfireSettings.GAP_NONE
+    if benign:
+        return WildfireSettings.GAP_GRAYWARE
+    if grayware:
+        return WildfireSettings.GAP_BENIGN
+    return WildfireSettings.GAP_BOTH
 
 
 def normalize_wildfire_settings(appliance: Appliance) -> dict[str, int]:
@@ -136,14 +196,34 @@ def normalize_wildfire_settings(appliance: Appliance) -> dict[str, int]:
                 "size_limits": limits,
                 "untuned_file_types": still_default,
                 "size_limits_untuned": bool(still_default),
+                # THE ALL QUANTIFIER beside the ANY one above. The two disagree on purpose and
+                # the model's comments say which is which; PAN-AVW-004 asserts this one.
+                "size_limits_wholly_untuned": wholly_untuned(limits, defaults),
                 "session_info_excluded": withheld,
                 # The searchable form of the line above: a control may not rest on a JSON
                 # column, so the boolean is stored beside the list it summarises.
                 "shares_full_session_info": not withheld,
+                # WHETHER ANYBODY LOOKED. True unconditionally here, and that is the whole of
+                # the claim: control only reaches this line when `latest_merged_snapshot`
+                # returned a snapshot AND `device_entry_from_snapshot` found a device entry in
+                # it - it raises otherwise - so a row written by this normalizer IS a row whose
+                # node was read. An absent `wildfire` node beneath a device entry that was read
+                # is a READING, not a failure, and means nothing is withheld.
+                #
+                # So False is reachable only on a row this normalizer has not written: one from
+                # before the column existed, or an appliance nothing has collected. Those are
+                # exactly the rows `shares_full_session_info` reports as compliant in silence,
+                # and telling them apart is the column's only job.
+                "session_info_read": True,
+
                 "inline_session_info_excluded": exclusions(
                     node, "cloud-inline-wf-session-info-select"),
                 "report_benign_file": benign,
                 "report_grayware_file": grayware,
+                # The disjunction the clause contract cannot write, as one graded token. It
+                # follows mechanically from the two booleans above, so it can never disagree
+                # with them.
+                "verdict_reporting_gap": verdict_reporting_gap(benign, grayware),
             },
         )
         FieldProvenance.objects.filter(

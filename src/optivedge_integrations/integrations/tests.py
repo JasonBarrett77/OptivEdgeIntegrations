@@ -11387,6 +11387,12 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.wildfire
     exclusions,
     size_limits,
     untuned,
+    verdict_reporting_gap,
+    wholly_untuned,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (  # noqa: E402
+    antivirus_posture_aggregates,
+    wildfire_coverage_aggregates,
 )
 
 
@@ -11627,6 +11633,77 @@ class WildfireDeviceSettingsTests(SimpleTestCase):
         self.assertEqual(size_limits(
             {"file-size-limit": {"entry": [{"@name": "pe", "size-limit": ""}]}}), {})
 
+    def test_the_twelve_items_are_CHILD_NODES_and_not_a_member_list(self):
+        """Read off fw-core-tpa-a, serial 013201001475, 2026-10-29 - the one appliance in the
+        lab that withholds anything:
+
+            <session-info-select>
+              <exclude-username>yes</exclude-username>
+              <exclude-src-ip>yes</exclude-src-ip>
+            </session-info-select>
+
+        Stage 4 settled the shape by writing both forms at the same container: a `<member>` is
+        REFUSED and a named child taking yes/no is ACCEPTED. Until this was fixed, the member
+        branch was the only branch and this node read as the empty list - so
+        `shares_full_session_info` was True, PAN-AVW-005's COMPLIANT side, on a firewall
+        withholding a username and a source address."""
+        node = {"session-info-select": {"exclude-username": "yes", "exclude-src-ip": "yes"}}
+
+        self.assertEqual(exclusions(node, "session-info-select"),
+                         ["exclude-src-ip", "exclude-username"])
+
+    def test_a_child_set_to_no_is_SHARED_and_is_not_listed(self):
+        """The key is present and says the item is shared, which is not a withholding."""
+        node = {"session-info-select": {"exclude-url": "no", "exclude-username": "yes"}}
+
+        self.assertEqual(exclusions(node, "session-info-select"), ["exclude-username"])
+
+    def test_an_empty_container_withholds_nothing(self):
+        """`cloud-inline-wf-session-info-select` was written as an empty container on
+        fw-core-tpa-a and reads back as null. Nothing is withheld, which is full sharing."""
+        self.assertEqual(
+            exclusions({"cloud-inline-wf-session-info-select": None},
+                       "cloud-inline-wf-session-info-select"), [])
+
+    #: PAN-AVW-004's ALL quantifier, which is NOT `size_limits_untuned`'s ANY.
+    def test_wholly_untuned_is_true_when_the_config_names_nothing(self):
+        """fw-core-tpa-a's state before this wave, and pan-fw-201's today: no
+        file-size-limit node at all, so nobody has sized this platform."""
+        self.assertTrue(wholly_untuned({}, self.V11_1))
+
+    def test_ONE_type_moved_answers_the_control_and_the_ANY_column_still_fires(self):
+        """fw-core-tpa-a as the lab holds it: `pe` is 10 against a shipped 16, and the other
+        nine are absent. The ALL column reads False - somebody sized something - while
+        `size_limits_untuned` beside it still reads True, which is the disagreement stage 5
+        recorded rather than resolved."""
+        self.assertFalse(wholly_untuned({"pe": 10}, self.V11_1))
+        self.assertTrue(bool(untuned({"pe": 10}, self.V11_1)))
+
+    def test_a_type_set_to_its_own_default_does_not_count_as_moved(self):
+        self.assertTrue(wholly_untuned({"pe": self.V11_1["pe"]}, self.V11_1))
+
+    def test_an_unknown_release_fires_rather_than_passing(self):
+        """No defaults table means the question cannot be answered, and the answer that
+        cannot be wrong in the dangerous direction is the firing one."""
+        self.assertTrue(wholly_untuned({"pe": 10}, {}))
+
+    def test_the_verdict_gap_names_WHICH_half_is_missing(self):
+        """The assertion is a disjunction over two booleans with a different severity on each
+        half, and a clause list has no OR - so one token carries both."""
+        self.assertEqual(verdict_reporting_gap(True, True), "none")
+        self.assertEqual(verdict_reporting_gap(True, False), "grayware")
+        self.assertEqual(verdict_reporting_gap(False, True), "benign")
+        self.assertEqual(verdict_reporting_gap(False, False), "both")
+
+    def test_the_three_lab_appliances_land_on_three_different_gap_tokens(self):
+        """Measured 2026-10-29. fw-core-tpa-a (013201001475) has both leaves `yes`;
+        pan-fw-111 (6A9C0A9904E7D6E) has grayware `yes` from a template and a device-local
+        benign `no`; pan-fw-201 (691665AC334B458) has no wildfire node at all, so both
+        leaves take the measured implicit `no`."""
+        self.assertEqual(verdict_reporting_gap(True, True), "none")
+        self.assertEqual(verdict_reporting_gap(False, True), "benign")
+        self.assertEqual(verdict_reporting_gap(False, False), "both")
+
 
 class WildfireAnalysisRuleTests(SimpleTestCase):
     """The WildFire analysis profile's match rules, measured on pan-fw-111 2026-10-09.
@@ -11705,6 +11782,235 @@ class WildfireAnalysisRuleTests(SimpleTestCase):
             {"file-type": {"member": ["any"]}}, {"@name": "r"}]}})
 
         self.assertEqual([r[0] for r in rows], ["r"])
+
+
+class WildfireCoverageAggregateTests(SimpleTestCase):
+    """PAN-AVW-003's three columns on the PROFILE row, which are a UNION over its rules.
+
+    The rows they summarise live on `SecurityProfileWildfireRule`, which is in no search
+    registry - so no clause can name a column of theirs and the aggregate is the only way the
+    coverage becomes reportable. Every input below is a profile stage 6 left standing on
+    pan-fw-111, serial 6A9C0A9904E7D6E.
+    """
+
+    def _rules(self, *specs):
+        entry = {"@name": "p", "rules": {"entry": [
+            dict({"@name": f"r{i}"}, **spec) for i, spec in enumerate(specs)]}}
+        return wildfire_coverage_aggregates(profile_wildfire_rules(entry))
+
+    ANY = {"member": ["any"]}
+
+    def test_no_rules_covers_nothing_and_the_direction_is_NULL(self):
+        """oep-avw6-w4: a bare entry with no rules node. Valid committed configuration that
+        submits nothing, and the commonest failing state there is - so the answer must be a
+        reading and not an absence. The null reports at the baseline severity, which is what
+        stage 3 prescribes for a profile that loses both directions."""
+        aggregates = wildfire_coverage_aggregates([])
+
+        self.assertEqual(aggregates, {"submits_all_file_types": False,
+                                      "covers_all_applications": False,
+                                      "direction_coverage": None})
+
+    def test_one_rule_covering_everything_both_ways(self):
+        """oep-avw6-w3, and the shipped predefined profile."""
+        self.assertEqual(
+            self._rules({"file-type": self.ANY, "application": self.ANY,
+                         "direction": "both"}),
+            {"submits_all_file_types": True, "covers_all_applications": True,
+             "direction_coverage": "both"})
+
+    def test_upload_only_and_download_only_are_kept_apart(self):
+        """oep-avw6-w1 and oep-avw6-w2. INBOUND IS DELIVERY, so `upload` alone leaves every
+        delivered file unanalysed and the two tokens cannot be collapsed."""
+        self.assertEqual(
+            self._rules({"file-type": self.ANY, "application": self.ANY,
+                         "direction": "upload"})["direction_coverage"], "upload")
+        self.assertEqual(
+            self._rules({"file-type": self.ANY, "application": self.ANY,
+                         "direction": "download"})["direction_coverage"], "download")
+
+    def test_TWO_RULES_SUM_TO_BOTH_and_neither_row_says_so(self):
+        """The clearest case of a union no per-rule predicate can form: one `upload` rule and
+        one `download` rule cover both directions between them."""
+        self.assertEqual(
+            self._rules({"file-type": self.ANY, "application": self.ANY,
+                         "direction": "upload"},
+                        {"file-type": self.ANY, "application": self.ANY,
+                         "direction": "download"})["direction_coverage"], "both")
+
+    def test_coverage_can_be_reached_through_DIFFERENT_rules(self):
+        """A profile can reach every file type through one rule and every application through
+        another, with no single rule satisfying the control."""
+        self.assertEqual(
+            self._rules({"file-type": self.ANY, "application": {"member": ["ftp"]},
+                         "direction": "both"},
+                        {"file-type": {"member": ["pe"]}, "application": self.ANY,
+                         "direction": "both"}),
+            {"submits_all_file_types": True, "covers_all_applications": True,
+             "direction_coverage": "both"})
+
+    def test_a_narrowed_type_set_is_not_every_type(self):
+        """oep-avw6-w5: every application, both directions, one file type. The column can only
+        ever answer `some rule names any` - the accepted type set moves with the content
+        release and is in no configuration read, so a list of named types has no denominator
+        to be complete against."""
+        self.assertEqual(
+            self._rules({"file-type": {"member": ["pe"]}, "application": self.ANY,
+                         "direction": "both"}),
+            {"submits_all_file_types": False, "covers_all_applications": True,
+             "direction_coverage": "both"})
+
+    def test_a_narrowed_application_set_is_not_every_application(self):
+        """oep-avw6-w6, the mirror of w5."""
+        self.assertEqual(
+            self._rules({"file-type": self.ANY, "application": {"member": ["ftp"]},
+                         "direction": "both"}),
+            {"submits_all_file_types": True, "covers_all_applications": False,
+             "direction_coverage": "both"})
+
+    def test_a_rule_with_no_direction_leaves_the_direction_NULL(self):
+        """oep-avw6-w7: the two children the device makes mandatory and nothing else. What an
+        absent `direction` means was never established, so the union of nothing is a null and
+        not a guess - and the type and application coverage is still read."""
+        self.assertEqual(
+            self._rules({"file-type": self.ANY, "application": self.ANY}),
+            {"submits_all_file_types": True, "covers_all_applications": True,
+             "direction_coverage": None})
+
+
+class AntivirusPostureAggregateTests(SimpleTestCase):
+    """PAN-AVW-001 and 002's graded columns on the PROFILE row.
+
+    The booleans beside them - `has_non_blocking_decoder` and the rest - carry the assertion;
+    these carry the SEVERITY, because a grading places VALUES and a boolean has only two. The
+    rows they summarise are on three models that are in no search registry.
+
+    Every input is one of the fifteen antivirus profiles stage 6 left standing on pan-fw-111,
+    serial 6A9C0A9904E7D6E.
+    """
+
+    CATALOGUE = ["MSOffice", "Windows Executables"]
+
+    def _decoders(self, *effective_actions):
+        """Only index 2 - the EFFECTIVE action - is read, so the rest is padding."""
+        return [("http", "", action, False, "", "", False, "", "", False)
+                for action in effective_actions]
+
+    def test_every_decoder_allowing_is_the_weakest_reading(self):
+        """oep-avw6-01: all seven protocols `allow` on all three verdict kinds."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders(*["allow"] * 7), [("ftp", "allow", False)],
+                {"MSOffice": "disable", "Windows Executables": "disable"}, self.CATALOGUE),
+            {"weakest_decoder_action": "allow",
+             "weakest_application_override_action": "allow",
+             "weakest_ml_model_state": "disable"})
+
+    def test_a_hardened_profile_reads_the_strongest_token_on_all_three(self):
+        """oep-avw6-06: reset-both everywhere, an exception doing the same, every model on."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders(*["reset-both"] * 7), [("ftp", "reset-both", True)],
+                {"MSOffice": "enable", "Windows Executables": "enable"}, self.CATALOGUE),
+            {"weakest_decoder_action": "reset-both",
+             "weakest_application_override_action": "reset-both",
+             "weakest_ml_model_state": "enable"})
+
+    def test_ONE_weak_protocol_decides_the_whole_profile(self):
+        """What the aggregate is for: six protocols hardened and one left open is a profile
+        malware walks through, and the severity must follow the weakest."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders("reset-both", "reset-both", "reset-both", "reset-both",
+                               "reset-both", "reset-both", "alert"),
+                [], {}, [])["weakest_decoder_action"], "alert")
+
+    def test_ALERT_IS_WEAKER_THAN_ANY_BLOCKER_AND_STRONGER_THAN_ALLOW(self):
+        """oep-avw6-02's token. The ordering is by how much of the transfer finishes, which is
+        not the tokens' alphabetical or enumeration order."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders("alert", "drop", "reset-both"), [], {}, []
+            )["weakest_decoder_action"], "alert")
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders("allow", "alert"), [], {}, []
+            )["weakest_decoder_action"], "allow")
+
+    def test_an_exception_on_the_literal_default_comes_back_UNRANKED(self):
+        """oep-avw6-07: reset-both on all seven decoders and one ftp exception left on
+        `default`, which on an exception resolves per SIGNATURE and so settles nothing. It is
+        returned as the device stored it rather than called strong or weak - stage 3 grades it
+        at the baseline. Returning the weakest token instead would assert a weakness nobody
+        measured; dropping it would read as `no exception`, which is false."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders(*["reset-both"] * 7), [("ftp", "default", None)],
+                {}, [])["weakest_application_override_action"], "default")
+
+    def test_an_exception_with_no_action_at_all_reads_as_the_absent_state(self):
+        """oep-avw6-12: a bare `<entry name="ftp"/>` with no action child. The device accepts
+        it and an absent action is `allow`, the permissive end."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders(*["reset-both"] * 7), [("ftp", "", False)],
+                {}, [])["weakest_application_override_action"], "allow")
+
+    def test_NO_EXCEPTIONS_AT_ALL_IS_BLANK_AND_NOT_THE_WEAKEST_TOKEN(self):
+        """oep-avw6-08 and most of the estate. A profile naming no application exception is
+        the COMPLIANT state, measured - there is nothing overriding its decoders - so the
+        weakest token would grade every clean profile at the worst severity on the strength of
+        rows that do not exist. A blank matches no placement and reports at the baseline,
+        which is the same mechanism `direction_coverage`'s null uses. This departs from stage
+        5's declared value set for the column, which has no member for an empty collection."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders(*["reset-both"] * 7), [], {}, []
+            )["weakest_application_override_action"], "")
+
+    def test_an_UNMENTIONED_ml_model_is_disabled_and_decides_the_token(self):
+        """oep-avw6-16 stores no `mlav-engine-filebased-enabled` node at all, so every model
+        in the catalogue is absent and absent means DISABLED - measured 2026-10-07, where such
+        a profile renders every model as `disable (for all protocols)`. The aggregate
+        quantifies over the CATALOGUE rather than over what the config names, exactly as the
+        rows beneath it are synthesized."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders(*["reset-both"] * 7), [], {}, self.CATALOGUE
+            )["weakest_ml_model_state"], "disable")
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders(*["reset-both"] * 7), [],
+                {"MSOffice": "enable"}, self.CATALOGUE
+            )["weakest_ml_model_state"], "disable")
+
+    def test_ALERT_ONLY_IS_STRONGER_THAN_OFF(self):
+        """oep-avw6-02's ML token, and the order a reader would guess wrong: a model that is
+        off produces nothing, while one on the middle setting produces a record of the
+        delivery. The wire literal has no space; the Help and the UI grid both print one."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                [], [], {"MSOffice": "enable(alert-only)",
+                         "Windows Executables": "enable"}, self.CATALOGUE
+            )["weakest_ml_model_state"], "enable(alert-only)")
+
+    def test_an_EMPTY_catalogue_is_blank_rather_than_the_weakest_token(self):
+        """No predefined profile in the build means no ML rows are written at all, so there is
+        no collection to be weakest. Reporting `disable` would grade a profile over eight rows
+        that do not exist."""
+        self.assertEqual(
+            antivirus_posture_aggregates(self._decoders("reset-both"), [], {}, [])
+            ["weakest_ml_model_state"], "")
+
+    def test_a_protocol_PAN_OS_adds_later_is_returned_unranked(self):
+        """The decoder walk carries a protocol it does not know rather than dropping it, so an
+        action the strength order does not place can reach here. It comes back as the device
+        gave it and the grading places it unranked - which is visible, where silently calling
+        it strong would not be."""
+        self.assertEqual(
+            antivirus_posture_aggregates(
+                self._decoders("some-future-action"), [], {}, []
+            )["weakest_decoder_action"], "some-future-action")
 
 
 class AntivirusApplicationOverrideTests(SimpleTestCase):

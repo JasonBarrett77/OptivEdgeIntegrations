@@ -152,7 +152,28 @@ class WildfireSettings(ProvenancedMixin, SyncTrackedModel):
     #: `session_info_excluded`; the searchable form is `size_limits_untuned` below.
     untuned_file_types = models.JSONField(default=list, blank=True)
     #: PAN-AVW-004's verdict. True when NO type has been moved off its default.
+    #:
+    #: THAT SENTENCE IS FALSE OF THIS COLUMN AND THE DISAGREEMENT IS LEFT STANDING. "NO type" is
+    #: the ALL quantifier; the normalization computes `bool(untuned(...))`, which is ANY, so an
+    #: appliance that has moved nine of ten types still reads True. Stage 3 settled
+    #: PAN-AVW-004's assertion on the ALL reading and stage 5 declared this column as what the
+    #: code DOES, commissioning the ALL quantifier as the new column below. Recorded rather than
+    #: reconciled: changing this one's meaning would silently change what every stored row
+    #: already asserts, and no control clauses on it until stage 8 says so.
     size_limits_untuned = models.BooleanField(default=True)
+    #: PAN-AVW-004's verdict on the ALL quantifier, and the one the control asserts: NO asserted
+    #: file type has been moved off the size the release ships, so nobody has sized any of them
+    #: for this platform. An estate that moved ONE type has answered the control's question and
+    #: reads False.
+    #:
+    #: `True` is the migration default and is the side that FIRES, matching `size_limits_untuned`
+    #: beside it. Worth stating because the convention on THIS model is no guide: the sibling
+    #: `shares_full_session_info` was added as `BooleanField(default=True)` with no backfill on a
+    #: column whose True side is the COMPLIANT one.
+    #:
+    #: The asserted set is the ten types `defaults_for_version` returns - the eleven the device
+    #: completes MINUS `eml`, which a Panorama template cannot set at all.
+    size_limits_wholly_untuned = models.BooleanField(default=True)
 
     #: The `exclude-*` members in force. EMPTY IS THE GOOD STATE - it means nothing is
     #: withheld from a sample. See the class docstring on the inversion.
@@ -164,6 +185,19 @@ class WildfireSettings(ProvenancedMixin, SyncTrackedModel):
     #: The same fact as `session_info_excluded == []`, stored because that is the one a
     #: control can search. Written at normalization beside the list it summarises.
     shares_full_session_info = models.BooleanField(default=True)
+    #: WHETHER ANYBODY LOOKED, which on this subject is a different fact from `nothing is
+    #: withheld` and is the one the store otherwise cannot tell apart.
+    #:
+    #: `shares_full_session_info` above is `True` both for a firewall that withholds nothing and
+    #: for a row nobody ever read: the device's absent state means full sharing, the column was
+    #: added as `BooleanField(default=True)` with no backfill, and there is no is-null operator
+    #: to ask the difference with. So a clause `shares_full_session_info eq false` passes every
+    #: appliance nobody has collected, in silence. This column is false on exactly those rows and
+    #: fires, which is the only mechanism there is.
+    #:
+    #: `False` is the migration default, which FIRES: a row nobody has normalized has not been
+    #: read, so false is true of it.
+    session_info_read = models.BooleanField(default=False)
     #: The Inline Session Information Settings block, same twelve members. Collected because
     #: it is the same fact about a second engine; PAN-AVW-005 asserts the main block only.
     inline_session_info_excluded = models.JSONField(default=list, blank=True)
@@ -172,6 +206,26 @@ class WildfireSettings(ProvenancedMixin, SyncTrackedModel):
     #: 2026-10-09. PAN-AVW-005 wants both `yes`.
     report_benign_file = models.BooleanField(default=False)
     report_grayware_file = models.BooleanField(default=False)
+
+    #: WHICH of the two verdict-reporting settings is left off, as one token.
+    #:
+    #: It exists because the assertion is a DISJUNCTION over two separate booleans - either one
+    #: being off is a finding - and the query contract's clause list is one conjunction with no
+    #: OR. The severity half makes it worse rather than better: the two halves carry different
+    #: severities, and a grading varies severity with the value of ONE column. Collapsing the
+    #: disjunction into a single token is the only shape that is both one clause and one graded
+    #: column.
+    #:
+    #: NO MIGRATION DEFAULT HAD TO BE CHOSEN: the value follows mechanically from two
+    #: non-nullable booleans that default to False, so an un-normalized row computes `both` -
+    #: neither verdict reported, which fires at the worse of the two severities. That is the one
+    #: place on this model where the firing direction is structural rather than chosen.
+    GAP_NONE = "none"
+    GAP_GRAYWARE = "grayware"
+    GAP_BENIGN = "benign"
+    GAP_BOTH = "both"
+    VERDICT_REPORTING_GAPS = (GAP_NONE, GAP_GRAYWARE, GAP_BENIGN, GAP_BOTH)
+    verdict_reporting_gap = models.CharField(max_length=16, default=GAP_BOTH)
 
     class Meta:
         constraints = [
