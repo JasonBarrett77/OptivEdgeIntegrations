@@ -257,3 +257,55 @@ def collect_predefined_gp_app_config_dictionary(session: PANSession) -> PANOSCol
         source_type=PREDEFINED_GP_APP_CONFIG_SOURCE_TYPE,
         request=request,
     )
+
+
+#: The App-ID catalogue, which is what makes "a rule names a function child application rather
+#: than the base application" decidable at all. PAN-SAS-003's population.
+#:
+#: The config tree's predefined branch again, and NOT the namespace `show predefined` addresses -
+#: so the same mechanism as the five reads above and a new xpath on an existing pattern.
+#:
+#: MEASURED COST, 2026-10-29, read read-only on three lab appliances: 3.6 MB and 5,051 entries on
+#: the 11.1.13-h3 PA-5220, 7.2 MB and 5,552 on one PA-VM, 7.3 MB and 5,581 on the other, each in
+#: about three seconds. Most of that is the inline base64 PNG icon on every entry. That is one
+#: 7 MB JSON document in `Snapshot.payload` per appliance per collection - by far the largest read
+#: in this package - and the normalizer needs four leaves of it. Recorded here because a reader
+#: pricing this read from the entry count alone would be out by an order of magnitude.
+#:
+#: AND THE COUNT IS NOT STABLE. Stage 3 recorded 5,164 and 5,166 entries, stage 4 recorded 6,005
+#: and 5,472, and the three measurements above are none of those: the catalogue arrives with
+#: content updates and moves with no configuration change at all. So any count derived from it is
+#: a reading of one day's content release, not a property of the estate.
+PREDEFINED_APPLICATION_XPATH = "/config/predefined/application"
+
+#: The snapshot source type the normalizer filters on. A constant beside the xpath because
+#: nothing maps a source type to a reader - see PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE.
+PREDEFINED_APPLICATION_SOURCE_TYPE = "config_predefined_application"
+
+
+def collect_predefined_applications(session: PANSession) -> PANOSCollectedResponse:
+    """Collect the vendor's App-ID catalogue for one appliance. PAN-SAS-003.
+
+    Appliance-wide, like every other predefined catalog, and read-only; no lease is needed and
+    none is taken. Per appliance rather than once and reused, because the entry count differs by
+    appliance in this estate - 5,051 against 5,552 and 5,581, measured 2026-10-29 - which is the
+    content release and not the platform.
+
+    WHAT IT BUYS, and nothing else can: the parent/child relation between App-IDs. Measured at
+    this xpath the same day, `dropbox-uploading` and `dropbox-downloading` carry
+    `application-container: dropbox` and `use-applications/member: [dropbox-base]` with NO
+    `parent-app` leaf, while `dropbox-delete` carries `parent-app: dropbox-base` as well - so
+    `parent-app` is present on one function child of three and a derivation resting on it alone
+    under-counts silently. Without this read the question has to be answered from the spelling of
+    an application's name, which is a heuristic over a vendor catalogue.
+    """
+    request = PANOSConfigRequest(
+        xpath=PREDEFINED_APPLICATION_XPATH,
+        target=session.target,
+        metadata={"command_name": "config get predefined application"},
+    )
+    return collect_config_response(
+        session,
+        source_type=PREDEFINED_APPLICATION_SOURCE_TYPE,
+        request=request,
+    )

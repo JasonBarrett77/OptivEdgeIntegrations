@@ -98,6 +98,13 @@ from .globalprotect import (
     GlobalProtectPortalClientAuthRow,
 )
 from .zones import Zone, ZoneInterface
+from .saas_security import (
+    CONSUMER_STORAGE_CATEGORIES,
+    CloudAppEngineSetting,
+    SaasApplicationPolicyPosture,
+    SaasUrlFilteringPosture,
+    SanctionedApplicationMarking,
+)
 from .policy import (
     AddressGroup,
     AddressGroupMember,
@@ -278,6 +285,11 @@ __all__ = [
     "Snapshot",
     "SyncTrackedModel",
     "TimestampedModel",
+    "CONSUMER_STORAGE_CATEGORIES",
+    "CloudAppEngineSetting",
+    "SaasApplicationPolicyPosture",
+    "SaasUrlFilteringPosture",
+    "SanctionedApplicationMarking",
     "Zone",
     "ZoneInterface",
 ]

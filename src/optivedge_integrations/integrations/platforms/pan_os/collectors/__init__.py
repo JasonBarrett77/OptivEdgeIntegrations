@@ -59,12 +59,19 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.panorama_st
     SHOW_PANORAMA_STATUS_COMMAND,
     collect_show_panorama_status,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.cloud_appid import (
+    CLOUD_APPID_CONNECTION_SOURCE_TYPE,
+    SHOW_CLOUD_APPID_CONNECTION_COMMAND,
+    collect_show_cloud_appid_connection,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
+    PREDEFINED_APPLICATION_SOURCE_TYPE,
     PREDEFINED_GP_APP_CONFIG_SOURCE_TYPE,
     PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE,
     SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND,
     SHOW_PREDEFINED_SSL_EXCLUDE_CERT_COMMAND,
     SHOW_PREDEFINED_URL_LISTS_COMMAND,
+    collect_predefined_applications,
     collect_predefined_certificates,
     collect_predefined_gp_app_config_dictionary,
     collect_predefined_log_forwarding_profiles,
@@ -80,6 +87,11 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.types impor
 )
 
 __all__ = [
+    "CLOUD_APPID_CONNECTION_SOURCE_TYPE",
+    "SHOW_CLOUD_APPID_CONNECTION_COMMAND",
+    "collect_show_cloud_appid_connection",
+    "PREDEFINED_APPLICATION_SOURCE_TYPE",
+    "collect_predefined_applications",
     "HIGH_AVAILABILITY_SOURCE_TYPE",
     "LIST_TYPE_CUSTOM",
     "PUSHED_VSYS_PROFILES_XPATH_TEMPLATE",
