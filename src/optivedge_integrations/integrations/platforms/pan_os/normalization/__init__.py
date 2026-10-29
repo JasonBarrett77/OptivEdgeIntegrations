@@ -126,6 +126,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.manageme
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.decryption import (
     normalize_decryption_policy,
+    normalize_decryption_settings,
     normalize_ssl_decryption_exclusions,
     normalize_ssl_decryption_vendor_exclusion_optout,
 )
@@ -230,6 +231,20 @@ def normalize_appliance_ssl_decryption_vendor_exclusion_optout(appliance: Applia
     the returned dict carries `predefined_list_collected` for a caller that needs the difference.
     """
     return normalize_ssl_decryption_vendor_exclusion_optout(appliance)
+
+
+def normalize_appliance_decryption_settings(appliance: Appliance) -> dict:
+    """Which certificate this appliance signs with when it stands in for a destination.
+    PAN-DCP-003, 004 and 006.
+
+    MUST RUN AFTER `normalize_appliance_certificate_objects`, and it is the only ordering this
+    normalizer has: the `forward_trust_is_designated_local_ca` verdict follows the designated
+    NAME into the certificate rows to ask whether that certificate is a self-signed authority
+    this appliance holds. Certificates are normalized earlier in the same per-appliance tuple.
+    Where they are not, the map comes back empty and the verdict reads FALSE, which is the
+    firing side - a designation whose target cannot be confirmed has not been shown good.
+    """
+    return normalize_decryption_settings(appliance)
 
 
 def normalize_appliance_management_tls(appliance: Appliance) -> dict:

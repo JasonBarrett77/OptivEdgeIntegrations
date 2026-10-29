@@ -247,6 +247,19 @@ def signature_hash_is_weak(signature_hash: str) -> bool:
     return resolved in WEAK_SIGNATURE_HASHES or not resolved
 
 
+#: `private-key-on-hsm` absent. ASSUMED AND NOT MEASURED, and the citation says so rather than
+#: dressing the guess up: the only certificate on the lab appliance carries this key's absence
+#: ALONGSIDE `private-key`, which is the on-device form, so an absent key most plausibly asserts
+#: that custody is local. Nothing was written to settle it - the one write that would is a
+#: `private-key-on-hsm` yes on a throwaway certificate, and the only certificate present is
+#: another run's standing object. `assumed` keeps the report saying "assumed, not measured", and
+#: FALSE is the direction that RAISES PAN-DCP-006 rather than passing it.
+PRIVATE_KEY_ON_HSM_ABSENT = Implicit.assumed(
+    False,
+    "stage 4 recorded `private-key-on-hsm` as unmeasured with consumer_disposition `assumed`: "
+    "the one lab certificate lacks the key and carries `private-key`, the on-device form")
+
+
 def min_version_rank(min_version: str) -> int:
     """The floor's ORDINAL position, with an out-of-set token below the lowest real version.
 
@@ -828,6 +841,8 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
                 False,
                 "a certificate entry carries `ca` only when it IS one in every sample seen, but "
                 "nobody has written a certificate without it and re-read the device"))
+        on_hsm, hsm_rk, hsm_rv = parse_yes_no_field(
+            entry.get("private-key-on-hsm"), implicit=PRIVATE_KEY_ON_HSM_ABSENT)
         public_key, _, _ = scalar_value(entry.get("public-key"))
         decoded = decode_certificate(public_key)
         not_valid_after = decoded.get("not_valid_after")
@@ -843,6 +858,8 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
             "is_self_signed": bool(subject_hash and issuer_hash
                                    and subject_hash == issuer_hash),
             "is_ca": is_ca,
+            #: PAN-DCP-006's third fact. ASSUMED, not measured - see the implicit.
+            "private_key_on_hsm": on_hsm,
             "key_algorithm": decoded.get("key_algorithm", ""),
             "key_size_bits": decoded.get("key_size_bits"),
             "signature_algorithm": decoded.get("signature_algorithm", ""),
@@ -864,7 +881,7 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
             # null validity end reads as expired: the certificate was not shown to be current.
             "is_expired": (not_valid_after is None
                            or not_valid_after <= timezone.now()),
-        }, [("is_ca", ca_rk, ca_rv)]))
+        }, [("is_ca", ca_rk, ca_rv), ("private_key_on_hsm", hsm_rk, hsm_rv)]))
 
     # The reference walk runs over the rows about to be written, not over the database, so it
     # cannot be out of step with them and needs no ordering guarantee between normalizers.

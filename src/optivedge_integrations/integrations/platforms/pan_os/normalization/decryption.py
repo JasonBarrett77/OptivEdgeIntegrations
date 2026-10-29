@@ -63,6 +63,7 @@ from optivedge_integrations.integrations.models import (
     DecryptionPolicyRuleSource,
     DecryptionPolicyRuleSourceUser,
     DecryptionRulebaseVerdict,
+    DecryptionSettings,
     EnforcementPoint,
     FieldProvenance,
     Snapshot,
@@ -97,6 +98,13 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.device_c
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     first_vsys_rulebase,
     pushed_rulebases,
+)
+# The shared writer for a node-shaped model - one row per appliance, provenance per field, and
+# it deletes only the provenance rows for the fields it writes so two normalizers can share a
+# model. Reused rather than re-expressed: the private `_replace_for_appliance` beside it in this
+# module predates it and is load-bearing for three shipped models.
+from optivedge_integrations.integrations.platforms.pan_os.normalization.services_settings import (
+    write_node_row,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshots import (
     is_panorama_managed,
@@ -962,4 +970,157 @@ def normalize_ssl_decryption_vendor_exclusion_optout(
         "stale_disabled_vendor_exclusions": stale,
         "predefined_list_collected": predefined_snapshot is not None,
         "predefined_entries_seen": len(shipped),
+    }
+
+
+# ---------------------------------------------------------------------------
+# The forward-proxy signing designation
+# ---------------------------------------------------------------------------
+
+#: The two designation containers and the column each algorithm child feeds.
+#:
+#: THE PAYLOAD IS A NESTED DICT AND NOT A STRING, which is the one trap on this node and the
+#: reason this table names the child explicitly: `{"forward-trust-certificate": {"rsa":
+#: "oep-p1-cert"}}`, measured by stage 4. A consumer reading `forward-trust-certificate` as a
+#: certificate name gets a dict, and `str()` of it stores something that looks like a name.
+FORWARD_PROXY_SLOTS = (
+    ("forward_trust_cert_rsa", "forward-trust-certificate", "rsa"),
+    ("forward_trust_cert_ecdsa", "forward-trust-certificate", "ecdsa"),
+    ("forward_untrust_cert_rsa", "forward-untrust-certificate", "rsa"),
+    ("forward_untrust_cert_ecdsa", "forward-untrust-certificate", "ecdsa"),
+)
+
+TRUST_COLUMNS = ("forward_trust_cert_rsa", "forward_trust_cert_ecdsa")
+UNTRUST_COLUMNS = ("forward_untrust_cert_rsa", "forward_untrust_cert_ecdsa")
+
+#: An absent designation slot. `not_assumed` AND NOT A MATERIALISED DEFAULT, because there is no
+#: value to materialise: stage 4 recorded the container's implicit as `not_applicable` with
+#: `may_materialise: false` - it has no value of its own, and its absence asserts that no
+#: forward-proxy CA is designated at all.
+#:
+#: THE FIREWALL STATES THAT ABSENCE IN WORDS, which is what makes it `measured` territory rather
+#: than a guess even though nothing is stored: with `/config/shared/ssl-decrypt` absent,
+#: `show system setting ssl-decrypt certificate` answers `No SSL Decryption CERT` and `NO
+#: INBOUND CERT` - measured in BOTH directions on pan-fw-201, before the node existed, after a
+#: designation was written and committed, and again after that delete was committed.
+DESIGNATION_ABSENT = Implicit.not_assumed(
+    "an absent forward-proxy designation slot has no value of its own - stage 4 recorded the "
+    "container implicit as not_applicable with may_materialise false, and the firewall reports "
+    "the absence in words through `show system setting ssl-decrypt certificate`")
+
+
+def merged_shared_ssl_decrypt(payload: dict[str, Any]) -> dict[str, Any]:
+    """The appliance's own shared `ssl-decrypt` node, or `{}`.
+
+    SHARED SCOPE ONLY. Stage 4 completed both scopes: `/config/shared/ssl-decrypt` has six
+    children and the vsys node has five, and the forward-proxy designations are device-wide. The
+    owner is LOCAL here, unlike the decryption rule's shared scope, which is Panorama's.
+    """
+    shared = merged_shared(payload)
+    node = shared.get("ssl-decrypt") if isinstance(shared, dict) else None
+    return node if isinstance(node, dict) else {}
+
+
+def forward_proxy_designations(
+    node: dict[str, Any],
+) -> tuple[dict[str, str], list[tuple[str, Any, str | None]]]:
+    """The four designation columns and their provenance rows, from the shared `ssl-decrypt`.
+
+    A CONTAINER THAT IS ABSENT AND ONE THAT IS PRESENT BUT HOLDS ONLY THE OTHER ALGORITHM GIVE
+    THE SAME COLUMN, which is correct and is why each child is read on its own: the two slots are
+    independent designations and one being filled says nothing about the other.
+    """
+    values: dict[str, str] = {}
+    provenance: list[tuple[str, Any, str | None]] = []
+    for column, container, child in FORWARD_PROXY_SLOTS:
+        held = node.get(container)
+        held = held if isinstance(held, dict) else {}
+        value, raw_key, raw_value = parse_text_field(
+            held.get(child), implicit=DESIGNATION_ABSENT)
+        values[column] = value
+        provenance.append((column, raw_key, raw_value))
+    return values, provenance
+
+
+def forward_proxy_verdicts(
+    values: dict[str, str], local_authorities: dict[str, tuple[bool, bool]],
+) -> dict[str, bool]:
+    """The two verdicts over the four designation columns.
+
+    `local_authorities` is {certificate name: (is_ca, is_self_signed)} for the certificates THIS
+    APPLIANCE holds. Passed in rather than queried here so the inputs are visible at the call
+    site and the derivation stays a pure function.
+
+    A NAME THAT RESOLVES TO NO CERTIFICATE MAKES THE FIRST VERDICT FALSE rather than leaving it
+    unknown, deliberately: a designation pointing at nothing is a worse state than no
+    designation at all, not a better-evidenced one.
+
+    THE QUANTIFIER ON THE FIRST IS `at least one filled AND every filled one qualifies`. An
+    appliance with an RSA slot naming a local self-signed CA and an ECDSA slot naming a
+    third-party certificate does NOT pass: the weaker of the two is what a session can end up
+    negotiating, and nothing in the configuration says which it will be.
+    """
+    trust = [values[c] for c in TRUST_COLUMNS if values.get(c)]
+    untrust = [values[c] for c in UNTRUST_COLUMNS if values.get(c)]
+    designated_local_ca = bool(trust) and all(
+        all(local_authorities.get(name, (False, False))) for name in trust)
+    distinct = bool(untrust) and not (set(untrust) & set(trust))
+    return {
+        "forward_trust_is_designated_local_ca": designated_local_ca,
+        "untrust_distinct_from_trust": distinct,
+    }
+
+
+def appliance_local_authorities(appliance: Appliance) -> dict[str, tuple[bool, bool]]:
+    """{certificate name: (is_ca, is_self_signed)} for the certificates this appliance holds.
+
+    READ FROM THE STORED ROWS and not from the payload, which is the one ordering dependency in
+    this normalizer and is declared here rather than left implicit: the certificate pass must
+    have run for this appliance first. It is already ordered that way in `flows.py`, where the
+    certificate objects are normalized in the per-appliance list ahead of this one.
+    AN EMPTY MAP MAKES THE FIRST VERDICT FALSE for any filled slot, which is the firing side: a
+    designation whose target cannot be confirmed is not a designation that has been shown good.
+    """
+    from optivedge_integrations.integrations.models import Certificate
+    return {
+        name: (bool(is_ca), bool(self_signed))
+        for name, is_ca, self_signed in Certificate.objects.filter(
+            appliance=appliance).values_list("name", "is_ca", "is_self_signed")
+    }
+
+
+def normalize_decryption_settings(appliance: Appliance) -> dict[str, Any]:
+    """Replace one appliance's forward-proxy signing designation. PAN-DCP-003, 004 and 006.
+
+    ONE ROW PER APPLIANCE AND ALWAYS WRITTEN, including where the whole `ssl-decrypt` branch is
+    absent - which is the state all four lab appliances were in before stage 6 built a
+    designation on one of them. The row that says "nothing is designated" is the only thing that
+    can carry PAN-DCP-006, whose subject is exactly that absence; a per-slot grain would have no
+    row at all in the failing state.
+
+    `write_node_row` is the shared writer and it deletes only the provenance rows for the fields
+    it writes, so this and the two other normalizers over `ssl-decrypt` do not erase each
+    other's - a missing provenance row means "nothing tracks this field", so an erasure would
+    read as a deliberate statement.
+    """
+    snapshot = latest_appliance_merged_snapshot(appliance)
+    if snapshot is None:
+        raise ValueError(f"no merged config snapshot for appliance {appliance.pk}")
+
+    node = merged_shared_ssl_decrypt(snapshot.payload)
+    values, provenance = forward_proxy_designations(node)
+    authorities = appliance_local_authorities(appliance)
+    values = {**values, **forward_proxy_verdicts(values, authorities)}
+
+    with transaction.atomic():
+        write_node_row(DecryptionSettings, appliance, snapshot, {
+            **values, "last_synced_at": snapshot.collected_at,
+        }, provenance)
+
+    return {
+        "decryption_settings": 1,
+        "node_present": bool(node),
+        "designated_slots": sum(
+            1 for column, _, _ in FORWARD_PROXY_SLOTS if values.get(column)),
+        "local_authorities_seen": len(authorities),
     }

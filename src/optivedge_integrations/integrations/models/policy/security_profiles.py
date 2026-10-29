@@ -74,6 +74,22 @@ class SecurityProfile(ScopedPolicyObject):
         "submits_all_file_types",
         "covers_all_applications",
         "direction_coverage",
+        # DECRYPTION, added for PAN-DCP-001/002/007. The two version verdicts and the two
+        # weakest-primitive tokens are computed from this row's own measured columns; the two
+        # rule-facing ones come from the decryption rulebase in the same payload the profile was
+        # read from. None of them has a payload key, so none can carry a provenance row.
+        #
+        # THE 21 MEASURED DECRYPTION COLUMNS ARE DELIBERATELY NOT HERE. Each has a key under
+        # `ssl-protocol-settings/`, `ssl-forward-proxy/` or `ssl-inbound-proxy/` and writes a
+        # `FieldProvenance` row, because for every one of them an absent key asserts a value and
+        # a reader is owed the difference between a value read and a value inferred.
+        "ssl_max_version_resolved",
+        "ssl_min_version_below_tls12",
+        "ssl_max_version_restrictive",
+        "rule_destination_unrestricted",
+        "weakest_broken_primitive_permitted",
+        "weakest_non_pfs_or_unauthenticated_permitted",
+        "decryption_rulebase_collected",
     )
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
@@ -81,6 +97,7 @@ class SecurityProfile(ScopedPolicyObject):
     KIND_WILDFIRE_ANALYSIS = "wildfire-analysis"
     KIND_FILE_BLOCKING = "file-blocking"
     KIND_DATA_FILTERING = "data-filtering"
+    KIND_DECRYPTION = "decryption"
     KIND_CHOICES = [
         (KIND_SPYWARE, "Anti-Spyware"),
         (KIND_VULNERABILITY, "Vulnerability Protection"),
@@ -88,6 +105,7 @@ class SecurityProfile(ScopedPolicyObject):
         (KIND_WILDFIRE_ANALYSIS, "WildFire Analysis"),
         (KIND_FILE_BLOCKING, "File Blocking"),
         (KIND_DATA_FILTERING, "Data Filtering"),
+        (KIND_DECRYPTION, "Decryption"),
     ]
 
     #: How far the reference walk behind `reference_reach` got. FOUR values, not a boolean,
@@ -110,6 +128,11 @@ class SecurityProfile(ScopedPolicyObject):
     #: file-blocking assertion off an antivirus row; nothing downstream enforces that.
     FILE_BLOCKING_KINDS = (KIND_FILE_BLOCKING,)
     DATA_FILTERING_KINDS = (KIND_DATA_FILTERING,)
+    #: Which kinds answer the decryption questions. The same rule as the two above, and this
+    #: family is the LOUDEST case of it: the permitted-primitive columns default TRUE, so a
+    #: `virus` row reads as permitting RC4 and a clause written without `kind eq decryption`
+    #: fires on every antivirus profile in the estate. Nothing downstream enforces the clause.
+    DECRYPTION_KINDS = (KIND_DECRYPTION,)
     #: Kinds built from an ordered rule list matching on SEVERITY, and so the only kinds for
     #: which a severity verdict means anything. Antivirus is deliberately not here: it has
     #: per-protocol decoders instead, and writes no verdict rows.
@@ -329,6 +352,141 @@ class SecurityProfile(ScopedPolicyObject):
     #: means was never established, so a rule's own direction can be null too and the union of
     #: nulls is a null rather than a guess.
     direction_coverage = models.CharField(max_length=16, null=True, blank=True, default=None)
+
+    # --- DECRYPTION ONLY. PAN-DCP-001, 002 and 007. ---
+    #
+    # EVERY DEFAULT HERE IS THE FIRING SIDE AND ON THIS KIND THE FIRING SIDE IS THE MEASURED
+    # ONE, which is what makes the family unusual: the vendor's predefined `default` profile
+    # stores an EMPTY `ssl-protocol-settings` container and no other key, so "nobody configured
+    # it" and "nobody collected it" really are the same configuration, measured 2026-10-25 on
+    # pan-fw-201 across four key-less committed objects and rendered in the grid and the dialog.
+    #
+    # THE POLARITIES RUN BOTH WAYS WITHIN ONE NODE. The nine `ssl-protocol-settings` algorithm
+    # keys are ALLOW switches - true means the primitive is permitted, which is the weak
+    # direction - while the twelve `block-*` keys are BLOCK switches, where false is weak. A
+    # query author reading this list top to bottom meets both polarities with nothing in the
+    # column names announcing the change, which is why each block below says which it is.
+
+    #: ALLOW SWITCHES. The floor and the ceiling as the administrator typed them, in the
+    #: DEVICE's spelling (`sslv3`, `tls1-0` ... `tls1-3`, plus `max` on the ceiling alone) and
+    #: never the catalogue's `TLSvN.M`. DO NOT COMPARE EITHER TOKEN IN A CLAUSE: the two leaves
+    #: do not share a value set - the device refuses `max` at `min-version` with code=12 - and
+    #: lexicographic order is right for the floor by coincidence and INVERTED for the ceiling,
+    #: where `max` sorts first while meaning the strongest setting available. The three verdict
+    #: columns below are what an assertion rests on.
+    #:
+    #: The defaults are the MEASURED absent values and both fire: an absent floor asserts
+    #: TLS 1.0 (deprecated by RFC 8996, the second-worst value the leaf can hold) and an absent
+    #: ceiling asserts TLS 1.2, which is NOT the `max` a reader would expect of a ceiling - the
+    #: newest protocol version is unreachable on every session an unconfigured profile governs.
+    ssl_min_version = models.CharField(max_length=16, blank=True, default="tls1-0")
+    ssl_max_version = models.CharField(max_length=16, blank=True, default="tls1-2")
+
+    #: The ceiling as the appliance would actually negotiate it, with the literal `max` replaced
+    #: by the highest version that build implements. BLANK where the literal could not be
+    #: resolved, which is the honest answer rather than a guess at an unknown build - and the
+    #: verdict beside it then stays TRUE, so an unresolvable ceiling reports rather than passing.
+    #:
+    #: Three columns and not one, because the stored literal is a POINTER: two appliances
+    #: storing `max` can negotiate different ceilings, and an appliance upgraded between two
+    #: collections changes what the literal means without the stored value moving.
+    ssl_max_version_resolved = models.CharField(max_length=16, blank=True, default="")
+
+    #: THE VERDICTS, both in the firing direction, both defaulting TRUE so an uncollected or
+    #: unrecomputed row reports itself. `below_tls12` is the ordering `sslv3 < tls1-0 < tls1-1 <
+    #: tls1-2 < tls1-3` applied to the floor; `restrictive` asks whether the RESOLVED ceiling
+    #: excludes a version the appliance implements, which the vendor recommends in exactly one
+    #: named circumstance - certificate-pinned mobile applications - and which nothing on the
+    #: firewall records, so that exception lives in the grading and not in a clause.
+    ssl_min_version_below_tls12 = models.BooleanField(default=True)
+    ssl_max_version_restrictive = models.BooleanField(default=True)
+
+    #: Whether NO decryption rule naming this profile narrows its destination to a named set.
+    #: TRUE where every rule naming it leaves the destination open, TRUE where no rule names it,
+    #: and TRUE where the rulebase was not collected - the direction is deliberate, because this
+    #: is used as an APPLICABILITY clause and the suppressing form would let a profile with a
+    #: TLS 1.0 floor pass on the strength of a rule nobody looked at.
+    #:
+    #: The off-box half of the exception - WHICH destinations the business actually requires -
+    #: is not here and cannot be: nothing in the configuration records which sites were meant
+    #: to be in it.
+    rule_destination_unrestricted = models.BooleanField(default=True)
+
+    #: ALLOW SWITCHES, one per primitive, with the VENDOR's polarity kept: TRUE MEANS PERMITTED,
+    #: which is the weak direction. Seven of the node's nine algorithm keys - the two this
+    #: domain's controls do not assert are left unread rather than stored at a guessed default.
+    #:
+    #: SIX DEFAULT TRUE AND `auth_algo_md5` DEFAULTS FALSE, and that is not a slip. Measured
+    #: 2026-10-25: twelve algorithm keys of this node assert ENABLED when absent and two assert
+    #: DISABLED, and MD5 is the only one of the two a control asserts - on three key-less
+    #: objects the grid does not list it and the dialog checkbox is unticked, while every other
+    #: member of its family reads enabled on the same objects in the same second. A normaliser
+    #: that materialises one implicit value per family reports MD5 as permitted on every
+    #: unconfigured profile in the estate, which is a false finding at high severity.
+    enc_algo_rc4 = models.BooleanField(default=True)
+    enc_algo_3des = models.BooleanField(default=True)
+    auth_algo_sha1 = models.BooleanField(default=True)
+    auth_algo_md5 = models.BooleanField(default=False)
+    keyxchg_algo_rsa = models.BooleanField(default=True)
+    enc_algo_aes_128_cbc = models.BooleanField(default=True)
+    enc_algo_aes_256_cbc = models.BooleanField(default=True)
+
+    #: The worst primitive each class still leaves negotiable, as ONE token, because the
+    #: SEVERITY varies with which one it is and a grading places the values of one column.
+    #: `none` is the compliant member of each.
+    #:
+    #: COLLAPSING COSTS SOMETHING AND IT IS NAMED: where two broken primitives are permitted
+    #: this holds only the worse, so a report naming RC4 is silent about SHA-1 on the same
+    #: profile. The seven booleans above are all presented for exactly that reason.
+    #:
+    #: Both defaults are the measured reading of a key-less profile rather than a pessimistic
+    #: guess: rc4, 3des and sha1 each assert ENABLED when absent, so an unconfigured profile
+    #: really does permit RC4, and all three key exchanges are enabled by default.
+    BROKEN_PRIMITIVE_ORDER = ("rc4", "3des", "md5", "sha1")
+    NON_PFS_OR_UNAUTHENTICATED_ORDER = ("rsa", "aes-128-cbc", "aes-256-cbc")
+    PRIMITIVE_NONE = "none"
+    weakest_broken_primitive_permitted = models.CharField(
+        max_length=16, blank=True, default="rc4")
+    weakest_non_pfs_or_unauthenticated_permitted = models.CharField(
+        max_length=16, blank=True, default="rsa")
+
+    #: BLOCK SWITCHES - the opposite polarity from the seven above. FALSE means the profile does
+    #: NOT perform the check, which is the weak direction, and false is what an absent key
+    #: asserts on all twelve (measured: the dialog's checkboxes are unticked on a profile that
+    #: stores no forward- or inbound-proxy key). So the materialised default, the measured
+    #: absent value and the firing side are the same answer here.
+    #:
+    #: `fwd_` is `ssl-forward-proxy`, `inb_` is `ssl-inbound-proxy`. The two containers are NOT
+    #: symmetric: `block-expired-certificate` and `block-untrusted-issuer` exist on the forward
+    #: container only, because an inbound-proxy session presents the organisation's own
+    #: certificate and there is no issuer to distrust.
+    fwd_block_expired_certificate = models.BooleanField(default=False)
+    fwd_block_untrusted_issuer = models.BooleanField(default=False)
+    fwd_block_unsupported_version = models.BooleanField(default=False)
+    fwd_block_unsupported_cipher = models.BooleanField(default=False)
+    inb_block_unsupported_version = models.BooleanField(default=False)
+    inb_block_unsupported_cipher = models.BooleanField(default=False)
+    fwd_block_if_no_resource = models.BooleanField(default=False)
+    fwd_block_tls13_downgrade_no_resource = models.BooleanField(default=False)
+    inb_block_if_no_resource = models.BooleanField(default=False)
+    inb_block_tls13_downgrade_no_resource = models.BooleanField(default=False)
+    fwd_block_if_hsm_unavailable = models.BooleanField(default=False)
+    inb_block_if_hsm_unavailable = models.BooleanField(default=False)
+
+    #: THE COMPANION THAT TELLS A REFERRER COUNT OF ZERO FROM A COUNT NOBODY TOOK, and the
+    #: mechanism rules.md prescribes for a reading that cannot tell ZERO from UNKNOWN. There is
+    #: no is-null operator in the query language, so "is this unknown" cannot be asked of
+    #: `is_used` or `referrer_count` directly; this column is that unknown, made askable.
+    #:
+    #: FALSE routes the row into the UNDETERMINED group rather than into the assertion, which is
+    #: the only direction that cannot produce a wrong deletion remediation: without the pair,
+    #: `is_used` false reports every profile on an uncollected appliance as unused.
+    #:
+    #: An APPLICABILITY clause on this column SUPPRESSES the control when the answer is no, and
+    #: the suppressing form reads as careful - so the suppressed rows must be picked up by a
+    #: second group that fires on its own. That pairing is stage 8's to write; this column only
+    #: makes it possible.
+    decryption_rulebase_collected = models.BooleanField(default=False)
 
     raw_profile = models.JSONField(default=dict, blank=True)
 

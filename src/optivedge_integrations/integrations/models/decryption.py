@@ -596,3 +596,115 @@ class SslDecryptionVendorExclusionOptOut(ProvenancedMixin, SyncTrackedModel):
     def clean(self) -> None:
         if self.appliance.management_station_id != self.management_station_id:
             raise ValidationError("Object appliance must belong to the same station.")
+
+
+class DecryptionSettings(ProvenancedMixin, SyncTrackedModel):
+    """One appliance's FORWARD-PROXY SIGNING designation. PAN-DCP-003, 004 and 006's subject.
+
+    `/config/shared/ssl-decrypt` holds which certificate the firewall signs with when it stands
+    in for a destination. A fifth model over a node three others already touch, and the split is
+    by CHILD rather than arbitrary: `SslDecryptionExclusion` owns `ssl-exclude-cert`,
+    `SslDecryptionVendorExclusionOptOut` owns `disabled-ssl-exclude-cert-from-predefined`, and
+    this owns the two `forward-*-certificate` containers. `trusted-root-CA` and
+    `root-ca-exclude-list` are owned by NOTHING and are named in this stage's artifact as the
+    gap: `trusted-root-CA` is the predicate PAN-DCP-004 rests on, so that control is exactly as
+    good as a list nothing checks.
+
+    THE GRAIN IS THE APPLIANCE AND NOT THE DESIGNATION SLOT, and the commonest failing state
+    decides it: NO certificate designated at all. `/config/shared/ssl-decrypt` was absent on all
+    four lab appliances before stage 6 built a designation on one of them, and the firewall says
+    so in its own words - `show system setting ssl-decrypt certificate` answers `No SSL
+    Decryption CERT`. A per-slot grain has NO ROW AT ALL in that state, so it could not report
+    the finding. A row per appliance always exists and can say "nothing is designated".
+
+    ON AN HA PAIR THIS YIELDS TWO ROWS FOR ONE REAL CONFIGURATION, and that is the opposite of
+    the decryption profile's shared scope, which anchors to the appliance GROUP. The designation
+    is device-wide - one node per firewall - so it takes an appliance directly, the same way
+    `SnmpSettings` does; writing to either peer writes to both and nothing here deduplicates
+    them.
+
+    THE DESIGNATION IS MADE ON A SCREEN THIS NODE IS NOT ON. The vendor's interface presents it
+    as something you select while editing the CERTIFICATE (Administrator's Guide p.323 step 8,
+    p.399 step 4) and stores it here, so an engineer looking for "where is the forward trust
+    certificate set" finds the certificate and not this node. The name stored here is the join
+    into `Certificate`, by name within the appliance.
+
+    THE TWO VERDICTS FOLLOW A REFERENCE AND THAT IS WHY THEY ARE COLUMNS. A clause compares one
+    field to one literal: it cannot follow `forward_trust_cert_rsa` into the certificate store
+    to ask whether the target is a CA, and it cannot compare two columns of this row to each
+    other. Both default FALSE, which fires, and on this estate false is also the true answer.
+    """
+
+    #: Computed here: both are quantifiers over the four designation columns, one of them
+    #: following the name into `Certificate`. See ProvenancedMixin.DERIVED_FIELDS.
+    DERIVED_FIELDS = (
+        "is_missing",
+        "forward_trust_is_designated_local_ca",
+        "untrust_distinct_from_trust",
+    )
+
+    management_station = models.ForeignKey(
+        ManagementStation, on_delete=models.CASCADE, related_name="decryption_settings")
+    appliance = models.ForeignKey(
+        "integrations.Appliance", on_delete=models.CASCADE,
+        related_name="decryption_settings")
+    appliance_group = models.ForeignKey(
+        "integrations.ApplianceGroup", on_delete=models.CASCADE,
+        related_name="decryption_settings", null=True, blank=True)
+    source_snapshot = models.ForeignKey(
+        "integrations.Snapshot", on_delete=models.CASCADE, related_name="decryption_settings")
+
+    #: THE FOUR DESIGNATION SLOTS. Each container has an `rsa` and an `ecdsa` child, so the
+    #: payload is a NESTED DICT and not a string - `{"forward-trust-certificate": {"rsa":
+    #: "oep-p1-cert"}}` - and a consumer reading `forward-trust-certificate` as a certificate
+    #: name gets a dict. Stage 4 measured that shape and it is the one trap on this node.
+    #:
+    #: EMPTY MEANS NO CERTIFICATE IS DESIGNATED IN THAT SLOT, which on its own is NOT the same
+    #: as none being designated at all - the other algorithm slot has to be read too, which is
+    #: what the two verdicts below do. `blank=True, default=""` and never `null=True`: the
+    #: search layer's `is_empty` compiles to `filter(field="")`, so emptiness is only assertable
+    #: on an empty string.
+    #:
+    #: Trust is what the firewall signs with for a destination it COULD validate; untrust is for
+    #: one it could NOT. The pair matters: a firewall using one certificate for both gives a
+    #: user no way to tell a trustworthy site from an untrustworthy one.
+    forward_trust_cert_rsa = models.CharField(max_length=64, blank=True, default="")
+    forward_trust_cert_ecdsa = models.CharField(max_length=64, blank=True, default="")
+    forward_untrust_cert_rsa = models.CharField(max_length=64, blank=True, default="")
+    forward_untrust_cert_ecdsa = models.CharField(max_length=64, blank=True, default="")
+
+    #: Whether this appliance has designated a forward-trust signing certificate AT ALL and
+    #: every slot it fills resolves to a certificate THIS APPLIANCE HOLDS that is marked a
+    #: certificate authority and is self-signed - the on-device PROXY for "the organisation
+    #: issued it", in the direction that PASSES only when all of that is in evidence.
+    #:
+    #: A name that resolves to no certificate row makes this FALSE rather than leaving it
+    #: unknown, deliberately: a designation pointing at nothing is a worse state than no
+    #: designation, not a better-evidenced one.
+    forward_trust_is_designated_local_ca = models.BooleanField(default=False)
+
+    #: Whether a forward-UNTRUST authority is designated and is a DIFFERENT certificate from
+    #: every forward-trust one. FALSE where no untrust authority is designated at all, and FALSE
+    #: where any untrust slot names a certificate a trust slot also names. Compared across BOTH
+    #: algorithm slots of each, which is four columns rather than two.
+    untrust_distinct_from_trust = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["appliance", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["appliance"],
+                name="integrations_unique_decryption_settings_per_appliance"),
+        ]
+        indexes = [
+            models.Index(fields=["appliance"]),
+            models.Index(fields=["management_station"]),
+            models.Index(fields=["forward_trust_is_designated_local_ca"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.appliance} decryption settings"
+
+    def clean(self) -> None:
+        if self.appliance.management_station_id != self.management_station_id:
+            raise ValidationError("Object appliance must belong to the same station.")
