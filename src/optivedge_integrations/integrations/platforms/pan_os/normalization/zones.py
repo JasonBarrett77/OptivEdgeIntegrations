@@ -94,6 +94,8 @@ class NormalizedZone:
     enable_device_identification: bool
     device_include_acl: list[str]
     device_exclude_acl: list[str]
+    device_identification_is_narrowed: bool
+    device_acl_lists_computed: bool
     prenat_user_identification: bool
     prenat_device_identification: bool
     prenat_source_policy_lookup: bool
@@ -279,6 +281,19 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
         # permanently None. Measured on 11.1.13-h3.
         packet_buffer_raw = _text(network.get("enable-packet-buffer-protection"))
 
+        # PAN-IOT-002's second half. The two Device-ID lists are JSON columns and a JSON column
+        # is reachable from no query, there is no count operator, and a clause cannot hold an
+        # OR - so "either list has a member" is computed here or it cannot be asked at all.
+        #
+        # ABSENT AND EMPTY ARE ONE STATE on the device as well as in the column, measured:
+        # deleting the only member leaves the `device-acl` container present and empty, and
+        # PAN-OS does not store an empty member list. So false here means the vendor's own
+        # INCLUDED NETWORKS `any` / EXCLUDED NETWORKS `none`, which is 48 of the 50 zones
+        # measured and is the COMPLIANT state - not an absence of knowledge. The absence of
+        # knowledge is the flag beside it.
+        device_include_members = _members(device_acl.get("include-list"))
+        device_exclude_members = _members(device_acl.get("exclude-list"))
+
         zones.append(
             NormalizedZone(
                 name=name,
@@ -298,8 +313,15 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
                 include_acl=_members(user_acl.get("include-list")),
                 exclude_acl=_members(user_acl.get("exclude-list")),
                 enable_device_identification=flag(entry.get("enable-device-identification")),
-                device_include_acl=_members(device_acl.get("include-list")),
-                device_exclude_acl=_members(device_acl.get("exclude-list")),
+                device_include_acl=device_include_members,
+                device_exclude_acl=device_exclude_members,
+                device_identification_is_narrowed=bool(
+                    device_include_members or device_exclude_members),
+                # TRUE ON EVERY ROW THIS PASS WRITES, and that is the whole of its job: it
+                # separates a row this normalizer computed from a row that predates the two
+                # columns, which the default of false covers until a renormalization runs. It
+                # cannot speak for a zone whose read never arrived - that zone has no row.
+                device_acl_lists_computed=True,
                 **prenat_values,
                 raw_entry=entry,
                 interfaces=[
@@ -350,6 +372,8 @@ def normalize_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
                 enable_device_identification=normalized.enable_device_identification,
                 device_include_acl=normalized.device_include_acl,
                 device_exclude_acl=normalized.device_exclude_acl,
+                device_identification_is_narrowed=normalized.device_identification_is_narrowed,
+                device_acl_lists_computed=normalized.device_acl_lists_computed,
                 prenat_user_identification=normalized.prenat_user_identification,
                 prenat_device_identification=normalized.prenat_device_identification,
                 prenat_source_policy_lookup=normalized.prenat_source_policy_lookup,

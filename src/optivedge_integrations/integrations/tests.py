@@ -39,7 +39,9 @@ from optivedge_integrations.integrations.models import (
     LoginBanner,
     ManagementTlsBinding,
     SslTlsServiceProfile,
+    DeviceIdentificationState,
     MasterKey,
+    RulebaseDeviceMatchVerdict,
     UpdateServerSettings,
     PasswordComplexityPolicy,
     IntegrationEvent,
@@ -65,6 +67,7 @@ from optivedge_integrations.integrations.models import (
     SecurityRuleService,
     SecurityRuleDestinationAddressRef,
     SecurityRuleSourceAddressRef,
+    SecurityRuleSourceHip,
     Snapshot,
     Zone,
     ZoneInterface,
@@ -154,6 +157,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_login_banner,
     normalize_appliance_management_tls,
     normalize_appliance_certificate_objects,
+    normalize_appliance_device_identification,
     normalize_appliance_master_key,
     normalize_appliance_services_settings,
     normalize_appliance_password_complexity,
@@ -161,6 +165,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_addresses,
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
+    normalize_enforcement_point_rulebase_device_match,
     normalize_enforcement_point_zones,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors import (
@@ -8072,6 +8077,392 @@ class MasterKeyNormalizationTests(TestCase):
         self.assertEqual(key.state, MasterKey.STATE_SET)
         self.assertEqual(key.auto_renew_hours, 720)
         self.assertTrue(key.on_hsm)
+
+
+class DeviceIdentificationStateNormalizationTests(TestCase):
+    """PAN-IOT-001 and PAN-IOT-003's subject - three instruments on one appliance row.
+
+    Every payload below is the shape measured on a lab appliance on 2026-10-29, named by
+    SERIAL: 691665AC334B458 answers to the factory-default hostname `PA-VM`.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.iot")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-iot",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-IOT", hostname="fw-iot")
+
+    def _merged(self, deviceconfig=None):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [
+                {"@name": "localhost.localdomain",
+                 "deviceconfig": deviceconfig if deviceconfig is not None else {}}]}}})
+
+    def _op(self, source_type, payload):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type=source_type, collected_at=timezone.now(), payload=payload)
+
+    def _normalize(self):
+        normalize_appliance_device_identification(self.appliance)
+        return DeviceIdentificationState.objects.get(appliance=self.appliance)
+
+    def test_a_row_exists_with_no_operational_snapshot_and_every_flag_fires(self):
+        """"We never asked" must not look like "we asked and it was fine". Unlicensed and
+        unasked produce the same licence payload, so the companion flag is the only separator -
+        and the control fires on its false."""
+        self._merged()
+        state = self._normalize()
+        self.assertFalse(state.licence_read_taken)
+        self.assertFalse(state.device_id_licensed)
+        self.assertFalse(state.device_dictionary_release_date_known)
+        self.assertIsNone(state.device_dictionary_age_days)
+        self.assertEqual(state.edge_service_address, "")
+
+    def test_no_merged_snapshot_means_no_row(self):
+        """There is nothing to anchor to and nothing the edge column could say."""
+        self.assertEqual(normalize_appliance_device_identification(self.appliance),
+                         {"device_identification_states": 0})
+        self.assertFalse(DeviceIdentificationState.objects.exists())
+
+    def test_an_empty_licence_envelope_is_a_read_that_happened(self):
+        """`{'licenses': None}` is truthy at the outer dict and falsy one level in, and it means
+        "holds nothing" - which is a DIFFERENT fact from "nobody asked". Both PA-5220s answer
+        this way."""
+        self._merged()
+        self._op("request_license_info", {"licenses": None})
+        state = self._normalize()
+        self.assertTrue(state.licence_read_taken)
+        self.assertFalse(state.device_id_licensed)
+
+    def test_a_populated_licence_table_without_the_feature_stays_unlicensed(self):
+        """The ten features on 691665AC334B458, none of them the device-identification one."""
+        self._merged()
+        self._op("request_license_info", {"licenses": {"entry": [
+            {"feature": "Adv Threat Prevention", "expired": "no"},
+            {"feature": "PAN-DB URL Filtering", "expired": "no"},
+            {"feature": "PA-VM", "expired": "no"}]}})
+        state = self._normalize()
+        self.assertTrue(state.licence_read_taken)
+        self.assertFalse(state.device_id_licensed)
+
+    def test_the_feature_match_is_exact_and_not_a_substring(self):
+        """A substring test would read an appliance as LICENSED on a neighbouring feature, which
+        makes the control pass - the unsafe direction. Exact and wrong leaves it firing."""
+        self._merged()
+        self._op("request_license_info", {"licenses": {"entry": [
+            {"feature": "IoT Security Add-on", "expired": "no"}]}})
+        self.assertFalse(self._normalize().device_id_licensed)
+
+    def test_an_expired_entitlement_is_not_in_force(self):
+        self._merged()
+        self._op("request_license_info", {"licenses": {"entry": [
+            {"feature": "IoT Security", "expired": "yes"}]}})
+        self.assertFalse(self._normalize().device_id_licensed)
+
+    def test_an_in_force_entitlement_is_the_only_thing_that_licenses_it(self):
+        self._merged()
+        self._op("request_license_info", {"licenses": {"entry": [
+            {"feature": "IoT Security", "description": "IoT Security Sub", "expired": "no"}]}})
+        state = self._normalize()
+        self.assertTrue(state.device_id_licensed)
+        self.assertTrue(state.licence_read_taken)
+
+    def test_the_edge_address_is_read_from_the_merged_setting_subtree(self):
+        self._merged({"setting": {"iot": {"edge": {
+            "address": "edge-oep-iot6.invalid", "disable-device-cert": "no"}}}})
+        self.assertEqual(self._normalize().edge_service_address, "edge-oep-iot6.invalid")
+
+    def test_an_absent_release_date_key_leaves_the_companion_false(self):
+        """The key is MISSING from the reply on both PA-5220s rather than empty, along with its
+        three sibling release-date keys, and nothing in the reply says whether that is a
+        platform distinction or a content state."""
+        self._merged()
+        self._op("show_system_info", {"system": {
+            "time": "Thu Oct 29 05:42:55 2026", "device-dictionary-version": "82-406"}})
+        state = self._normalize()
+        self.assertEqual(state.device_dictionary_version, "82-406")
+        self.assertEqual(state.device_dictionary_release_date, "")
+        self.assertFalse(state.device_dictionary_release_date_known)
+        self.assertIsNone(state.device_dictionary_age_days)
+
+    def test_the_age_is_taken_in_the_appliance_own_clock_frame(self):
+        """The timezone token is an ABBREVIATION and not an offset, and `time` is rendered in the
+        same frame as the release date - so the two naive timestamps subtract correctly without
+        the abbreviation being parsed at all."""
+        self._merged()
+        self._op("show_system_info", {"system": {
+            "time": "Thu Oct 29 05:43:07 2026",
+            "device-dictionary-version": "249-772",
+            "device-dictionary-release-date": "2026/10/24 02:35:51 GMT"}})
+        state = self._normalize()
+        self.assertTrue(state.device_dictionary_release_date_known)
+        self.assertEqual(state.device_dictionary_age_days, 5)
+
+    def test_two_appliances_reporting_the_same_instant_under_different_abbreviations_agree(self):
+        """Measured: the two PA-VMs hold the same content and report it as 02:35:51 GMT and
+        19:35:51 PDT, with clocks seven hours apart. The age must not differ."""
+        self._merged()
+        self._op("show_system_info", {"system": {
+            "time": "Wed Oct 28 22:43:10 2026",
+            "device-dictionary-release-date": "2026/10/23 19:35:51 PDT"}})
+        self.assertEqual(self._normalize().device_dictionary_age_days, 5)
+
+    def test_an_unreadable_release_date_is_not_known_and_carries_no_age(self):
+        """A true flag beside a null age would admit the row to a threshold a null passes, which
+        is the one hole the companion exists to close. The string is still kept for display."""
+        self._merged()
+        self._op("show_system_info", {"system": {
+            "time": "Thu Oct 29 05:43:07 2026",
+            "device-dictionary-release-date": "whenever"}})
+        state = self._normalize()
+        self.assertEqual(state.device_dictionary_release_date, "whenever")
+        self.assertFalse(state.device_dictionary_release_date_known)
+        self.assertIsNone(state.device_dictionary_age_days)
+
+    def test_a_missing_device_clock_falls_back_to_the_collection_time(self):
+        """Mixing frames costs at most the appliance's UTC offset. The alternative is a null,
+        which passes every threshold - so the fallback is taken."""
+        self._merged()
+        self._op("show_system_info", {"system": {
+            "device-dictionary-release-date": "2020/01/01 00:00:00 GMT"}})
+        state = self._normalize()
+        self.assertTrue(state.device_dictionary_release_date_known)
+        self.assertGreater(state.device_dictionary_age_days, 1000)
+
+    def test_the_icd_reply_is_free_text_and_is_parsed_by_label(self):
+        """`Snapshot.payload` here is a plain string, the only source type in this domain that
+        is, so anything calling `.get()` on it raises."""
+        self._merged()
+        self._op("show_iot_icd_version",
+                 "Version: 13.pan_h1_r3\nTimeBuilt: 2026-02-06T13:34:53PST\nGitTag: 10c7d140")
+        state = self._normalize()
+        self.assertEqual(state.icd_build_version, "13.pan_h1_r3")
+        self.assertEqual(state.icd_built_at, "2026-02-06T13:34:53PST")
+
+    def test_one_row_per_appliance_and_renormalizing_updates_it(self):
+        self._merged()
+        self._normalize()
+        self._op("request_license_info", {"licenses": None})
+        self._normalize()
+        self.assertEqual(DeviceIdentificationState.objects.count(), 1)
+        self.assertTrue(DeviceIdentificationState.objects.get().licence_read_taken)
+
+    def test_the_companion_flags_cannot_contradict_the_values_they_vouch_for(self):
+        self._merged()
+        state = self._normalize()
+        state.device_dictionary_release_date_known = True
+        with self.assertRaises(ValidationError):
+            state.full_clean()
+
+
+class RulebaseDeviceMatchVerdictTests(TestCase):
+    """PAN-IOT-004's subject - a verdict over the rule SET of one enforcement point."""
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.dm")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-dm",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-DM", hostname="fw-dm")
+        self.point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance=self.appliance, vsys_name="vsys3")
+
+    def _merged(self, vsys_entry=None, shared=None):
+        payload = {"config": {
+            "devices": {"entry": [{"@name": "localhost.localdomain", "vsys": {"entry": [
+                dict({"@name": "vsys3"}, **(vsys_entry or {}))]}}]},
+            "shared": shared or {}}}
+        # ATTACHED TO THE APPLIANCE, not to the point: `latest_merged_snapshot` for an
+        # enforcement point goes through `choose_local_appliance` and reads the appliance's
+        # snapshot, because one merged read speaks for every vsys on the device.
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(), payload=payload)
+
+    def _rule(self, snapshot, name, action, hips=(), order=1):
+        rule = SecurityRule.objects.create(
+            management_station=self.station, enforcement_point=self.point,
+            source_snapshot=snapshot, config_source=SecurityRule.SOURCE_LOCAL,
+            effective_order=order, rule_position=order, name=name, action=action)
+        for position, value in enumerate(hips):
+            SecurityRuleSourceHip.objects.create(
+                security_rule=rule, value=value, position=position)
+        return rule
+
+    def _normalize(self):
+        normalize_enforcement_point_rulebase_device_match(self.point)
+        return RulebaseDeviceMatchVerdict.objects.get(enforcement_point=self.point)
+
+    def test_no_merged_snapshot_means_no_verdict(self):
+        """A verdict with nothing behind it would fire on the strength of nothing."""
+        self.assertEqual(normalize_enforcement_point_rulebase_device_match(self.point),
+                         {"rulebase_device_match_verdicts": 0})
+        self.assertFalse(RulebaseDeviceMatchVerdict.objects.exists())
+
+    def test_an_estate_with_no_device_object_fires_with_a_zero_count(self):
+        """Zero means no rule COULD name a device even if somebody wrote one, which is a
+        different remediation from "no rule names one". It is the state of all four lab
+        appliances at both configuration containers."""
+        snapshot = self._merged()
+        self._rule(snapshot, "allow-any", "allow", hips=["any"])
+        verdict = self._normalize()
+        self.assertTrue(verdict.has_no_rule_matching_on_device)
+        self.assertEqual(verdict.device_object_count, 0)
+        self.assertEqual(verdict.rules_matching_on_device_count, 0)
+
+    def test_device_objects_are_counted_at_vsys_and_firewall_local_shared_scope(self):
+        """A shared object is visible to every vsys, so a count taken from the vsys container
+        alone is a count of the wrong thing."""
+        self._merged(
+            vsys_entry={"device-object": {"entry": [{"@name": "oep-iot6-dev-v"}]}},
+            shared={"device-object": {"entry": [{"@name": "oep-iot6-dev-s"}]}})
+        self.assertEqual(self._normalize().device_object_count, 2)
+
+    def test_a_keyword_only_member_list_is_not_a_device_match(self):
+        """`any` is the commonest member in the estate and constrains nothing. Counting a
+        populated list as a device match would report the whole lab as having the dimension."""
+        snapshot = self._merged(
+            vsys_entry={"device-object": {"entry": [{"@name": "oep-iot6-dev-v"}]}})
+        self._rule(snapshot, "allow_icmp", "allow", hips=["any"])
+        verdict = self._normalize()
+        self.assertTrue(verdict.has_no_rule_matching_on_device)
+        self.assertEqual(verdict.rules_matching_on_device_count, 0)
+
+    def test_an_unresolvable_member_is_not_a_device_match(self):
+        """One member list holds a device object, a GlobalProtect HIP profile and three bare
+        keywords, all as plain strings, so resolution against the device-object namespace is the
+        only discriminator there is."""
+        snapshot = self._merged(
+            vsys_entry={"device-object": {"entry": [{"@name": "oep-iot6-dev-v"}]}})
+        self._rule(snapshot, "hip-rule", "allow", hips=["hip-corp-managed"])
+        self.assertTrue(self._normalize().has_no_rule_matching_on_device)
+
+    def test_an_allow_rule_naming_a_device_object_clears_the_verdict(self):
+        snapshot = self._merged(
+            vsys_entry={"device-object": {"entry": [{"@name": "oep-iot6-dev-v"}]}})
+        self._rule(snapshot, "oep-iot6-rule", "allow", hips=["oep-iot6-dev-v"])
+        verdict = self._normalize()
+        self.assertFalse(verdict.has_no_rule_matching_on_device)
+        self.assertEqual(verdict.rules_matching_on_device_count, 1)
+
+    def test_a_deny_rule_naming_a_device_counts_but_does_not_clear_the_verdict(self):
+        """The control asserts over rules that PERMIT traffic; the count has no action filter,
+        so a finding can print a number that includes the deny."""
+        snapshot = self._merged(
+            vsys_entry={"device-object": {"entry": [{"@name": "oep-iot6-dev-v"}]}})
+        self._rule(snapshot, "deny-camera", "deny", hips=["oep-iot6-dev-v"])
+        verdict = self._normalize()
+        self.assertTrue(verdict.has_no_rule_matching_on_device)
+        self.assertEqual(verdict.rules_matching_on_device_count, 1)
+
+    def test_one_row_per_enforcement_point_and_renormalizing_updates_it(self):
+        snapshot = self._merged(
+            vsys_entry={"device-object": {"entry": [{"@name": "oep-iot6-dev-v"}]}})
+        self._normalize()
+        self._rule(snapshot, "oep-iot6-rule", "allow", hips=["oep-iot6-dev-v"])
+        self._normalize()
+        self.assertEqual(RulebaseDeviceMatchVerdict.objects.count(), 1)
+        self.assertFalse(RulebaseDeviceMatchVerdict.objects.get().has_no_rule_matching_on_device)
+
+    def test_the_verdict_cannot_contradict_the_count_it_is_taken_over(self):
+        self._merged()
+        verdict = self._normalize()
+        verdict.has_no_rule_matching_on_device = False
+        with self.assertRaises(ValidationError):
+            verdict.full_clean()
+
+
+class ZoneDeviceIdentificationNarrowingTests(TestCase):
+    """PAN-IOT-002's second half, which is a column because no query could ask it."""
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.zdi")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-zdi",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-ZDI", hostname="fw-zdi")
+        self.point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance=self.appliance, vsys_name="vsys3")
+
+    def _zones(self, entries):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [
+                {"@name": "localhost.localdomain",
+                 "vsys": {"entry": [{"@name": "vsys3", "zone": {"entry": entries}}]}}]}}})
+        normalize_enforcement_point_zones(self.point)
+        return {zone.name: zone for zone in Zone.objects.filter(enforcement_point=self.point)}
+
+    def test_a_zone_with_no_device_acl_is_not_narrowed_and_is_still_computed(self):
+        """False here is the MEASURED meaning of an absent `device-acl` - the grid renders
+        INCLUDED NETWORKS `any` and EXCLUDED NETWORKS `none` - and not an absence of knowledge.
+        48 of the 50 zones measured are in this state, which is why it cannot be flipped to
+        fire; the flag beside it is what carries the unknown."""
+        zones = self._zones([{"@name": "oep-iot6-z2"}])
+        self.assertFalse(zones["oep-iot6-z2"].device_identification_is_narrowed)
+        self.assertTrue(zones["oep-iot6-z2"].device_acl_lists_computed)
+
+    def test_an_include_list_narrows_identification(self):
+        zones = self._zones([{"@name": "oep-iot6-z3",
+                              "enable-device-identification": "yes",
+                              "device-acl": {"include-list": {"member": ["203.0.113.0/24"]}}}])
+        zone = zones["oep-iot6-z3"]
+        self.assertTrue(zone.enable_device_identification)
+        self.assertEqual(zone.device_include_acl, ["203.0.113.0/24"])
+        self.assertTrue(zone.device_identification_is_narrowed)
+
+    def test_an_exclude_list_narrows_it_too_and_the_two_directions_differ(self):
+        """An absent exclude list means NOTHING is excluded, the permissive end - the opposite
+        of the include list's absence, which means identification applies to everything."""
+        zones = self._zones([{"@name": "oep-iot6-z4",
+                              "enable-device-identification": "yes",
+                              "device-acl": {"exclude-list": {"member": ["203.0.113.128/25"]}}}])
+        zone = zones["oep-iot6-z4"]
+        self.assertEqual(zone.device_include_acl, [])
+        self.assertEqual(zone.device_exclude_acl, ["203.0.113.128/25"])
+        self.assertTrue(zone.device_identification_is_narrowed)
+
+    def test_an_empty_device_acl_container_is_the_same_state_as_an_absent_one(self):
+        """Measured: deleting the only member leaves the container present and EMPTY, and
+        PAN-OS does not store an empty member list."""
+        zones = self._zones([{"@name": "oep-iot6-z5",
+                              "enable-device-identification": "yes", "device-acl": {}}])
+        self.assertFalse(zones["oep-iot6-z5"].device_identification_is_narrowed)
+
+    def test_a_member_may_be_a_literal_a_cidr_block_or_an_address_group_name(self):
+        """Stored as written with no resolution, which is the shipped model's own comment -
+        anything computing the addresses an ACL covers has to resolve them itself."""
+        zones = self._zones([{"@name": "scratch_zone",
+                              "enable-device-identification": "yes",
+                              "device-acl": {
+                                  "include-list": {"member": [
+                                      "99.99.98.0/24", "99.99.99.99",
+                                      "ag-agent-desktop-services"]},
+                                  "exclude-list": {"member": ["88.88.88.0/24"]}}}])
+        zone = zones["scratch_zone"]
+        self.assertEqual(len(zone.device_include_acl), 3)
+        self.assertTrue(zone.device_identification_is_narrowed)
+
+    def test_the_verdict_cannot_disagree_with_the_json_it_came_from(self):
+        zones = self._zones([{"@name": "oep-iot6-z2"}])
+        zone = zones["oep-iot6-z2"]
+        zone.device_identification_is_narrowed = True
+        with self.assertRaises(ValidationError):
+            zone.full_clean()
 
 
 class ServicesSettingsNormalizationTests(TestCase):

@@ -34,8 +34,14 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
 
+    # RE-CHAINED WHEN THE WAVE WAS MERGED, 2026-10-29. This migration was built by one of four
+    # concurrent stage 7 runs, each told to depend on the head it found - `0092_ike_crypto` for
+    # all four, because none of them could see a sibling's work. Four leaf nodes is a state
+    # Django refuses outright ("Conflicting migrations detected; multiple leaf nodes"), so the
+    # four were put in a line at merge time. The four touch different models, so the order
+    # carries no meaning beyond the filenames they were assigned.
     dependencies = [
-        ('integrations', '0092_ike_crypto'),
+        ('integrations', '0093_assessment_coverage'),
     ]
 
     operations = [

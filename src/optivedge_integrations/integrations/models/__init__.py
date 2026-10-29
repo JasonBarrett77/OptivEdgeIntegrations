@@ -50,6 +50,10 @@ from .management_ssh import ManagementSshSettings
 from .high_availability import HighAvailabilityConfig
 from .panorama_registration import PanoramaRegistration
 from .master_key import MasterKey
+from .device_identification import (
+    DeviceIdentificationState,
+    RulebaseDeviceMatchVerdict,
+)
 from .wildfire_settings import WildfireSettings
 from .services_settings import LoggingSettings, UpdateServerSettings
 from .device_services import NtpSettings, SnmpSettings, SystemIdentity
@@ -144,7 +148,9 @@ __all__ = [
     "HighAvailabilityConfig",
     "ManagementSshSettings",
     "PanoramaRegistration",
+    "DeviceIdentificationState",
     "MasterKey",
+    "RulebaseDeviceMatchVerdict",
     "NtpSettings",
     "SnmpSettings",
     "SystemIdentity",

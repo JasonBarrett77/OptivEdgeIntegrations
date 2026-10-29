@@ -36,7 +36,10 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_predefined_certificates,
     collect_predefined_security_profiles,
     collect_show_high_availability_all,
+    collect_request_license_info,
+    collect_show_iot_icd_version,
     collect_show_logging_status,
+    collect_show_system_info,
     collect_show_masterkey_properties,
     collect_show_panorama_status,
     collect_predefined_log_forwarding_profiles,
@@ -59,6 +62,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     PANOSNormalizedCollection,
     normalize_appliance_group_shared_scope,
     normalize_enforcement_point_addresses,
+    normalize_enforcement_point_rulebase_device_match,
     normalize_enforcement_point_zones,
     normalize_enforcement_point_dynamic_address_content,
     normalize_enforcement_point_security_rules,
@@ -76,6 +80,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_management_tls,
     normalize_appliance_high_availability,
     normalize_appliance_management_ssh,
+    normalize_appliance_device_identification,
     normalize_appliance_master_key,
     normalize_appliance_panorama_registration,
     normalize_appliance_services_settings,
@@ -353,6 +358,15 @@ class PANOSInScopeConfigCollection:
     panorama_status_collections: list[PANOSApplianceCollectedSnapshot] = field(
         default_factory=list)
     panorama_status_failures: list[PANOSApplianceCollectionFailure] = field(
+        default_factory=list)
+    #: The three device-identification op reads - `request license info`,
+    #: `show system info` and `show iot icd version`. Their own pair for the same reason the
+    #: logging-status pair is its own: a failure here leaves PAN-IOT-001's licence half and the
+    #: whole of PAN-IOT-003 resting on companion flags that FIRE, which a reader acts on
+    #: differently from a configuration read that came back wrong.
+    device_identification_collections: list[PANOSApplianceCollectedSnapshot] = field(
+        default_factory=list)
+    device_identification_failures: list[PANOSApplianceCollectionFailure] = field(
         default_factory=list)
     management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = field(
         default_factory=list)
@@ -742,6 +756,45 @@ def collect_appliance_predefined_catalogs(
     return persisted, failures
 
 
+def collect_appliance_device_identification(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> tuple[list[PANOSPersistedCollection], list[str]]:
+    """PAN-IOT-001's and PAN-IOT-003's only sources. No configuration read carries any of them.
+
+    Three op calls on one session, appliance-wide, COLLECTED INDEPENDENTLY. They answer three
+    unrelated questions and letting one exception abandon the other two would be expensive here
+    in particular: `request license info` is the only read in this estate that returns the SAME
+    PAYLOAD for "nothing is licensed" and "nobody asked", and the column that separates them is
+    computed from whether its snapshot exists. Losing it to a failure in the free-text ICD read
+    would silently move an appliance from "entitlement absent" to "never measured".
+
+    Failures are returned rather than swallowed, so a partial collection is visible as partial.
+    """
+    session = open_session(
+        appliance.management_station,
+        credentials_provider=credentials_provider,
+        target=appliance.serial_number,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    persisted: list[PANOSPersistedCollection] = []
+    failures: list[str] = []
+    for collect in (
+        collect_request_license_info,
+        collect_show_system_info,
+        collect_show_iot_icd_version,
+    ):
+        try:
+            persisted.append(persist_appliance_collected_response(appliance, collect(session)))
+        except Exception as exc:  # noqa: BLE001 - recorded and reported, not suppressed
+            failures.append(f"{collect.__name__}: {exc}")
+    return persisted, failures
+
+
 def collect_appliance_group_pushed_shared_policy(
     appliance_group: ApplianceGroup,
     *,
@@ -808,6 +861,9 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     ("authentication settings", normalize_appliance_authentication_settings),
     ("login banner", normalize_appliance_login_banner),
     ("master key", normalize_appliance_master_key),
+    # Device > IoT Security, the licence table and the installed content dictionary. Three op
+    # snapshots and one merged leaf; depends on nothing else in this tuple.
+    ("device identification", normalize_appliance_device_identification),
     ("services settings", normalize_appliance_services_settings),
     # AFTER services settings, which owns the other column on the same LoggingSettings row.
     # The two write disjoint column sets and each deletes only its own provenance rows, so the
@@ -1064,6 +1120,23 @@ def renormalize_in_scope_configuration(
                 kind="rule profile coverage", enforcement_point=enforcement_point,
                 counts=dict(counts or {})))
 
+    # AFTER the security-rule pass above, and it must stay after: the verdict is taken over the
+    # `SecurityRule` rows that pass writes, so run earlier it would read the PREVIOUS run's
+    # rules - or none on a first collection, which reads as "this point has no device
+    # dimension" and FIRES. Reuses the policy-object failure pair rather than adding a third:
+    # the shape is identical and two lists that can disagree are worse than one.
+    for enforcement_point in enforcement_points:
+        try:
+            counts = normalize_enforcement_point_rulebase_device_match(enforcement_point)
+        except Exception as exc:
+            policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                kind="rulebase device match", enforcement_point=enforcement_point,
+                error_text=str(exc)))
+        else:
+            policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                kind="rulebase device match", enforcement_point=enforcement_point,
+                counts=dict(counts or {})))
+
     return PANOSInScopeRenormalizationResult(
         appliances=appliances,
         enforcement_points=enforcement_points,
@@ -1107,6 +1180,8 @@ def collect_in_scope_configuration_snapshots(
     high_availability_failures: list[PANOSApplianceCollectionFailure] = []
     panorama_status_collections: list[PANOSApplianceCollectedSnapshot] = []
     panorama_status_failures: list[PANOSApplianceCollectionFailure] = []
+    device_identification_collections: list[PANOSApplianceCollectedSnapshot] = []
+    device_identification_failures: list[PANOSApplianceCollectionFailure] = []
     shared_policy_collections: list[PANOSApplianceGroupCollectedSnapshot] = []
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure] = []
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot] = []
@@ -1223,6 +1298,31 @@ def collect_in_scope_configuration_snapshots(
             PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
         )
 
+    # ITS OWN LOOP AND ITS OWN FAILURE LIST, for the reason above it. Three op calls per
+    # appliance; per-read failures are reported individually so one unavailable read reads as
+    # one missing read rather than as a lost appliance.
+    for appliance in appliances:
+        try:
+            persisted_list, iot_failures = collect_appliance_device_identification(
+                appliance,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            device_identification_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=str(exc))
+            )
+            continue
+        for error_text in iot_failures:
+            device_identification_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=error_text)
+            )
+        for persisted in persisted_list:
+            device_identification_collections.append(
+                PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
+            )
+
     for appliance_group in appliance_groups:
         try:
             persisted = collect_appliance_group_pushed_shared_policy(
@@ -1285,6 +1385,8 @@ def collect_in_scope_configuration_snapshots(
         high_availability_failures=high_availability_failures,
         panorama_status_collections=panorama_status_collections,
         panorama_status_failures=panorama_status_failures,
+        device_identification_collections=device_identification_collections,
+        device_identification_failures=device_identification_failures,
         shared_policy_collections=shared_policy_collections,
         shared_policy_failures=shared_policy_failures,
         vsys_policy_collections=vsys_policy_collections,
