@@ -51,6 +51,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_predefined_url_lists,
     collect_show_pushed_shared_policy,
     collect_show_pushed_shared_policy_vsys,
+    collect_show_rule_hit_count,
     set_target_vsys,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.device_groups import (
@@ -71,6 +72,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_enforcement_point_security_rules,
     normalize_appliance_group_security_profiles,
     normalize_security_profiles,
+    normalize_appliance_policy_rule_settings,
+    normalize_enforcement_point_security_rule_posture,
+    normalize_enforcement_point_vsys_rule_posture,
     normalize_security_rule_profile_coverage,
     normalize_appliance_admin_role_posture,
     normalize_appliance_admin_users,
@@ -864,6 +868,35 @@ def collect_enforcement_point_pushed_shared_policy(
     return persist_enforcement_point_collected_response(enforcement_point, collected)
 
 
+def collect_enforcement_point_rule_hit_count(
+    enforcement_point: EnforcementPoint,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> PANOSPersistedCollection:
+    """Per-rule usage telemetry for one vsys - the only read that says whether a rule is used.
+
+    PER ENFORCEMENT POINT and not per appliance, because the command names the vsys inside the
+    command body and there is no device-wide form of it. See
+    `collectors/rule_hit_count.py` for what the reply reports when nothing is counting, which
+    is the measurement the columns resting on it are safe because of.
+    """
+    appliance = resolve_enforcement_point_collection_appliance(enforcement_point)
+    session = open_session(
+        appliance.management_station,
+        credentials_provider=credentials_provider,
+        target=appliance.serial_number,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    collected = collect_show_rule_hit_count(
+        session,
+        vsys_name=enforcement_point.vsys_name,
+    )
+    return persist_enforcement_point_collected_response(enforcement_point, collected)
+
+
 def collect_enforcement_point_pushed_profiles(
     enforcement_point: EnforcementPoint,
     *,
@@ -924,6 +957,10 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # snapshots and one merged leaf; depends on nothing else in this tuple.
     ("device identification", normalize_appliance_device_identification),
     ("services settings", normalize_appliance_services_settings),
+    # Device > Setup > Management > Policy Rulebase Settings, two leaves of the same merged
+    # device entry its neighbours read. Depends on nothing else in this tuple, and the point
+    # loops that read the row it writes all run after this loop finishes.
+    ("policy rule settings", normalize_appliance_policy_rule_settings),
     # Device > Setup > Management > Management Interface Settings, and the operational mode the
     # appliance reports when asked. Reads the same merged device entry as its neighbours plus
     # its own `show system info` snapshot, and depends on nothing else in this tuple.
@@ -1231,6 +1268,26 @@ def renormalize_in_scope_configuration(
                 kind="rule profile coverage", enforcement_point=enforcement_point,
                 counts=dict(counts or {})))
 
+    # AFTER the profile-coverage loop above, and the two of these must stay in this order. The
+    # per-rule pass computes shadowing and duplicates over the whole rulebase's stored rows and
+    # resolves the service and schedule collections the rules name; the vsys pass then takes
+    # eight verdicts over what it wrote. Run either early and it reads the previous run's rows,
+    # or none on a first collection - which for a verdict about an absent rule is the direction
+    # that manufactures a finding.
+    for kind, normalize_point in (
+            ("security rule posture", normalize_enforcement_point_security_rule_posture),
+            ("vsys rule posture", normalize_enforcement_point_vsys_rule_posture)):
+        for enforcement_point in enforcement_points:
+            try:
+                counts = normalize_point(enforcement_point)
+            except Exception as exc:
+                policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                    kind=kind, enforcement_point=enforcement_point, error_text=str(exc)))
+            else:
+                policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                    kind=kind, enforcement_point=enforcement_point,
+                    counts={k: v for k, v in (counts or {}).items() if isinstance(v, int)}))
+
     # AFTER the security-rule pass above, and it must stay after: the verdict is taken over the
     # `SecurityRule` rows that pass writes, so run earlier it would read the PREVIOUS run's
     # rules - or none on a first collection, which reads as "this point has no device
@@ -1462,8 +1519,13 @@ def collect_in_scope_configuration_snapshots(
     # for what the other omits. They share the result lists because they answer one question at
     # one scope; a run can tell them apart by the snapshot's own source_type.
     for enforcement_point in enforcement_points:
+        # The hit-count read joins these two because it shares their grain and their failure
+        # shape: one op call per vsys, and a failure leaves three columns on every rule of that
+        # point at their indeterminate values with `hit_count_reading_known` false - which is
+        # the same "a verdict went unanswered" outcome, told apart by the snapshot's source_type.
         for collect_pushed in (collect_enforcement_point_pushed_shared_policy,
-                               collect_enforcement_point_pushed_profiles):
+                               collect_enforcement_point_pushed_profiles,
+                               collect_enforcement_point_rule_hit_count):
             try:
                 persisted = collect_pushed(
                     enforcement_point,

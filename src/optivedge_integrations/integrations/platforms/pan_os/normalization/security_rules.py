@@ -42,6 +42,7 @@ from optivedge_integrations.integrations.models import (
     SecurityRuleSourceAddressRef,
     SecurityRuleSourceHip,
     SecurityRuleSourceUser,
+    SecurityRuleTag,
     SecurityRuleToZone,
     Snapshot,
 )
@@ -125,6 +126,13 @@ class NormalizedSecurityRule:
     destination_address_members: list[NormalizedSecurityRuleMember]
     # (field_name, raw_key_or_ABSENT, raw_prov_value)
     field_provenance_data: list[tuple[str, Any, str | None]]
+    #: DEFAULTED, unlike every field above, and deliberately: this dataclass has no field
+    #: defaults anywhere else, so every hand-built fixture in the suite constructs it in full -
+    #: the same trap `NormalizedSecurityProfile` carries. Both new fields store the EMPTY state
+    #: that the device's absent key means, so a caller that omits them gets the same answer the
+    #: reader would have given for a rule with neither key.
+    group_tag: str = ""
+    schedule: str = ""
 
 
 @dataclass(slots=True)
@@ -181,6 +189,33 @@ RULE_TYPE_IMPLICIT = Implicit.assumed(
     "PAN-OS stores an explicit universal rather than pruning it, so absence is a payload state "
     "the device keeps distinct, and what the dataplane shows for that state is SILENCE. The "
     "name 'universal' is our reading of the silence; no device output states it")
+
+
+#: What an absent `group-tag` means. MEASURED on 013201001475: the key is absent from all 666
+#: firewall rules, the policy grid shows no group header for any of them, and a positive control
+#: wrote `group-tag=Production`, committed, and read back the BARE SCALAR
+#: `{'group-tag': 'Production'}` before deleting it. So absence is "this rule is in no tag
+#: group", which is the state PAN-POL-021's third clause reports.
+GROUP_TAG_ABSENT = Implicit.measured(
+    "",
+    "measured on 013201001475: `group-tag` absent from all 666 firewall rules with no group "
+    "header in the policy grid, and a positive control wrote it, committed, read back the bare "
+    "scalar and deleted it - so an absent key means the rule is grouped by no tag")
+
+#: What an absent `schedule` means. MEASURED on 013201001475: absent from all 666 firewall rules
+#: AND all 630 Panorama rules, with the rule dialog rendering Schedule as `None`. Help p.358
+#: agrees - "By default, Security policy rules are always in effect (all dates and times)".
+#:
+#: THE TRAP IS THE RENDERED WORD: the dialog's `None` is rendered TEXT and not an empty-value
+#: placeholder, so a reader must never store a schedule object named `None`. And the direction
+#: matters: for a control about temporary access expiring, a rule with no schedule is the
+#: FINDING rather than the pass.
+SCHEDULE_ABSENT = Implicit.measured(
+    "",
+    "measured on 013201001475: `schedule` absent from all 666 firewall rules and all 630 "
+    "Panorama rules, the rule dialog rendering Schedule as the literal text `None`, and Help "
+    "p.358 'Security policy rules are always in effect (all dates and times)' by default - so "
+    "an absent key means the rule is permanently in force")
 
 
 def first_vsys_rulebase(payload: dict[str, Any], vsys_name: str) -> dict[str, Any]:
@@ -350,6 +385,10 @@ def normalize_rule(
         implicit=Implicit.measured(
             False, "read-a-security-rule.md: 'negate-destination absent -> no' [MEASURED 2026-10-05]")
     )
+    group_tag, group_tag_rk, group_tag_rv = parse_text_field(
+        rule.get("group-tag"), implicit=GROUP_TAG_ABSENT)
+    schedule, schedule_rk, schedule_rv = parse_text_field(
+        rule.get("schedule"), implicit=SCHEDULE_ABSENT)
 
     # Both flags now carry their MEASURED default when the key is absent, so neither is null any
     # more. They were null from the day this module was written until 2026-09-22, because the
@@ -373,6 +412,9 @@ def normalize_rule(
         (SecurityRuleDestinationHip, "destination-hip"),
         (SecurityRuleSaasUser, "saas-user-list"),
         (SecurityRuleSaasTenant, "saas-tenant-list"),
+        # A MEMBER LIST and not a scalar, unlike `group-tag` beside it - one object reached by
+        # two keys, so a consumer reading only one drops half the metadata.
+        (SecurityRuleTag, "tag"),
     ]:
         for position, (value, prov) in enumerate(iter_member_values(rule.get(field_name))):
             members.append(
@@ -452,6 +494,8 @@ def normalize_rule(
         log_setting=log_setting,
         negate_source=bool(negate_source),
         negate_destination=bool(negate_destination),
+        group_tag=group_tag,
+        schedule=schedule,
         raw_rule=rule,
         members=members,
         source_address_members=source_address_members,
@@ -467,6 +511,8 @@ def normalize_rule(
             ("log_setting", log_setting_rk, log_setting_rv),
             ("negate_source", negate_source_rk, negate_source_rv),
             ("negate_destination", negate_destination_rk, negate_destination_rv),
+            ("group_tag",   group_tag_rk,   group_tag_rv),
+            ("schedule",    schedule_rk,    schedule_rv),
         ],
     )
 
@@ -1371,6 +1417,8 @@ def _persist_one_security_rule(
         log_setting=normalized_rule.log_setting,
         negate_source=normalized_rule.negate_source,
         negate_destination=normalized_rule.negate_destination,
+        group_tag=normalized_rule.group_tag,
+        schedule=normalized_rule.schedule,
         source_num_hosts=side_num_hosts(
             source_resolved_refs,
             negated=normalized_rule.negate_source,

@@ -33,6 +33,10 @@ from .security_profiles import (
     SecurityProfileCategoryVerdict,
     SecurityProfileSeverityVerdict,
 )
+from .rule_posture import (
+    PolicyRuleSettings,
+    VsysRulePosture,
+)
 from .rules import (
     SecurityRule,
     SecurityRuleAddressRef,
@@ -50,6 +54,7 @@ from .rules import (
     SecurityRuleSourceAddressRef,
     SecurityRuleSourceHip,
     SecurityRuleSourceUser,
+    SecurityRuleTag,
     SecurityRuleToZone,
     SecurityRuleValue,
 )
@@ -57,6 +62,8 @@ from .search import SecurityRuleSearchVocabularyEntry
 
 __all__ = [
     "AddressGroup",
+    "PolicyRuleSettings",
+    "VsysRulePosture",
     "DataFilteringPosture",
     "AddressGroupMember",
     "AddressGroupTag",
@@ -88,6 +95,7 @@ __all__ = [
     "SecurityRuleSearchVocabularyEntry",
     "SecurityRuleSourceHip",
     "SecurityRuleSourceUser",
+    "SecurityRuleTag",
     "SecurityRuleToZone",
     "SecurityRuleValue",
 ]

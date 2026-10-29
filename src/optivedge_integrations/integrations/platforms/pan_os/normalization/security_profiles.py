@@ -2177,7 +2177,42 @@ PROFILE_COVERAGE_COLUMNS = {
     "virus": "has_antivirus_profile",
     "spyware": "has_spyware_profile",
     "vulnerability": "has_vulnerability_profile",
+    # THE FOURTH KIND, added for PAN-POL-020 (security-policy). The resolver already computed it
+    # - `profile_types_in_force` reads every element the rule's own `profile-setting/profiles`
+    # names and every key of the group's `members` - and this dict was what stopped it reaching a
+    # column. PAN-POL-008 excludes URL filtering BY NAME and PAN-POL-020 asserts it, so the
+    # fourth column belongs to that control and to no other.
+    "url-filtering": "has_url_filtering_profile",
 }
+
+#: The three kinds `threat_profile_kinds_in_force` counts, and URL filtering is NOT one of them:
+#: PAN-POL-008 names antivirus, anti-spyware and vulnerability protection and excludes site
+#: inspection, which PAN-POL-020 asserts separately. A tuple rather than a slice of the dict
+#: above, so adding a fifth coverage column cannot silently change what the count means.
+THREAT_PROFILE_KIND_COLUMNS = (
+    "has_antivirus_profile", "has_spyware_profile", "has_vulnerability_profile")
+
+
+def url_inspection_posture(rule, *, has_url_filtering: bool) -> str:
+    """Which of three site-inspection states one rule is in - PAN-POL-020's severity axis.
+
+    `none` where no URL filtering profile is in force by either route. Otherwise the rule's OWN
+    `category` list decides: a rule that names categories is matching on a subset and is
+    therefore excusing everything outside it from the profile that is bound, which is the middle
+    state the control grades at its own rank.
+
+    WHAT THIS CANNOT TELL APART, and it is the control's own open question rather than a defect
+    here: an unrecorded exception from a DELIBERATE, bounded one. PAN-OS holds a profile binding
+    and a category list and no field for a reason, an owner or an expiry date.
+
+    Returns one of the three literals and never the empty string: empty means NO PASS HAS RUN,
+    and this function having run is the opposite of that.
+    """
+    if not has_url_filtering:
+        return SecurityRule.URL_POSTURE_NONE
+    if any(str(row.value or "").strip() for row in rule.securityrulecategorys.all()):
+        return SecurityRule.URL_POSTURE_EXCEPTION_UNRECORDED
+    return SecurityRule.URL_POSTURE_IN_FORCE
 
 
 def profile_types_in_force(rule, groups_by_name: dict[str, list]) -> set[str]:
@@ -2489,9 +2524,13 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
     counts["wildfire_analysis_gap"] = 0
     counts["profile_verdict_failures"] = 0
     counts["spyware_profile_unresolved"] = 0
+    counts["threat_profile_kinds_missing"] = 0
     verdict_rows: list[SecurityRuleProfileVerdict] = []
+    # `securityrulecategorys` is prefetched for `url_inspection_posture`: without it the posture
+    # costs one query per rule, which on this lab is a thousand.
     rules = (SecurityRule.objects.filter(enforcement_point=enforcement_point)
-             .prefetch_related("securityruleprofiles", "securityruleprofilegroups"))
+             .prefetch_related("securityruleprofiles", "securityruleprofilegroups",
+                               "securityrulecategorys"))
     for rule in rules:
         types = profile_types_in_force(rule, groups_by_name)
         changed = []
@@ -2502,6 +2541,19 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
             if getattr(rule, column) != value:
                 setattr(rule, column, value)
                 changed.append(column)
+        # AFTER the coverage loop above, which has just set the four booleans on `rule` in
+        # memory - so these two read this run's answer and not the previous pass's.
+        kinds = sum(1 for column in THREAT_PROFILE_KIND_COLUMNS if getattr(rule, column))
+        if rule.threat_profile_kinds_in_force != kinds:
+            rule.threat_profile_kinds_in_force = kinds
+            changed.append("threat_profile_kinds_in_force")
+        posture = url_inspection_posture(
+            rule, has_url_filtering=rule.has_url_filtering_profile)
+        if rule.url_inspection_posture != posture:
+            rule.url_inspection_posture = posture
+            changed.append("url_inspection_posture")
+        counts["threat_profile_kinds_missing"] += 3 - kinds
+
         resolved_spyware = spyware_profile_is_resolved(
             rule, groups_by_name, profiles_by_kind_and_name)
         if rule.spyware_profile_resolved != resolved_spyware:
