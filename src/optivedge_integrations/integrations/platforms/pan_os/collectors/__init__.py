@@ -60,13 +60,16 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.panorama_st
     collect_show_panorama_status,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
+    PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE,
     SHOW_PREDEFINED_IP_BLOCK_LISTS_COMMAND,
+    SHOW_PREDEFINED_SSL_EXCLUDE_CERT_COMMAND,
     SHOW_PREDEFINED_URL_LISTS_COMMAND,
     collect_predefined_certificates,
     collect_predefined_log_forwarding_profiles,
     collect_predefined_security_profiles,
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
+    collect_show_predefined_ssl_exclude_cert,
     collect_show_predefined_url_lists,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import (
@@ -117,7 +120,10 @@ __all__ = [
     "collect_show_masterkey_properties",
     "collect_predefined_ssl_tls_service_profiles",
     "collect_show_predefined_ip_block_lists",
+    "collect_show_predefined_ssl_exclude_cert",
     "collect_show_predefined_url_lists",
+    "PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE",
+    "SHOW_PREDEFINED_SSL_EXCLUDE_CERT_COMMAND",
     "collect_show_panorama_status",
     "collect_show_pushed_shared_policy",
     "collect_show_pushed_shared_policy_vsys",

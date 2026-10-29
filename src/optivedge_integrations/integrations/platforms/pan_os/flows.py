@@ -46,6 +46,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_predefined_log_forwarding_profiles,
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
+    collect_show_predefined_ssl_exclude_cert,
     collect_show_predefined_url_lists,
     collect_show_pushed_shared_policy,
     collect_show_pushed_shared_policy_vsys,
@@ -92,6 +93,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_server_profiles,
     normalize_appliance_interfaces,
     normalize_appliance_management_interfaces,
+    normalize_appliance_ssl_decryption_exclusions,
+    normalize_appliance_ssl_decryption_vendor_exclusion_optout,
+    normalize_enforcement_point_decryption_policy,
     normalize_collected_response,
 )
 from optivedge_integrations.integrations.platforms.pan_os.persistence import (
@@ -749,6 +753,13 @@ def collect_appliance_predefined_catalogs(
         # PAN-LOG-005's only route. Without it a vsys whose only coverage is the vendor's
         # predefined profile reports as having no log forwarding at all.
         collect_predefined_log_forwarding_profiles,
+        # PAN-DEC-004's only route, and the THIRD `show predefined` op read here rather than a
+        # fifth config read: measured on all four appliances, `action=get` at
+        # /config/predefined/ssl-exclude-cert answers an empty count envelope for a populated
+        # list and `action=show` denies the node exists. Without it
+        # `stale_disabled_vendor_exclusion_count` is zero on every row and the control reports
+        # nothing on an appliance carrying residue.
+        collect_show_predefined_ssl_exclude_cert,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))
@@ -917,6 +928,14 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # missing one is a reading in its own right rather than an ordering problem.
     ("high availability", normalize_appliance_high_availability),
     ("Panorama registration", normalize_appliance_panorama_registration),
+    # Device > Certificate Management > SSL Decryption Exclusion, in both writable scopes, and
+    # the shared opt-out list that says which of the VENDOR's exclusions somebody switched off.
+    # Both read the same merged device entry as their neighbours and depend on nothing else in
+    # this tuple; the opt-out additionally reads the `show predefined ssl-exclude-cert` snapshot
+    # for its set difference, and a missing one is a reading in its own right.
+    ("SSL decryption exclusions", normalize_appliance_ssl_decryption_exclusions),
+    ("SSL decryption vendor exclusion opt-outs",
+     normalize_appliance_ssl_decryption_vendor_exclusion_optout),
 )
 
 
@@ -1090,6 +1109,22 @@ def renormalize_in_scope_configuration(
                     error_text=rule_failure.error_text,
                 )
             )
+
+    # The decryption rulebase and its verdict. Reuses the policy-object failure pair rather than
+    # adding a third: the shape is identical and two lists that can disagree are worse than one.
+    # NO ORDERING OBLIGATION - the verdict is computed from the rules this same call parses, so
+    # unlike the rulebase device match below it cannot read a previous run's rows.
+    for enforcement_point in enforcement_points:
+        try:
+            counts = normalize_enforcement_point_decryption_policy(enforcement_point)
+        except Exception as exc:
+            policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                kind="decryption policy", enforcement_point=enforcement_point,
+                error_text=str(exc)))
+        else:
+            policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                kind="decryption policy", enforcement_point=enforcement_point,
+                counts={k: v for k, v in (counts or {}).items() if isinstance(v, int)}))
 
     for enforcement_point in enforcement_points:
         try:
