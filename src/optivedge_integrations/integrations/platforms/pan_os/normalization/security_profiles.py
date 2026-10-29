@@ -85,6 +85,19 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
 from optivedge_integrations.integrations.platforms.pan_os.normalization.ike import (
     _weakest as weakest_member,
 )
+# THE DECRYPTION RULEBASE WALK, ALREADY WRITTEN AND ALREADY MEASURED by the `decryption-policy`
+# domain, which owns those models. Imported rather than re-walked: `local_decryption_rules` goes
+# through the security rulebase normalizer's own accessor for the same parent node, and
+# `pushed_decryption_rules` raises on a shape nobody has seen rather than returning nothing. A
+# private copy here would be a fourth reading of one node and free to drift from the three.
+#
+# THIS IS NOT A ROW DEPENDENCY. Nothing here reads `DecryptionPolicyRule`, so the two
+# normalizers need no ordering between them: the referrer facts come out of the same payload the
+# profiles came out of, which is what makes them impossible to get out of step.
+from optivedge_integrations.integrations.platforms.pan_os.normalization.decryption import (
+    local_decryption_rules,
+    pushed_decryption_rules,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     effective_in_scope_order,
 )
@@ -107,7 +120,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.types im
 #: `virus` profile resolves to an object; it writes no severity verdicts - see below.
 PROFILE_KINDS = (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY,
                 SecurityProfile.KIND_VIRUS, SecurityProfile.KIND_WILDFIRE_ANALYSIS,
-                SecurityProfile.KIND_FILE_BLOCKING, SecurityProfile.KIND_DATA_FILTERING)
+                SecurityProfile.KIND_FILE_BLOCKING, SecurityProfile.KIND_DATA_FILTERING,
+                SecurityProfile.KIND_DECRYPTION)
 
 #: The file types PAN-FIL-001 asserts a profile must stop, SPELLED AS THE DEVICE SPELLS THEM.
 #: Nine come from the control's own command and `PE` is the tenth. The case matters and is
@@ -639,6 +653,319 @@ def dns_sinkhole_address(entry: dict[str, Any]) -> tuple[str, str]:
     return scalar_value(node.get("ipv4-address"))[0], scalar_value(node.get("ipv6-address"))[0]
 
 
+# --------------------------------------------------------------------------- decryption
+#
+# PAN-DCP-001, 002 and 007. Objects > Decryption Profile, which is a `profiles/decryption` entry
+# and so scopes exactly like every other kind on this model - which is why it is a KIND here and
+# not a model of its own. This module's own docstring named decryption as planned work.
+
+#: THE DEVICE'S OWN VERSION ORDER for `ssl-protocol-settings`, weakest first. FIVE members on
+#: the floor leaf and six on the ceiling, measured by `action=complete` with_body=True on
+#: pan-fw-201 (11.2.5), pan-fw-111 (11.2.3-h3) and fw-core-tpa-a (11.1.13-h3) - identical on all
+#: three.
+#:
+#: THE TWO LEAVES DO NOT SHARE A VALUE SET and the device enforces it: writing `max` to
+#: min-version is refused `code=12 ... min-version 'max' is not an allowed keyword`. A
+#: comparison that reuses one leaf's set on the other compares against a value that leaf cannot
+#: hold, and never fires.
+#:
+#: THIS IS NOT `SslTlsServiceProfile.VERSION_ORDER` AND MUST NOT BE. That tuple is four members
+#: for `protocol-settings/min-version` on a DIFFERENT object; this one has `sslv3` below them.
+#: Ranking a decryption profile's floor against the four-member order would place `sslv3` as
+#: unrecognised. The two shapes rhyme and the value sets differ, which is exactly why the
+#: ordering is applied here instead of shared.
+DECRYPTION_VERSION_ORDER = ("sslv3", "tls1-0", "tls1-1", "tls1-2", "tls1-3")
+
+#: The literal that exists on the CEILING leaf alone. A POINTER AND NOT A VERSION: two
+#: appliances storing it can negotiate different ceilings, and an appliance upgraded between two
+#: collections changes what the literal means without the stored value moving.
+DECRYPTION_VERSION_MAX = "max"
+
+#: The floor the assertions are written against.
+DECRYPTION_TLS12 = "tls1-2"
+
+#: What `max` resolves to, per PAN-OS major version. DERIVED and not measured - no session was
+#: put on the wire - so the table is deliberately narrow: it answers for the majors whose
+#: completion sets were read on a device and for nothing else.
+#:
+#: AN UNRECOGNISED BUILD RESOLVES TO THE EMPTY STRING rather than to the newest version this
+#: table happens to know. Guessing upward would make `ssl_max_version_restrictive` read FALSE -
+#: the PASSING side - for an appliance whose ceiling nobody could place, which is the one
+#: direction that must not happen. Blank leaves the verdict true and the row reports itself.
+DECRYPTION_MAX_VERSION_BY_MAJOR = {
+    "11.1": "tls1-3",
+    "11.2": "tls1-3",
+}
+
+
+def decryption_version_rank(token: str) -> int:
+    """The token's position in the device's own order, or -1 for one the order does not place.
+
+    -1 SORTS BELOW EVERY REAL VERSION, so every "the floor is too low" comparison FIRES on an
+    unrecognised token. That is the direction stage 0 measured the enumerated query gets wrong:
+    a list of the forbidden values reads a token it does not recognise as compliant.
+    """
+    text = str(token or "")
+    return DECRYPTION_VERSION_ORDER.index(text) if text in DECRYPTION_VERSION_ORDER else -1
+
+
+def resolve_max_version(configured: str, software_version: str) -> str:
+    """`max` resolved against the build; the configured token unchanged otherwise. Blank if
+    neither can be placed.
+
+    The build arrives as `Appliance.software_version` - `11.2.5`, `11.2.3-h3`, `11.1.13-h3` -
+    and only the first two components decide this, so the hotfix suffix is dropped. A build this
+    table does not name resolves to BLANK, which keeps the verdict beside it firing.
+    """
+    token = str(configured or "")
+    if token != DECRYPTION_VERSION_MAX:
+        return token if token in DECRYPTION_VERSION_ORDER else ""
+    parts = str(software_version or "").split(".")
+    major = ".".join(parts[:2]) if len(parts) >= 2 else ""
+    return DECRYPTION_MAX_VERSION_BY_MAJOR.get(major, "")
+
+
+def appliance_top_version(software_version: str) -> str:
+    """The highest protocol version this build implements, or blank where it is unknown."""
+    parts = str(software_version or "").split(".")
+    major = ".".join(parts[:2]) if len(parts) >= 2 else ""
+    return DECRYPTION_MAX_VERSION_BY_MAJOR.get(major, "")
+
+
+#: SIX ALGORITHM KEYS ASSERT ENABLED WHEN ABSENT AND MD5 ASSERTS DISABLED. Measured 2026-10-25
+#: on pan-fw-201 across three key-less committed objects, in the grid and in the dialog: every
+#: member of the family reads enabled except MD5, whose checkbox is unticked, and writing `yes`
+#: makes it appear. THERE IS NO FAMILY DEFAULT TO WRITE - twelve keys of this node assert
+#: enabled and two assert disabled - so the implicit is declared PER KEY and never shared. A
+#: normaliser that materialises one value per family reports MD5 as permitted on every
+#: unconfigured profile in the estate, which is a false finding at high severity.
+_ALGO_ENABLED = Implicit.measured(
+    True,
+    "stage 4, decryption-profile ssl-protocol-settings/*: absent = ENABLED, measured 2026-10-25 "
+    "on pan-fw-201 across three key-less committed objects, in the grid and in the dialog")
+_MD5_DISABLED = Implicit.measured(
+    False,
+    "stage 4, decryption-profile ssl-protocol-settings/auth-algo-md5: absent = DISABLED, the "
+    "OPPOSITE of its siblings - measured 2026-10-25, the dialog checkbox is unticked while "
+    "every other member of the family reads enabled on the same objects in the same second")
+
+#: (column, key, implicit) for the seven `ssl-protocol-settings` ALLOW switches this domain
+#: stores. TRUE MEANS THE PRIMITIVE IS PERMITTED, which is the weak direction - the inverse of
+#: every `block-*` key below, inside the same entry.
+DECRYPTION_ALGORITHM_SWITCHES = (
+    ("enc_algo_rc4", "enc-algo-rc4", _ALGO_ENABLED),
+    ("enc_algo_3des", "enc-algo-3des", _ALGO_ENABLED),
+    ("auth_algo_sha1", "auth-algo-sha1", _ALGO_ENABLED),
+    ("auth_algo_md5", "auth-algo-md5", _MD5_DISABLED),
+    ("keyxchg_algo_rsa", "keyxchg-algo-rsa", _ALGO_ENABLED),
+    ("enc_algo_aes_128_cbc", "enc-algo-aes-128-cbc", _ALGO_ENABLED),
+    ("enc_algo_aes_256_cbc", "enc-algo-aes-256-cbc", _ALGO_ENABLED),
+)
+
+#: The two version leaves. Both materialise the value an absent key asserts and both of those
+#: FIRE. The floor's is the most consequential default in this domain: the vendor's predefined
+#: `default` profile stores no version key at all, so every appliance whose rules name it is
+#: running a TLS 1.0 floor.
+_MIN_VERSION_ABSENT = Implicit.measured(
+    "tls1-0",
+    "stage 4, decryption-profile ssl-protocol-settings/min-version: absent renders Min Version "
+    "TLSv1.0, measured 2026-10-25 on pan-fw-201 across four key-less objects including the "
+    "vendor predefined `default` and the Panorama-pushed `zz_sslssh_shared`")
+_MAX_VERSION_ABSENT = Implicit.measured(
+    "tls1-2",
+    "stage 4, decryption-profile ssl-protocol-settings/max-version: absent renders Max Version "
+    "TLSv1.2 and NOT `max`, measured 2026-10-25 on pan-fw-201 - so an absent ceiling makes the "
+    "newest protocol version unreachable on every session the profile governs")
+
+_BLOCK_ABSENT = Implicit.measured(
+    False,
+    "stage 4, decryption-profile ssl-forward-proxy/* and ssl-inbound-proxy/*: absent = NOT "
+    "BLOCKING, measured 2026-10-25 - the dialog checkboxes are unticked on a profile storing no "
+    "key of either container")
+
+#: (column, container, key) for the twelve BLOCK switches. THE OPPOSITE POLARITY from the
+#: algorithm tuple above: false means the profile does not perform the check, which is weak.
+#:
+#: THE TWO CONTAINERS ARE NOT SYMMETRIC. `block-expired-certificate` and
+#: `block-untrusted-issuer` exist on the FORWARD container only - an inbound-proxy session
+#: presents the organisation's own certificate, so there is no issuer to distrust.
+DECRYPTION_BLOCK_SWITCHES = (
+    ("fwd_block_expired_certificate", "ssl-forward-proxy", "block-expired-certificate"),
+    ("fwd_block_untrusted_issuer", "ssl-forward-proxy", "block-untrusted-issuer"),
+    ("fwd_block_unsupported_version", "ssl-forward-proxy", "block-unsupported-version"),
+    ("fwd_block_unsupported_cipher", "ssl-forward-proxy", "block-unsupported-cipher"),
+    ("fwd_block_if_no_resource", "ssl-forward-proxy", "block-if-no-resource"),
+    ("fwd_block_tls13_downgrade_no_resource", "ssl-forward-proxy",
+     "block-tls13-downgrade-no-resource"),
+    ("fwd_block_if_hsm_unavailable", "ssl-forward-proxy", "block-if-hsm-unavailable"),
+    ("inb_block_unsupported_version", "ssl-inbound-proxy", "block-unsupported-version"),
+    ("inb_block_unsupported_cipher", "ssl-inbound-proxy", "block-unsupported-cipher"),
+    ("inb_block_if_no_resource", "ssl-inbound-proxy", "block-if-no-resource"),
+    ("inb_block_tls13_downgrade_no_resource", "ssl-inbound-proxy",
+     "block-tls13-downgrade-no-resource"),
+    ("inb_block_if_hsm_unavailable", "ssl-inbound-proxy", "block-if-hsm-unavailable"),
+)
+
+#: Which stored column permits which member of each weakest-primitive order. The ORDER lives on
+#: the model and this is what connects it to the booleans.
+_BROKEN_PRIMITIVE_COLUMNS = {
+    "rc4": "enc_algo_rc4",
+    "3des": "enc_algo_3des",
+    "md5": "auth_algo_md5",
+    "sha1": "auth_algo_sha1",
+}
+_NON_PFS_COLUMNS = {
+    "rsa": "keyxchg_algo_rsa",
+    "aes-128-cbc": "enc_algo_aes_128_cbc",
+    "aes-256-cbc": "enc_algo_aes_256_cbc",
+}
+
+
+def _weakest_permitted(values: dict[str, Any], columns: dict[str, str],
+                       order: tuple[str, ...]) -> str:
+    """The worst primitive of one class whose ALLOW switch reads true, or `none`.
+
+    `weakest_member` is the shared implementation of weakest-by-an-explicit-order and is reused
+    rather than re-expressed. What is local is the mapping from a primitive's name to the column
+    that permits it, and the fallback to `none` where the class permits nothing - which
+    `weakest_member` reports as None, meaning "nothing on offer" rather than "nothing collected".
+    """
+    permitted = [name for name in order if values.get(columns[name])]
+    return weakest_member(permitted, order) or SecurityProfile.PRIMITIVE_NONE
+
+
+def decryption_profile_values(
+    entry: dict[str, Any], *, software_version: str,
+) -> tuple[dict[str, Any], list[tuple[str, Any, str | None]]]:
+    """Every decryption column readable from ONE entry, as (columns, provenance rows).
+
+    THE CONTAINERS ARE NAMED-CHILDREN AND NOT MEMBER LISTS, which is the one shape trap on this
+    node: `ssl-protocol-settings` parses to `{"enc-algo-rc4": "no", ...}` and has no `member`
+    key at all, so a reader written for a member list returns the empty list for it with no
+    exception and no warning - and for a container an empty list is a REAL answer. Every leaf
+    here is read through `parse_yes_no_field` or `parse_text_field` on the named child.
+
+    THE FIVE CONTAINER KEYS CARRY NO VALUE OF THEIR OWN and are deliberately not columns: their
+    absence asserts each child's implicit and nothing else, measured. So a container that is
+    ABSENT and one that is PRESENT AND EMPTY produce identical columns, which is correct - the
+    lab subject that writes three empty containers reads the same as a profile with none.
+
+    `software_version` is the owning appliance's build, needed by ONE column because the stored
+    ceiling may be the literal `max`. An empty string is accepted and leaves the resolution
+    blank, which keeps the verdict beside it firing.
+    """
+    protocol = entry.get("ssl-protocol-settings")
+    protocol = protocol if isinstance(protocol, dict) else {}
+
+    values: dict[str, Any] = {}
+    provenance: list[tuple[str, Any, str | None]] = []
+
+    min_version, min_rk, min_rv = parse_text_field(
+        protocol.get("min-version"), implicit=_MIN_VERSION_ABSENT)
+    max_version, max_rk, max_rv = parse_text_field(
+        protocol.get("max-version"), implicit=_MAX_VERSION_ABSENT)
+    values["ssl_min_version"] = min_version
+    values["ssl_max_version"] = max_version
+    provenance.append(("ssl_min_version", min_rk, min_rv))
+    provenance.append(("ssl_max_version", max_rk, max_rv))
+
+    for column, key, implicit in DECRYPTION_ALGORITHM_SWITCHES:
+        value, raw_key, raw_value = parse_yes_no_field(protocol.get(key), implicit=implicit)
+        values[column] = value
+        provenance.append((column, raw_key, raw_value))
+
+    for column, container, key in DECRYPTION_BLOCK_SWITCHES:
+        node = entry.get(container)
+        node = node if isinstance(node, dict) else {}
+        value, raw_key, raw_value = parse_yes_no_field(node.get(key), implicit=_BLOCK_ABSENT)
+        values[column] = value
+        provenance.append((column, raw_key, raw_value))
+
+    # THE VERDICTS, computed from the columns immediately above so a verdict and its own
+    # evidence cannot disagree. Each is written in the firing direction, which on this kind is
+    # also the measured reading of a profile that stores nothing.
+    resolved = resolve_max_version(max_version, software_version)
+    top = appliance_top_version(software_version)
+    values["ssl_max_version_resolved"] = resolved
+    values["ssl_min_version_below_tls12"] = (
+        decryption_version_rank(min_version) < decryption_version_rank(DECRYPTION_TLS12))
+    # TRUE where the ceiling could not be resolved OR the build's top could not be placed: both
+    # are "not shown to reach the newest version", which has to report rather than pass.
+    values["ssl_max_version_restrictive"] = bool(
+        not resolved or not top
+        or decryption_version_rank(resolved) < decryption_version_rank(top))
+    values["weakest_broken_primitive_permitted"] = _weakest_permitted(
+        values, _BROKEN_PRIMITIVE_COLUMNS, SecurityProfile.BROKEN_PRIMITIVE_ORDER)
+    values["weakest_non_pfs_or_unauthenticated_permitted"] = _weakest_permitted(
+        values, _NON_PFS_COLUMNS, SecurityProfile.NON_PFS_OR_UNAUTHENTICATED_ORDER)
+    return values, provenance
+
+
+def decryption_rule_references(rules: list[dict[str, Any]]) -> list[tuple[str, bool]]:
+    """(profile name, whether that rule narrows its destination) for a list of decryption rules.
+
+    THE REFERRER WALK FOR THIS KIND IS NOT THE SHIPPED ONE, and it is the one thing adding
+    `decryption` to `PROFILE_KINDS` does not turn on correctly by itself.
+    `collect_profile_and_group_references` walks SECURITY rules' `profile-setting` and profile
+    GROUPS' member lists; neither can ever name a decryption profile - a decryption RULE names
+    it at its own `profile` key, and `GROUP_MEMBER_TYPES` correctly does not list `decryption`
+    because a profile group cannot hold one. A decryption-kind row left to the shipped walk
+    reads `is_used` false and `referrer_count` zero for every profile in the estate, with a
+    deletion remediation attached.
+
+    `destination` OF `any` IS NOT A NARROWING. `any` is a MEMBER of the list rather than an
+    absence, so the test is on the member values; an absent or empty destination is not a
+    narrowing either, because an unmeasured precondition must not read as the vendor's
+    recommended exception.
+    """
+    references: list[tuple[str, bool]] = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        name = _text(rule.get("profile"))
+        if not name:
+            continue
+        destinations = set(_members(rule.get("destination")))
+        narrows = bool(destinations) and destinations != {"any"}
+        references.append((name, narrows))
+    return references
+
+
+def decryption_rule_facts(
+    references: list[tuple[str, bool]], *, collected: bool,
+) -> dict[str, dict[str, Any]]:
+    """{profile name: the four rule-facing columns} over one owner's decryption rulebases.
+
+    KEYED BY NAME AND NOT BY SCOPE, because that is how the DEVICE joins them: a decryption rule
+    carries a profile NAME and the firewall resolves it against vsys, then shared, then
+    predefined. Resolving per scope here would drop a rule naming a profile defined at a scope
+    this root cannot see. The cost is that two profiles of one name at two scopes share a
+    referrer count; the alternative drops referrers, which is the direction that reports a used
+    profile as unused and offers to delete it.
+
+    `collected` is whether a rulebase read was ISSUED for this owner, including one that came
+    back empty, and it is the whole point of the companion column: stage 4 measured that an
+    absent decryption rulebase is NOT distinguishable from one never collected, and rules.md
+    requires such a reading to be treated as an unknown PER FIELD rather than per device.
+    """
+    facts: dict[str, dict[str, Any]] = {}
+    for name, narrows in references:
+        fact = facts.setdefault(name, {"referrer_count": 0, "narrowed": False})
+        fact["referrer_count"] += 1
+        fact["narrowed"] = fact["narrowed"] or narrows
+    return {
+        name: {
+            "referrer_count": fact["referrer_count"],
+            "is_used": fact["referrer_count"] > 0,
+            # NEGATED so the column reads in the firing direction: true means the vendor's
+            # recommended exception is not in evidence.
+            "rule_destination_unrestricted": not fact["narrowed"],
+            "decryption_rulebase_collected": collected,
+        }
+        for name, fact in facts.items()
+    }
+
+
 # --------------------------------------------------------------------------- normalized forms
 
 
@@ -706,6 +1033,14 @@ class NormalizedSecurityProfile:
     pattern_names: list[str]
     raw_profile: dict[str, Any]
     field_provenance_data: list[tuple[str, Any, str | None]]
+    #: The decryption columns, keyed by field name. EMPTY for every other kind, so the model's
+    #: own defaults stand - which are the firing side.
+    #:
+    #: DEFAULTED, UNLIKE EVERY FIELD ABOVE IT, and deliberately: this dataclass has no field
+    #: defaults at all, so an undefaulted field is a required positional argument everywhere and
+    #: breaks the fixture builder the reference tests share. A default at the end costs nothing
+    #: and the one production construction site passes it explicitly.
+    decryption: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_predefined(self) -> bool:
@@ -805,6 +1140,17 @@ class SecurityProfileBuild:
     #: profile `data-leak-detection` member lists, and an audit reading security rules and
     #: profile groups alone calls such a profile unused.
     ai_security_read_present: bool = False
+    #: {profile name: the four rule-facing decryption columns}. EMPTY for a point whose
+    #: decryption rulebase was not readable, which is NOT the same as empty rulebases - the
+    #: flag below is what separates them, and it is why the flag exists.
+    decryption_facts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: Whether a decryption rulebase READ was issued for this point at all, INCLUDING one that
+    #: came back empty. Stage 4 measured that an absent decryption rulebase is not
+    #: distinguishable from one never collected, so this is the only thing that tells a referrer
+    #: count of zero from a count nobody took. False is the firing side.
+    decryption_rulebase_collected: bool = False
+    #: The owning appliance's build, for resolving a ceiling stored as the literal `max`.
+    software_version: str = ""
 
 
 def profile_ml_models(entry: dict[str, Any]) -> dict[str, str]:
@@ -1259,8 +1605,12 @@ def profile_decoders(entry: dict[str, Any]) -> list[tuple]:
 
 def normalize_security_profile(
     *, kind: str, source_snapshot: Snapshot, config_source: str, namespace_type: str,
-    namespace_value: str, entry: dict[str, Any],
+    namespace_value: str, entry: dict[str, Any], software_version: str = "",
 ) -> NormalizedSecurityProfile:
+    """One profile entry. `software_version` is the owning appliance's build and is read by the
+    DECRYPTION kind alone, which stores a ceiling whose literal `max` is a pointer rather than a
+    version. It defaults to the empty string so every other kind's call site is unchanged, and
+    an empty build leaves the resolution blank, which keeps that verdict firing."""
     entry_rk, entry_rv = entry_provenance(entry)
     description, description_rk, description_rv = parse_text_field(
         entry.get("description"), implicit=DESCRIPTION_ABSENT)
@@ -1283,6 +1633,16 @@ def normalize_security_profile(
                   if kind in SecurityProfile.THREAT_RULE_KINDS else [])
     cloud_inline, cloud_inline_rk, cloud_inline_rv = parse_yes_no_field(
         entry.get("cloud-inline-analysis"), implicit=CLOUD_INLINE_ANALYSIS_ABSENT)
+    # DECRYPTION ONLY. Twenty-one measured columns and five verdicts over them, all from this
+    # entry; the four rule-facing columns need the rulebase and are applied at persist time.
+    # Computed HERE rather than in the persist loop, unlike the antivirus aggregates, because
+    # these are reads of the entry's own keys and carry PROVENANCE ROWS - a reader is owed the
+    # difference between a value read and a value inferred on every one of them.
+    decryption_values: dict[str, Any] = {}
+    decryption_provenance: list[tuple[str, Any, str | None]] = []
+    if kind in SecurityProfile.DECRYPTION_KINDS:
+        decryption_values, decryption_provenance = decryption_profile_values(
+            entry, software_version=software_version)
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -1347,11 +1707,12 @@ def normalize_security_profile(
                                              SecurityProfileCategoryVerdict.BRUTE_FORCE)}
                            if kind == SecurityProfile.KIND_VULNERABILITY else {}),
         raw_profile=entry,
+        decryption=decryption_values,
         field_provenance_data=[
             ("__entry__", entry_rk, entry_rv),
             ("description", description_rk, description_rv),
         ] + ([("cloud_inline_analysis", cloud_inline_rk, cloud_inline_rv)]
-             if kind == SecurityProfile.KIND_SPYWARE else []),
+             if kind == SecurityProfile.KIND_SPYWARE else []) + decryption_provenance,
     )
 
 
@@ -1614,6 +1975,12 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
         raise ValueError(f"missing pushed VSYS snapshot for {enforcement_point}")
 
     vsys = enforcement_point.vsys_name
+    # THE BUILD, for the decryption kind's `max` ceiling alone. `choose_local_appliance` is the
+    # one definition of which appliance's merged config speaks for a point and is already
+    # imported here; a point with no resolvable appliance leaves this blank, which keeps the
+    # ceiling verdict firing rather than passing on a guess.
+    local_appliance = choose_local_appliance(enforcement_point)
+    software_version = local_appliance.software_version if local_appliance else ""
     merged_root = merged_vsys_entry(merged_snapshot.payload, vsys)
     merged_shared_root = merged_shared(merged_snapshot.payload)
     pushed_shared_root = pushed_shared(pushed_shared_snapshot.payload) if pushed_shared_snapshot else {}
@@ -1648,7 +2015,8 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
                         lambda entry=entry, kind=kind, namespace_type=namespace_type,
                         namespace_value=namespace_value: normalize_security_profile(
                             kind=kind, source_snapshot=merged_snapshot, config_source=SecurityRule.SOURCE_LOCAL,
-                            namespace_type=namespace_type, namespace_value=namespace_value, entry=entry),
+                            namespace_type=namespace_type, namespace_value=namespace_value, entry=entry,
+                            software_version=software_version),
                         shared=shared)
         for entry in _entries(root, "profile-group"):
             collect(build.groups, "security profile group", "profile-group", source, entry,
@@ -1692,7 +2060,8 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
                 make = (lambda entry=entry, snapshot=snapshot, kind=kind, namespace_type=namespace_type,
                         namespace_value=namespace_value: normalize_security_profile(
                             kind=kind, source_snapshot=snapshot, config_source=SecurityRule.SOURCE_PUSHED_PRE,
-                            namespace_type=namespace_type, namespace_value=namespace_value, entry=entry))
+                            namespace_type=namespace_type, namespace_value=namespace_value, entry=entry,
+                            software_version=software_version))
                 collect(build.profiles, kind_label, node, "pushed", entry, make, shared=shared)
 
     predefined_snapshot = latest_predefined_profiles_snapshot(enforcement_point)
@@ -1712,7 +2081,8 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
                             kind=kind, source_snapshot=predefined_snapshot,
                             config_source=SecurityRule.SOURCE_LOCAL,
                             namespace_type=PolicyObjectNamespace.PREDEFINED,
-                            namespace_value="predefined", entry=entry))
+                            namespace_value="predefined", entry=entry,
+                            software_version=software_version))
 
     for root, where, shared_root, pushed in (
         (merged_root, f"{vsys} ", False, False),
@@ -1747,10 +2117,69 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
     # set from a name rather than written as a literal so that adding that collector is the only
     # change needed here.
     build.ai_security_read_present = False
+
+    # THE DECRYPTION REFERRER WALK, over the rulebases in the payloads the profiles came from.
+    # `local_decryption_rules` returns a STATE as well as the entries and the state is what
+    # settles the companion flag: a readable rulebase that is empty is not the same answer as a
+    # rulebase nobody read, and stage 4 measured that the config read cannot tell them apart on
+    # its own. Reaching the merged payload at all is what `collected` records.
+    build.software_version = software_version
+    decryption_rules: list[dict[str, Any]] = []
+    _state, local_rules = local_decryption_rules(merged_snapshot, enforcement_point)
+    decryption_rules.extend(local_rules)
+    collected = True
+    # THE PUSHED RULEBASES ARE UNEXERCISED IN THIS LAB and the accessor raises on a shape nobody
+    # has seen. A raise here would take down an enforcement point's whole profile build over a
+    # referrer count, so it is caught, recorded as an issue, and the flag goes FALSE - which
+    # routes every profile of this point into the undetermined group instead of reporting them
+    # as unused. Failure proportionate to what is unknown, which is this repo's first principle.
+    for snapshot in (pushed_shared_snapshot, pushed_snapshot):
+        if snapshot is None:
+            continue
+        try:
+            pre, post = pushed_decryption_rules(snapshot)
+        except Exception as exc:  # noqa: BLE001 - one unreadable rulebase must not take the point
+            collected = False
+            build.issues.append(PolicyObjectIssue(
+                kind="security profile reference", name="", severity=PolicyObjectIssue.WARNING,
+                node="pushed rulebase/decryption", source="pushed",
+                disposition=PolicyObjectIssue.KEPT, raw_entry={},
+                reason=(f"pushed decryption rulebase unreadable ({type(exc).__name__}: {exc}), "
+                        "so no decryption profile of this point can be shown to be in use")))
+            continue
+        decryption_rules.extend(pre)
+        decryption_rules.extend(post)
+    build.decryption_rulebase_collected = collected
+    build.decryption_facts = decryption_rule_facts(
+        decryption_rule_references(decryption_rules), collected=collected)
     return build
 
 
 # --------------------------------------------------------------------------- writing
+
+
+def _decryption_rule_columns(
+    normalized: NormalizedSecurityProfile,
+    facts: dict[str, dict[str, Any]] | None,
+    collected: bool,
+) -> dict[str, Any]:
+    """The four rule-facing decryption columns for one profile row.
+
+    A PROFILE NO RULE NAMES IS NOT ABSENT FROM THIS ANSWER, it is present with zeroes: the
+    referrer map only holds names some rule used, and a profile missing from it has genuinely
+    been looked for. So `collected` is still written through, because that is what separates
+    "we read the rulebase and nothing names this" from "nobody read the rulebase" - and those
+    two must not land on the same row.
+    """
+    found = (facts or {}).get(normalized.name)
+    if found is not None:
+        return dict(found)
+    return {
+        "referrer_count": 0,
+        "is_used": False,
+        "rule_destination_unrestricted": True,
+        "decryption_rulebase_collected": collected,
+    }
 
 
 def replace_security_profiles(
@@ -1760,6 +2189,8 @@ def replace_security_profiles(
     referrers: dict[tuple[str, str, str, str], list[str]],
     reach: dict[tuple[str, str, str, str], str] | None = None,
     reach_resolved: dict[tuple[str, str, str, str], bool] | None = None,
+    decryption_facts: dict[str, dict[str, Any]] | None = None,
+    decryption_rulebase_collected: bool = False,
 ) -> tuple[list[SecurityProfile], list[SecurityProfileGroup]]:
     """Write the definitions `owner` owns, replacing what it holds. As replace_addresses: the
     caller passes everything and this keeps its own share."""
@@ -1791,6 +2222,25 @@ def replace_security_profiles(
     for normalized in (p for p in profiles if keep_here(p)):
         used_by = referrers.get(normalized.key, [])
         verdict = normalized.verdicts
+        # WHO NAMES THIS DEFINITION, and for the decryption kind that is a DIFFERENT WALK.
+        # Decided here rather than splatted over the `create()` call, because two sources
+        # writing one column through `**` is a TypeError rather than an override - which is how
+        # this was caught.
+        #
+        # `used_by` is the shipped two-hop walk over SECURITY rules and profile GROUPS. Neither
+        # can ever name a decryption profile: a decryption RULE names it at its own `profile`
+        # key, and `GROUP_MEMBER_TYPES` correctly omits `decryption` because a profile group
+        # cannot hold one. So for that kind `used_by` is always empty, and using it would report
+        # every decryption profile in the estate as unreferenced with a deletion remediation.
+        reference_columns = {
+            "referrer_count": len(used_by), "is_used": bool(used_by), "referrers": used_by,
+        }
+        if normalized.kind in SecurityProfile.DECRYPTION_KINDS:
+            reference_columns = {
+                **reference_columns,
+                **_decryption_rule_columns(
+                    normalized, decryption_facts, decryption_rulebase_collected),
+            }
         row = SecurityProfile.objects.create(
             management_station=owner.management_station, **owner_kwargs,
             source_snapshot=normalized.source_snapshot, config_source=normalized.config_source,
@@ -1803,7 +2253,7 @@ def replace_security_profiles(
             dns_sinkhole_ipv4=normalized.dns_sinkhole_ipv4,
             dns_sinkhole_ipv6=normalized.dns_sinkhole_ipv6,
             cloud_inline_analysis=normalized.cloud_inline_analysis,
-            referrer_count=len(used_by), is_used=bool(used_by), referrers=used_by,
+            **reference_columns,
             has_rules=normalized.has_rules,
             # DEFAULTED where the caller passed no reach: `undetermined` and False, which are
             # both the firing side. A caller that cannot say how far the walk got must not leave
@@ -1825,6 +2275,11 @@ def replace_security_profiles(
                if normalized.kind == SecurityProfile.KIND_VIRUS else {}),
             **(wildfire_coverage_aggregates(normalized.wildfire_rules)
                if normalized.kind == SecurityProfile.KIND_WILDFIRE_ANALYSIS else {}),
+            # THE DECRYPTION COLUMNS read off the entry - 21 measured and 5 verdicts over them.
+            # EMPTY for every other kind, so the model's own defaults stand, which are the
+            # firing side. The four rule-facing ones are in `reference_columns` above, because
+            # two of them are the same columns every other kind writes from `used_by`.
+            **normalized.decryption,
             raw_profile=normalized.raw_profile, last_synced_at=normalized.source_snapshot.collected_at,
         )
         # One row per severity the profile actually answers for. A kind with no threat rules
@@ -2106,7 +2561,8 @@ def normalize_security_profiles(enforcement_point: EnforcementPoint) -> dict[str
         reach, resolved = _reach_for_build(build)
         issues = build.issues + _unresolved_issues(unresolved)
         profiles, groups = replace_security_profiles(
-            enforcement_point, build.profiles, build.groups, referrers, reach, resolved)
+            enforcement_point, build.profiles, build.groups, referrers, reach, resolved,
+            build.decryption_facts, build.decryption_rulebase_collected)
         replace_normalization_issues(enforcement_point, _own_issues(enforcement_point, issues), kinds=ISSUE_KINDS)
         postures = replace_data_filtering_posture(enforcement_point, build, reach)
     return {"security_profiles": len(profiles), "security_profile_groups": len(groups),
@@ -2134,10 +2590,29 @@ def normalize_appliance_group_security_profiles(appliance_group: ApplianceGroup)
                       SecurityProfile.REACH_BY_GROUP_ONLY: 2,
                       SecurityProfile.REACH_BY_RULE: 3}
     issues: list[PolicyObjectIssue] = []
+    # THE DECRYPTION REFERRER FACTS, unioned across the points for the same reason `reach` is: a
+    # SHARED decryption profile is one namespace and a decryption rule in ANY vsys can name it,
+    # so a profile reached from one point's rulebase is in force whatever the others say. The
+    # count SUMS, the narrowing is an OR over the rules that named it anywhere, and `collected`
+    # is an AND - a rulebase unreadable at any point means the shared row's referrer answer was
+    # not established, which has to route the row into the undetermined group.
+    decryption_facts: dict[str, dict[str, Any]] = {}
+    decryption_collected = True
     with transaction.atomic():
         for point in points:
             build = build_normalized_security_profiles(point)
             issues.extend(build.issues)
+            decryption_collected = decryption_collected and build.decryption_rulebase_collected
+            for name, fact in build.decryption_facts.items():
+                merged = decryption_facts.setdefault(
+                    name, {"referrer_count": 0, "is_used": False,
+                           "rule_destination_unrestricted": True,
+                           "decryption_rulebase_collected": True})
+                merged["referrer_count"] += fact["referrer_count"]
+                merged["is_used"] = merged["is_used"] or fact["is_used"]
+                merged["rule_destination_unrestricted"] = (
+                    merged["rule_destination_unrestricted"]
+                    and fact["rule_destination_unrestricted"])
             point_referrers, _ = attribute_references(build.references, build.profiles)
             point_reach, point_resolved = _reach_for_build(build)
             for key, value in point_reach.items():
@@ -2159,9 +2634,11 @@ def normalize_appliance_group_security_profiles(appliance_group: ApplianceGroup)
             for group in build.groups:
                 if is_shared_scope(group.namespace_type):
                     shared_groups.setdefault((group.name, str(group.namespace_type), group.namespace_value), group)
+        for fact in decryption_facts.values():
+            fact["decryption_rulebase_collected"] = decryption_collected
         profiles, groups = replace_security_profiles(
             appliance_group, list(shared_profiles.values()), list(shared_groups.values()),
-            referrers, reach, resolved)
+            referrers, reach, resolved, decryption_facts, decryption_collected)
         replace_normalization_issues(appliance_group, _own_issues(appliance_group, issues), kinds=ISSUE_KINDS)
     return {"security_profiles": len(profiles), "security_profile_groups": len(groups), "issues": len(issues)}
 

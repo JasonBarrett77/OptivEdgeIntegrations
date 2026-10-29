@@ -89,6 +89,7 @@ from .decryption import (
     DecryptionPolicyRuleSourceUser,
     DecryptionPolicyRuleValue,
     DecryptionRulebaseVerdict,
+    DecryptionSettings,
     SslDecryptionExclusion,
     SslDecryptionVendorExclusionOptOut,
 )
@@ -156,6 +157,7 @@ __all__ = [
     "DecryptionPolicyRuleSourceUser",
     "DecryptionPolicyRuleValue",
     "DecryptionRulebaseVerdict",
+    "DecryptionSettings",
     "SslDecryptionExclusion",
     "SslDecryptionVendorExclusionOptOut",
     "Appliance",

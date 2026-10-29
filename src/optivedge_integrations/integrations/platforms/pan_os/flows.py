@@ -103,6 +103,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_tunnel_inspection_coverage,
     normalize_appliance_routing_adjacencies,
     normalize_appliance_management_interfaces,
+    normalize_appliance_decryption_settings,
     normalize_appliance_ssl_decryption_exclusions,
     normalize_appliance_ssl_decryption_vendor_exclusion_optout,
     normalize_enforcement_point_decryption_policy,
@@ -970,6 +971,11 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     ("SSL decryption exclusions", normalize_appliance_ssl_decryption_exclusions),
     ("SSL decryption vendor exclusion opt-outs",
      normalize_appliance_ssl_decryption_vendor_exclusion_optout),
+    # Device > Certificate Management > Certificates, the Forward Trust/Untrust designation -
+    # stored at /config/shared/ssl-decrypt beside the two exclusion nodes above, and set on a
+    # screen it is not on. MUST RUN AFTER "certificate objects" earlier in this tuple: its
+    # local-authority verdict resolves the designated NAME against the certificate rows.
+    ("decryption settings", normalize_appliance_decryption_settings),
     # Network hardening: Device > Setup > Session, Network > LLDP, Network > DHCP,
     # Policies > Tunnel Inspection and Network > Virtual Routers. All five read the same
     # merged device entry as their neighbours and depend on nothing else in this tuple -

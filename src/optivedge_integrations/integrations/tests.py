@@ -9527,10 +9527,14 @@ class ImplicitDeclarationTests(TestCase):
         # deliberately - this stage implements what stage 5 declared and reports the difference -
         # so this entry is the queue item it is meant to be rather than a stale one.
         "decryption.py": 3,
-        "certificates.py": 1,         # certificate `ca`; the three timeouts were PROMOTED to
-                                      # measured on 2026-10-25 - see the module constant and
-                                      # the note there on why the old declaration is described
-                                      # rather than quoted
+        # certificate `ca`, and `private-key-on-hsm` added 2026-10-29 by the
+        # `decryption-profiles` run: PAN-DCP-006's third fact. BOTH ARE QUEUE ITEMS AND BOTH ARE
+        # CHEAP TO CLEAR, and stage 4 named the write for the second - a `private-key-on-hsm` yes
+        # on a throwaway certificate, then a read of the Certificates grid's HSM column. It was
+        # not paid because the only certificate on the lab appliance is another run's standing
+        # object. The three timeouts were PROMOTED to measured on 2026-10-25 - see the module
+        # constant and the note there on why the old declaration is described rather than quoted.
+        "certificates.py": 2,
         # MERGED FROM TWO CONCURRENT RUNS, 2026-10-29: `certificates.py` fell to 1
         # because that domain promoted three timeouts to measured, and
         # `device_configuration.py` rose to 7 because admin-authentication demoted

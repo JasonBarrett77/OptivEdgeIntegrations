@@ -118,6 +118,21 @@ class Certificate(ApplianceScopedObject):
     is_self_signed = models.BooleanField(default=False)
     is_ca = models.BooleanField(default=False)
 
+    #: PAN-DCP-006's third fact: whether this certificate's private key is held on a separate
+    #: signing module rather than on the firewall. The `private-key-on-hsm` key with the
+    #: vendor's polarity, so TRUE means external custody.
+    #:
+    #: THE ABSENT VALUE IS ASSUMED AND NOT MEASURED, and the assumption is recorded rather than
+    #: hidden: the only certificate on the lab appliance lacks this key and carries
+    #: `private-key`, which is the on-device form, so an absent key most plausibly asserts local
+    #: custody. No positive control was paid for it because that means writing the key, and the
+    #: one certificate present is another run's standing object. FALSE is the direction that
+    #: RAISES PAN-DCP-006 rather than passing it, so the unsettled case is the loud one. The
+    #: value is stored non-null deliberately: `provenance_for` computes the type from the
+    #: citation AND the value, so an assumed default holding null would persist as
+    #: `not_configured` and the declaration and the row would disagree with nothing noticing.
+    private_key_on_hsm = models.BooleanField(default=False)
+
     not_valid_before = models.DateTimeField(null=True, blank=True)
     not_valid_after = models.DateTimeField(null=True, blank=True)
 

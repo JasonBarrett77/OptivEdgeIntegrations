@@ -15,7 +15,9 @@ from django.utils import timezone
 from optivedge_integrations.integrations.models import (
     Appliance,
     ApplianceGroup,
+    Certificate,
     DataFilteringPosture,
+    DecryptionSettings,
     EnforcementNode,
     EnforcementPoint,
     FieldProvenance,
@@ -27,8 +29,11 @@ from optivedge_integrations.integrations.models import (
     SecurityRule,
     SecurityRuleProfileVerdict,
     Snapshot,
+    SslTlsServiceProfile,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_profiles import (
+    DECRYPTION_ALGORITHM_SWITCHES,
+    DECRYPTION_BLOCK_SWITCHES,
     NormalizedSecurityProfile,
     ProfileReference,
     attribute_references,
@@ -36,6 +41,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     collect_references,
     data_filtering_rule_pattern_names,
     data_filtering_verdicts,
+    decryption_profile_values,
+    decryption_rule_facts,
+    decryption_rule_references,
+    decryption_version_rank,
     data_pattern_defines_a_pattern,
     file_blocking_verdicts,
     reference_reach_by_key,
@@ -59,6 +68,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_group_security_profiles,
     normalize_security_profiles,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.decryption import (
+    normalize_decryption_settings,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     normalize_security_rules,
@@ -1637,3 +1649,546 @@ class AntiSpywarePerRuleTests(TestCase):
         self.assertEqual(rows["p1"], "local")
         self.assertEqual(rows["p-bare"], "pan_os_default",
                          "the measured implicit, not an assumption")
+
+
+# ------------------------------------------------------------------------------------------
+# Decryption profiles - PAN-DCP-001, 002 and 007's subject
+# ------------------------------------------------------------------------------------------
+#
+# EVERY ENTRY SHAPE BELOW IS WHAT THE LAB STORED, read back off pan-fw-201 (PA-VM 11.2.5) and
+# fw-core-tpa-a (PA-5220 11.1.13-h3) on 2026-10-29 through Panorama's `target=` proxy - not a
+# shape reconstructed from the specification. That distinction has already cost this repo once:
+# a pushed-rulebase walk used the merged view's spelling and a fixture built from the spec would
+# have agreed with the bug.
+
+DCP = SecurityProfile.KIND_DECRYPTION
+
+
+def dcp_entry(name, *, protocol=None, forward=None, inbound=None, bare=False):
+    """One `profiles/decryption` entry. `bare=True` is the 19-key-less lab subject."""
+    entry = {"@name": name}
+    if bare:
+        return entry
+    if protocol is not None:
+        entry["ssl-protocol-settings"] = protocol
+    if forward is not None:
+        entry["ssl-forward-proxy"] = forward
+    if inbound is not None:
+        entry["ssl-inbound-proxy"] = inbound
+    return entry
+
+
+def dcp_values(entry, sw="11.2.5"):
+    return decryption_profile_values(entry, software_version=sw)[0]
+
+
+class DecryptionProfileImplicitTests(SimpleTestCase):
+    """What an ABSENT key asserts, which on this node is per key and not per family."""
+
+    def test_a_profile_with_no_key_at_all_reports_rather_than_passing(self):
+        # `oep-dcp6-01`, and the vendor's predefined `default`, whose whole stored content is an
+        # EMPTY `ssl-protocol-settings` container. So "nobody configured it" and "nobody
+        # collected it" are the same configuration on this node, measured.
+        v = dcp_values(dcp_entry("oep-dcp6-01", bare=True))
+        self.assertEqual(v["ssl_min_version"], "tls1-0")
+        self.assertEqual(v["ssl_max_version"], "tls1-2")
+        self.assertTrue(v["ssl_min_version_below_tls12"])
+        self.assertTrue(v["ssl_max_version_restrictive"])
+        self.assertEqual(v["weakest_broken_primitive_permitted"], "rc4")
+        self.assertEqual(v["weakest_non_pfs_or_unauthenticated_permitted"], "rsa")
+
+    def test_md5_is_the_one_key_of_its_family_that_absence_disables(self):
+        # THE MEASURED EXCEPTION. Twelve algorithm keys of this node assert ENABLED when absent
+        # and two assert DISABLED; MD5 is the only one of the two a control asserts. A uniform
+        # family default reports MD5 as permitted on every unconfigured profile in the estate.
+        v = dcp_values(dcp_entry("p", bare=True))
+        self.assertTrue(v["enc_algo_rc4"])
+        self.assertTrue(v["enc_algo_3des"])
+        self.assertTrue(v["auth_algo_sha1"])
+        self.assertTrue(v["keyxchg_algo_rsa"])
+        self.assertFalse(v["auth_algo_md5"], "absent MD5 is DISABLED, unlike its siblings")
+
+    def test_an_empty_container_reads_the_same_as_an_absent_one(self):
+        # `oep-dcp6-10` writes three EMPTY containers. The container keys carry no value of
+        # their own - their absence asserts each child's implicit and nothing else - so the two
+        # states must produce identical columns, and a reader that treated an empty container as
+        # a different answer would split one configuration into two.
+        empty = dcp_values({"@name": "p", "ssl-forward-proxy": None,
+                            "ssl-inbound-proxy": None, "ssl-protocol-settings": None})
+        self.assertEqual(empty, dcp_values(dcp_entry("p", bare=True)))
+
+    def test_all_twelve_block_switches_read_absence_as_not_blocking(self):
+        v = dcp_values(dcp_entry("p", bare=True))
+        for column, _, _ in DECRYPTION_BLOCK_SWITCHES:
+            self.assertFalse(v[column], column)
+
+
+class DecryptionVersionOrderTests(SimpleTestCase):
+    """The ordering, and why it is not `SslTlsServiceProfile.VERSION_ORDER`."""
+
+    def test_sslv3_is_placed_and_sorts_below_every_tls_generation(self):
+        # The shipped four-member tuple on the SSL/TLS service profile has no `sslv3`, and
+        # ranking this leaf against it would make `oep-dcp6-04`'s floor unrecognised.
+        self.assertEqual(decryption_version_rank("sslv3"), 0)
+        self.assertLess(decryption_version_rank("sslv3"), decryption_version_rank("tls1-0"))
+        self.assertEqual(decryption_version_rank("sslv3"), SslTlsServiceProfile.RANK_UNRECOGNISED + 1)
+
+    def test_an_unrecognised_token_sorts_below_everything_so_the_verdict_fires(self):
+        self.assertEqual(decryption_version_rank("TLSv1.2"), -1)
+        v = dcp_values(dcp_entry("p", protocol={"min-version": "TLSv1.2"}))
+        self.assertTrue(v["ssl_min_version_below_tls12"],
+                        "the catalogue's spelling is not the device's, and it must not pass")
+
+    def test_the_floor_verdict_fires_on_sslv3_tls10_and_tls11_and_not_on_tls12_or_tls13(self):
+        for token, fires in (("sslv3", True), ("tls1-0", True), ("tls1-1", True),
+                             ("tls1-2", False), ("tls1-3", False)):
+            v = dcp_values(dcp_entry("p", protocol={"min-version": token}))
+            self.assertEqual(v["ssl_min_version_below_tls12"], fires, token)
+
+    def test_max_resolves_against_the_build_and_the_token_is_stored_unchanged(self):
+        # `oep-dcp6-02` stores `max`. The literal is a POINTER, so three columns and not one.
+        v = dcp_values(dcp_entry("p", protocol={"max-version": "max"}), sw="11.2.5")
+        self.assertEqual(v["ssl_max_version"], "max", "the configured literal, unchanged")
+        self.assertEqual(v["ssl_max_version_resolved"], "tls1-3")
+        self.assertFalse(v["ssl_max_version_restrictive"])
+
+    def test_an_unknown_build_leaves_the_ceiling_unresolved_and_the_verdict_firing(self):
+        # Guessing upward would make an appliance whose ceiling nobody could place read as
+        # COMPLIANT, which is the one direction that must not happen.
+        v = dcp_values(dcp_entry("p", protocol={"max-version": "max"}), sw="99.9.9")
+        self.assertEqual(v["ssl_max_version_resolved"], "")
+        self.assertTrue(v["ssl_max_version_restrictive"])
+
+    def test_a_ceiling_of_tls12_is_restrictive_on_every_lab_build(self):
+        for sw in ("11.1.13-h3", "11.2.3-h3", "11.2.5"):
+            v = dcp_values(dcp_entry("p", protocol={"max-version": "tls1-2"}), sw=sw)
+            self.assertTrue(v["ssl_max_version_restrictive"], sw)
+
+
+class DecryptionWeakestPrimitiveTests(SimpleTestCase):
+    """The two collapsed verdicts, and every member of each value set."""
+
+    def test_each_member_of_the_broken_order_is_reachable(self):
+        # The four lab subjects that discriminate this column, by what they switch OFF.
+        off = {"enc-algo-rc4": "no", "enc-algo-3des": "no",
+               "auth-algo-sha1": "no", "auth-algo-md5": "no"}
+        cases = [
+            ({}, "rc4"),                                                  # oep-dcp6-01
+            ({"enc-algo-rc4": "no"}, "3des"),                             # oep-dcp6-07
+            ({"enc-algo-rc4": "no", "enc-algo-3des": "no"}, "sha1"),       # oep-dcp6-08
+            ({"enc-algo-rc4": "no", "enc-algo-3des": "no",
+              "auth-algo-md5": "yes"}, "md5"),                            # oep-dcp6-09
+            (off, "none"),                                                 # oep-dcp6-02
+        ]
+        for protocol, expected in cases:
+            v = dcp_values(dcp_entry("p", protocol=protocol))
+            self.assertEqual(v["weakest_broken_primitive_permitted"], expected, protocol)
+
+    def test_md5_ranks_above_sha1_so_a_profile_switching_md5_on_reports_md5(self):
+        # SHA-1 is the one member stage 3 ranks below the others, for the vendor's own reason -
+        # its row is CONDITIONAL where its neighbours are unconditional.
+        v = dcp_values(dcp_entry("p", protocol={
+            "enc-algo-rc4": "no", "enc-algo-3des": "no", "auth-algo-md5": "yes"}))
+        self.assertEqual(v["weakest_broken_primitive_permitted"], "md5")
+        self.assertTrue(v["auth_algo_sha1"], "sha1 is still permitted and is still reportable")
+
+    def test_each_member_of_the_non_pfs_order_is_reachable(self):
+        cases = [
+            ({}, "rsa"),
+            ({"keyxchg-algo-rsa": "no"}, "aes-128-cbc"),
+            ({"keyxchg-algo-rsa": "no", "enc-algo-aes-128-cbc": "no"}, "aes-256-cbc"),
+            ({"keyxchg-algo-rsa": "no", "enc-algo-aes-128-cbc": "no",
+              "enc-algo-aes-256-cbc": "no"}, "none"),
+        ]
+        for protocol, expected in cases:
+            v = dcp_values(dcp_entry("p", protocol=protocol))
+            self.assertEqual(v["weakest_non_pfs_or_unauthenticated_permitted"], expected,
+                             protocol)
+
+    def test_collapsing_keeps_only_the_worse_and_the_booleans_stay_readable(self):
+        # The named cost of one column rather than four: a report naming RC4 is silent about
+        # SHA-1 on the same profile, which is why the four booleans are all presented.
+        v = dcp_values(dcp_entry("p", protocol={}))
+        self.assertEqual(v["weakest_broken_primitive_permitted"], "rc4")
+        self.assertTrue(v["auth_algo_sha1"])
+        self.assertTrue(v["enc_algo_3des"])
+
+
+class DecryptionReferrerWalkTests(SimpleTestCase):
+    """The walk the shipped one cannot do, and the companion that tells zero from unknown."""
+
+    def test_a_decryption_rule_names_its_profile_at_profile_and_not_profile_setting(self):
+        # `oep-dec6-r08` on fw-core-tpa-a vsys2 - the only rule in the estate that names a
+        # decryption profile. The shipped two-hop walk reads `profile-setting`, which a
+        # decryption rule does not carry, so it finds nothing here.
+        rules = [{"@name": "r08", "profile": "default",
+                  "destination": {"member": ["any"]}}]
+        self.assertEqual(decryption_rule_references(rules), [("default", False)])
+
+    def test_a_rule_naming_no_profile_contributes_nothing(self):
+        # Eleven of the thirteen rules on that vsys, and all four on pan-fw-201.
+        rules = [{"@name": "r01", "destination": {"member": ["any"]}}]
+        self.assertEqual(decryption_rule_references(rules), [])
+
+    def test_a_destination_of_any_is_not_a_narrowing(self):
+        # `any` is a MEMBER of the list and not an absence, so the test is on the values.
+        facts = decryption_rule_facts(
+            decryption_rule_references([{"@name": "r", "profile": "p",
+                                         "destination": {"member": ["any"]}}]),
+            collected=True)
+        self.assertTrue(facts["p"]["rule_destination_unrestricted"])
+
+    def test_an_absent_destination_is_not_a_narrowing_either(self):
+        # An unmeasured precondition must not read as the vendor's recommended exception.
+        facts = decryption_rule_facts(
+            decryption_rule_references([{"@name": "r", "profile": "p"}]), collected=True)
+        self.assertTrue(facts["p"]["rule_destination_unrestricted"])
+
+    def test_a_named_destination_set_narrows_and_clears_the_applicability_clause(self):
+        # THE BRANCH THE LAB CANNOT DISCRIMINATE: `oep-dec6-r12` narrows its destination to
+        # `ao-analytics-ingestion-services-01-loc` and names NO profile, so no stored row in
+        # this estate has this column false. It is pinned here instead.
+        facts = decryption_rule_facts(
+            decryption_rule_references([
+                {"@name": "r", "profile": "p",
+                 "destination": {"member": ["ao-analytics-ingestion-services-01-loc"]}}]),
+            collected=True)
+        self.assertFalse(facts["p"]["rule_destination_unrestricted"])
+
+    def test_one_narrowing_rule_among_several_suppresses_the_control_as_declared(self):
+        # THE QUANTIFIER IS STAGE 5's AND THIS RUN BELIEVES IT IS THE WRONG WAY ROUND. Its
+        # `computes` is explicit - "whether ANY decryption rule naming this profile restricts
+        # its destination ... negated" - and its `stores` agrees: true only "where EVERY rule
+        # naming it leaves the destination open". So one narrowed rule among ten wide-open ones
+        # SUPPRESSES the control on a profile nine rules still expose, which is the suppressing
+        # form rules.md warns about, on a column stage 5 itself documents as an applicability
+        # clause. Implemented as declared and reported in the stage 7 artifact's `spec_gaps`;
+        # the other quantifier - any rule leaving it open keeps the control applying - is what
+        # this run would have written, and changing it is a person's call and not this stage's.
+        #
+        # This test asserts the DECLARED behaviour, so it fails if somebody flips it quietly.
+        facts = decryption_rule_facts(
+            decryption_rule_references([
+                {"@name": "r1", "profile": "p", "destination": {"member": ["net-a"]}},
+                {"@name": "r2", "profile": "p", "destination": {"member": ["any"]}}]),
+            collected=True)
+        self.assertFalse(facts["p"]["rule_destination_unrestricted"])
+        self.assertEqual(facts["p"]["referrer_count"], 2)
+
+    def test_the_collected_flag_is_carried_through_and_is_what_separates_zero_from_unknown(self):
+        # THE OTHER BRANCH THE LAB CANNOT DISCRIMINATE: no pushed rulebase on any lab appliance
+        # is unreadable, so `False` never occurs in a stored row today.
+        facts = decryption_rule_facts(
+            decryption_rule_references([{"@name": "r", "profile": "p"}]), collected=False)
+        self.assertFalse(facts["p"]["decryption_rulebase_collected"])
+
+
+class DecryptionProfileNormalizationTests(TestCase):
+    """End to end, over payloads shaped like the ones read off the lab on 2026-10-29."""
+
+    def _point(self, *, merged, pushed_profiles=None, serial="DCP7", sw="11.2.5"):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            hostname=f"pano-{serial}")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name=f"grp-{serial}",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number=serial, hostname=f"host-{serial}", software_version=sw)
+        group.active_appliance = appliance
+        group.save()
+        point = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group, vsys_name="vsys1", in_scope=True)
+        EnforcementNode.objects.create(
+            management_station=station, enforcement_point=point, appliance=appliance)
+        now = timezone.now()
+        Snapshot.objects.create(management_station=station, appliance=appliance,
+                                source_type="show_merged_config", collected_at=now,
+                                payload=merged)
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="config_predefined_security_profiles", collected_at=now,
+            payload={"profiles": {DCP: {"entry": [{"@name": "default",
+                                                   "ssl-protocol-settings": None}]}}})
+        Snapshot.objects.create(management_station=station, appliance_group=group,
+                                source_type="show_pushed_shared_policy", collected_at=now,
+                                payload={"policy": {"panorama": {}}})
+        Snapshot.objects.create(management_station=station, enforcement_point=point,
+                                source_type="show_pushed_shared_policy_vsys", scope_name="vsys1",
+                                collected_at=now, payload={"policy": {"panorama": {}}})
+        Snapshot.objects.create(
+            management_station=station, enforcement_point=point,
+            source_type="config_pushed_vsys_profiles", scope_name="vsys1",
+            collected_at=now, payload=pushed_profiles if pushed_profiles is not None else {})
+        return station, group, point
+
+    @staticmethod
+    def _merged(vsys_content=None, shared_content=None):
+        return {"config": {
+            "shared": shared_content or {},
+            "devices": {"entry": [{"@name": "localhost.localdomain", "vsys": {"entry": [
+                dict({"@name": "vsys1"}, **(vsys_content or {}))]}}]}}}
+
+    def _normalize(self, group, point):
+        normalize_appliance_group_security_profiles(group)
+        return normalize_security_profiles(point)
+
+    def test_the_vendor_predefined_profile_lands_as_a_row_that_fires(self):
+        # IT EXISTS ON ALL FOUR LAB APPLIANCES AND IS THE COMMONEST FAILING STATE: it stores an
+        # empty `ssl-protocol-settings` and nothing else, and it is in force on every appliance
+        # whose rules name it.
+        station, group, point = self._point(merged=self._merged())
+        self._normalize(group, point)
+        row = SecurityProfile.objects.get(kind=DCP, name="default")
+        self.assertTrue(row.is_predefined)
+        self.assertEqual(row.ssl_min_version, "tls1-0")
+        self.assertTrue(row.ssl_min_version_below_tls12)
+        self.assertEqual(row.weakest_broken_primitive_permitted, "rc4")
+
+    def test_a_vsys_scoped_profile_is_owned_by_the_point_and_a_shared_one_by_the_group(self):
+        station, group, point = self._point(
+            merged=self._merged(
+                {"profiles": {DCP: {"entry": [dcp_entry("oep-dcp6-01", bare=True)]}}},
+                {"profiles": {DCP: {"entry": [dcp_entry(
+                    "oep-dcp6-02", protocol={"min-version": "tls1-2",
+                                             "max-version": "max"})]}}}))
+        self._normalize(group, point)
+        vsys_row = SecurityProfile.objects.get(kind=DCP, name="oep-dcp6-01")
+        shared_row = SecurityProfile.objects.get(kind=DCP, name="oep-dcp6-02")
+        self.assertEqual(vsys_row.enforcement_point_id, point.pk)
+        self.assertIsNone(vsys_row.appliance_group_id)
+        self.assertEqual(shared_row.appliance_group_id, group.pk)
+        self.assertIsNone(shared_row.enforcement_point_id)
+        self.assertEqual(shared_row.ssl_max_version_resolved, "tls1-3")
+        self.assertFalse(shared_row.ssl_min_version_below_tls12)
+
+    def test_the_referrer_columns_come_from_the_decryption_rulebase_and_not_from_security_rules(self):
+        # A SECURITY rule naming a `decryption` profile is not a thing the device has, and the
+        # shipped walk would find nothing either way. What matters is that the DECRYPTION rule
+        # is found: without this the column reads zero for every profile in the estate, with a
+        # deletion remediation attached.
+        station, group, point = self._point(merged=self._merged({
+            "profiles": {DCP: {"entry": [dcp_entry("p1", bare=True),
+                                         dcp_entry("p2", bare=True)]}},
+            "rulebase": {"decryption": {"rules": {"entry": [
+                {"@name": "d1", "profile": "p1", "destination": {"member": ["any"]}}]}}},
+        }))
+        self._normalize(group, point)
+        p1 = SecurityProfile.objects.get(kind=DCP, name="p1")
+        p2 = SecurityProfile.objects.get(kind=DCP, name="p2")
+        self.assertEqual(p1.referrer_count, 1)
+        self.assertTrue(p1.is_used)
+        self.assertEqual(p2.referrer_count, 0)
+        self.assertFalse(p2.is_used, "a profile no rule names, which is the firing side")
+        self.assertTrue(p1.decryption_rulebase_collected)
+        self.assertTrue(p2.decryption_rulebase_collected,
+                        "the rulebase WAS read; p2 simply is not in it")
+
+    def test_a_narrowing_rule_clears_the_applicability_clause_on_the_profile_it_names(self):
+        station, group, point = self._point(merged=self._merged({
+            "profiles": {DCP: {"entry": [dcp_entry("p1", bare=True)]}},
+            "rulebase": {"decryption": {"rules": {"entry": [
+                {"@name": "d1", "profile": "p1",
+                 "destination": {"member": ["pinned-apps"]}}]}}},
+        }))
+        self._normalize(group, point)
+        row = SecurityProfile.objects.get(kind=DCP, name="p1")
+        self.assertFalse(row.rule_destination_unrestricted)
+
+    def test_every_measured_decryption_column_carries_a_provenance_row(self):
+        # An absent key asserts a value on all 21, so a reader is owed the difference between a
+        # value read and a value inferred on every one of them.
+        station, group, point = self._point(merged=self._merged({
+            "profiles": {DCP: {"entry": [
+                dcp_entry("p-bare", bare=True),
+                dcp_entry("p-set", protocol={"min-version": "tls1-2", "enc-algo-rc4": "no"},
+                          forward={"block-expired-certificate": "yes"})]}}}))
+        self._normalize(group, point)
+        rows = {}
+        for name in ("p-bare", "p-set"):
+            row = SecurityProfile.objects.get(kind=DCP, name=name)
+            rows[name] = {p.field_name: p.provenance_type for p in
+                          FieldProvenance.objects.filter(object_id=row.pk)}
+        measured = ([c for c, _, _ in DECRYPTION_ALGORITHM_SWITCHES]
+                    + [c for c, _, _ in DECRYPTION_BLOCK_SWITCHES]
+                    + ["ssl_min_version", "ssl_max_version"])
+        self.assertEqual(len(measured), 21)
+        for column in measured:
+            self.assertIn(column, rows["p-bare"], column)
+            self.assertEqual(rows["p-bare"][column], "pan_os_default",
+                             f"{column}: a MEASURED implicit, not an assumption")
+        for column in ("ssl_min_version", "enc_algo_rc4", "fwd_block_expired_certificate"):
+            self.assertEqual(rows["p-set"][column], "local", column)
+
+    def test_no_derived_decryption_column_carries_a_provenance_row(self):
+        # `DerivedFieldDeclarationTests` enforces this repo-wide; this pins it for the seven
+        # this domain added, because a derived column with a row would claim a device said
+        # something it never says.
+        station, group, point = self._point(merged=self._merged({
+            "profiles": {DCP: {"entry": [dcp_entry("p", bare=True)]}}}))
+        self._normalize(group, point)
+        row = SecurityProfile.objects.get(kind=DCP, name="p")
+        written = {p.field_name for p in FieldProvenance.objects.filter(object_id=row.pk)}
+        for column in ("ssl_max_version_resolved", "ssl_min_version_below_tls12",
+                       "ssl_max_version_restrictive", "rule_destination_unrestricted",
+                       "weakest_broken_primitive_permitted",
+                       "weakest_non_pfs_or_unauthenticated_permitted",
+                       "decryption_rulebase_collected"):
+            self.assertNotIn(column, written, column)
+
+    def test_a_non_decryption_kind_keeps_the_firing_defaults_and_the_kind_clause_matters(self):
+        # THE LOUD CONSEQUENCE OF A SHARED MODEL. An antivirus row holds `enc_algo_rc4 = True`,
+        # so a clause written without `kind eq decryption` fires on every antivirus profile in
+        # the estate. Nothing downstream enforces that clause, which is why it is pinned here.
+        station, group, point = self._point(merged=self._merged({
+            "profiles": {SecurityProfile.KIND_VIRUS: {"entry": [{"@name": "av1"}]}}}))
+        self._normalize(group, point)
+        row = SecurityProfile.objects.get(kind=SecurityProfile.KIND_VIRUS, name="av1")
+        self.assertTrue(row.enc_algo_rc4)
+        self.assertEqual(row.weakest_broken_primitive_permitted, "rc4")
+        written = {p.field_name for p in FieldProvenance.objects.filter(object_id=row.pk)}
+        self.assertNotIn("enc_algo_rc4", written,
+                         "no decryption key was read, so nothing claims one was")
+
+
+class DecryptionSettingsTests(TestCase):
+    """The forward-proxy signing designation. PAN-DCP-003, 004 and 006's subject."""
+
+    def _appliance(self, *, shared, certificates=None, sw="11.2.5"):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano-ds")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name="grp-ds",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="DS7", hostname="host-ds", software_version=sw)
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"shared": shared, "devices": {"entry": [
+                {"@name": "localhost.localdomain",
+                 "vsys": {"entry": [{"@name": "vsys1"}]}}]}}})
+        for name, is_ca, self_signed in (certificates or []):
+            Certificate.objects.create(
+                management_station=station, appliance=appliance, appliance_group=group,
+                source_snapshot=Snapshot.objects.filter(appliance=appliance).first(),
+                scope=Certificate.SCOPE_SHARED, name=name, is_ca=is_ca,
+                is_self_signed=self_signed)
+        return appliance
+
+    def test_an_appliance_with_no_ssl_decrypt_node_still_gets_a_row_that_fires(self):
+        # THE STATE ALL FOUR LAB APPLIANCES WERE IN before stage 6 built a designation on one,
+        # and the state the other three are still in. A per-slot grain has NO ROW here, so it
+        # could not report PAN-DCP-006 at all - which is the control this subject exists for.
+        appliance = self._appliance(shared={})
+        counts = normalize_decryption_settings(appliance)
+        self.assertEqual(counts["decryption_settings"], 1)
+        self.assertFalse(counts["node_present"])
+        row = DecryptionSettings.objects.get(appliance=appliance)
+        self.assertEqual(row.forward_trust_cert_rsa, "")
+        self.assertFalse(row.forward_trust_is_designated_local_ca)
+        self.assertFalse(row.untrust_distinct_from_trust)
+
+    def test_the_designation_is_a_nested_dict_and_not_a_certificate_name(self):
+        # `{"forward-trust-certificate": {"rsa": "oep-p1-cert"}}` - measured. A consumer reading
+        # the container as a name stores the repr of a dict, which looks like a name.
+        appliance = self._appliance(
+            shared={"ssl-decrypt": {"forward-trust-certificate": {"rsa": "oep-p1-cert"}}},
+            certificates=[("oep-p1-cert", True, True)])
+        normalize_decryption_settings(appliance)
+        row = DecryptionSettings.objects.get(appliance=appliance)
+        self.assertEqual(row.forward_trust_cert_rsa, "oep-p1-cert")
+        self.assertEqual(row.forward_trust_cert_ecdsa, "")
+        self.assertTrue(row.forward_trust_is_designated_local_ca)
+
+    def test_an_empty_untrust_container_is_not_a_designation(self):
+        # pan-fw-201 stores `"forward-untrust-certificate": null` - the element exists and holds
+        # nothing. Reading the container's presence rather than its children would report a
+        # separate untrusted-site authority that does not exist.
+        appliance = self._appliance(
+            shared={"ssl-decrypt": {"forward-trust-certificate": {"rsa": "oep-p1-cert"},
+                                    "forward-untrust-certificate": None}},
+            certificates=[("oep-p1-cert", True, True)])
+        normalize_decryption_settings(appliance)
+        row = DecryptionSettings.objects.get(appliance=appliance)
+        self.assertEqual(row.forward_untrust_cert_rsa, "")
+        self.assertFalse(row.untrust_distinct_from_trust)
+
+    def test_a_designation_naming_a_certificate_that_is_not_a_local_ca_does_not_pass(self):
+        # THE BRANCH THE LAB CANNOT DISCRIMINATE: the one designation standing on the estate
+        # names a self-signed CA, so no stored row has a filled trust slot and a false verdict.
+        for certs in ([("c1", False, True)], [("c1", True, False)], []):
+            with self.subTest(certs=certs):
+                appliance = self._appliance(
+                    shared={"ssl-decrypt": {"forward-trust-certificate": {"rsa": "c1"}}},
+                    certificates=certs)
+                normalize_decryption_settings(appliance)
+                row = DecryptionSettings.objects.get(appliance=appliance)
+                self.assertFalse(row.forward_trust_is_designated_local_ca)
+                Certificate.objects.all().delete()
+                DecryptionSettings.objects.all().delete()
+                Snapshot.objects.all().delete()
+                Appliance.objects.all().delete()
+                ApplianceGroup.objects.all().delete()
+                ManagementStation.objects.all().delete()
+
+    def test_both_filled_trust_slots_must_qualify_and_not_just_one(self):
+        # The weaker of the two is what a session can end up negotiating, and nothing in the
+        # configuration says which it will be.
+        appliance = self._appliance(
+            shared={"ssl-decrypt": {"forward-trust-certificate": {
+                "rsa": "good", "ecdsa": "third-party"}}},
+            certificates=[("good", True, True), ("third-party", True, False)])
+        normalize_decryption_settings(appliance)
+        row = DecryptionSettings.objects.get(appliance=appliance)
+        self.assertFalse(row.forward_trust_is_designated_local_ca)
+
+    def test_untrust_naming_the_same_certificate_as_trust_is_not_distinct(self):
+        # A firewall using one certificate for both gives a user no way to tell a trustworthy
+        # site from an untrustworthy one.
+        appliance = self._appliance(
+            shared={"ssl-decrypt": {"forward-trust-certificate": {"rsa": "c1"},
+                                    "forward-untrust-certificate": {"rsa": "c1"}}},
+            certificates=[("c1", True, True)])
+        normalize_decryption_settings(appliance)
+        row = DecryptionSettings.objects.get(appliance=appliance)
+        self.assertFalse(row.untrust_distinct_from_trust)
+
+    def test_a_distinct_untrust_authority_passes(self):
+        appliance = self._appliance(
+            shared={"ssl-decrypt": {"forward-trust-certificate": {"rsa": "c1"},
+                                    "forward-untrust-certificate": {"rsa": "c2"}}},
+            certificates=[("c1", True, True), ("c2", True, True)])
+        normalize_decryption_settings(appliance)
+        row = DecryptionSettings.objects.get(appliance=appliance)
+        self.assertTrue(row.untrust_distinct_from_trust)
+
+    def test_the_four_designation_columns_carry_provenance_and_the_verdicts_do_not(self):
+        appliance = self._appliance(
+            shared={"ssl-decrypt": {"forward-trust-certificate": {"rsa": "c1"}}},
+            certificates=[("c1", True, True)])
+        normalize_decryption_settings(appliance)
+        row = DecryptionSettings.objects.get(appliance=appliance)
+        written = {p.field_name: p.provenance_type
+                   for p in FieldProvenance.objects.filter(object_id=row.pk)}
+        self.assertEqual(written.get("forward_trust_cert_rsa"), "local")
+        # not_assumed: there is no value to materialise and `may_materialise` is false.
+        self.assertEqual(written.get("forward_trust_cert_ecdsa"), "not_configured")
+        self.assertNotIn("forward_trust_is_designated_local_ca", written)
+        self.assertNotIn("untrust_distinct_from_trust", written)
+
+
+class CertificateHsmCustodyTests(TestCase):
+    """`private-key-on-hsm`, which NO certificate on this estate carries."""
+
+    def test_an_absent_key_is_stored_as_an_assumption_and_fires(self):
+        # Every certificate on all three lab appliances lacks this key, so the stored value is
+        # the assumption on every row in the estate - and FALSE is the direction that RAISES
+        # PAN-DCP-006 rather than passing it.
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
+            PRIVATE_KEY_ON_HSM_ABSENT)
+        self.assertIs(PRIVATE_KEY_ON_HSM_ABSENT.value, False)
+        self.assertEqual(PRIVATE_KEY_ON_HSM_ABSENT.provenance_type, "assumed_default",
+                         "assumed and not measured - stage 4's own disposition")
