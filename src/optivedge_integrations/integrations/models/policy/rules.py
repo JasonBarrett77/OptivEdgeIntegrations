@@ -24,6 +24,7 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
         "has_antivirus_profile",
         "has_spyware_profile",
         "has_vulnerability_profile",
+        "spyware_profile_resolved",
         "wildfire_analysis_submits_all",
         "wildfire_analysis_detail",
     )
@@ -57,6 +58,30 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     has_antivirus_profile = models.BooleanField(default=False)
     has_spyware_profile = models.BooleanField(default=False)
     has_vulnerability_profile = models.BooleanField(default=False)
+
+    #: THE THIRD ATTACHMENT STATE, and the only thing that separates it from the first.
+    #:
+    #: `has_spyware_profile` is true as soon as something names a spyware profile - the rule's own
+    #: `profile-setting/profiles/spyware` slot, or a profile group whose `spyware` key exists. It
+    #: says nothing about whether that NAME resolves. This column is the resolution: true only
+    #: where a spyware profile row was found by name AND scope. So:
+    #:
+    #:   has_spyware_profile False                      nothing binds. Attach a profile.
+    #:   has_spyware_profile True, resolved False       a name is bound and resolves to nothing.
+    #:                                                  Repair the profile, or repair the group.
+    #:   both True                                      a definition is in force.
+    #:
+    #: Three states, three different repairs, and the existing finding sentence renders the middle
+    #: one as protected by a profile it then says does not exist. The data was already in the
+    #: store - `SecurityRuleProfileVerdict.profile_name` is non-blank with `satisfied` NULL for
+    #: exactly that case - and no query could reach it, because `profile_name` is in no field
+    #: registry. This column is that question answered where a clause can see it.
+    #:
+    #: FALSE IS THE FIRING SIDE and the default, so a rule nobody has recomputed reports as
+    #: unresolved rather than passing. The cost of that direction is that the migration window is
+    #: indistinguishable from the real middle state until the recompute runs, which is why it is a
+    #: separate column rather than folded into `has_spyware_profile`.
+    spyware_profile_resolved = models.BooleanField(default=False)
 
     #: Does the WildFire analysis profile in force on this rule send EVERY file type for
     #: sandbox analysis? PAN-AVW-003 asks this per RULE rather than per profile, because a
@@ -96,6 +121,19 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     def _verdict_detail(self, assertion):
         row = self.profile_verdict(assertion)
         return row.detail if row else ""
+
+    def _verdict_grading(self, assertion):
+        """The GRADED VALUE beside one assertion's verdict, or "" where there is no row.
+
+        A verdict says WHETHER; a severity grading needs WHICH, and the value it needs sits on a
+        collection one model away from the rule the finding names. See
+        `SecurityRuleProfileVerdict.grading_value` for why it is one column and not three.
+
+        EMPTY where no row exists, which matches no severity placement - so a rule nobody has
+        recomputed reports at its control's BASELINE severity rather than being handed a value.
+        """
+        row = self.profile_verdict(assertion)
+        return row.grading_value if row else ""
 
     #: THE NINE PER-RULE THREAT-PROFILE VERDICTS, named exactly as the control queries name
     #: them. Each reads a `SecurityRuleProfileVerdict` row; see that model for why they are a
@@ -161,6 +199,23 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     @property
     def spyware_exceptions_minimal_detail(self):
         return self._verdict_detail("spyware_exceptions_minimal")
+
+    #: THE THREE GRADED VALUES PAN-SPY-001, -002 and -004 CALIBRATE THEIR SEVERITY WITH. Each
+    #: reads the `grading_value` of the assertion it belongs to, so each is the WHICH beside that
+    #: assertion's WHETHER. None of them may be clausedon alone: an empty string matches no
+    #: placement, so a row nobody recomputed loses the ESCALATION and keeps the finding, which the
+    #: boolean verdict beside it raises because its `false` clause also matches a NULL row.
+    @property
+    def spyware_worst_unstopped_severity(self):
+        return self._verdict_grading("spyware_blocks_critical_high")
+
+    @property
+    def spyware_dns_content_list_action(self):
+        return self._verdict_grading("spyware_dns_sinkholes")
+
+    @property
+    def spyware_worst_engine_action(self):
+        return self._verdict_grading("spyware_inline_analysis_blocks")
 
     @property
     def vulnerability_blocks_critical_high(self):
@@ -369,6 +424,26 @@ class SecurityRuleProfileVerdict(models.Model):
     satisfied = models.BooleanField(null=True)
     #: Why, in words. Empty only when `satisfied` is True.
     detail = models.CharField(max_length=255, blank=True)
+    #: THE GRADED VALUE beside this verdict - the one the control's severity grading varies with.
+    #: `critical` for a severity band, `alert` for a DNS action, `drop` for an engine action: a
+    #: different vocabulary per assertion, which is why it is ONE column and not three.
+    #:
+    #: Three named columns on this model would be three nulls on every row of the other eight
+    #: assertions, growing by one every time a graded control is added - the same argument that
+    #: made the verdict a satellite rather than eighteen columns on SecurityRule. It follows
+    #: `detail`, which is one column on this model read through nine named properties on the rule,
+    #: and which the search layer already reaches per assertion as `<field>_detail`.
+    #:
+    #: BLANK AND NOT NULL, deliberately. The search layer has no is-null operator, so a positive
+    #: clause over a nullable column never matches and the control reports a clean estate - and
+    #: `is_empty`, the one operator that is ABOUT absence, compiles to `filter(field="")` in every
+    #: per-model compiler and reaches no NULL. A blank matches no severity placement either way,
+    #: which is the direction this field's own absence has to point.
+    #:
+    #: EMPTY ON EVERY ASSERTION THAT HAS NO GRADING, which is most of them, and empty on a verdict
+    #: whose profile could not be resolved - there is no value to name, and naming one would hand
+    #: a grading a severity it has not earned.
+    grading_value = models.CharField(max_length=32, blank=True)
 
     class Meta:
         ordering = ["security_rule", "assertion"]
