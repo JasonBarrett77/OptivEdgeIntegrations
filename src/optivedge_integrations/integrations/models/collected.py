@@ -121,6 +121,22 @@ class Appliance(SyncTrackedModel):
     serial_number = models.CharField(max_length=64)
     model = models.CharField(max_length=128, blank=True)
     software_version = models.CharField(max_length=64, blank=True)
+    #: `show system info`'s `device-certificate-status`, verbatim. PAN-PLT-003 and PAN-PLT-004.
+    #:
+    #: THE WORD `None` IS A VALUE AND NOT AN ABSENCE. Three of four lab appliances report the
+    #: literal four-character string `None` inside a populated element, which parses to the
+    #: Python string "None" - truthy, and not `is None` - so `if status:` reports a certificate
+    #: on every appliance in this estate and `status is None` reports one on none of them. Two
+    #: readings and both are wrong; only a comparison against the word is right. The one
+    #: appliance that differs reads `Expired`, and no appliance here carries a valid state.
+    #:
+    #: BLANK MEANS NOBODY LOOKED, which is a different fact from the word `None`, and this is
+    #: the one `show system info` key where that asymmetry matters: `software_version` beside it
+    #: is filled from `show managed devices` and this key is not carried by that read at all.
+    #: Blank rather than NULL so a negated equality against an expected state matches and FIRES.
+    #: Written by platforms/pan_os/normalization/platform_lifecycle.py, not by the topology
+    #: normalizer that fills the rest of this row - the read that fills those does not carry it.
+    device_certificate_status = models.CharField(max_length=64, blank=True)
     details_collected_at = models.DateTimeField(null=True, blank=True)
     topology_resolved_at = models.DateTimeField(null=True, blank=True)
     virtual_systems_collected_at = models.DateTimeField(null=True, blank=True)

@@ -12,6 +12,16 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.device_iden
     collect_show_iot_icd_version,
     collect_show_system_info,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.platform_lifecycle import (
+    DEVICE_TELEMETRY_XPATH,
+    LOG_ALARM_SETTINGS_XPATH,
+    RESOURCE_MONITOR_WINDOW,
+    RESOURCE_MONITOR_WINDOW_SAMPLES,
+    SHOW_RESOURCE_MONITOR_COMMAND,
+    collect_device_telemetry,
+    collect_log_alarm_settings,
+    collect_show_running_resource_monitor,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.managed_devices import (
     SHOW_MANAGED_DEVICES_COMMAND,
     collect_show_managed_devices,
@@ -102,6 +112,14 @@ __all__ = [
     "SHOW_PREDEFINED_URL_LISTS_COMMAND",
     "SHOW_PUSHED_SHARED_POLICY_COMMAND",
     "SHOW_SYSTEM_INFO_COMMAND",
+    "DEVICE_TELEMETRY_XPATH",
+    "LOG_ALARM_SETTINGS_XPATH",
+    "RESOURCE_MONITOR_WINDOW",
+    "RESOURCE_MONITOR_WINDOW_SAMPLES",
+    "SHOW_RESOURCE_MONITOR_COMMAND",
+    "collect_device_telemetry",
+    "collect_log_alarm_settings",
+    "collect_show_running_resource_monitor",
     "build_clear_target_vsys_command",
     "build_set_target_vsys_command",
     "build_show_external_list_command",

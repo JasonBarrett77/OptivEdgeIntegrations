@@ -42,6 +42,9 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_pushed_vsys_profiles,
     collect_show_logging_status,
     collect_show_system_info,
+    collect_device_telemetry,
+    collect_log_alarm_settings,
+    collect_show_running_resource_monitor,
     collect_show_masterkey_properties,
     collect_show_panorama_status,
     collect_predefined_log_forwarding_profiles,
@@ -87,6 +90,13 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_high_availability,
     normalize_appliance_management_ssh,
     normalize_appliance_device_identification,
+    normalize_appliance_configuration_backup_evidence,
+    normalize_appliance_dataplane_utilisation,
+    normalize_appliance_device_telemetry,
+    normalize_appliance_globalprotect_portal_presence,
+    normalize_appliance_licence_inventory,
+    normalize_appliance_log_alarm_settings,
+    normalize_appliance_platform_content_streams,
     normalize_appliance_master_key,
     normalize_appliance_panorama_registration,
     normalize_appliance_management_plane,
@@ -824,6 +834,57 @@ def collect_appliance_device_identification(
     return persisted, failures
 
 
+def collect_appliance_platform_lifecycle(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> tuple[list[PANOSPersistedCollection], list[str]]:
+    """PAN-PLT-003's and PAN-PLT-006's own sources. No configuration read carries any of them.
+
+    THREE READS ON ONE SESSION, COLLECTED INDEPENDENTLY, for the same reason
+    `collect_appliance_device_identification` gives: they answer unrelated questions and letting
+    one exception abandon the others is expensive here in particular, because each of the three
+    is the ONLY thing that can tell its own unknown from its own zero. Losing the telemetry read
+    to a failure in the resource monitor would move an appliance from "the node is absent" to
+    "nobody measured it", and those are different findings.
+
+    TWO OF THE THREE ARE COMMITTED-LOCAL CONFIGURATION READS, the first in this package. An
+    absence at either xpath is the READING rather than a failure, and the collector records it as
+    an empty result; anything else propagates into `failures` below, which is what keeps an
+    unreachable appliance from reading as a configured-nothing one.
+
+    THE FOURTH AND FIFTH READS THIS DOMAIN NEEDS ARE NOT HERE AND BOTH ABSENCES ARE DELIBERATE.
+    `show system info` and `request license info` are taken by
+    `collect_appliance_device_identification` already, so four of this domain's nine subjects need
+    no new call at all. And `show config saved` is not collectable: its argument is mandatory, the
+    bare form answers code=17 on all four lab appliances, and nothing enumerates the snapshot
+    names - so `ConfigurationBackupEvidence` is written from no snapshot and says so.
+
+    Failures are returned rather than swallowed, so a partial collection is visible as partial.
+    """
+    session = open_session(
+        appliance.management_station,
+        credentials_provider=credentials_provider,
+        target=appliance.serial_number,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    persisted: list[PANOSPersistedCollection] = []
+    failures: list[str] = []
+    for collect in (
+        collect_device_telemetry,
+        collect_log_alarm_settings,
+        collect_show_running_resource_monitor,
+    ):
+        try:
+            persisted.append(persist_appliance_collected_response(appliance, collect(session)))
+        except Exception as exc:  # noqa: BLE001 - recorded and reported, not suppressed
+            failures.append(f"{collect.__name__}: {exc}")
+    return persisted, failures
+
+
 def collect_appliance_group_pushed_shared_policy(
     appliance_group: ApplianceGroup,
     *,
@@ -925,6 +986,21 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # snapshots and one merged leaf; depends on nothing else in this tuple.
     ("device identification", normalize_appliance_device_identification),
     ("services settings", normalize_appliance_services_settings),
+    # PLATFORM LIFECYCLE - PAN-PLT-001 to PAN-PLT-006. Seven members rather than one, so that a
+    # failure in any of them costs only its own model: they read four different payloads between
+    # them and none depends on another, so the order within this block carries no meaning.
+    #
+    # Each one anchors its row to the MERGED snapshot and reports in a companion column whether
+    # its own read answered - "we never asked" must not look like "we asked and it was fine", and
+    # on this domain that separation is what stops an unlicensed appliance, an opted-out one, an
+    # idle dataplane and an unread one from all reading the same way.
+    ("platform content streams", normalize_appliance_platform_content_streams),
+    ("device telemetry", normalize_appliance_device_telemetry),
+    ("GlobalProtect portal presence", normalize_appliance_globalprotect_portal_presence),
+    ("licence inventory", normalize_appliance_licence_inventory),
+    ("log alarm settings", normalize_appliance_log_alarm_settings),
+    ("configuration backup evidence", normalize_appliance_configuration_backup_evidence),
+    ("dataplane utilisation", normalize_appliance_dataplane_utilisation),
     # Device > Setup > Management > Management Interface Settings, and the operational mode the
     # appliance reports when asked. Reads the same merged device entry as its neighbours plus
     # its own `show system info` snapshot, and depends on nothing else in this tuple.
