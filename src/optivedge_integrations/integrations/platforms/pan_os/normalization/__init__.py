@@ -39,6 +39,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.authenti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.login_banner import (
     normalize_login_banner,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.globalprotect import (
+    normalize_globalprotect,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.high_availability import (
     normalize_high_availability,
 )
@@ -358,6 +361,16 @@ def normalize_appliance_certificate_objects(appliance: Appliance) -> dict:
     return normalize_certificate_objects(appliance)
 
 
+def normalize_appliance_globalprotect(appliance: Appliance) -> dict:
+    """Every GlobalProtect portal, its client-auth rows, and one verdict row per vsys.
+
+    Reads the SAME merged payload as its neighbours and the licence snapshot another domain's
+    collector already takes, so it depends on nothing else in the tuple and may be moved within
+    it. Returns counts, which is what `APPLIANCE_OBJECT_NORMALIZERS` requires.
+    """
+    return normalize_globalprotect(appliance)
+
+
 def normalize_appliance_certificate_settings(appliance: Appliance) -> dict:
     """The appliance's certificate-expiry check. Depends on nothing else in the tuple."""
     return normalize_certificate_settings(appliance)
@@ -404,6 +417,7 @@ __all__ = [
     "normalize_appliance_password_profiles",
     "normalize_appliance_certificate_objects",
     "normalize_appliance_certificate_settings",
+    "normalize_appliance_globalprotect",
     "normalize_appliance_interface_management_profiles",
     "normalize_appliance_interfaces",
     "normalize_appliance_management_interfaces",

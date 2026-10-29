@@ -34,6 +34,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_managed_devices,
     collect_show_merged_config,
     collect_predefined_certificates,
+    collect_predefined_gp_app_config_dictionary,
     collect_predefined_security_profiles,
     collect_show_high_availability_all,
     collect_request_license_info,
@@ -76,6 +77,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_authentication_profiles,
     normalize_appliance_authentication_sequences,
     normalize_appliance_certificate_objects,
+    normalize_appliance_globalprotect,
     normalize_appliance_certificate_settings,
     normalize_appliance_interface_management_profiles,
     normalize_appliance_authentication_settings,
@@ -762,6 +764,12 @@ def collect_appliance_predefined_catalogs(
         # `stale_disabled_vendor_exclusion_count` is zero on every row and the control reports
         # nothing on an appliance carrying residue.
         collect_show_predefined_ssl_exclude_cert,
+        # PAN-GPP-003's decoding input: the GlobalProtect app-setting dictionary. A portal
+        # stores an app setting as an entry NAME and a member list and validates neither, so
+        # without this nothing says what a stored setting MEANS or whether the name is real.
+        # The entry count differs by appliance in this estate, which is why it is read here -
+        # once per appliance - rather than once and reused.
+        collect_predefined_gp_app_config_dictionary,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))
@@ -924,6 +932,13 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # function's order rather than on this tuple's, and moving it within the tuple is safe.
     ("device services", normalize_appliance_device_services),
     ("certificate objects", normalize_appliance_certificate_objects),
+    # Network > GlobalProtect > Portals, plus the vsys's HIP objects and the licence reply
+    # another domain's collector already takes. Reads the same merged payload as its neighbours
+    # and depends on nothing else in this tuple - placed after the certificate objects because
+    # a portal BINDS an SslTlsServiceProfile and a CertificateProfile and a reader will look
+    # for them nearby, NOT because anything here resolves over those rows: this domain stores
+    # the binding as a name, deliberately, and the resolution is another control's.
+    ("globalprotect portals", normalize_appliance_globalprotect),
     # Device > Setup > Management > General Settings, one leaf. Reads the same merged device
     # entry as its neighbours and depends on nothing else in this tuple - placed beside the
     # certificate objects because they are one domain's controls and not because of an order.

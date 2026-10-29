@@ -213,3 +213,47 @@ def collect_show_predefined_ssl_exclude_cert(session: PANSession) -> PANOSCollec
         source_type=PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE,
         request=request,
     )
+
+
+#: The GlobalProtect APP-SETTING DICTIONARY: the value space of every setting a portal's agent
+#: configuration can carry. Measured 2026-10-29 through Panorama's target= proxy on all four lab
+#: appliances - 89 entries on both PA-5220s (11.1.13-h3) and 98 on both PA-VMs (11.2.3-h3 and
+#: 11.2.5), the 89 a strict SUBSET of the 98 and every shared key identical - so it is read PER
+#: APPLIANCE and never carried between them.
+#:
+#: REQUIRED AND LOAD-BEARING, not decoration. The portal stores an app setting as an entry NAME
+#: and a MEMBER LIST, and validates neither: an entry named for no real setting was stored
+#: without comment and `validate full` said nothing about it. Without this dictionary a reader
+#: holds the name and the list and no way to know what either MEANS - no label, no permitted
+#: set, no form default, and no way to tell a real setting from a typo. For `client-upgrade`,
+#: the one setting a control in this domain asks about, it carries the regex
+#: ^(prompt|disabled|manual|transparent|internal)$ and the form default `prompt`.
+#:
+#: `action=complete` IS NOT A SUBSTITUTE: completion at an ENTRY of this node is refused code=6
+#: `Invalid sequence` on both builds while this ordinary config read returns the entry in full.
+PREDEFINED_GP_APP_CONFIG_XPATH = "/config/predefined/dynamic-schema/gp-app-config/config"
+
+#: The snapshot source type the normalizer filters on. A constant beside the xpath because
+#: nothing maps a source type to a reader - see PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE.
+PREDEFINED_GP_APP_CONFIG_SOURCE_TYPE = "config_predefined_gp_app_config"
+
+
+def collect_predefined_gp_app_config_dictionary(session: PANSession) -> PANOSCollectedResponse:
+    """Collect the vendor's GlobalProtect app-setting dictionary for one appliance. PAN-GPP-003.
+
+    The same mechanism and the same namespace as the predefined certificates and SSL/TLS
+    profiles above - the config tree's predefined branch, which `show config merged` does not
+    carry - so this is a new xpath on an existing pattern rather than a new mechanism.
+
+    Appliance-wide and read-only; no lease is needed and none is taken.
+    """
+    request = PANOSConfigRequest(
+        xpath=PREDEFINED_GP_APP_CONFIG_XPATH,
+        target=session.target,
+        metadata={"command_name": "config get predefined gp-app-config dictionary"},
+    )
+    return collect_config_response(
+        session,
+        source_type=PREDEFINED_GP_APP_CONFIG_SOURCE_TYPE,
+        request=request,
+    )
