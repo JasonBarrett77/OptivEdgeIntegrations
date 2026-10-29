@@ -70,6 +70,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_group_security_profiles,
     normalize_security_profiles,
     normalize_security_rule_profile_coverage,
+    normalize_appliance_admin_role_posture,
     normalize_appliance_admin_users,
     normalize_appliance_authentication_profiles,
     normalize_appliance_authentication_sequences,
@@ -884,6 +885,9 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # sequence resolves over the rows this writes.
     ("authentication sequences", normalize_appliance_authentication_sequences),
     ("admin users", normalize_appliance_admin_users),
+    # AFTER admin users only for readability - it reads the same merged payload directly and
+    # not the AdminUser rows, so it depends on nothing in this tuple and moving it is safe.
+    ("admin role posture", normalize_appliance_admin_role_posture),
     ("server profiles", normalize_appliance_server_profiles),
     ("password profiles", normalize_appliance_password_profiles),
     ("password complexity", normalize_appliance_password_complexity),

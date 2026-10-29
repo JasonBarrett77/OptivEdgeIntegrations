@@ -31,6 +31,7 @@ from .management_interface import (
     parse_permitted_source,
 )
 from .normalization import NormalizationIssue
+from .admin_role_posture import AdminRolePosture
 from .admin_user import AdminUser, ROLE_KEYS
 from .server_profile import ServerProfile
 from .log_settings import (
@@ -132,6 +133,7 @@ __all__ = [
     "Interface",
     "AuthenticationProfile",
     "AuthenticationSequence",
+    "AdminRolePosture",
     "AdminUser",
     "ServerProfile",
     "ALL_FORWARDING_LOG_TYPES_MISSING",

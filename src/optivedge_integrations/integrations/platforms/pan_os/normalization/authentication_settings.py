@@ -36,6 +36,11 @@ def normalize_authentication_settings(appliance: Appliance) -> dict[str, int]:
         return {"authentication_settings": 0}
 
     values, provenance = authentication_settings_from_node(_management_node(snapshot))
+    # True where the parse stored NOTHING for the lockout duration. Read off the stored value
+    # rather than off `was_absent`, so a key that is present but carries no parseable text -
+    # which `parse_integer_field` also resolves to the implicit None - reports itself unread
+    # instead of reporting that it was read and configured. Both are the firing side.
+    values["lockout_time_minutes_unknown"] = values.get("lockout_time_minutes") is None
     content_type = ContentType.objects.get_for_model(AuthenticationSettings)
     with transaction.atomic():
         obj, _ = AuthenticationSettings.objects.update_or_create(

@@ -8566,6 +8566,11 @@ class AuthenticationSettingsNormalizationTests(TestCase):
     The zeros are the whole subject: three of these four fields default to 0 and 0 means
     something different on each - unlimited attempts, locked until released, and a key that
     never expires. Idle timeout is the odd one, defaulting to the vendor's 60.
+
+    AND SINCE 2026-10-29 LOCKOUT TIME INFERS NOTHING AT ALL. Its 0 is the STRICTEST value on
+    the reading the project measured, so expanding an absent key to 0 stored the compliant
+    answer about a setting nobody read. The column is nullable, the declaration is
+    `Implicit.not_assumed`, and `lockout_time_minutes_unknown` is what reports the absence.
     """
 
     def setUp(self):
@@ -8595,8 +8600,12 @@ class AuthenticationSettingsNormalizationTests(TestCase):
         settings = self._normalize()
         self.assertEqual(settings.idle_timeout_minutes, 60)
         self.assertEqual(settings.lockout_failed_attempts, 0)
-        self.assertEqual(settings.lockout_time_minutes, 0)
         self.assertEqual(settings.api_key_lifetime_minutes, 0)
+        # The three above materialise their WEAKEST value, so an unread appliance reports
+        # itself. Lockout time materialises nothing, because its 0 is the strictest value it
+        # has, and the flag beside it carries the reporting instead.
+        self.assertIsNone(settings.lockout_time_minutes)
+        self.assertTrue(settings.lockout_time_minutes_unknown)
 
     def test_admin_lockout_is_a_container(self):
         settings = self._normalize({
@@ -8608,6 +8617,8 @@ class AuthenticationSettingsNormalizationTests(TestCase):
             (settings.idle_timeout_minutes, settings.lockout_failed_attempts,
              settings.lockout_time_minutes, settings.api_key_lifetime_minutes),
             (10, 3, 30, 525600))
+        # A key that IS in the payload is not unknown, whatever it holds.
+        self.assertFalse(settings.lockout_time_minutes_unknown)
 
     def test_one_row_per_appliance_and_re_normalizing_updates_it(self):
         self._normalize({"idle-timeout": "10"})
@@ -8708,9 +8719,10 @@ class PasswordComplexityNormalizationTests(TestCase):
             object_id=policy.pk)}
         self.assertIn("minimum_length", rows)
         self.assertEqual(rows["minimum_length"].raw_value, "tpl-base")
-        # Every complexity key the device does not carry is a measured PAN-OS default - the
-        # whole node absent means 0 and unticked, measured 2026-09-03 from the blank form.
-        self.assertEqual(rows["minimum_special"].provenance_type, "pan_os_default")
+        # Every complexity key the device does not carry is OUR INFERENCE of 0/unticked. The
+        # blank form was read on 2026-09-03, which says what the UI renders for an absent key
+        # and not that PAN-OS supplies the value - so `assumed_default`, not `pan_os_default`.
+        self.assertEqual(rows["minimum_special"].provenance_type, "assumed_default")
 
 
 class ServerProfileNormalizationTests(TestCase):
@@ -9341,7 +9353,14 @@ class ImplicitDeclarationTests(TestCase):
     ASSUMED_DEFAULTS = {
         "authentication.py": 3,       # profile lockout pair, mfa-enable
         "certificates.py": 2,         # certificate-profile timeouts, certificate `ca`
-        "device_configuration.py": 2, # master key auto-renew, on-hsm
+        # master key auto-renew and on-hsm; the three authentication-settings keys whose
+        # zero-ish value is the WEAKEST (idle timeout, failed attempts, API key lifetime); and
+        # the two branches of the password-complexity loop, which covers eleven keys between
+        # them. All five of the latter were `Implicit.measured` until 2026-10-29: reading an
+        # unconfigured FORM establishes what the UI renders for an absent key, which is not the
+        # claim that PAN-OS supplies the value, and the admin-authentication pipeline's stage 4
+        # records every one of those implicits as unmeasured with disposition not_assumed.
+        "device_configuration.py": 7,
         "device_services.py": 2,      # accept-dhcp-hostname, accept-dhcp-domain
         "management_ssh.py": 1,       # the built-in SSH offer of an UNMEASURED release
         "password_profiles.py": 1,    # password-change periods
@@ -11778,6 +11797,14 @@ class PasswordComplexityAbsentNodeProvenanceTests(TestCase):
     Nothing about the declarations changed to fix it: the loop already resolved every absent key
     to `Implicit.measured(..., PASSWORD_COMPLEXITY_CITATION)`. The early returns were the only
     reason those declarations never reached a row.
+
+    THE DECLARATIONS DID CHANGE ON 2026-10-29, and sixteen rows are still sixteen rows. Eleven
+    of the thirteen keys a control reads became `Implicit.assumed` - the unconfigured form says
+    what the UI renders, not what PAN-OS supplies - so their rows now read `assumed_default`
+    rather than `pan_os_default`. The two post-expiration keys became `Implicit.not_assumed`,
+    because 0 is the COMPLIANT value on both, so they store NOTHING and their rows read
+    `not_configured`. All fourteen non-declined keys moved, the three no control reads
+    included: one loop, one form reading, and nothing supports a per-key distinction.
     """
 
     def setUp(self):
@@ -11800,6 +11827,10 @@ class PasswordComplexityAbsentNodeProvenanceTests(TestCase):
             content_type=ContentType.objects.get_for_model(PasswordComplexityPolicy),
             object_id=policy.pk)}
         return policy, rows
+
+    #: The two keys whose COMPLIANT value is 0, so an absent one is declined rather than
+    #: inferred: the row reads `not_configured` and the column holds nothing.
+    NOT_ASSUMED = {"post_expiration_admin_login_count", "post_expiration_grace_period"}
 
     #: The three shapes that each took one of the deleted early returns, and a fourth whose
     #: node IS present - which always reached the loop - with the one key it writes. Mapped to
@@ -11825,18 +11856,25 @@ class PasswordComplexityAbsentNodeProvenanceTests(TestCase):
                     f"{label}: sixteen tracked fields, sixteen rows - a missing row means only "
                     f"that the field is not tracked, and all sixteen are")
                 defaulted = {name for name in rows if name not in written}
+                declined = defaulted & self.NOT_ASSUMED
+                inferred = defaulted - self.NOT_ASSUMED
                 self.assertEqual(
-                    {rows[name].provenance_type for name in defaulted}, {"pan_os_default"},
-                    f"{label}: an absent key is the measured default, not local")
+                    {rows[name].provenance_type for name in inferred}, {"assumed_default"},
+                    f"{label}: an absent key is OUR inference here, not local and not a "
+                    f"measured vendor default")
+                self.assertEqual(
+                    {rows[name].provenance_type for name in declined},
+                    {"not_configured"} if declined else set(),
+                    f"{label}: the two keys whose compliant value is 0 infer nothing")
                 for name in written:
                     self.assertEqual(
                         rows[name].provenance_type, "local",
                         f"{label}: {name} is in the payload, so the row is the key's own")
 
     def test_the_stored_numbers_did_not_move(self):
-        """The fix is control flow. Every field reads exactly what the pre-populated dict held -
-        `False` for a flag, `0` for a number - because that is what the loop's declarations say
-        an absent key means."""
+        """Fourteen of the sixteen read exactly what they always did - `False` for a flag, `0`
+        for a number - because 0 is the FINDING value on every one of them, and materialising
+        the finding value is what makes an unknown fire."""
         policy, _ = self._normalize(self.PAYLOADS["no config root"][0])
         self.assertFalse(policy.enabled)
         self.assertFalse(policy.block_username_inclusion)
@@ -11844,10 +11882,44 @@ class PasswordComplexityAbsentNodeProvenanceTests(TestCase):
         for field in ("minimum_length", "minimum_uppercase", "minimum_lowercase",
                       "minimum_numeric", "minimum_special", "new_differs_by_characters",
                       "history_count", "block_repeated_characters", "change_period_block",
-                      "expiration_period", "expiration_warning_period",
-                      "post_expiration_admin_login_count", "post_expiration_grace_period"):
+                      "expiration_period", "expiration_warning_period"):
             with self.subTest(field):
                 self.assertEqual(getattr(policy, field), 0)
+
+    def test_the_two_keys_whose_compliant_value_is_zero_store_nothing(self):
+        """PAN-AUTH-012 and 013 both assert `greater than 0`, so a materialised 0 would be the
+        COMPLIANT answer about a key nobody measured - "we never asked" rendered as "we asked
+        and it was fine". The column holds nothing and the flag beside it fires."""
+        policy, rows = self._normalize(self.PAYLOADS["no config root"][0])
+        self.assertIsNone(policy.post_expiration_admin_login_count)
+        self.assertIsNone(policy.post_expiration_grace_period)
+        self.assertTrue(policy.post_expiration_admin_login_count_unknown)
+        self.assertTrue(policy.post_expiration_grace_period_unknown)
+        for field in self.NOT_ASSUMED:
+            with self.subTest(field):
+                self.assertEqual(rows[field].provenance_type, "not_configured")
+
+    def test_a_key_that_is_present_clears_its_own_flag(self):
+        """The flag reports ABSENCE, so a configured value has to turn it off - otherwise every
+        appliance reads as unread and the control can never pass."""
+        policy, _ = self._normalize({"config": {"mgt-config": {"password-complexity": {
+            "password-change": {"post-expiration-admin-login-count": "2",
+                                "post-expiration-grace-period": "7"}}}}})
+        self.assertEqual(policy.post_expiration_admin_login_count, 2)
+        self.assertEqual(policy.post_expiration_grace_period, 7)
+        self.assertFalse(policy.post_expiration_admin_login_count_unknown)
+        self.assertFalse(policy.post_expiration_grace_period_unknown)
+
+    def test_a_key_present_but_empty_reports_itself_unread(self):
+        """A key PRESENT with no parseable text resolves to the implicit value too - None here -
+        with the KEY's own provenance marker, so `was_absent` answers False while the column
+        holds nothing. The flag is read off the stored value for exactly this shape: saying "we
+        read it and it was configured" over a null is the reassuring answer about a value
+        nobody has."""
+        policy, _ = self._normalize({"config": {"mgt-config": {"password-complexity": {
+            "password-change": {"post-expiration-grace-period": ""}}}}})
+        self.assertIsNone(policy.post_expiration_grace_period)
+        self.assertTrue(policy.post_expiration_grace_period_unknown)
 
     def test_the_row_carries_the_defaulted_value_and_no_key(self):
         """A reader of the row can see what was defaulted without resolving the field, and
@@ -11858,10 +11930,20 @@ class PasswordComplexityAbsentNodeProvenanceTests(TestCase):
                          ("0", ""))
 
     def test_provenance_for_no_longer_answers_none_for_a_tracked_field(self):
-        """The consumer-visible defect. `PasswordComplexityPolicy` declares no `DERIVED_FIELDS`,
-        so all sixteen are tracked, and `None` from `provenance_for` means untracked."""
+        """The consumer-visible defect. All sixteen PAYLOAD-BACKED fields are tracked, and
+        `None` from `provenance_for` means untracked.
+
+        The only `DERIVED_FIELDS` on this model are the two absence flags, which are computed
+        from whether the parse stored anything and have no payload key of their own - so they
+        can never carry a row, and `provenance_for` answers `derived` for them."""
         policy, _ = self._normalize(self.PAYLOADS["no config root"][0])
-        self.assertEqual(PasswordComplexityPolicy.DERIVED_FIELDS, ())
+        self.assertEqual(
+            PasswordComplexityPolicy.DERIVED_FIELDS,
+            ("post_expiration_admin_login_count_unknown",
+             "post_expiration_grace_period_unknown"))
+        self.assertEqual(
+            policy.provenance_for("post_expiration_grace_period_unknown").provenance_type,
+            "derived")
         for field in ("enabled", "minimum_length", "post_expiration_grace_period"):
             with self.subTest(field):
                 self.assertIsNotNone(policy.provenance_for(field))
@@ -13353,3 +13435,184 @@ class PanoramaRegistrationNormalizationTests(_HaPanoramaBase):
         self.assertEqual(_normalize_pano(self.appliance), {"panorama_registrations": 0})
         self.assertFalse(_PanoramaRegistration.objects.filter(
             appliance=self.appliance).exists())
+
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    AdminRolePosture as _AdminRolePosture)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.admin_role_posture import (  # noqa: E402
+    normalize_admin_role_posture as _normalize_role_posture)
+
+
+class AdminRolePostureNormalizationTests(TestCase):
+    """PAN-AUTH-023's subject - a verdict over a collection whose COMMONEST state is absent.
+
+    Measured on the lab 2026-10-29, reading all four appliances: `shared/admin-role` is absent
+    on one of them, carries one entry on another and two on the two HA peers, and on every
+    appliance that has a role exactly one role is assigned to exactly one account. So the
+    estate exercises the counting but never the predefined-name case the intersection exists
+    for, which is why that case has a test of its own here.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.arp")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-arp",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-ARP", hostname="fw-arp")
+
+    def _normalize(self, shared=None, users=()):
+        config = {"devices": {"entry": [{"@name": "localhost.localdomain"}]}}
+        if shared is not None:
+            config["shared"] = shared
+        if users:
+            config["mgt-config"] = {"users": {"entry": list(users)}}
+        Snapshot.objects.filter(appliance=self.appliance).delete()
+        _AdminRolePosture.objects.filter(appliance=self.appliance).delete()
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": config})
+        _normalize_role_posture(self.appliance)
+        return _AdminRolePosture.objects.get(appliance=self.appliance)
+
+    def _custom(self, name, profile):
+        return {"@name": name,
+                "permissions": {"role-based": {"custom": {"profile": profile}}}}
+
+    def test_an_absent_collection_still_writes_a_row_holding_the_finding(self):
+        """The failing state has NO ENTRY to hang a row on, which is why the row is the
+        appliance. Returning without writing would leave the appliance unreported, and this
+        control's commonest true answer is "there is no scoped role here at all"."""
+        row = self._normalize()
+        self.assertEqual((row.scoped_role_count, row.scoped_roles_in_use_count), (0, 0))
+
+    def test_a_template_pushed_empty_node_is_not_a_role(self):
+        """`{"admin-role": None}` is what a template push of an empty node leaves behind."""
+        row = self._normalize({"admin-role": None})
+        self.assertEqual((row.scoped_role_count, row.scoped_roles_in_use_count), (0, 0))
+
+    def test_roles_are_counted_and_only_the_assigned_ones_are_in_use(self):
+        row = self._normalize(
+            {"admin-role": {"entry": [{"@name": "r-one"}, {"@name": "r-two"}]}},
+            users=[self._custom("a", "r-one"), {"@name": "b"}])
+        self.assertEqual((row.scoped_role_count, row.scoped_roles_in_use_count), (2, 1))
+
+    def test_two_accounts_on_one_role_count_the_role_once(self):
+        """The column counts ROLES IN USE, not assignments - zero is the finding and two
+        accounts on one role is still one role."""
+        row = self._normalize(
+            {"admin-role": {"entry": [{"@name": "r-one"}]}},
+            users=[self._custom("a", "r-one"), self._custom("b", "r-one")])
+        self.assertEqual((row.scoped_role_count, row.scoped_roles_in_use_count), (1, 1))
+
+    def test_a_predefined_role_name_is_not_a_scoped_role_in_use(self):
+        """THE CASE THE LAB CANNOT SHOW. `custom/profile` reaches a PREDEFINED role too -
+        completing that leaf on a device with no custom roles returned `auditadmin`,
+        `securityadmin` and `cryptoadmin` - and a predefined role is not one anybody here
+        scoped. Counting the reference rather than the intersection would report a scoped role
+        in use on an appliance that defines none."""
+        row = self._normalize(
+            {"admin-role": {"entry": [{"@name": "r-one"}]}},
+            users=[self._custom("a", "auditadmin")])
+        self.assertEqual((row.scoped_role_count, row.scoped_roles_in_use_count), (1, 0))
+
+    def test_one_row_per_appliance_and_re_normalizing_updates_it(self):
+        self._normalize({"admin-role": {"entry": [{"@name": "r-one"}]}})
+        row = self._normalize({"admin-role": {"entry": [{"@name": "r-one"},
+                                                        {"@name": "r-two"}]}})
+        self.assertEqual(_AdminRolePosture.objects.filter(appliance=self.appliance).count(), 1)
+        self.assertEqual(row.scoped_role_count, 2)
+
+    def test_no_merged_snapshot_writes_nothing(self):
+        self.assertEqual(_normalize_role_posture(self.appliance),
+                         {"admin_role_postures": 0})
+        self.assertFalse(
+            _AdminRolePosture.objects.filter(appliance=self.appliance).exists())
+
+    def test_every_column_is_derived_and_none_carries_a_provenance_row(self):
+        """A derived column may never have a stored row, and both of this model's columns are
+        counts. The consequence is in the model docstring: nothing here can say whether the
+        roles it counted are the appliance's own or a template's."""
+        row = self._normalize({"admin-role": {"entry": [{"@name": "r-one"}]}})
+        self.assertFalse(FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_AdminRolePosture),
+            object_id=row.pk).exists())
+        self.assertEqual(
+            row.provenance_for("scoped_role_count").provenance_type, "derived")
+
+
+class AdminUserCredentialAndRosterColumnTests(TestCase):
+    """PAN-AUTH-019's second half as its own column, and PAN-AUTH-021/022's roster caveat.
+
+    `centrally_authenticated` is a verdict over BOTH of stage 3's halves and cannot report
+    which half failed. The remediations differ - bind an identity service, against delete a
+    stored credential - so the credential half needs a column a query can reach on its own.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.cred")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-cred",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-CRED", hostname="fw-cred")
+
+    def _normalize(self, users):
+        Snapshot.objects.filter(appliance=self.appliance).delete()
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {
+                "devices": {"entry": [{"@name": "localhost.localdomain"}]},
+                "mgt-config": {"users": {"entry": list(users)}}}})
+        _normalize_admins(self.appliance)
+        return {u.name: u for u in _AdminUser.objects.filter(appliance=self.appliance)}
+
+    def test_either_credential_alone_is_a_credential(self):
+        """A DISJUNCTION, and the lab has an account of each kind. `phash` arrives as eight
+        asterisks in every view, so only its presence is ever readable; the SSH key is not
+        masked, and a later stage enumerating only the password would pass a key-only
+        superuser."""
+        rows = self._normalize([
+            {"@name": "pwd-only", "phash": "$1$abc"},
+            {"@name": "key-only", "public-key": "c3NoLXJzYQ=="},
+            {"@name": "both", "phash": "$1$abc", "public-key": "c3NoLXJzYQ=="},
+            {"@name": "neither"},
+        ])
+        self.assertTrue(rows["pwd-only"].has_local_credential)
+        self.assertTrue(rows["key-only"].has_local_credential)
+        self.assertTrue(rows["both"].has_local_credential)
+        self.assertFalse(rows["neither"].has_local_credential)
+
+    def test_the_masked_hash_is_still_a_credential(self):
+        """What the device actually sends: `phash` comes back as the literal eight asterisks in
+        every view on every appliance, so a value comparison has nothing to compare and a
+        presence test is all this column can ever be."""
+        rows = self._normalize([{"@name": "masked", "phash": "********"}])
+        self.assertTrue(rows["masked"].has_local_credential)
+        self.assertTrue(rows["masked"].has_password)
+
+    def test_every_roster_declares_itself_a_floor(self):
+        """Nothing in this package issues `<show><admins><all/></admins></show>`, so an
+        administrator the identity service defines is not in `mgt-config/users` and is not
+        counted. The column does not recover those accounts; it stops the superuser total
+        reading as a census."""
+        rows = self._normalize([
+            {"@name": "su", "permissions": {"role-based": {"superuser": "yes"}}},
+            {"@name": "other"},
+        ])
+        self.assertEqual(rows["su"].superuser_cohort_size, 1)
+        for row in rows.values():
+            self.assertTrue(row.roster_is_configuration_only)
+
+    def test_both_columns_are_declared_derived(self):
+        self.assertIn("has_local_credential", _AdminUser.DERIVED_FIELDS)
+        self.assertIn("roster_is_configuration_only", _AdminUser.DERIVED_FIELDS)
+        rows = self._normalize([{"@name": "a", "phash": "$1$abc"}])
+        self.assertEqual(
+            rows["a"].provenance_for("has_local_credential").provenance_type, "derived")

@@ -49,6 +49,29 @@ RENAMED = {
 }
 
 
+#: value column -> the companion boolean that reports it holding nothing. Only the two keys
+#: whose COMPLIANT value is 0 have one: on the other eleven the stored 0 is itself the finding,
+#: so there is nothing a second column would add.
+ABSENCE_FLAGS = {
+    "post_expiration_admin_login_count": "post_expiration_admin_login_count_unknown",
+    "post_expiration_grace_period": "post_expiration_grace_period_unknown",
+}
+
+
+def _absence_flags(renamed: dict[str, object]) -> dict[str, bool]:
+    """True where the parse stored NOTHING for the value column beside it.
+
+    READ OFF THE STORED VALUE AND NOT OFF `was_absent`, deliberately, and this is wider than
+    "the key was absent from the payload" by exactly one shape: a key PRESENT but carrying no
+    parseable text. `parse_integer_field` returns the implicit value for that too - None here -
+    with the KEY's own provenance marker, so `was_absent` answers False while the column holds
+    nothing. A flag read that way would say "we read it and it was configured" over a null,
+    which is the reassuring answer about a value nobody has. Asking whether anything was stored
+    covers both, and both are the firing side.
+    """
+    return {flag: renamed.get(field) is None for field, flag in ABSENCE_FLAGS.items()}
+
+
 def normalize_password_complexity(appliance: Appliance) -> dict[str, int]:
     snapshot = latest_merged_snapshot(appliance)
     if snapshot is None:
@@ -56,6 +79,7 @@ def normalize_password_complexity(appliance: Appliance) -> dict[str, int]:
 
     values, provenance = password_complexity_from_snapshot(snapshot)
     renamed = {RENAMED[k]: v for k, v in values.items()}
+    renamed.update(_absence_flags(renamed))
 
     content_type = ContentType.objects.get_for_model(PasswordComplexityPolicy)
     with transaction.atomic():
