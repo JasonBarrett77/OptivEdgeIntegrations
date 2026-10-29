@@ -263,7 +263,11 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
         prenat = prenat if isinstance(prenat, dict) else {}
 
         def flag(node: Any) -> bool:
-            """These read OFF when absent - the claim, and what is behind it, below."""
+            """These read OFF when absent - the claim, and what is behind it, below.
+
+            SEVEN LEAVES SHARE THIS CLOSURE and only `enable-user-identification` has been
+            measured, so it reads its own declaration below and the other six keep this one.
+            """
             value, _raw_key, _raw_prov = parse_yes_no_field(
                 node,
                 implicit=Implicit.assumed(
@@ -273,7 +277,31 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
                     "reads an unmarked zone as not identifying users, the narrower claim"))
             return value
 
-        enable_user_identification = flag(entry.get("enable-user-identification"))
+        # PAN-UID-001's leaf, and the ONE of the seven that is now measured rather than inferred.
+        # The declaration is separated from `flag` above so that promoting it does not promote its
+        # six neighbours, three of which are the prenat flags, one the Device-ID twin and one
+        # net-inspection - none of them measured.
+        #
+        # THIS CHANGES NO STORED VALUE AND NO STORED ROW, and that is worth saying because the
+        # stage 5 record that asked for it expected otherwise: `Zone` is declared
+        # `class Zone(SyncTrackedModel)` and is NOT a `ProvenancedMixin`, so this module writes no
+        # `FieldProvenance` row at all and the `Implicit` travels out of `parse_yes_no_field` and
+        # is discarded. What moves is the CLAIM: the citation now names a measurement a reader can
+        # go and disagree with, instead of naming this module's own prose. If Zone ever gains the
+        # mixin, this leaf's row types as `pan_os_default` and its six neighbours as
+        # `assumed_default`, which is the distinction this split exists to keep available.
+        enable_user_identification, _uid_raw_key, _uid_raw_prov = parse_yes_no_field(
+            entry.get("enable-user-identification"),
+            implicit=Implicit.measured(
+                False,
+                "stage4-user-id.json, object security-zone, field enable-user-identification: "
+                "implicit 'no', measured on serial 691665AC334B458 (PA-VM 11.2.5) 2026-10-26. A "
+                "zone committed carrying nothing but its name renders the User-ID ENABLED "
+                "checkbox UNTICKED in Network > Zones, read as a CSS class because innerText is "
+                "empty for a ticked and an unticked box alike; the positive control was paid in "
+                "BOTH directions (written yes and committed, job 250, box TICKED; deleted and "
+                "committed, job 254, UNTICKED again), over a natural experiment of 50 zones "
+                "across four appliances and 20 vsys, not one of which stores the key"))
         prenat_values = {name: flag(prenat.get(element)) for name, element in PRENAT_FLAGS.items()}
         # `enable-packet-buffer-protection`, NOT `packet-buffer-protection` - PAN-OS
         # rejects the latter outright ("packet-buffer-protection unexpected here"), so the

@@ -9560,7 +9560,11 @@ class ImplicitDeclarationTests(TestCase):
         "saas_security.py": 1,
         "security_rules.py": 1,       # rule-type absent -> universal; see RULE_TYPE_IMPLICIT
         "server_profiles.py": 1,      # admin-use-only
-        "zones.py": 1,                # user-identification and prenat flags
+        # The four prenat flags, net-inspection and the Device-ID twin - SEVEN leaves shared one
+        # closure and `enable-user-identification` was promoted out of it on 2026-10-29, with its
+        # own `Implicit.measured` beside it. The count is unchanged because the remaining six
+        # still share the one `Implicit.assumed`; what changed is which leaves it speaks for.
+        "zones.py": 1,
     }
 
     def test_every_assumed_default_is_accounted_for(self):
@@ -16894,3 +16898,509 @@ class PlatformLifecycleDerivedFieldTests(SimpleTestCase):
         field = Appliance._meta.get_field("device_certificate_status")
         self.assertFalse(field.null)
         self.assertTrue(field.blank)
+
+
+# ---------------------------------------------------------------------------------------------
+# user-id - PAN-UID-002 to PAN-UID-006
+#
+# EVERY PAYLOAD BELOW IS A LAB SHAPE, read off serial 013201001475 and the two PA-VMs on
+# 2026-10-29 through Panorama's `target=` proxy with `type=config&action=get` at each subject's
+# own xpath, and cross-checked against the same appliances' `show config merged`. Nothing here is
+# a shape invented to make a column pass. The cases the LAB DOES NOT HOLD are in
+# `UserIdBranchesTheLabCannotShowTests`, named as such, because a branch proved only against a
+# hand-built payload is proved against this module's own understanding of the device.
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    UserIdCollectorSettings as _UidSettings,
+    UserIdDiscoveryBound as _UidBound,
+    UserIdMonitoredServer as _UidServer,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (  # noqa: E402,E501
+    Implicit as _Implicit,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.user_id import (  # noqa: E402,E501
+    collector_settings_values as _uid_settings_values,
+    discovery_bound_verdict as _uid_verdict,
+    monitored_servers as _uid_servers,
+    normalize_user_id as _uid_normalize,
+    reaches_public_space as _uid_public,
+)
+
+
+class UserIdPureReadingTests(SimpleTestCase):
+    """The three readers, against the states the lab holds and against the RFC boundary."""
+
+    def test_an_absent_settings_node_yields_the_four_measured_implicits(self):
+        """THE NORMAL CASE IN THIS ESTATE: `setting` is absent on all four lab appliances and all
+        twenty vsys, so these six values ARE the content of every row the estate would store."""
+        values, provenance = _uid_settings_values({"@name": "vsys8"})
+
+        self.assertEqual(values, {
+            "enable_probing": False, "enable_session": False,
+            "enable_mapping_timeout": True, "ip_user_mapping_timeout": 45,
+            "wmi_account": "", "syslog_service_profile": ""})
+        # Each absent key still records a row - four `pan_os_default` and two `not_configured` -
+        # because a MISSING row means only that nothing tracks the field.
+        self.assertEqual(len(provenance), 6)
+        self.assertTrue(all(isinstance(raw_key, _Implicit) for _, raw_key, _ in provenance))
+
+    def test_a_collector_container_with_no_setting_child_is_not_a_settings_node(self):
+        """pan-fw-111/vsys1 verbatim: a committed firewall-local `user-id-collector` holding two
+        empty children and NO `setting`. The parent's presence says nothing."""
+        values, _ = _uid_settings_values({"user-id-collector": {
+            "server-monitor": None, "include-exclude-network": None}})
+
+        self.assertEqual(values["ip_user_mapping_timeout"], 45)
+        self.assertTrue(values["enable_mapping_timeout"])
+
+    def test_the_mapping_timeout_implicit_points_the_other_way_from_its_neighbours(self):
+        """The one value in this domain a reader is most likely to invert: expiry ON is good,
+        where probing ON and session-reading ON are bad."""
+        values, _ = _uid_settings_values({})
+
+        self.assertTrue(values["enable_mapping_timeout"])
+        self.assertFalse(values["enable_probing"])
+        self.assertFalse(values["enable_session"])
+
+    def test_a_disabled_include_entry_is_not_in_force(self):
+        """fw-core-tpa-a/vsys5 verbatim. The `disabled` key is NEGATED with implicit `no`, so an
+        entry carrying no key is in force - and one carrying `yes` bounds nothing while looking
+        configured in the grid."""
+        verdict = _uid_verdict({"user-id-collector": {"include-exclude-network": {"entry": [
+            {"@name": "oep-uid6-n5", "discovery": "include",
+             "network-address": "10.50.0.0/16", "disabled": "yes"}]}}})
+
+        self.assertEqual(verdict["list_shape"], _UidBound.SHAPE_NO_ENTRIES)
+        self.assertEqual(verdict["include_entry_count"], 0)
+        self.assertEqual(verdict["include_networks"], [])
+
+    def test_an_include_and_an_exclude_in_force_reads_as_include_present(self):
+        """fw-core-tpa-a/vsys1 verbatim: a /16 include narrowed by a /24 exclude."""
+        verdict = _uid_verdict({"user-id-collector": {"include-exclude-network": {"entry": [
+            {"@name": "oep-uid6-n1", "discovery": "include",
+             "network-address": "10.10.0.0/16"},
+            {"@name": "oep-uid6-n2", "discovery": "exclude",
+             "network-address": "10.10.5.0/24"}]}}})
+
+        self.assertEqual(verdict["list_shape"], _UidBound.SHAPE_INCLUDE_PRESENT)
+        self.assertEqual((verdict["include_entry_count"], verdict["exclude_entry_count"]), (1, 1))
+        self.assertEqual(verdict["include_networks"], ["10.10.0.0/16"])
+
+    def test_excludes_with_no_include_is_its_own_verdict(self):
+        """fw-core-tpa-a/vsys2 verbatim. The vendor says twice that an exclude-only list excludes
+        EVERY subnetwork and not only the ones named, so user mapping stops - a functional fault
+        rather than an exposure, which is why it is not folded into `no_entries`."""
+        verdict = _uid_verdict({"user-id-collector": {"include-exclude-network": {"entry": [
+            {"@name": "oep-uid6-n3", "discovery": "exclude",
+             "network-address": "10.20.0.0/16"}]}}})
+
+        self.assertEqual(verdict["list_shape"], _UidBound.SHAPE_EXCLUDE_ONLY)
+        self.assertEqual((verdict["include_entry_count"], verdict["exclude_entry_count"]), (0, 1))
+
+    def test_an_include_over_public_space_outranks_merely_having_an_include(self):
+        """fw-core-tpa-a/vsys4 verbatim. The precedence is what makes this one answer rather than
+        four tests, and reversing it is the mutation this test exists to catch."""
+        verdict = _uid_verdict({"user-id-collector": {"include-exclude-network": {"entry": [
+            {"@name": "oep-uid6-n4", "discovery": "include",
+             "network-address": "203.0.113.0/24"}]}}})
+
+        self.assertEqual(verdict["list_shape"], _UidBound.SHAPE_INCLUDE_COVERS_PUBLIC)
+
+    def test_one_public_include_beside_a_private_one_decides_the_row(self):
+        verdict = _uid_verdict({"user-id-collector": {"include-exclude-network": {"entry": [
+            {"@name": "a", "discovery": "include", "network-address": "10.0.0.0/8"},
+            {"@name": "b", "discovery": "include", "network-address": "203.0.113.0/24"}]}}})
+
+        self.assertEqual(verdict["list_shape"], _UidBound.SHAPE_INCLUDE_COVERS_PUBLIC)
+        self.assertEqual(verdict["include_entry_count"], 2)
+
+    def test_the_bounded_set_is_rfc_1918_and_rfc_3927_and_nothing_else(self):
+        """DELIBERATELY NOT `ipaddress.is_private`, which is wider and has moved between Python
+        releases - a verdict that moved with the interpreter would be a different control on a
+        different machine. The cost is that 100.64/10 and the IPv6 unique-local range answer TRUE
+        and over-fire, which is stage 5's literal reading and is reported rather than widened."""
+        for cidr in ("10.0.0.0/8", "10.1.2.3", "172.16.0.0/12", "192.168.1.0/24",
+                     "169.254.0.0/16"):
+            self.assertFalse(_uid_public(cidr), cidr)
+        for cidr in ("172.15.0.0/16", "172.32.0.0/16", "203.0.113.0/24", "8.8.8.8",
+                     "0.0.0.0/0", "100.64.0.0/10", "fc00::/7"):
+            self.assertTrue(_uid_public(cidr), cidr)
+
+    def test_an_unreadable_or_empty_range_reaches_public_space(self):
+        """The firing side. A range nobody can parse is a range nobody has established as
+        bounded, and reporting the strongest verdict in the set on the strength of a parse
+        failure is the error that cannot be checked in a minute."""
+        self.assertTrue(_uid_public(""))
+        self.assertTrue(_uid_public("rubbish"))
+
+    def test_the_kind_is_which_child_is_present_and_not_a_value(self):
+        """fw-core-tpa-a/vsys1 and /vsys4 verbatim: three syslog senders, one AD server carrying
+        a host and no transport selector, one Exchange server."""
+        rows = _uid_servers({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "oep-uid6-s1", "syslog": {"address": "192.0.2.11",
+                                                "connection-type": "udp"}},
+            {"@name": "oep-uid6-s2", "syslog": {"address": "192.0.2.12",
+                                                "connection-type": "ssl"}},
+            {"@name": "oep-uid6-s4", "active-directory": {"host": "192.0.2.21"}},
+            {"@name": "oep-uid6-s5", "exchange": {"host": "192.0.2.22"}}]}}},
+            tls_profile_bound=False)
+        by_name = {values["name"]: values for values, _, _ in rows}
+
+        self.assertEqual(by_name["oep-uid6-s1"]["monitored_server_kind"], "syslog")
+        self.assertEqual(by_name["oep-uid6-s1"]["connection_type"], "udp")
+        self.assertEqual(by_name["oep-uid6-s2"]["connection_type"], "ssl")
+        self.assertEqual(by_name["oep-uid6-s4"]["monitored_server_kind"], "active-directory")
+        self.assertEqual(by_name["oep-uid6-s4"]["connection_type"], "")
+        self.assertEqual(by_name["oep-uid6-s5"]["monitored_server_kind"], "exchange")
+
+    def test_the_transport_is_read_off_the_branch_and_not_off_the_entry(self):
+        """The two nodes are a level apart. Reading `connection-type` off the entry answers the
+        empty string for every sender in the estate - silently, and `` fires, so a reader would
+        see a page of findings on senders that are correctly configured."""
+        rows = _uid_servers({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "s", "connection-type": "ssl", "syslog": {"connection-type": "udp"}}]}}},
+            tls_profile_bound=False)
+
+        self.assertEqual(rows[0][0]["connection_type"], "udp")
+
+    def test_a_disabled_monitored_server_still_gets_a_row(self):
+        """oep-uid6-s3 verbatim: a udp sender carrying `disabled: yes`, so the grid's Enabled
+        column reads unticked. NO COLUMN STORES THAT, because stage 5 declares none - so the row
+        exists and nothing downstream can tell it from an in-force sender. Asserted rather than
+        quietly fixed: adding an undeclared column here would be this stage deciding what the
+        finding says."""
+        rows = _uid_servers({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "oep-uid6-s3", "disabled": "yes",
+             "syslog": {"connection-type": "udp"}}]}}}, tls_profile_bound=False)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0]["connection_type"], "udp")
+
+    def test_a_nameless_entry_is_dropped_rather_than_stored_with_an_empty_subject(self):
+        rows = _uid_servers({"user-id-collector": {"server-monitor": {"entry": [
+            {"syslog": {"connection-type": "udp"}}]}}}, tls_profile_bound=False)
+
+        self.assertEqual(rows, [])
+
+    def test_a_present_but_unparseable_timeout_falls_back_and_keeps_the_keys_provenance(self):
+        """The value falls back to the measured implicit and the provenance stays the KEY's: the
+        device does hold something here, and it is not a default."""
+        values, provenance = _uid_settings_values({"user-id-collector": {"setting": {
+            "ip-user-mapping-timeout": "not-a-number"}}})
+        raw_key = [k for name, k, _ in provenance if name == "ip_user_mapping_timeout"][0]
+
+        self.assertEqual(values["ip_user_mapping_timeout"], 45)
+        self.assertIsNone(raw_key)
+
+    def test_a_template_marked_leaf_is_read_through_its_marker(self):
+        """The pushed-VALUE case. Stage 4 measured no pushed content under `user-id-collector` on
+        any lab appliance, so this is the one part of the provenance story the estate cannot
+        show - and a reader that took `{'#text': ..., '@ptpl': ...}` for a string would store
+        the dict's repr."""
+        values, provenance = _uid_settings_values({"user-id-collector": {"setting": {
+            "enable-probing": {"#text": "yes", "@ptpl": "a_template"}}}})
+        raw_key, raw_value = [(k, v) for name, k, v in provenance
+                              if name == "enable_probing"][0]
+
+        self.assertTrue(values["enable_probing"])
+        self.assertEqual((raw_key, raw_value), ("@ptpl", "a_template"))
+
+
+class UserIdNormalizationTests(TestCase):
+    """The rows, their provenance, and what a vsys holding nothing stores."""
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.uid")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-uid",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-UID", hostname="fw-uid", software_version="11.1.13-h3")
+        self.point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            vsys_name="vsys1", vsys_display_name="vsys1")
+
+    def _merged(self, vsys=None):
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "vsys": {"entry": [dict({"@name": "vsys1"}, **(vsys or {}))]}}]}}})
+
+    def test_a_vsys_with_no_collector_node_still_gets_both_singleton_rows(self):
+        """The whole reason those two models exist. All twenty lab vsys are in this state, and
+        the agent-setup panel renders values for every one of them - so a vsys with no node is
+        not a vsys with no settings, it is a vsys running the vendor's."""
+        self._merged()
+
+        counts = _uid_normalize(self.point)
+
+        self.assertEqual(counts["user_id_collector_settings"], 1)
+        self.assertEqual(counts["user_id_discovery_bounds"], 1)
+        self.assertEqual(counts["user_id_monitored_servers"], 0)
+        settings = _UidSettings.objects.get(enforcement_point=self.point)
+        self.assertEqual(settings.ip_user_mapping_timeout, 45)
+        self.assertTrue(settings.enable_mapping_timeout)
+        bound = _UidBound.objects.get(enforcement_point=self.point)
+        self.assertEqual(bound.list_shape, _UidBound.SHAPE_NO_ENTRIES)
+
+    def test_an_absent_key_records_a_provenance_row_saying_which_kind_of_absence(self):
+        """Four `pan_os_default` and two `not_configured`. A MISSING row would say "nothing
+        tracks this field" about a value PAN-OS supplied, which is the correction normalization
+        made across this package on 2026-09-21."""
+        self._merged()
+        _uid_normalize(self.point)
+        settings = _UidSettings.objects.get(enforcement_point=self.point)
+
+        types = {name: settings.provenance_for(name).provenance_type
+                 for name in ("enable_probing", "enable_session", "enable_mapping_timeout",
+                              "ip_user_mapping_timeout", "wmi_account",
+                              "syslog_service_profile")}
+
+        self.assertEqual(types["enable_probing"], "pan_os_default")
+        self.assertEqual(types["ip_user_mapping_timeout"], "pan_os_default")
+        self.assertEqual(types["wmi_account"], "not_configured")
+        self.assertEqual(types["syslog_service_profile"], "not_configured")
+        self.assertEqual(
+            settings.provenance_for("ip_user_mapping_timeout").raw_value, "45")
+
+    def test_a_locally_set_key_records_local_and_not_a_default(self):
+        """fw-core-tpa-a/vsys1 verbatim: `enable-probing: yes` and no other leaf."""
+        self._merged({"user-id-collector": {"setting": {"enable-probing": "yes"}}})
+        _uid_normalize(self.point)
+        settings = _UidSettings.objects.get(enforcement_point=self.point)
+
+        self.assertTrue(settings.enable_probing)
+        self.assertEqual(settings.provenance_for("enable_probing").provenance_type, "local")
+        # The sibling it did NOT move still reads as the vendor's.
+        self.assertEqual(
+            settings.provenance_for("enable_session").provenance_type, "pan_os_default")
+
+    def test_the_verdict_row_carries_no_provenance_row_at_all(self):
+        """Every column is in `DERIVED_FIELDS`, so `provenance_for` answers `derived` without a
+        stored row - and `DerivedFieldDeclarationTests` fails if one exists."""
+        self._merged()
+        _uid_normalize(self.point)
+        bound = _UidBound.objects.get(enforcement_point=self.point)
+
+        self.assertEqual(bound.field_provenance.count(), 0)
+        self.assertEqual(bound.provenance_for("list_shape").provenance_type, "derived")
+
+    def test_a_monitored_server_gets_an_entry_row_and_a_transport_row(self):
+        self._merged({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "s1", "syslog": {"connection-type": "udp"}},
+            {"@name": "s2", "active-directory": {"host": "192.0.2.21"}}]}}})
+        _uid_normalize(self.point)
+
+        syslog = _UidServer.objects.get(enforcement_point=self.point, name="s1")
+        directory = _UidServer.objects.get(enforcement_point=self.point, name="s2")
+
+        self.assertEqual(syslog.provenance_for("__entry__").provenance_type, "local")
+        self.assertEqual(syslog.provenance_for("connection_type").provenance_type, "local")
+        # The other three branches carry no such leaf, so the field is NOT TRACKED on that row
+        # rather than defaulted - which is the one thing a missing row still means.
+        self.assertIsNone(directory.provenance_for("connection_type"))
+
+    def test_the_tls_binding_is_resolved_from_the_collector_in_the_same_pass(self):
+        """The one cross-subject resolution in this domain, two rows apart. Resolved from the
+        payload this call parses rather than from the row it is about to write, so the pass
+        carries no ordering obligation on its caller."""
+        self._merged({"user-id-collector": {
+            "setting": {"syslog-service-profile": "tls-prof"},
+            "server-monitor": {"entry": [{"@name": "s1", "syslog": {
+                "connection-type": "ssl"}}]}}})
+        _uid_normalize(self.point)
+
+        self.assertTrue(_UidServer.objects.get(enforcement_point=self.point)
+                        .tls_service_profile_bound)
+
+    def test_a_renormalize_replaces_rows_and_their_provenance_rather_than_adding(self):
+        """A leftover row reports a host somebody has already removed - a finding against a fixed
+        estate, with nothing noticing. The provenance sweep has to run FIRST and be scoped by
+        object id: `FieldProvenance` is a generic relation with no cascade, so deleting the
+        subject rows first orphans their provenance against a primary key the database reuses."""
+        self._merged({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "gone", "syslog": {"connection-type": "udp"}}]}}})
+        _uid_normalize(self.point)
+        self.assertEqual(_UidServer.objects.count(), 1)
+
+        self._merged()
+        _uid_normalize(self.point)
+
+        self.assertEqual(_UidServer.objects.count(), 0)
+        self.assertEqual(_UidSettings.objects.count(), 1)
+        self.assertEqual(_UidBound.objects.count(), 1)
+        content_type = ContentType.objects.get_for_model(_UidServer)
+        self.assertEqual(
+            FieldProvenance.objects.filter(content_type=content_type).count(), 0)
+
+    def test_a_missing_merged_snapshot_raises_rather_than_storing_a_clean_vsys(self):
+        """The point-level failure the platform layering says still raises: there is nothing to
+        iterate, and a silent empty result would report every vsys of an uncollected appliance as
+        one whose collector settings are the vendor's."""
+        with self.assertRaises(ValueError):
+            _uid_normalize(self.point)
+
+
+class UserIdBranchesTheLabCannotShowTests(SimpleTestCase):
+    """The states no lab appliance holds, asserted against the readers instead of the device.
+
+    NOT A DEVICE PROOF, and the distinction is the point. Stage 6 left no vsys with an SSL/TLS
+    service profile bound to its syslog listener, no eDirectory monitored server, and no
+    committed syslog sender with `connection-type` absent - and a stage 7 run may not build a lab
+    subject stage 6 chose not to leave. So each of these proves the COMPUTATION and not the
+    reading, and the stage 7 artifact names them as unproved on a device.
+    """
+
+    def test_an_edirectory_server_is_the_fourth_kind_and_nothing_in_the_lab_holds_one(self):
+        rows = _uid_servers({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "edir", "e-directory": {"host": "192.0.2.90"}}]}}},
+            tls_profile_bound=False)
+
+        self.assertEqual(rows[0][0]["monitored_server_kind"], "e-directory")
+        self.assertEqual(rows[0][0]["connection_type"], "")
+
+    def test_an_entry_with_no_type_branch_stores_a_blank_kind_and_SUPPRESSES(self):
+        """The one direction in this domain that cannot be arranged away: a row holding `` matches
+        no kind clause, so every control on this model reports NOTHING for it. No value would be
+        safer - any value would put the row into some other kind's control - so the mitigation is
+        ordering. On a committed device it should be impossible: the useridd daemon refuses such
+        an entry at commit phase 1 with `Error: server <name> type is unknown`."""
+        rows = _uid_servers({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "orphan"}]}}}, tls_profile_bound=False)
+
+        self.assertEqual(rows[0][0]["monitored_server_kind"], "")
+
+    def test_two_kinds_sharing_one_name_stay_two_rows(self):
+        """Why the kind is in the uniqueness constraint. Without it the survivor is whichever was
+        written last, and the name is the string the grid shows and the string the daemon's error
+        quotes back - so the collision is not hypothetical."""
+        rows = _uid_servers({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "same", "syslog": {"connection-type": "udp"}},
+            {"@name": "same", "exchange": {"host": "192.0.2.80"}}]}}},
+            tls_profile_bound=False)
+
+        self.assertEqual(sorted(r[0]["monitored_server_kind"] for r in rows),
+                         ["exchange", "syslog"])
+
+    def test_a_committed_syslog_sender_with_no_transport_key_reads_as_empty_and_fires(self):
+        """Stage 4 could not establish whether this state is reachable - its own subject on this
+        object was never committable - so the clause is written as `is not ssl` rather than
+        `eq udp`, which makes it fire whether or not the state exists."""
+        rows = _uid_servers({"user-id-collector": {"server-monitor": {"entry": [
+            {"@name": "s", "syslog": {"address": "192.0.2.99"}}]}}}, tls_profile_bound=False)
+
+        self.assertEqual(rows[0][0]["connection_type"], "")
+        self.assertEqual(rows[0][0]["monitored_server_kind"], "syslog")
+
+    def test_absent_empty_and_no_collector_are_collapsed_into_one_verdict(self):
+        """THE ONE BRANCH THIS LAB CANNOT DISCRIMINATE, and it was collapsed on purpose: an empty
+        list bounds nothing, exactly as no list does. A mutation replacing `entry_container` with
+        a truthiness test is the one mutation the device readback did NOT catch, because the only
+        lab appliance holding the empty-committed shape gives the same answer either way. The
+        failure to avoid is the opposite one - a query testing node PRESENCE rather than an
+        in-force include entry answers `bounded` on an appliance that is not."""
+        for payload in ({"user-id-collector": {}},
+                        {"user-id-collector": {"include-exclude-network": None}},
+                        {}):
+            self.assertEqual(_uid_verdict(payload)["list_shape"], _UidBound.SHAPE_NO_ENTRIES)
+
+    def test_an_include_entry_with_no_range_bounds_nothing_so_it_fires(self):
+        verdict = _uid_verdict({"user-id-collector": {"include-exclude-network": {"entry": [
+            {"@name": "n", "discovery": "include"}]}}})
+
+        self.assertEqual(verdict["list_shape"], _UidBound.SHAPE_INCLUDE_COVERS_PUBLIC)
+        self.assertEqual(verdict["include_networks"], [""])
+
+    def test_a_wmi_account_longer_than_the_column_is_sliced_rather_than_refused(self):
+        """255 is this store's number and not the device's - no `maxLength` was measured for any
+        field of this domain - so the slice is where a value longer than the proposal lands."""
+        values, _ = _uid_settings_values({"user-id-collector": {"setting": {
+            "wmi-account": "OEPLAB\\" + "u" * 300}}})
+
+        self.assertEqual(len(values["wmi_account"]), 255)
+
+
+class UserIdModelShapeTests(SimpleTestCase):
+    """The nullability and the declarations the controls rest on."""
+
+    def test_every_settings_column_is_non_nullable(self):
+        """LOAD-BEARING rather than tidy. The clause grammar has no is-null operator: a `> 60`
+        over a NULL is silent on every compiler in this consumer, and a negated equality against
+        one matches neither value - so a nullable spelling of any of these would invert its
+        control in silence, with nothing erroring at any layer."""
+        for name in ("enable_probing", "enable_session", "enable_mapping_timeout",
+                     "ip_user_mapping_timeout", "wmi_account", "syslog_service_profile"):
+            self.assertFalse(_UidSettings._meta.get_field(name).null, name)
+
+    def test_the_two_text_columns_are_blank_and_not_null(self):
+        for model, name in ((_UidSettings, "wmi_account"),
+                            (_UidSettings, "syslog_service_profile"),
+                            (_UidServer, "connection_type"),
+                            (_UidServer, "monitored_server_kind"),
+                            (_UidBound, "list_shape")):
+            field = model._meta.get_field(name)
+            self.assertFalse(field.null, f"{model.__name__}.{name}")
+            self.assertTrue(field.blank, f"{model.__name__}.{name}")
+
+    def test_the_defaults_are_the_sides_stage_5_measured(self):
+        defaults = {name: _UidSettings._meta.get_field(name).default
+                    for name in ("enable_probing", "enable_session",
+                                 "enable_mapping_timeout", "ip_user_mapping_timeout")}
+
+        self.assertEqual(defaults, {
+            "enable_probing": False, "enable_session": False,
+            "enable_mapping_timeout": True, "ip_user_mapping_timeout": 45})
+
+    def test_the_computed_columns_are_declared_derived_and_the_read_ones_are_not(self):
+        for name in ("list_shape", "include_entry_count", "exclude_entry_count",
+                     "include_networks"):
+            self.assertIn(name, _UidBound.DERIVED_FIELDS, name)
+        for name in ("monitored_server_kind", "tls_service_profile_bound"):
+            self.assertIn(name, _UidServer.DERIVED_FIELDS, name)
+        for name in ("name", "connection_type"):
+            self.assertNotIn(name, _UidServer.DERIVED_FIELDS, name)
+        for name in ("enable_probing", "ip_user_mapping_timeout", "wmi_account"):
+            self.assertNotIn(name, _UidSettings.DERIVED_FIELDS, name)
+
+    def test_the_listener_honesty_column_is_declared_derived_and_fires_by_default(self):
+        field = ManagementInterface._meta.get_field("userid_listener_state_established")
+
+        self.assertIn("userid_listener_state_established",
+                      ManagementInterface.DERIVED_FIELDS)
+        self.assertFalse(field.default)
+
+    def test_the_timeout_range_is_the_devices_and_not_the_helps(self):
+        """The Help documents 3,600 on three builds and the write gate refuses anything over
+        1440 with code=12, measured. A remediation written from the Help is refused."""
+        row = _UidSettings(ip_user_mapping_timeout=3600)
+        with self.assertRaises(ValidationError):
+            row.clean()
+        row.ip_user_mapping_timeout = 1440
+        row.clean()
+
+    def test_a_verdict_that_contradicts_its_own_counts_is_refused(self):
+        row = _UidBound(list_shape=_UidBound.SHAPE_INCLUDE_PRESENT,
+                        include_entry_count=0, exclude_entry_count=0, include_networks=[])
+        with self.assertRaises(ValidationError):
+            row.clean()
+        row = _UidBound(list_shape=_UidBound.SHAPE_NO_ENTRIES, include_entry_count=0,
+                        exclude_entry_count=1, include_networks=[])
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+    def test_the_json_list_has_to_agree_with_the_count_a_control_reads(self):
+        """The convention `InterfaceManagementProfile` and `Certificate` already follow: a column
+        derived from a JSON field gets a `clean()` asserting the two agree."""
+        row = _UidBound(list_shape=_UidBound.SHAPE_INCLUDE_PRESENT, include_entry_count=2,
+                        exclude_entry_count=0, include_networks=["10.0.0.0/8"])
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+    def test_a_transport_on_a_non_syslog_branch_is_refused(self):
+        row = _UidServer(name="s", monitored_server_kind=_UidServer.KIND_EXCHANGE,
+                         connection_type="udp")
+        with self.assertRaises(ValidationError):
+            row.clean()
