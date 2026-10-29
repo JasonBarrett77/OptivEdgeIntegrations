@@ -116,6 +116,11 @@ from .globalprotect import (
     GlobalProtectPortalClientAuthRow,
 )
 from .zones import Zone, ZoneInterface
+from .user_id import (
+    UserIdCollectorSettings,
+    UserIdDiscoveryBound,
+    UserIdMonitoredServer,
+)
 from .saas_security import (
     CONSUMER_STORAGE_CATEGORIES,
     CloudAppEngineSetting,
@@ -332,4 +337,7 @@ __all__ = [
     "SanctionedApplicationMarking",
     "Zone",
     "ZoneInterface",
+    "UserIdCollectorSettings",
+    "UserIdDiscoveryBound",
+    "UserIdMonitoredServer",
 ]

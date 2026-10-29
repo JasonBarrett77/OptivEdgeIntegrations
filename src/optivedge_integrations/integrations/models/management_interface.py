@@ -37,6 +37,7 @@ class ManagementInterface(ProvenancedMixin, SyncTrackedModel):
     DERIVED_FIELDS = (
         "is_missing",
         "is_management_surface",
+        "userid_listener_state_established",
     )
     PLANE_MGT = "mgt"
     PLANE_AUX1 = "aux-1"
@@ -97,6 +98,28 @@ class ManagementInterface(ProvenancedMixin, SyncTrackedModel):
     #: measured, which reads as the careful choice and is not.
     is_management_surface = models.BooleanField(default=True)
 
+    #: Does this project's reading of the User-ID syslog listener's state ON THIS SURFACE rest on
+    #: a measurement, or on an unmeasured inference? PAN-UID-005.
+    #:
+    #: TRUE for the MGT plane and for a dataplane profile, where the implicit value of the
+    #: listener keys IS measured. FALSE for AUX-1 and AUX-2, where it is not: the payload
+    #: contract's `mgt-services` node names `/deviceconfig/system/service` alone and claims
+    #: nothing about the aux planes, and `normalization/management_interfaces.py` nonetheless
+    #: applies that node's citation to all ten keys of EVERY deviceconfig plane - so an aux
+    #: plane's two listener rows persist today as `pan_os_default`, a VENDOR FACT, on a citation
+    #: that does not cover them. This column is what makes that visible instead of silent; the
+    #: normalizer's own behaviour is reported upstream rather than changed here.
+    #:
+    #: A FALSE MEANS THE LISTENER COLUMNS BESIDE IT ARE A GUESS, AND IT FIRES. It is the companion
+    #: that `service_enabled` needs and cannot be: that field compiles to a membership test over
+    #: the `services` child rows, so a surface with no service row and a surface whose listener is
+    #: genuinely off both drop out of the result and report nothing. SQL decides that the
+    #: compliant way and there is no is-null operator to ask with.
+    #:
+    #: DEFAULT FALSE, which is the FIRING side and the opposite of the usual derived-boolean trap:
+    #: here false means "we cannot say", so every surface in the window between the migration and
+    #: the first renormalize reports the finding rather than hiding it.
+    userid_listener_state_established = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["appliance__hostname", "plane", "interface_name"]

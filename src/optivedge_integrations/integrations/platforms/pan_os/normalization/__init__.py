@@ -76,6 +76,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.saas_sec
     normalize_cloud_app_engine,
     normalize_saas_security,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.user_id import (
+    normalize_user_id,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.master_key import (
     normalize_master_key,
 )
@@ -648,6 +651,28 @@ def normalize_enforcement_point_saas_security(
     return normalize_saas_security(enforcement_point)
 
 
+def normalize_enforcement_point_user_id(
+    enforcement_point: EnforcementPoint,
+) -> dict:
+    """One enforcement point's User-ID collector, discovery verdict and monitored servers.
+    PAN-UID-002 to 006.
+
+    DEPENDS ON NOTHING ELSE IN THIS MODULE, including the one cross-subject resolution it makes:
+    `tls_service_profile_bound` on each monitored server is read from the collector's own
+    `syslog-service-profile` in the SAME payload parse rather than from the row this call is
+    about to write, so running it first or last gives the same answer and there is no first
+    collection on which it would read a previous run's rows.
+
+    TWO OF ITS THREE MODELS GET A ROW WHERE THE DEVICE HOLDS NOTHING. `user-id-collector/setting`
+    is absent on every vsys of this lab and the agent-setup panel still renders values for it, so
+    a settings row is the vendor's defaults rather than an absence; and the discovery verdict's
+    commonest FAILING state has no entry in it, so a model with a row only where an entry exists
+    could not report the control's baseline failure. The monitored servers are the opposite grain
+    and get no row where no sender exists, which is PAN-UID-005's applicability.
+    """
+    return normalize_user_id(enforcement_point)
+
+
 def normalize_appliance_cloud_app_engine(appliance: Appliance) -> dict:
     """One appliance's App-ID Cloud Engine, configured and actual. PAN-SAS-005.
 
@@ -731,6 +756,8 @@ __all__ = [
     "normalize_security_rule_profile_coverage",
     "normalize_appliance_cloud_app_engine",
     "normalize_enforcement_point_saas_security",
+    "normalize_enforcement_point_user_id",
+    "normalize_user_id",
     "normalize_security_rules",
     "normalize_show_managed_devices",
     "normalize_ike_crypto_profiles",

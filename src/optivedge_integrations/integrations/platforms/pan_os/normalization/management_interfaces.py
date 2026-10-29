@@ -93,6 +93,24 @@ MGT_CITATION = (
 #: opposite polarity to the keys above. Measured 2026-08-27/28.
 PROFILE_IMPLICIT_ENABLED: frozenset[str] = frozenset()
 
+#: The planes on which the User-ID syslog listener's implicit value IS established. PAN-UID-005.
+#:
+#: `MGT_CITATION` above is applied to all ten keys of EVERY deviceconfig plane by `_mgt_services`,
+#: aux-1 and aux-2 included - but the payload contract node that citation names covers
+#: `/deviceconfig/system/service` ALONE and claims nothing about the aux subtrees. So on an aux
+#: plane the two listener rows are persisted as a vendor fact on a citation that does not reach
+#: them. This set is what `userid_listener_state_established` is computed from, and it is the
+#: honest reading of what has been measured rather than a second guess at the value.
+#:
+#: WHY THE VALUE IS LEFT ALONE: stage 5 declared the column and reported the citation's reach as a
+#: defect for a person to settle, and `rules.md` holds that a stage records a defect rather than
+#: fixing it mid-run. Narrowing `_mgt_services`' implicit here would change what every PAN-MGT
+#: control reads off an aux plane, which is not this domain's call. The column makes the gap
+#: queryable; it does not paper over it.
+USERID_LISTENER_MEASURED_PLANES = frozenset({
+    ManagementInterface.PLANE_MGT, ManagementInterface.PLANE_DATAPLANE,
+})
+
 
 def _text(node: Any) -> str:
     """A leaf may be a bare string or {'#text': v, '@loc': ...} - see the payload contract."""
@@ -298,6 +316,11 @@ def normalize_management_interfaces(appliance: Appliance) -> list[ManagementInte
                 interface_name=interface_name,
                 profile_name=profile_name,
                 is_management_surface=is_surface,
+                # PAN-UID-005's honesty column, computed from the PLANE rather than from any key.
+                # It is a fact about what this project has measured, so no read carries it and no
+                # predicate could consult the contract file that decides it.
+                userid_listener_state_established=(
+                    plane in USERID_LISTENER_MEASURED_PLANES),
             )
             _record(surface, *surface_prov)
             # The binding is a field OF the surface, so it is a named field rather than

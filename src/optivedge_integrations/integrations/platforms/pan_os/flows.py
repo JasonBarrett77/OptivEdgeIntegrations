@@ -125,6 +125,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_cloud_app_engine,
     normalize_enforcement_point_decryption_policy,
     normalize_enforcement_point_saas_security,
+    normalize_enforcement_point_user_id,
     normalize_collected_response,
 )
 from optivedge_integrations.integrations.platforms.pan_os.persistence import (
@@ -1358,6 +1359,24 @@ def renormalize_in_scope_configuration(
         else:
             policy_object_normalizations.append(PANOSPolicyObjectNormalized(
                 kind="SaaS security", enforcement_point=enforcement_point,
+                counts={k: v for k, v in (counts or {}).items() if isinstance(v, int)}))
+
+    # The User-ID collector: its settings node, the discovery verdict over its include/exclude
+    # list, and one row per monitored server. Reuses the policy-object failure pair rather than
+    # adding another: the shape is identical and two lists that can disagree are worse than one.
+    # NO ORDERING OBLIGATION - all three models are built from the one payload parse this call
+    # takes, including the cross-subject `tls_service_profile_bound`, so it cannot read a previous
+    # run's rows. PAN-UID-002 to 006.
+    for enforcement_point in enforcement_points:
+        try:
+            counts = normalize_enforcement_point_user_id(enforcement_point)
+        except Exception as exc:
+            policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                kind="User-ID collector", enforcement_point=enforcement_point,
+                error_text=str(exc)))
+        else:
+            policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                kind="User-ID collector", enforcement_point=enforcement_point,
                 counts={k: v for k, v in (counts or {}).items() if isinstance(v, int)}))
 
     for enforcement_point in enforcement_points:
