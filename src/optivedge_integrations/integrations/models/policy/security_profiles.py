@@ -65,6 +65,15 @@ class SecurityProfile(ScopedPolicyObject):
         "lowest_block_threshold",
         "reference_reach",
         "reference_reach_resolved",
+        # ANTIVIRUS and WILDFIRE-ANALYSIS aggregates over the satellite rows, added for
+        # PAN-AVW-001/002/003. Aggregates over related rows, so they have no payload key of
+        # their own and can never carry a provenance row.
+        "weakest_decoder_action",
+        "weakest_application_override_action",
+        "weakest_ml_model_state",
+        "submits_all_file_types",
+        "covers_all_applications",
+        "direction_coverage",
     )
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
@@ -260,6 +269,66 @@ class SecurityProfile(ScopedPolicyObject):
     #: right and not a pass. Non-nullable and false by default, which is the firing side - that is
     #: what makes the column safe to ship before the walk is complete everywhere.
     reference_reach_resolved = models.BooleanField(default=False)
+
+    #: ANTIVIRUS ONLY. The WEAKEST state any row of each satellite collection is left in, as one
+    #: token, so that a SEVERITY can vary with it. The booleans beside them - the
+    #: `has_non_blocking_*` properties above - are what a clause rests on; these exist because a
+    #: grading places VALUES and a boolean has only two.
+    #:
+    #: THEY SUMMARISE ROWS NOBODY CAN REACH. `SecurityProfileDecoder`,
+    #: `SecurityProfileApplicationOverride` and `SecurityProfileMlModel` are in no search
+    #: registry, so no clause can name a column of theirs and no finding can rest on one; an
+    #: aggregate written onto this row at normalization is the only way the detail becomes
+    #: reportable at all.
+    #:
+    #: Each default is the WEAKEST token of its own collection, which is the firing side: a row
+    #: nobody has normalized is graded as though every entry were at its absent state, and the
+    #: measured implicit says an untouched profile really is there - an absent decoder action is
+    #: `allow` and an absent ML model is `disable`. A null would be worse than the weakest token,
+    #: because a grading places values and a null matches no placement.
+    #:
+    #: BLANK MEANS THE COLLECTION HAS NO ROWS, which is NOT the same as the weakest token, and
+    #: the two cases that produce it are opposite in meaning: a non-antivirus kind (nothing is
+    #: claimed, and the `kind` clause every query carries keeps the assertion off the row) and an
+    #: antivirus profile naming no application exception at all (measured, and the COMPLIANT
+    #: state - a profile with no exceptions has nothing overriding its decoders). Writing `allow`
+    #: for the second would grade every clean profile at the worst severity on the strength of
+    #: rows that do not exist. A blank matches no placement, so such a row is reported at the
+    #: baseline, which is the same mechanism `direction_coverage`'s null uses below.
+    weakest_decoder_action = models.CharField(max_length=32, blank=True, default="allow")
+    weakest_application_override_action = models.CharField(
+        max_length=32, blank=True, default="allow")
+    #: The ML order is NOT the order a reader would guess: `disable` is weakest, then
+    #: `enable(alert-only)`, then `enable` - a model that is off produces nothing, while one on
+    #: the middle setting at least produces a record of the delivery.
+    weakest_ml_model_state = models.CharField(max_length=32, blank=True, default="disable")
+
+    #: WILDFIRE-ANALYSIS ONLY, and all three are a UNION OVER THE PROFILE'S RULES rather than a
+    #: property of any one rule: a profile can reach `any` file type through one rule and both
+    #: directions through another, and the commonest failing state - a profile with no rules node
+    #: at all - has no row to carry anything.
+    #:
+    #: `submits_all_file_types` and `covers_all_applications` answer `some rule names any`. They
+    #: CANNOT answer the wider question of whether a list of named types or applications adds up
+    #: to the release's whole set: the accepted file-type set moves with the content release and
+    #: the application set is a content catalogue of ~1400 entries, and neither is in any
+    #: configuration read or in this store. A profile naming every type individually therefore
+    #: reads as not covering them all, which is almost certainly right and is a different claim.
+    #:
+    #: False is the migration default on both and is the side that FIRES: a profile nobody has
+    #: normalized has not been shown to cover anything.
+    submits_all_file_types = models.BooleanField(default=False)
+    covers_all_applications = models.BooleanField(default=False)
+    #: `both` where some rule covers both or two rules cover one each, `download` where only
+    #: inbound is reached, `upload` where only outbound, and NULL where no rule reaches either.
+    #: INBOUND IS DELIVERY: `upload` alone leaves every delivered file unanalysed.
+    #:
+    #: THE NULL DOES TWO JOBS THAT AGREE: it is what a profile with no rules holds and what a row
+    #: nobody has normalized holds, and both must be reported at the baseline severity. It is
+    #: also the honest answer to an unsettled measurement - what an absent `direction` on a rule
+    #: means was never established, so a rule's own direction can be null too and the union of
+    #: nulls is a null rather than a guess.
+    direction_coverage = models.CharField(max_length=16, null=True, blank=True, default=None)
 
     raw_profile = models.JSONField(default=dict, blank=True)
 
@@ -716,6 +785,19 @@ class SecurityProfileDecoder(models.Model):
     #: block it. Recorded in control-changes.json.
     BLOCKING_ACTIONS = frozenset({"drop", "reset-client", "reset-server", "reset-both"})
 
+    #: WEAKEST FIRST, by how much of the transfer each action lets finish. `allow` lets the file
+    #: through, `alert` records it and lets it through, and the four blockers stop it - stage 3
+    #: calls those four equally strong, so their order here is the device's own enumeration order
+    #: and nothing rests on it.
+    #:
+    #: `default` IS NOT PLACED, deliberately. On a decoder it never reaches an aggregate: the
+    #: literal resolves per protocol before the row is written. On an APPLICATION EXCEPTION it is
+    #: a real stored value whose resolution is per SIGNATURE and so settles nothing, which is why
+    #: `SecurityProfileApplicationOverride.blocks` is null for it - so an aggregate over this
+    #: order returns it unranked rather than calling it strong or weak.
+    ACTION_STRENGTH_ORDER = ("allow", "alert", "drop", "reset-client", "reset-server",
+                             "reset-both")
+
     security_profile = models.ForeignKey(
         SecurityProfile, on_delete=models.CASCADE, related_name="decoders")
     protocol = models.CharField(max_length=32)
@@ -1093,6 +1175,19 @@ class SecurityProfileMlModel(models.Model):
     ACTIONS = ("enable", "enable(alert-only)", "disable")
     RUNS = ("enable", "enable(alert-only)")
     BLOCKS = "enable"
+
+    #: WEAKEST FIRST, and not the order a reader would guess: a model that is OFF produces
+    #: nothing at all, while one on the middle setting at least produces a record of the
+    #: delivery. An ABSENT model - a profile that does not mention it - is stored with a blank
+    #: `configured_action` and means DISABLED, so an aggregate maps blank onto `disable` before
+    #: ordering rather than treating it as an unranked value.
+    #:
+    #: THE WIRE LITERAL FOR THE MIDDLE STATE HAS NO SPACE, and both the vendor's Help and the UI
+    #: grid spell it with one, so a later stage matching a screen label against a stored value
+    #: will not match. These are the device's spellings.
+    STATE_STRENGTH_ORDER = ("disable", "enable(alert-only)", "enable")
+    #: What the config holds for a model the profile does not mention, and what it means.
+    ABSENT_STATE = "disable"
 
     #: As the content release names it. Not an enum - see the class docstring.
     name = models.CharField(max_length=128)
