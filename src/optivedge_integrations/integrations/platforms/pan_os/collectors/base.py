@@ -43,8 +43,16 @@ def collect_config_response(
 
     Reads only. `request.action` is asserted rather than trusted, because this helper sits in
     the collection path and a mutating action reaching it would turn a survey into a change.
+
+    TWO READ ACTIONS, NOT ONE, and they answer different questions about the same xpath.
+    `get` returns the CANDIDATE - what an administrator typed, committed or not - and answers a
+    bare `null` where the node is absent. `show` returns the COMMITTED configuration and RAISES
+    `No such node` for an absence, which is the only read that says "absent" out loud about what
+    the firewall is enforcing rather than about somebody's intent. `show` was refused here until
+    2026-10-29, so a domain whose columns rest on the committed view had no way to collect them;
+    it is as read-only as `get` and the assertion below still refuses everything that mutates.
     """
-    if request.action != "get":
+    if request.action not in ("get", "show"):
         raise ValueError(
             f"collectors perform reads only; refusing config action {request.action!r}"
         )

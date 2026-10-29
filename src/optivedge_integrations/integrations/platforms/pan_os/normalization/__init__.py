@@ -58,6 +58,15 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.device_i
     normalize_device_identification_state,
     normalize_rulebase_device_match,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.platform_lifecycle import (
+    normalize_configuration_backup_evidence,
+    normalize_dataplane_utilisation,
+    normalize_device_telemetry_settings,
+    normalize_globalprotect_portal_presence,
+    normalize_licence_inventory,
+    normalize_log_alarm_settings,
+    normalize_platform_content_streams,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.master_key import (
     normalize_master_key,
 )
@@ -280,6 +289,82 @@ def normalize_appliance_device_identification(appliance: Appliance) -> dict:
     differ. Depends on nothing else in the appliance tuple.
     """
     return normalize_device_identification_state(appliance)
+
+
+
+def normalize_appliance_platform_content_streams(appliance: Appliance) -> dict:
+    """The installed content streams, and the device certificate the same reply carries.
+
+    PAN-PLT-002, with one column for PAN-PLT-003 and PAN-PLT-004. Reads the appliance's own
+    `show system info` snapshot - the one another domain's collector already takes - and anchors
+    its row to the merged snapshot, so an appliance nobody asked still gets a row with
+    `content_streams_collected` false, which FIRES. Depends on nothing else in the tuple.
+    """
+    return normalize_platform_content_streams(appliance)
+
+
+def normalize_appliance_device_telemetry(appliance: Appliance) -> dict:
+    """The three telemetry sharing switches, as COMMITTED. An input to PAN-PLT-003.
+
+    Its own committed-local snapshot, which no other normalizer reads. A missing one leaves all
+    three switches NULL and `telemetry_switches_known` false - not `no`, which is a different
+    claim about the appliance. Depends on nothing else in the tuple.
+    """
+    return normalize_device_telemetry_settings(appliance)
+
+
+def normalize_appliance_globalprotect_portal_presence(appliance: Appliance) -> dict:
+    """Whether the appliance is a GlobalProtect portal, across EVERY vsys. PAN-PLT-003's input.
+
+    Reads the same merged payload as its neighbours and sweeps every vsys the device's own
+    `/vsys` names, because a vsys1-only reading answers "not a portal" on an appliance that is
+    one - both PA-5220s in this lab. ONE ROW PER APPLIANCE, which is not the grain of
+    `normalize_appliance_globalprotect`'s per-vsys verdict beside it; the two are different
+    questions over one subtree and neither reads the other's rows. Depends on nothing else in
+    the tuple and may be moved within it.
+    """
+    return normalize_globalprotect_portal_presence(appliance)
+
+
+def normalize_appliance_licence_inventory(appliance: Appliance) -> dict:
+    """The entitlement verdict AND the per-entitlement rows. PAN-PLT-004, and PAN-PLT-001's half.
+
+    Two models in one pass, because both come from one `request license info` reply and reading
+    it twice would let the count disagree with the rows it counted. That snapshot is taken by
+    another domain's collector already. Depends on nothing else in the tuple.
+    """
+    return normalize_licence_inventory(appliance)
+
+
+def normalize_appliance_log_alarm_settings(appliance: Appliance) -> dict:
+    """The log-database alarm mechanism, as COMMITTED. PAN-PLT-006's first half.
+
+    Its own committed-local snapshot. THE ABSENCE IS THE READING on three of four lab
+    appliances, and the row keeps three states apart that every obvious reader collapses: the
+    node absent, the node present with the master switch unset, and nobody having asked.
+    Depends on nothing else in the tuple.
+    """
+    return normalize_log_alarm_settings(appliance)
+
+
+def normalize_appliance_configuration_backup_evidence(appliance: Appliance) -> dict:
+    """What the firewall records about its own backups, which is nothing usable. PAN-PLT-005.
+
+    Reads no collector's snapshot at all, deliberately: `show config saved` cannot enumerate its
+    own argument, so the row is written at its firing values and the companion column is the
+    record that the firewall was asked and could not answer. Depends on nothing else in the tuple.
+    """
+    return normalize_configuration_backup_evidence(appliance)
+
+
+def normalize_appliance_dataplane_utilisation(appliance: Appliance) -> dict:
+    """The dataplane load for one named window. PAN-PLT-006's second half.
+
+    Its own operational snapshot. A wall of zeroes is not an absence - all four lab appliances
+    report `0,0,0,...` - so the companion is the only column that can tell an idle appliance from
+    one nobody read. Depends on nothing else in the tuple.
+    """
+    return normalize_dataplane_utilisation(appliance)
 
 
 def normalize_appliance_services_settings(appliance: Appliance) -> dict:
@@ -516,6 +601,20 @@ __all__ = [
     "normalize_enforcement_point_security_rules",
     "normalize_appliance_device_identification",
     "normalize_device_identification_state",
+    "normalize_appliance_configuration_backup_evidence",
+    "normalize_appliance_dataplane_utilisation",
+    "normalize_appliance_device_telemetry",
+    "normalize_appliance_globalprotect_portal_presence",
+    "normalize_appliance_licence_inventory",
+    "normalize_appliance_log_alarm_settings",
+    "normalize_appliance_platform_content_streams",
+    "normalize_configuration_backup_evidence",
+    "normalize_dataplane_utilisation",
+    "normalize_device_telemetry_settings",
+    "normalize_globalprotect_portal_presence",
+    "normalize_licence_inventory",
+    "normalize_log_alarm_settings",
+    "normalize_platform_content_streams",
     "normalize_enforcement_point_rulebase_device_match",
     "normalize_enforcement_point_zones",
     "normalize_rulebase_device_match",

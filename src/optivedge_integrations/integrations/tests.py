@@ -16222,3 +16222,663 @@ class InterfaceNetworkHardeningColumnTests(_NetworkHardeningBase):
         self.assertEqual(
             FieldProvenance.objects.filter(
                 content_type=ContentType.objects.get_for_model(Interface)).count(), 0)
+
+
+# ---------------------------------------------------------------------------
+# Platform lifecycle - PAN-PLT-001 to PAN-PLT-006
+# ---------------------------------------------------------------------------
+#
+# THE LAB CANNOT DISCRIMINATE MOST OF THIS DOMAIN'S BRANCHES, which is why these tests exist and
+# what they are for. The readback over all four appliances produced ONE value of
+# `content_currency_state` on four rows out of six possible tokens, one value of
+# `support_entitlement_state` out of five, and three of the five `alarm_mechanism_state` tokens.
+# A readback over one estate is not evidence about a branch that estate cannot reach, so every
+# state no appliance here holds is driven from a payload shaped like the reply that would produce
+# it - and the shapes are the ones stage 4 measured rather than ones invented to pass.
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    ConfigurationBackupEvidence as _PltBackup,
+    DataplaneUtilisation as _PltDataplane,
+    DeviceTelemetrySettings as _PltTelemetry,
+    FirewallContentStreams as _PltStreams,
+    GlobalProtectPortalPresence as _PltPortal,
+    LicenceEntitlement as _PltEntitlement,
+    LicenceInventory as _PltInventory,
+    LogAlarmSettings as _PltAlarm)
+from optivedge_integrations.integrations.platforms.pan_os.collectors.platform_lifecycle import (  # noqa: E402
+    DEVICE_TELEMETRY_XPATH as _PLT_TELEMETRY_XPATH,
+    LOG_ALARM_SETTINGS_XPATH as _PLT_ALARM_XPATH,
+    SHOW_RESOURCE_MONITOR_COMMAND as _PLT_RM_COMMAND,
+    collect_device_telemetry as _plt_collect_telemetry,
+    collect_log_alarm_settings as _plt_collect_alarm)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.platform_lifecycle import (  # noqa: E402
+    alarm_mechanism_state as _plt_alarm_state,
+    build_content_streams as _plt_build_streams,
+    build_dataplane_utilisation as _plt_build_dataplane,
+    build_device_telemetry as _plt_build_telemetry,
+    build_licence_inventory as _plt_build_licences,
+    build_log_alarm_settings as _plt_build_alarm,
+    build_portal_presence as _plt_build_portal,
+    content_currency_state as _plt_currency_state,
+    portal_container_state as _plt_portal_state)
+from optivedge_integrations.integrations.platforms.pan_os.session import (  # noqa: E402
+    PANSessionAPIError as _PltAPIError)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (  # noqa: E402
+    classify_prov_type as _plt_classify_prov)
+from datetime import datetime as _PltDateTime  # noqa: E402
+
+
+def _plt_system(**overrides):
+    """A `show system info` reply shaped like the lab's, with the clock the age rests on."""
+    reply = {
+        "time": "Thu Oct 29 09:48:06 2026",
+        "app-version": "9161-10297",
+        "app-release-date": "2026/10/28 01:27:15 GMT",
+        "av-version": "5709-6237",
+        "av-release-date": "2026/10/29 01:00:30 GMT",
+        "threat-version": "9161-10297",
+        "threat-release-date": "2026/10/28 01:27:15 GMT",
+        "wildfire-version": "1130785-1135443",
+        "url-filtering-version": "20261029.20147",
+        "device-dictionary-version": "249-772",
+        "device-dictionary-release-date": "2026/10/24 02:35:51 GMT",
+        "device-certificate-status": "None",
+    }
+    for key, value in overrides.items():
+        if value is None:
+            reply.pop(key, None)
+        else:
+            reply[key] = value
+    return reply
+
+
+class PlatformLifecycleContentCurrencyTests(SimpleTestCase):
+    """The content verdict, including the five states this lab cannot produce.
+
+    THE READBACK PRODUCED `stream_never_installed` ON ALL FOUR APPLIANCES and nothing else: both
+    PA-5220s hold antivirus, threats and WildFire at `0`, one PA-VM holds antivirus at `0` and
+    the other holds WildFire at `0`. So the entire severity axis above that token is untested by
+    the estate, and these are what test it.
+    """
+
+    def test_an_uncollected_appliance_holds_the_empty_string_and_not_a_token(self):
+        """The one state the choice list does not carry, and it is not `current`.
+
+        A token here would be a verdict over a reply nobody received. The empty string is not
+        `current`, the control's clause is a negated equality against `current`, so it FIRES.
+        """
+        built = _plt_build_streams(None, None)
+        self.assertFalse(built.collected)
+        self.assertEqual(built.currency_state, "")
+        self.assertEqual(built.app_version if hasattr(built, "app_version") else "", "")
+
+    def test_every_stream_fresh_is_current(self):
+        built = _plt_build_streams(_plt_system(
+            **{"app-release-date": "2026/10/29 01:27:15 GMT",
+               "threat-release-date": "2026/10/29 01:27:15 GMT",
+               "av-release-date": "2026/10/29 01:00:30 GMT",
+               "wildfire-version": "1130785-1135443"}), None)
+        self.assertEqual(built.currency_state, "current")
+
+    def test_a_week_old_applications_stream_is_outside_preferred_and_inside_minimum(self):
+        built = _plt_build_streams(_plt_system(
+            **{"app-release-date": "2026/10/20 01:27:15 GMT",
+               "threat-release-date": "2026/10/20 01:27:15 GMT"}), None)
+        self.assertEqual(built.currency_state, "inside_minimum_outside_preferred")
+
+    def test_a_three_week_old_threat_stream_is_behind(self):
+        """Rank 1: that stream carries the vulnerability and spyware signatures."""
+        built = _plt_build_streams(_plt_system(
+            **{"threat-release-date": "2026/10/05 01:27:15 GMT"}), None)
+        self.assertEqual(built.currency_state, "applications_and_threats_behind")
+
+    def test_a_fortnight_old_antivirus_stream_is_a_behind_malware_stream(self):
+        """Rank 2, and it must not be reported as rank 1: the streams are graded separately."""
+        built = _plt_build_streams(_plt_system(
+            **{"av-release-date": "2026/10/14 01:00:30 GMT"}), None)
+        self.assertEqual(built.currency_state, "malware_stream_behind")
+
+    def test_an_installed_stream_with_no_date_is_not_reported_as_behind(self):
+        """BOTH PA-5220s ARE IN THIS STATE FOR A REASON THAT IS NOT THEIR CONTENT.
+
+        A real `app-version` with no `app-release-date` key at all: the stream is installed and
+        the date is simply not reported, so the arithmetic cannot be performed. It gets its own
+        token rather than collapsing into `behind`, which would blame the appliance for the
+        reply's shape.
+        """
+        built = _plt_build_streams(_plt_system(**{"app-release-date": None}), None)
+        self.assertEqual(built.currency_state, "release_date_not_reported")
+        self.assertEqual(built.release_dates["app"], "")
+        self.assertFalse(built.release_date_reported)
+
+    def test_the_never_installed_sentinel_outranks_every_staleness_state(self):
+        """`0` is TRUTHY and is not a low version number. Both literals are the same state."""
+        self.assertEqual(
+            _plt_build_streams(_plt_system(**{"av-version": "0", "av-release-date": None}),
+                               None).currency_state,
+            "stream_never_installed")
+        self.assertEqual(
+            _plt_build_streams(_plt_system(**{"wildfire-version": "0"}), None).currency_state,
+            "stream_never_installed")
+
+    def test_release_date_reported_consults_the_version_beside_each_date(self):
+        """An UNINSTALLED stream with no date is not a missing date.
+
+        The comparison between two columns that no predicate can make, and the reason this is a
+        stored column rather than a clause.
+        """
+        built = _plt_build_streams(
+            _plt_system(**{"av-version": "0", "av-release-date": None}), None)
+        self.assertTrue(built.release_date_reported)
+
+    def test_the_verdict_cannot_be_a_token_where_nothing_was_collected(self):
+        """The model's own `clean()` refuses the pair, so a stale verdict cannot be persisted."""
+        row = _PltStreams(content_streams_collected=False,
+                          content_currency_state="current")
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+
+class PlatformLifecycleTelemetryTests(SimpleTestCase):
+    """The telemetry switches, and the three states the companion has to keep apart."""
+
+    def test_a_read_that_never_happened_leaves_nulls_and_an_unknown(self):
+        values = _plt_build_telemetry(False, None)
+        self.assertIsNone(values["device_health_performance"])
+        self.assertFalse(values["telemetry_switches_known"])
+
+    def test_an_absent_node_is_not_the_switches_being_off(self):
+        """MEASURED ON ONE PA-VM IN THIS LAB. The read answered, the node is not there, and what
+        the device does in that state is UNMEASURED - so the switches are NULL and not False."""
+        values = _plt_build_telemetry(True, None)
+        self.assertIsNone(values["product_usage"])
+        self.assertIsNone(values["threat_prevention"])
+        self.assertFalse(values["telemetry_switches_known"])
+
+    def test_the_opted_out_reading_stores_false_and_is_known(self):
+        values = _plt_build_telemetry(True, {
+            "device-health-performance": "no", "product-usage": "no",
+            "threat-prevention": "no", "region": "Americas"})
+        self.assertFalse(values["device_health_performance"])
+        self.assertTrue(values["telemetry_switches_known"])
+        self.assertEqual(values["region"], "Americas")
+
+    def test_the_region_first_key_order_reads_the_same(self):
+        """ONE APPLIANCE RETURNS `region` FIRST where the other three return it last, so a reader
+        walking the node in order gets a different field on different platforms."""
+        values = _plt_build_telemetry(True, {
+            "region": "Americas", "threat-prevention": "yes",
+            "product-usage": "yes", "device-health-performance": "yes"})
+        self.assertTrue(values["device_health_performance"])
+        self.assertTrue(values["telemetry_switches_known"])
+
+    def test_a_node_missing_one_switch_is_not_known(self):
+        """A true flag beside two nulls is the shape the companion exists to deny."""
+        values = _plt_build_telemetry(True, {"device-health-performance": "yes"})
+        self.assertTrue(values["device_health_performance"])
+        self.assertIsNone(values["product_usage"])
+        self.assertFalse(values["telemetry_switches_known"])
+
+
+class PlatformLifecycleAlarmTests(SimpleTestCase):
+    """The alarm mechanism, where the unknown is the normal state rather than the edge case."""
+
+    def test_a_read_that_never_happened_blanks_the_verdict(self):
+        values, _prov = _plt_build_alarm(False, None)
+        self.assertEqual(values["alarm_mechanism_state"], "")
+        self.assertFalse(values["alarm_generation_enabled_known"])
+        self.assertFalse(values["alarm_settings_node_present"])
+
+    def test_an_absent_node_is_node_absent_and_still_not_known(self):
+        """THE BUG THE READBACK CAUGHT. The committed read answering `No such node` is a reading
+        about the device - so the verdict is `node_absent` - and it carries NO master switch, so
+        the companion must say unknown. The first version stored True here beside a NULL switch,
+        which is the column that answers "is this unknown" claiming the unknown was known."""
+        values, _prov = _plt_build_alarm(True, None)
+        self.assertEqual(values["alarm_mechanism_state"], "node_absent")
+        self.assertIsNone(values["alarm_generation_enabled"])
+        self.assertFalse(values["alarm_generation_enabled_known"])
+
+    def test_an_emptied_container_is_present_and_is_not_an_absent_node(self):
+        """Deleting the leaves and leaving the container reads as PRESENT, which stage 6's own
+        teardown note depends on - it is a different verdict from the node being absent."""
+        values, _prov = _plt_build_alarm(True, {})
+        self.assertTrue(values["alarm_settings_node_present"])
+        self.assertEqual(values["alarm_mechanism_state"], "generation_off")
+        self.assertFalse(values["alarm_generation_enabled_known"])
+
+    def test_generation_off_with_everything_else_set(self):
+        values, _prov = _plt_build_alarm(True, {
+            "enable-alarm-generation": "no",
+            "log-databases-alarm-threshold": {"system": "85"},
+            "enable-cli-alarm-notification": "yes"})
+        self.assertEqual(values["alarm_mechanism_state"], "generation_off")
+        self.assertTrue(values["alarm_generation_enabled_known"])
+
+    def test_on_without_thresholds(self):
+        values, _prov = _plt_build_alarm(True, {"enable-alarm-generation": "yes"})
+        self.assertEqual(values["alarm_mechanism_state"], "on_without_thresholds")
+        self.assertEqual(values["log_db_alarm_threshold_count"], 0)
+        self.assertIsNone(values["log_db_alarm_threshold_lowest"])
+
+    def test_on_with_thresholds_and_no_route(self):
+        values, _prov = _plt_build_alarm(True, {
+            "enable-alarm-generation": "yes",
+            "log-databases-alarm-threshold": {"system": "85", "config": "80", "alarm": "0"},
+            "enable-cli-alarm-notification": "no",
+            "enable-web-alarm-notification": "no"})
+        self.assertEqual(values["alarm_mechanism_state"], "on_with_thresholds_no_route")
+        self.assertFalse(values["alarm_notification_route_present"])
+        # THE SENTINEL IS KEPT AND NOT DROPPED. Zero is inside the grammar's range and the
+        # device accepts it, and whether it means "alarm always" or "alarm never" is unmeasured -
+        # so a query ranking "lower is stricter" may be exactly inverted at this one value.
+        self.assertEqual(values["log_db_alarm_threshold_lowest"], 0)
+        self.assertEqual(values["log_db_alarm_threshold_count"], 3)
+
+    def test_on_with_thresholds_and_a_route_is_the_only_acceptable_state(self):
+        values, _prov = _plt_build_alarm(True, {
+            "enable-alarm-generation": "yes",
+            "log-databases-alarm-threshold": {"system": "85"},
+            "enable-cli-alarm-notification": "yes",
+            "enable-web-alarm-notification": "no"})
+        self.assertEqual(values["alarm_mechanism_state"], "on_with_thresholds_and_route")
+        self.assertTrue(values["alarm_notification_route_present"])
+
+    def test_either_route_alone_is_a_route(self):
+        """A DISJUNCTION OVER TWO NULLABLE BOOLEANS, which is not expressible as a clause list."""
+        for cli, web in (("yes", "no"), ("no", "yes")):
+            values, _prov = _plt_build_alarm(True, {
+                "enable-alarm-generation": "yes",
+                "log-databases-alarm-threshold": {"system": "85"},
+                "enable-cli-alarm-notification": cli,
+                "enable-web-alarm-notification": web})
+            self.assertTrue(values["alarm_notification_route_present"], (cli, web))
+
+    def test_an_absent_leaf_declares_not_configured_rather_than_guessing(self):
+        """On this subject a provenance row can only ever say "normalization declined to guess",
+        and saying it is the point: a MISSING row would say "nothing tracks this field"."""
+        _values, provenance = _plt_build_alarm(True, None)
+        self.assertEqual({name for name, _rk, _rv in provenance},
+                         {"alarm_generation_enabled", "cli_alarm_notification_enabled",
+                          "web_alarm_notification_enabled", "log_db_alarm_thresholds"})
+        for _name, raw_key, _raw_value in provenance:
+            self.assertEqual(_plt_classify_prov(raw_key), "not_configured")
+
+    def test_the_count_must_agree_with_the_map(self):
+        row = _PltAlarm(log_db_alarm_thresholds={"system": 85}, log_db_alarm_threshold_count=3)
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+    def test_a_null_switch_takes_the_off_branch_and_the_companion_is_the_separator(self):
+        """The one place this classification cannot keep "off" and "unknown" apart, stated rather
+        than hidden: the node is present, the switch is not in it, and the token says
+        `generation_off`. The direction is the firing one either way."""
+        self.assertEqual(
+            _plt_alarm_state(answered=True, node_present=True, generation=None,
+                             threshold_count=3, route_present=True),
+            "generation_off")
+
+
+class PlatformLifecyclePortalPresenceTests(SimpleTestCase):
+    """The four container shapes, and the vsys sweep a vsys1-only read gets wrong."""
+
+    def test_the_container_shapes(self):
+        self.assertEqual(_plt_portal_state({}), ("container_absent", 0))
+        self.assertEqual(
+            _plt_portal_state({"global-protect": {"global-protect-portal": None}}),
+            ("container_empty", 0))
+        self.assertEqual(
+            _plt_portal_state({"global-protect": {"global-protect-portal": {
+                "entry": {"@name": "p1"}}}}),
+            ("entries_present", 1))
+
+    def test_a_staged_container_is_not_an_empty_one(self):
+        """MEASURED BY STAGE 4 AS A REAL SHAPE: `{"@admin": "admin", "@dirtyId": "50"}` with no
+        non-attribute content at all. `entry_container` classes it empty, correctly for its own
+        purpose; an appliance reported as a portal on the strength of it would have an advisory
+        triaged onto a firewall with no portal configured."""
+        self.assertEqual(
+            _plt_portal_state({"global-protect": {"global-protect-portal": {
+                "@admin": "admin", "@dirtyId": "50"}}}),
+            ("container_staged_uncommitted", 0))
+
+    def test_a_portal_in_a_later_vsys_makes_the_appliance_a_portal(self):
+        """A VSYS1-ONLY READ ANSWERS "NOT A PORTAL" ON AN APPLIANCE THAT IS ONE, which is the
+        state of both PA-5220s in this lab. The verdict spans every vsys, so the strongest shape
+        found anywhere is what it reports."""
+        device = {
+            "@name": "localhost.localdomain",
+            "vsys": {"entry": [
+                {"@name": "vsys1"},
+                {"@name": "vsys3", "global-protect": {"global-protect-portal": {
+                    "entry": [{"@name": "a"}, {"@name": "b"}]}}},
+            ]},
+        }
+        snapshot = SimpleNamespace(payload={"config": {"devices": {"entry": [device]}}})
+        built = _plt_build_portal(snapshot)
+        self.assertEqual(built["portal_entry_count"], 2)
+        self.assertEqual(built["portal_container_state"], "entries_present")
+        self.assertEqual(built["portal_vsys_coverage"], "every_vsys_read")
+        self.assertEqual((built["vsys_read_count"], built["vsys_total_count"]), (2, 2))
+
+    def test_an_appliance_with_no_vsys_node_is_not_collected_rather_than_portal_free(self):
+        """`container_absent` would claim the appliance has no portal, which nobody established."""
+        device = {"@name": "localhost.localdomain"}
+        snapshot = SimpleNamespace(payload={"config": {"devices": {"entry": [device]}}})
+        built = _plt_build_portal(snapshot)
+        self.assertEqual(built["portal_container_state"], "not_collected")
+        self.assertEqual(built["portal_vsys_coverage"], "no_vsys_read")
+
+    def test_a_vsys_entry_without_a_name_is_counted_as_unread(self):
+        """The coverage column's only discriminator on this read path, and it has to have one:
+        a vsys the walk cannot key is a vsys nothing looked in."""
+        device = {"@name": "localhost.localdomain",
+                  "vsys": {"entry": [{"@name": "vsys1"}, {"no-name": True}]}}
+        snapshot = SimpleNamespace(payload={"config": {"devices": {"entry": [device]}}})
+        built = _plt_build_portal(snapshot)
+        self.assertEqual(built["portal_vsys_coverage"], "some_vsys_unread")
+        self.assertEqual((built["vsys_read_count"], built["vsys_total_count"]), (1, 2))
+
+
+class PlatformLifecycleLicenceTests(SimpleTestCase):
+    """The licence table's three shapes, and the verdicts over them."""
+
+    @staticmethod
+    def _snapshot(payload):
+        return SimpleNamespace(payload=payload, collected_at=_PltDateTime(2026, 10, 29, 9, 48))
+
+    @staticmethod
+    def _row(**overrides):
+        row = {"feature": "Threat Prevention", "description": "Antivirus and anti-spyware",
+               "expires": "Never", "expired": "no", "base-license-name": "PA-VM",
+               "authcode": None}
+        row.update(overrides)
+        return {k: v for k, v in row.items() if v is not None or k == "authcode"}
+
+    def test_a_read_that_never_happened_is_not_collected(self):
+        built = _plt_build_licences(None)
+        self.assertEqual(built.inventory_read, "not_collected")
+        self.assertEqual(built.entitlement_state, "inventory_not_collected")
+        self.assertEqual(built.support_state, "inventory_not_collected")
+
+    def test_a_null_licenses_element_is_unknown_and_not_nothing_licensed(self):
+        """MEASURED ON BOTH PA-5220s. The outer dict is TRUTHY and the inner value is None, so
+        `if result:` reports licences present and `result["licenses"]["entry"]` raises. The token
+        is named for the SHAPE because nothing in the payload separates "none installed" from
+        "nothing returned"."""
+        built = _plt_build_licences(self._snapshot({"licenses": None}))
+        self.assertEqual(built.inventory_read, "null_licenses_element")
+        self.assertEqual(built.entitlement_state, "no_licence_rows_returned")
+        self.assertEqual(built.row_count, 0)
+
+    def test_a_single_row_arrives_as_a_dict_and_is_not_lost(self):
+        """A normalizer written without the project's own list-coercion loses every row but one
+        on an appliance holding a single licence."""
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": self._row()}}))
+        self.assertEqual(built.inventory_read, "rows_returned")
+        self.assertEqual(built.row_count, 1)
+        self.assertEqual(built.features_held, ["Threat Prevention"])
+
+    def test_never_is_a_sentinel_and_not_a_date(self):
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [self._row()]}}))
+        self.assertEqual(built.rows[0]["values"]["expires"], "Never")
+        self.assertEqual(built.entitlement_state, "active_beyond_90_days")
+        self.assertEqual(built.expiring_count, 0)
+
+    def test_the_expired_flag_is_un_inverted(self):
+        """STAGE 4 MEASURED THIS KEY'S POLARITY AS NEGATED - the only one in the domain - and
+        warned that storing it without knowing stores the opposite of "licensed". Getting it
+        wrong is a wrong finding in both directions at once and in silence."""
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [
+            self._row(expired="yes", expires="September 20, 2026")]}}))
+        self.assertIs(built.rows[0]["values"]["expired"], True)
+        self.assertEqual(built.expired_count, 1)
+        self.assertEqual(built.entitlement_state, "expired_entitlement_present")
+
+    def test_an_expiry_inside_thirty_days_is_counted_and_graded(self):
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [
+            self._row(expires="November 10, 2026")]}}))
+        self.assertEqual(built.expiring_count, 1)
+        self.assertEqual(built.entitlement_state, "expiring_within_30_days")
+
+    def test_an_expiry_inside_ninety_days_is_the_low_band(self):
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [
+            self._row(expires="December 20, 2026")]}}))
+        self.assertEqual(built.expiring_count, 0)
+        self.assertEqual(built.entitlement_state, "active_inside_90_days")
+
+    def test_an_unreadable_expiry_never_reaches_the_passing_token(self):
+        """Stage 5's vocabulary has no token for an expiry no parser reads, and this is where
+        that gap lands: on the lowest FINDING band, never on `active_beyond_90_days`."""
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [
+            self._row(expires="whenever")]}}))
+        self.assertEqual(built.entitlement_state, "active_inside_90_days")
+
+    def test_an_absent_base_licence_name_asserts_the_row_is_the_base_licence(self):
+        """THE ONE IMPLICIT IN THIS DOMAIN WHERE THE ABSENCE IS THE DISCRIMINATOR. The empty
+        string is stored and the provenance row is what separates it from nobody looking."""
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [
+            self._row(feature="PA-VM", description="Standard VM-300",
+                      **{"base-license-name": None})]}}))
+        self.assertEqual(built.rows[0]["values"]["base_license_name"], "")
+        provenance = dict((name, _plt_classify_prov(rk))
+                          for name, rk, _rv in built.rows[0]["provenance"])
+        self.assertEqual(provenance["base_license_name"], "pan_os_default")
+        self.assertEqual(provenance["expires"], "local")
+
+    def test_no_support_row_is_a_finding_and_not_a_pass(self):
+        """NO APPLIANCE IN THIS ESTATE CARRIES ONE, so this is the value every row holds today -
+        and an absent row is the same shape as a subscription nobody bought."""
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [self._row()]}}))
+        self.assertEqual(built.support_state, "absent_from_inventory")
+
+    def test_a_support_row_is_recognised_and_graded(self):
+        """The state the lab cannot produce. A word-boundary match on `support`, which is the
+        test stage 6's independent second reading made."""
+        for expires, expected in (("Never", "active_beyond_90_days"),
+                                  ("November 10, 2026", "expires_within_90_days")):
+            built = _plt_build_licences(self._snapshot({"licenses": {"entry": [
+                self._row(feature="Premium Support", expires=expires)]}}))
+            self.assertEqual(built.support_state, expected, expires)
+
+    def test_an_expired_support_row_is_expired(self):
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [
+            self._row(feature="Standard Support", expired="yes",
+                      expires="September 20, 2026")]}}))
+        self.assertEqual(built.support_state, "expired")
+
+    def test_a_feature_merely_containing_the_letters_is_not_a_support_row(self):
+        """A word boundary and not a substring: `supported` is not `support`."""
+        built = _plt_build_licences(self._snapshot({"licenses": {"entry": [
+            self._row(feature="Supported Platforms Pack")]}}))
+        self.assertEqual(built.support_state, "absent_from_inventory")
+
+    def test_the_feature_list_cannot_name_more_than_the_count_counts(self):
+        row = _PltInventory(entitlement_features_held=["a", "b"], licence_row_count=1)
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+
+class PlatformLifecycleDataplaneTests(SimpleTestCase):
+    """The dataplane load, where a wall of zeroes is not an absence."""
+
+    @staticmethod
+    def _payload(name="s1dp0", values=("0,0,0,1", "0,0,0,0")):
+        return {"resource-monitor": {"data-processors": {name: {"minute": {
+            "task": None,
+            "cpu-load-average": {"entry": [
+                {"coreid": str(i), "value": v} for i, v in enumerate(values)]}}}}}}
+
+    def test_a_read_that_never_happened_is_not_collected(self):
+        values = _plt_build_dataplane(None)
+        self.assertFalse(values["resource_monitor_collected"])
+        self.assertIsNone(values["dataplane_cpu_load_max_percent"])
+        self.assertEqual(values["dataplane_count"], 0)
+        self.assertEqual(values["collected_window"], "")
+
+    def test_the_comma_separated_value_is_split_and_not_parsed_as_a_number(self):
+        values = _plt_build_dataplane(self._payload())
+        self.assertEqual(values["dataplane_cpu_load_samples"]["s1dp0"]["0"], [0, 0, 0, 1])
+        self.assertEqual(values["dataplane_cpu_load_max_percent"], 1)
+        self.assertTrue(values["resource_monitor_collected"])
+
+    def test_the_processor_name_is_platform_shaped_and_kept_verbatim(self):
+        """`dp0` on a PA-VM and `s1dp0` on a PA-5220. A reader hard-coding either returns
+        nothing on half the estate."""
+        for name in ("dp0", "s1dp0"):
+            values = _plt_build_dataplane(self._payload(name=name))
+            self.assertEqual(values["dataplane_count"], 1)
+            self.assertIn(name, values["dataplane_cpu_load_samples"])
+
+    def test_a_wall_of_zeroes_is_collected_and_its_maximum_is_zero(self):
+        """MEASURED ON ALL FOUR LAB APPLIANCES - populated, truthy and all zero. The companion is
+        the only thing that separates it from a read that never ran."""
+        values = _plt_build_dataplane(self._payload(values=("0,0,0,0",)))
+        self.assertTrue(values["resource_monitor_collected"])
+        self.assertEqual(values["dataplane_cpu_load_max_percent"], 0)
+
+    def test_a_reply_with_processors_and_no_series_is_not_collected(self):
+        """A true flag beside a null maximum would read as an idle appliance."""
+        payload = {"resource-monitor": {"data-processors": {"dp0": {"minute": {"task": None}}}}}
+        values = _plt_build_dataplane(payload)
+        self.assertEqual(values["dataplane_count"], 1)
+        self.assertFalse(values["resource_monitor_collected"])
+        self.assertIsNone(values["dataplane_cpu_load_max_percent"])
+
+
+class PlatformLifecycleBackupEvidenceTests(SimpleTestCase):
+    """The trap column, and the guard that stops it being read as evidence."""
+
+    def test_a_count_with_no_enumeration_behind_it_is_refused(self):
+        """A positive comparison on the count would read "this appliance has snapshots, therefore
+        it is backed up", which INVERTS the control. Nothing can enumerate the snapshot names, so
+        a non-zero count beside a false flag cannot be allowed to look like a measurement."""
+        row = _PltBackup(on_box_snapshot_list_collected=False,
+                         on_box_saved_configuration_count=4)
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+    def test_zero_and_uncollected_is_the_honest_state(self):
+        row = _PltBackup(on_box_snapshot_list_collected=False,
+                         on_box_saved_configuration_count=0)
+        row.clean()
+
+
+class PlatformLifecycleCollectorTests(SimpleTestCase):
+    """The committed-local reads, where an absence is the answer and not a failed read."""
+
+    class _Session:
+        target = "SERIAL-PLT-001"
+
+        def __init__(self, error=None, result=None):
+            self.error = error
+            self.result = result
+            self.calls = []
+
+        def request_xml_api(self, params, *, target=None):
+            self.calls.append((dict(params), target))
+            if self.error is not None:
+                raise self.error
+            return {"response": {"@status": "success", "result": self.result}}
+
+    def test_no_such_node_is_recorded_as_an_empty_result(self):
+        """The refusal IS the reading. An empty result is the same shape the helper already
+        produces for an xpath that matches nothing, so the normalizer has one thing to read."""
+        session = self._Session(error=_PltAPIError("No such node"))
+        collected = _plt_collect_alarm(session)
+        self.assertEqual(collected.source_type, "config_log_alarm_settings")
+        self.assertEqual(collected.response["response"]["result"], {})
+        params, target = session.calls[0]
+        self.assertEqual(params["action"], "show")
+        self.assertEqual(params["xpath"], _PLT_ALARM_XPATH)
+        self.assertEqual(target, "SERIAL-PLT-001")
+
+    def test_any_other_refusal_propagates_so_no_snapshot_is_written(self):
+        """An unreachable appliance must not read as a configured-nothing one: no snapshot at
+        all is the third state, and it is what the companion columns report."""
+        session = self._Session(error=_PltAPIError("Invalid credential"))
+        with self.assertRaises(_PltAPIError):
+            _plt_collect_telemetry(session)
+
+    def test_a_present_node_comes_back_as_the_node(self):
+        session = self._Session(result={"device-telemetry": {"product-usage": "yes"}})
+        collected = _plt_collect_telemetry(session)
+        self.assertEqual(collected.response["response"]["result"],
+                         {"device-telemetry": {"product-usage": "yes"}})
+        self.assertEqual(session.calls[0][0]["xpath"], _PLT_TELEMETRY_XPATH)
+
+    def test_the_resource_monitor_command_names_one_window_and_not_the_bare_form(self):
+        """The bare form returns all five windows at once - 43,184 bytes against 13,587 for the
+        largest single one - and a column derived from "every window" has no defined meaning."""
+        self.assertIn("<minute><last>60</last></minute>", _PLT_RM_COMMAND)
+        self.assertNotIn("<resource-monitor/>", _PLT_RM_COMMAND)
+
+    def test_the_collectors_and_normalizers_are_wired_into_the_flow(self):
+        """Nothing fails if a collector is written and never called: the snapshot never exists
+        and every column resting on it holds its default for ever. The only thing that catches
+        that is a reader of the flow, which is what this is."""
+        import inspect
+
+        from optivedge_integrations.integrations.platforms.pan_os import flows
+
+        source = inspect.getsource(flows.collect_appliance_platform_lifecycle)
+        for name in ("collect_device_telemetry", "collect_log_alarm_settings",
+                     "collect_show_running_resource_monitor"):
+            self.assertIn(name, source, name)
+        for label, function in (
+            ("platform content streams", flows.normalize_appliance_platform_content_streams),
+            ("device telemetry", flows.normalize_appliance_device_telemetry),
+            ("GlobalProtect portal presence",
+             flows.normalize_appliance_globalprotect_portal_presence),
+            ("licence inventory", flows.normalize_appliance_licence_inventory),
+            ("log alarm settings", flows.normalize_appliance_log_alarm_settings),
+            ("configuration backup evidence",
+             flows.normalize_appliance_configuration_backup_evidence),
+            ("dataplane utilisation", flows.normalize_appliance_dataplane_utilisation),
+        ):
+            self.assertIn((label, function), flows.APPLIANCE_OBJECT_NORMALIZERS, label)
+
+
+class PlatformLifecycleDerivedFieldTests(SimpleTestCase):
+    """Every declared derived column is a real field, and the measured ones are NOT declared.
+
+    `DerivedFieldDeclarationTests` already asserts the first half across the whole app. This
+    asserts the half that is specific to this domain: `LicenceEntitlement`'s five measured
+    columns and `LogAlarmSettings`' five are deliberately OUT of `DERIVED_FIELDS` so that
+    normalization writes them real provenance rows - which on the alarm node is the only place
+    "normalization declined to guess" is ever recorded.
+    """
+
+    def test_the_measured_columns_are_not_declared_derived(self):
+        for model, columns in (
+            (_PltEntitlement, ("expires", "expired", "base_license_name", "description")),
+            (_PltAlarm, ("alarm_generation_enabled", "cli_alarm_notification_enabled",
+                         "web_alarm_notification_enabled", "log_db_alarm_thresholds")),
+        ):
+            for column in columns:
+                self.assertNotIn(column, model.DERIVED_FIELDS, f"{model.__name__}.{column}")
+
+    def test_every_verdict_column_is_declared_derived(self):
+        for model, columns in (
+            (_PltStreams, ("content_currency_state", "content_streams_collected",
+                           "release_date_reported")),
+            (_PltTelemetry, ("telemetry_switches_known",)),
+            (_PltPortal, ("portal_entry_count", "portal_container_state",
+                          "portal_vsys_coverage")),
+            (_PltInventory, ("entitlement_state", "support_entitlement_state",
+                             "licence_inventory_read")),
+            (_PltAlarm, ("alarm_mechanism_state", "alarm_generation_enabled_known",
+                         "alarm_settings_node_present")),
+            (_PltBackup, ("on_box_snapshot_list_collected",)),
+            (_PltDataplane, ("resource_monitor_collected",)),
+        ):
+            for column in columns:
+                self.assertIn(column, model.DERIVED_FIELDS, f"{model.__name__}.{column}")
+
+    def test_the_appliance_certificate_column_is_blank_and_not_nullable(self):
+        """Blank means nobody looked; the word `None` means the appliance looked and has no
+        certificate. A NULL would stop a negated equality matching at all, so the reading that
+        must FIRE would silently pass."""
+        field = Appliance._meta.get_field("device_certificate_status")
+        self.assertFalse(field.null)
+        self.assertTrue(field.blank)
