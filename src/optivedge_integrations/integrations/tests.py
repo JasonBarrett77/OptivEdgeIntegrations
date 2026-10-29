@@ -203,6 +203,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.certificates import (
     _algorithms,
+    _permits_sha1,
     _scep_verdicts,
     decode_certificate,
     key_strength_band,
@@ -1515,6 +1516,33 @@ class CertificateVerdictColumnTests(TestCase):
         pinned, explicit = _algorithms({"auth-algo-sha1": "yes"}, "tls1-3", "tls1-3")
         self.assertEqual(explicit, ["auth-algo-sha1"])
         self.assertFalse(pinned["auth-algo-sha1"])
+
+    def test_the_graded_sha1_column_reports_the_configuration_not_the_rendered_set(self):
+        """Decided 2026-10-29, and it splits the two readings apart on purpose.
+
+        `protocol_algorithms` is the RENDERED set and goes on saying SHA-1 is out at a
+        tls1-3-only range, which is what the dialog shows and what was measured on pan-fw-201.
+        `allows_sha1` is the column a control clauses on, and it reports the CONFIGURATION: a
+        TLS 1.3 session still validates a certificate chain, and certificate signatures and
+        self-signed root CA signatures may use SHA-1 whatever the cipher suite negotiates. With
+        no insight into every TLS 1.3 operation, a profile that has not turned the key off is
+        reported as permitting it.
+
+        The two assertions in the first block are the whole decision: same profile, same range,
+        and the two columns deliberately disagree.
+        """
+        self.assertTrue(_permits_sha1({}))
+        self.assertFalse(_algorithms({}, "tls1-3", "tls1-3")[0]["auth-algo-sha1"])
+
+        # Only an explicit OFF clears the graded column, and the range never enters into it -
+        # `_permits_sha1` does not take one.
+        self.assertFalse(_permits_sha1({"auth-algo-sha1": "no"}))
+        self.assertTrue(_permits_sha1({"auth-algo-sha1": "yes"}))
+
+        # Never None, at any range: the column is a BooleanField and this reading leaves no
+        # state unestablished.
+        for settings in ({}, {"auth-algo-sha1": "no"}, {"auth-algo-sha1": "yes"}):
+            self.assertIn(_permits_sha1(settings), (True, False))
 
 
 class DynamicAddressContentNormalizationTests(TestCase):

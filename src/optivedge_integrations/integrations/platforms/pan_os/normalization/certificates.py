@@ -380,16 +380,29 @@ def _excluded_by_range(min_rank: int, max_rank: int) -> set[str]:
     return excluded
 
 
-def _permits_sha1(effective: dict[str, Any]) -> bool:
-    """The one algorithm a control asserts, read off the effective map with null as TRUE.
+def _permits_sha1(protocol_settings: dict[str, Any]) -> bool:
+    """Whether the profile's CONFIGURATION leaves SHA-1 enabled, whatever the version range.
 
-    Null means the range's rendered set is not established for that key, and the column is a
-    BooleanField that cannot hold it. True is the firing side and the model's own default, for
-    the reason the default was chosen: a profile that has not been shown to narrow SHA-1 has
-    not narrowed it.
+    READS THE CONFIGURATION AND NOT THE RENDERED SET, decided 2026-10-29. An earlier version of
+    this function read the range-narrowed map, so a tls1-3-only profile reported as not
+    permitting SHA-1 - the range takes SHA-1 out of the algorithm dialog, which is measured and
+    which `protocol_algorithms` still records. That reading treats cipher negotiation as the
+    whole of what an SSL/TLS service profile governs, and it is not: a TLS 1.3 session still
+    validates a certificate chain, and certificate signatures and self-signed root CA
+    signatures may use SHA-1 whatever the cipher suite does. Without insight into every TLS 1.3
+    operation, the safe reading is the one the configuration states.
+
+    So the key written OFF is False, the key written ON is True, and an ABSENT key is True
+    because absent means enabled for every algorithm key the dialog exposes
+    (`ALGORITHM_IMPLICIT`, measured 2026-09-02). NEVER None: the column is a BooleanField, and
+    under this reading there is no range in which the configuration is unestablished - which is
+    a second reason to read it here rather than off the rendered set.
     """
-    value = effective.get("auth-algo-sha1", True)
-    return True if value is None else bool(value)
+    raw = protocol_settings.get("auth-algo-sha1", ABSENT)
+    if raw is ABSENT:
+        return bool(ALGORITHM_IMPLICIT.value)
+    value, _, _ = parse_yes_no_field(raw, implicit=ALGORITHM_IMPLICIT)
+    return bool(value)
 
 
 def _algorithms(protocol_settings: dict[str, Any], min_version: str,
@@ -418,10 +431,11 @@ def _algorithms(protocol_settings: dict[str, Any], min_version: str,
     rather than "enabled". `protocol_algorithms` is a display column nothing may clause on, so a
     third state there costs no query anything.
 
-    THE ONE KEY ANY CONTROL ASSERTS IS NEVER NULL: `auth-algo-sha1` is determined at every
-    range, because the tls1-3-only range is the one it is measured OUT of. `allows_sha1` reads
-    a null as True anyway - the firing side - so a future range that left it unestablished
-    would report rather than reassure.
+    `allows_sha1` NO LONGER READS THIS MAP, as of 2026-10-29. This map is the RENDERED set -
+    what the algorithm dialog shows - and `auth-algo-sha1` is correctly False here at a
+    tls1-3-only range, because that is the range it was measured OUT of. The graded column
+    reports the CONFIGURATION instead, for the reason recorded on `_permits_sha1`: the rendered
+    cipher set is not the whole of what the profile governs.
 
     The three camellia/seed keys stay out of the expansion for the reason they always have:
     stage 4 records their implicit as `unsettable` - the write is refused at BOTH ends of the
@@ -760,9 +774,9 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
             "min_version_rank": min_version_rank(min_version),
             "protocol_algorithms": effective,
             "explicit_algorithms": explicit,
-            # Promoted to a column so a control can rest on it. Derived here, in the one place
-            # that already knows absent means enabled FOR THE RANGE.
-            "allows_sha1": _permits_sha1(effective),
+            # Promoted to a column so a control can rest on it. Reads `settings` - the
+            # CONFIGURATION - rather than `effective`, the rendered set: see `_permits_sha1`.
+            "allows_sha1": _permits_sha1(settings),
         }, [
             ("certificate_name", cert_rk, cert_rv),
             ("min_version", min_rk, min_rv),
