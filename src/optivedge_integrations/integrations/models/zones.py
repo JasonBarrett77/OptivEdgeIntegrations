@@ -66,6 +66,50 @@ class Zone(SyncTrackedModel):
     zone_protection_profile = models.CharField(max_length=128, blank=True)
     log_setting = models.CharField(max_length=128, blank=True)
 
+    # ------------------------------------------------------------- PAN-ZON-001's three columns
+    #
+    # `zone_protection_profile` above is THE NAIVE READING and these are what the measurement
+    # bought. Stage 4's own warning on the attachment leaf is that a consumer must not treat it
+    # as a plain empty string: the test the control needs is RESOLVING the name against the
+    # profile collection rather than checking the column for non-emptiness, because a zone
+    # naming a profile that does not exist reads as configured and meters nothing. The
+    # configuration expresses NO referential integrity here - the leaf is a free string,
+    # measured - and `is_empty` on the column above is the clause a reviewer would write and it
+    # misses that case entirely.
+
+    #: How many interfaces this zone's type subtree lists, as a reachable scalar beside the
+    #: `ZoneInterface` rows. Stored rather than counted at query time for the reason the shipped
+    #: `InterfaceManagementProfile.bound_interface_count` is: there is no count operator and no
+    #: aggregation in a predicate, and `ZoneInterface.ip_addresses` is a JSON column no query
+    #: can read.
+    interface_count = models.PositiveIntegerField(default=0)
+
+    #: Whether this zone can receive traffic at all, and so whether PAN-ZON-001 applies to it:
+    #: the zone carries one of the six type subtrees AND either names at least one interface or
+    #: is an EXTERNAL zone, which has no interfaces of its own and still offers the attachment.
+    #:
+    #: TRUE IS THE DEFAULT AND IT INCLUDES THE ROW, chosen deliberately AGAINST the column's own
+    #: arithmetic: a zone nobody has recomputed has `zone_type: unknown` and `interface_count:
+    #: 0`, which would compute FALSE and silently drop every zone out of the control between the
+    #: migration and the recompute pass. This is the applicability gate the control rests on,
+    #: and rules.md's direction decides it - a missing reading reported as compliant is a
+    #: customer told they are safe on the strength of nothing.
+    can_receive_traffic = models.BooleanField(default=True)
+
+    #: Whether NO zone protection profile is actually in force on this zone: the attachment leaf
+    #: is empty, OR it names a profile that does not resolve CASE-SENSITIVELY in this
+    #: appliance's device-local `ZoneProtectionProfile` collection. True is the finding.
+    #:
+    #: THE JOIN IS CASE-SENSITIVE AND NOT NORMALISED (help p.663), and the resolution order has
+    #: exactly ONE member, measured: `action=complete` answers code=6 Invalid sequence at both
+    #: the shared and the vsys spellings of the profile collection, so there is no second scope
+    #: to fall through to on a firewall.
+    #:
+    #: TRUE IS THE DEFAULT AND IT FIRES - a zone whose attachment nobody has resolved reports
+    #: itself rather than passing. The alternative reads as a clean estate on exactly the
+    #: appliances nobody has looked at.
+    zone_protection_unresolved = models.BooleanField(default=True)
+
     #: Tri-state, unlike every other flag here, because its default is ENABLED. Absent
     #: means on; only an explicit `no` means off. See the normalizer for the measurements.
     packet_buffer_protection = models.BooleanField(null=True, blank=True)

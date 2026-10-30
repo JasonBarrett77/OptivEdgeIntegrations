@@ -127,6 +127,7 @@ from .globalprotect import (
     GlobalProtectPortalClientAuthRow,
 )
 from .zones import Zone, ZoneInterface
+from .zone_dos_protection import DosPolicyRule, ZoneProtectionProfile
 from .user_id import (
     UserIdCollectorSettings,
     UserIdDiscoveryBound,
@@ -363,6 +364,8 @@ __all__ = [
     "SanctionedApplicationMarking",
     "Zone",
     "ZoneInterface",
+    "ZoneProtectionProfile",
+    "DosPolicyRule",
     "UserIdCollectorSettings",
     "UserIdDiscoveryBound",
     "UserIdMonitoredServer",

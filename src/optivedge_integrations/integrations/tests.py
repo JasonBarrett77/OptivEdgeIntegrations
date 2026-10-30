@@ -15667,9 +15667,14 @@ class SessionSettingsNormalizationTests(_NetworkHardeningBase):
         _nh_session(self.appliance)
 
         self.assertEqual(_NhSession.objects.count(), 1)
+        # THREE AND NOT TWO SINCE 2026-10-30: `tcp_reject_non_syn` was added to this model by the
+        # `zone-dos-protection` domain, which declared a `SessionSettings` model of its own and
+        # found this class already owning `deviceconfig/setting/session`. The count is the
+        # invariant this test exists for - one row per tracked field, never duplicated by a
+        # second pass - and it moves by one for every column added to the node.
         self.assertEqual(
             FieldProvenance.objects.filter(
-                content_type=ContentType.objects.get_for_model(_NhSession)).count(), 2)
+                content_type=ContentType.objects.get_for_model(_NhSession)).count(), 3)
 
     def test_a_template_decorated_leaf_reads_its_text_and_not_the_marker(self):
         """`deviceconfig/setting` is template-supplied on 013201001475 (@ptpl=shared-base) while
@@ -21248,3 +21253,746 @@ class SslTlsExplicitProtocolSettingsTests(TestCase):
         normalize_certificate_objects(self.appliance)
         self.assertTrue(
             SslTlsServiceProfile.objects.get(name="default").has_explicit_protocol_settings)
+
+
+# ===========================================================================================
+# zone-dos-protection - PAN-ZON-001 to PAN-ZON-008
+# ===========================================================================================
+#
+# WHAT THESE TESTS ARE FOR, in the words stage 7's contract added on 2026-10-29: a column whose
+# absent-key behaviour was MEASURED owes a test asserting it, because that is the cheapest place
+# in the pipeline to lose a measurement - the device reading sits in a handback, the value sits
+# in the normaliser, and nothing fails when a later edit changes what an absence stores. A test
+# that would still pass if the normaliser stopped storing the column is not that test.
+#
+# EVERY PAYLOAD HERE IS A LAB SHAPE, read off 6A9C0A9904E7D6E and 691665AC334B458 on 2026-10-30
+# through Panorama's `target=` proxy, trimmed to the keys under test. Two are CONSTRUCTED and
+# say so in their own comment: the two branches a readback over this lab could not discriminate,
+# which the mutation harness found and which are therefore the two that most need a test.
+#
+# Appliances are named by SERIAL, because 691665AC334B458 answers to the factory-default
+# hostname `PA-VM` while every artifact calls it `pan-fw-201`.
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    DosPolicyRule as _ZdpRule,
+    ZoneProtectionProfile as _ZdpProfile,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.network_hardening import (  # noqa: E402
+    normalize_session_settings as _zdp_session,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.zone_dos_protection import (  # noqa: E402
+    attachment_sweep_is_complete as _zdp_sweep,
+    dos_flood_and_resource_settings as _zdp_dos_settings,
+    dos_profile_references as _zdp_refs,
+    normalize_dos_policy_rules as _zdp_rules,
+    normalize_zone_protection_profiles as _zdp_profiles,
+    scan_weakest_action as _zdp_weakest,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.zones import (  # noqa: E402
+    normalize_zones as _zdp_zones,
+    zone_attachment_verdict as _zdp_verdict,
+    zone_can_receive_traffic as _zdp_can_receive,
+)
+
+
+class _ZoneDosBase(TestCase):
+    """One appliance, one vsys, one merged snapshot the caller shapes."""
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_FIREWALL, hostname="pano-zdp.net")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-zdp",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="6A9C0A9904E7D6E", hostname="fw-zdp",
+            software_version="11.2.3-h3")
+        self.group.active_appliance = self.appliance
+        self.group.save()
+        self.point = EnforcementPoint.objects.create(
+            management_station=self.station, appliance=self.appliance, vsys_name="vsys1",
+            in_scope=True)
+
+    def _merged(self, *, profiles=None, zones=None, deviceconfig=None, rulebase=None,
+                extra_device=None):
+        device = {
+            "@name": "localhost.localdomain",
+            "network": {"profiles": {"zone-protection-profile": {"entry": profiles}}
+                        if profiles is not None else {}},
+            "deviceconfig": deviceconfig or {},
+            "vsys": {"entry": [{
+                "@name": "vsys1",
+                **({"zone": {"entry": zones}} if zones is not None else {}),
+                **({"rulebase": rulebase} if rulebase is not None else {}),
+            }]},
+        }
+        device.update(extra_device or {})
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            enforcement_point=self.point,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [device]}}})
+
+    def _bare_profile(self, name="oep-zdp6-p01"):
+        """oep-zdp6-p01's measured shape: committed carrying nothing but its own name.
+
+        Stage 4 built it, committed it, and read it back from `show config running` still
+        carrying only `description` - so every absence this fixture asserts is a state a
+        RUNNING device holds and not a candidate artefact.
+        """
+        self._merged(profiles=[{"@name": name}])
+        _zdp_profiles(self.appliance)
+        return _ZdpProfile.objects.get(profile_name=name)
+
+
+class ZoneProtectionProfileAbsentKeyTests(_ZoneDosBase):
+    """What the profile stores when a key is absent, and what the row says it rests on."""
+
+    def test_an_absent_flood_enable_means_the_type_is_NOT_metered(self):
+        """All five, on oep-zdp6-p01. FALSE IS THE FIRING SIDE of PAN-ZON-002 and -003, so a
+        profile nobody configured reports rather than reassuring."""
+        row = self._bare_profile()
+
+        self.assertFalse(row.syn_flood_enabled)
+        self.assertFalse(row.udp_flood_enabled)
+        self.assertFalse(row.icmp_flood_enabled)
+        self.assertFalse(row.icmpv6_flood_enabled)
+        self.assertFalse(row.other_ip_flood_enabled)
+
+    def test_an_absent_flood_enable_records_the_MEASURED_vendor_default(self):
+        """The provenance row is the only thing separating a key absent with PAN-OS supplying
+        the value from a key nobody has measured, and these five are measured."""
+        row = self._bare_profile()
+
+        for column in ("syn_flood_enabled", "udp_flood_enabled", "icmp_flood_enabled",
+                       "icmpv6_flood_enabled", "other_ip_flood_enabled"):
+            self.assertEqual(
+                row.provenance_for(column).provenance_type, "pan_os_default", column)
+
+    def test_an_absent_packet_drop_means_the_firewall_does_NOT_discard(self):
+        row = self._bare_profile()
+
+        for column in ("discard_ip_spoof", "strict_ip_check",
+                       "discard_strict_source_routing", "discard_loose_source_routing",
+                       "discard_malformed_option",
+                       "discard_overlapping_tcp_segment_mismatch",
+                       "discard_record_route", "discard_timestamp"):
+            self.assertIs(getattr(row, column), False, column)
+            self.assertEqual(
+                row.provenance_for(column).provenance_type, "pan_os_default", column)
+
+    def test_an_absent_tcp_reject_non_syn_stores_the_POINTER_and_not_a_value(self):
+        """`global` is NEITHER the asserted `yes` NOR a readable `no` - the shape stage 4 named
+        as one a consumer gets wrong, measured wrong in both directions."""
+        row = self._bare_profile()
+
+        self.assertEqual(row.non_syn_reject_configured, "global")
+        self.assertEqual(
+            row.provenance_for("non_syn_reject_configured").provenance_type, "pan_os_default")
+
+    def test_an_absent_scan_ENTRY_means_the_type_is_not_detected_AT_ALL(self):
+        """THE WORSE OF THE TWO ABSENCES, and the one a normaliser that collapses them loses:
+        with no entry the outer grid's four scan columns render BLANK and the `scan` node is
+        absent from the committed entry. The empty string is the sentinel, not `alert`."""
+        row = self._bare_profile()
+
+        self.assertEqual(row.scan_tcp_port_action, "")
+        self.assertEqual(row.scan_udp_port_action, "")
+        self.assertEqual(row.scan_host_sweep_action, "")
+        self.assertEqual(row.scan_ip_protocol_action, "")
+        # And no provenance row at all: nothing is tracked, because there is no key.
+        self.assertIsNone(row.provenance_for("scan_tcp_port_action"))
+
+    def test_a_scan_entry_with_no_ACTION_child_records_the_event(self):
+        """oep-zdp6-p07's measured shape: the four entries exist carrying an interval and a
+        threshold and NO action element. Measured separately on entry 8002 - its action child
+        deleted and the entry committed carrying only `interval`, `show config running`
+        returning {'@name': '8002', 'interval': '102'}, and the dialog rendering `alert`."""
+        self._merged(profiles=[{"@name": "oep-zdp6-p07", "scan": {"entry": [
+            {"@name": "8001", "interval": "5", "threshold": "100"},
+            {"@name": "8002", "interval": "5", "threshold": "100"},
+            {"@name": "8003", "interval": "5", "threshold": "100"},
+            {"@name": "8006", "interval": "5", "threshold": "100"},
+        ]}}])
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="oep-zdp6-p07")
+
+        self.assertEqual(row.scan_tcp_port_action, "alert")
+        self.assertEqual(row.scan_host_sweep_action, "alert")
+        self.assertEqual(
+            row.provenance_for("scan_tcp_port_action").provenance_type, "pan_os_default")
+        # AND THE EVENT IS RECORDED, which is the whole difference from the absence above.
+        self.assertFalse(row.scan_detection_gap)
+
+    def test_the_sensitivity_keys_store_NOTHING_when_nobody_measured_them(self):
+        """`not_assumed`, and the two leads disagree: help p.672 gives 100 for every scan type
+        and the device's own form prefills 4 for IP Protocol Scan. The integer parser returns a
+        genuine NULL, which NO operator reaches - which is why the companion exists."""
+        row = self._bare_profile()
+
+        self.assertIsNone(row.scan_interval)
+        self.assertIsNone(row.scan_threshold)
+        self.assertEqual(row.scan_block_ip_track_by, "")
+        self.assertEqual(
+            row.provenance_for("scan_interval").provenance_type, "not_configured")
+        self.assertEqual(
+            row.provenance_for("scan_threshold").provenance_type, "not_configured")
+        self.assertFalse(row.scan_sensitivity_known)
+
+    def test_an_absent_exclusion_list_means_NOTHING_is_exempt(self):
+        """The safe direction, and stage 4's weakest promotion on this object - the positive
+        control was not paid, and it is promoted only because an empty entry-list has no other
+        reading."""
+        row = self._bare_profile()
+
+        self.assertEqual(row.scan_white_list, [])
+        self.assertEqual(row.scan_white_list_count, 0)
+        self.assertEqual(
+            row.provenance_for("scan_white_list").provenance_type, "pan_os_default")
+
+    def test_an_absent_flood_rate_set_stores_NOTHING_rather_than_the_dialog_hint(self):
+        """ExtJS writes emptyText into the input's `value` and the hint reads
+        `10000 [0 - 2000000]` - the shipped number AND the range in one placeholder. Stage 4
+        recorded these implicits as a RELATION rather than a constant and set `merge_as: hold`,
+        so there is no value to put in the column."""
+        self.assertIsNone(self._bare_profile().flood_rates)
+
+    def test_the_action_is_WHICH_CONTAINER_EXISTS_and_neither_is_blank(self):
+        """`flood/tcp-syn` has no `action` leaf: the response is which of two sibling CONTAINERS
+        is present, and there is no third state the configuration expresses."""
+        self.assertEqual(self._bare_profile().syn_flood_action, "")
+        self._merged(profiles=[{"@name": "p-red", "flood": {"tcp-syn": {
+            "enable": "yes", "red": {"activate-rate": "1000"}}}}])
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="p-red")
+        self.assertEqual(row.syn_flood_action, "red")
+        # AND THE RESOLVED BRANCH TRAVELS WITH THE NUMBERS, because the same activate-rate
+        # means a different response under each container.
+        self.assertEqual(row.flood_rates["syn_flood_action"], "red")
+        self.assertEqual(row.flood_rates["rates"]["tcp-syn"]["red"]["activate-rate"], "1000")
+
+    def test_an_unmarked_entry_records_LOCAL_and_never_the_parents_marker(self):
+        """THE SPECIFIC ERROR STAGE 4 MEASURED ON THIS OBJECT: `network/profiles` is itself
+        @ptpl='shared-single-vsys' while the profile collection beneath it carries no mark at
+        all, so a normaliser inheriting the parent's would label every locally-created profile
+        template-supplied AND name the wrong template."""
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": [{
+                "@name": "localhost.localdomain",
+                "network": {"profiles": {
+                    "@ptpl": "shared-single-vsys",
+                    "zone-protection-profile": {"entry": [{"@name": "oep-zdp6-p01"}]}}},
+                "vsys": {"entry": [{"@name": "vsys1"}]}}]}}})
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="oep-zdp6-p01")
+
+        self.assertEqual(row.provenance_for("__entry__").provenance_type, "local")
+
+    def test_a_template_supplied_entry_records_TEMPLATE_from_its_OWN_marker(self):
+        # CONSTRUCTED. No zone protection profile in this lab is template-supplied - all
+        # thirteen record `local` - so the readback proved only one arm of this branch and a
+        # mutation that hardcoded the parent's marker moved nothing until the harness learned to
+        # compare provenance at all. That is exactly why this arm needs a test.
+        self._merged(profiles=[{"@name": "p-tpl", "@ptpl": "ptpl-pan-fw-111"}])
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="p-tpl")
+
+        self.assertEqual(row.provenance_for("__entry__").provenance_type, "template")
+        self.assertEqual(row.provenance_for("__entry__").raw_value, "ptpl-pan-fw-111")
+
+
+class ZoneProtectionProfileVerdictTests(_ZoneDosBase):
+    """The computed columns, each asserted at the value its own control reads."""
+
+    def test_every_gap_verdict_FIRES_on_a_profile_that_stores_nothing(self):
+        """The direction rules.md asks for: a profile nobody configured reports itself rather
+        than reading as a clean one, and that is what its inputs' own defaults compute to."""
+        row = self._bare_profile()
+
+        self.assertTrue(row.volumetric_flood_gap)
+        self.assertTrue(row.packet_drop_gap)
+        self.assertTrue(row.scan_detection_gap)
+
+    def test_the_volumetric_verdict_IGNORES_the_half_open_connection_flood(self):
+        """PAN-ZON-002 owns the SYN flood and PAN-ZON-003 owns the other four. A verdict that
+        counted all five would fire on oep-zdp6-p04 - whose only gap is the SYN flood - under
+        the wrong control, and the two have different severities."""
+        self._merged(profiles=[{"@name": "oep-zdp6-p04", "flood": {
+            "tcp-syn": {"enable": "no"}, "udp": {"enable": "yes"},
+            "icmp": {"enable": "yes"}, "icmpv6": {"enable": "yes"},
+            "other-ip": {"enable": "yes"}}}])
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="oep-zdp6-p04")
+
+        self.assertFalse(row.syn_flood_enabled)
+        self.assertFalse(row.volumetric_flood_gap)
+
+    def test_the_packet_drop_verdict_reads_the_FOUR_asserted_drops_and_not_all_eight(self):
+        """oep-zdp6-p09's shape: the spoofed-source drop is off and the four PAN-ZON-006 names
+        are on. `discard-ip-spoof` is PAN-ZON-005's and belongs to a different finding."""
+        self._merged(profiles=[{"@name": "oep-zdp6-p09",
+                                "discard-ip-spoof": "no",
+                                "discard-strict-source-routing": "yes",
+                                "discard-loose-source-routing": "yes",
+                                "discard-malformed-option": "yes",
+                                "discard-overlapping-tcp-segment-mismatch": "yes"}])
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="oep-zdp6-p09")
+
+        self.assertFalse(row.discard_ip_spoof)
+        self.assertFalse(row.packet_drop_gap)
+
+    def test_the_pointer_resolves_through_the_DEVICE_WIDE_leaf_in_both_directions(self):
+        """HALF OF PAN-ZON-006'S ANSWER IS NOT ON THE PROFILE AT ALL. oep-zdp6-sess carries
+        `tcp-reject-non-syn: no` device-wide, so a profile at `global` enforces NO."""
+        self._merged(
+            profiles=[{"@name": "p-global"}],
+            deviceconfig={"setting": {"session": {"tcp-reject-non-syn": "no"}}})
+        _zdp_profiles(self.appliance)
+        self.assertEqual(
+            _ZdpProfile.objects.get(profile_name="p-global").non_syn_reject_effective, "no")
+
+        _ZdpProfile.objects.all().delete()
+        Snapshot.objects.all().delete()
+        self._merged(profiles=[{"@name": "p-global"}], deviceconfig={"setting": {}})
+        _zdp_profiles(self.appliance)
+        # The device-wide key absent means the firewall DOES reject, measured, so the same
+        # profile at `global` now enforces YES.
+        self.assertEqual(
+            _ZdpProfile.objects.get(profile_name="p-global").non_syn_reject_effective, "yes")
+
+    def test_a_profile_stating_its_OWN_refusal_needs_no_second_reading(self):
+        """oep-zdp6-p10's shape - `no` on the profile - which resolves without the device-wide
+        node and must not be overwritten by it."""
+        self._merged(
+            profiles=[{"@name": "oep-zdp6-p10", "tcp-reject-non-syn": "no"}],
+            deviceconfig={"setting": {}})
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="oep-zdp6-p10")
+
+        self.assertEqual(row.non_syn_reject_configured, "no")
+        self.assertEqual(row.non_syn_reject_effective, "no")
+
+    def test_an_UNRECOGNISED_literal_resolves_through_the_device_and_does_not_invent_yes(self):
+        # CONSTRUCTED, and the licence is a refusal stage 4 recorded because it looks like
+        # evidence and is not: writing `global` to the DEVICE-WIDE <yes|no> leaf was ACCEPTED at
+        # the write and never committed, so whether commit validation rejects a third value
+        # there IS NOT ESTABLISHED - and a normaliser must not assume this leaf's committed
+        # value set is closed.
+        self._merged(
+            profiles=[{"@name": "p-odd", "tcp-reject-non-syn": "something-else"}],
+            deviceconfig={"setting": {"session": {"tcp-reject-non-syn": "no"}}})
+        _zdp_profiles(self.appliance)
+
+        self.assertEqual(
+            _ZdpProfile.objects.get(profile_name="p-odd").non_syn_reject_effective, "no")
+
+    def test_the_weakest_scan_action_is_NOT_a_lexical_or_numeric_ORDER(self):
+        """THE ORDERING IS NOT A LADDER. Stage 3 grades `block` as acceptable and `block-ip`
+        tracking the source-and-destination PAIR as low, because a scanner that moves to
+        another destination is no longer blocked - so the pair form sorts BELOW the plain block
+        despite being the more elaborate setting."""
+        pair = _zdp_weakest(
+            {"8001": "block", "8002": "block-ip", "8003": "block", "8006": "block"},
+            "source-and-destination")
+        self.assertEqual(pair, "block-ip-source-and-destination")
+        # And the SOURCE form outranks the plain block, which no comparison on the strings
+        # produces in either direction.
+        source = _zdp_weakest(
+            {"8001": "block-ip", "8002": "block-ip", "8003": "block-ip", "8006": "block-ip"},
+            "source")
+        self.assertEqual(source, "block-ip-source")
+        # A MISSING ENTRY IS WORSE THAN ANY ACTION, which is the whole point of the sentinel.
+        self.assertEqual(
+            _zdp_weakest({"8001": "allow", "8002": "", "8003": "block", "8006": "block"}, ""),
+            "")
+
+    def test_an_UNRANKED_action_sorts_WORST_and_is_never_graded_as_the_best(self):
+        # CONSTRUCTED. The four measured arms are the whole value set `action=complete`
+        # returned, so no lab profile can produce this - and a value outside the set is a
+        # reading nobody has graded. Ranking it best would grade a profile on a guess.
+        self.assertEqual(
+            _zdp_weakest({"8001": "block", "8002": "a-new-action", "8003": "block",
+                          "8006": "block"}, ""),
+            "a-new-action")
+
+    def test_a_blockip_whose_track_by_was_never_read_grades_at_the_GENTLER_rank(self):
+        """The reassuring direction, chosen deliberately and named in stage 5's not_measured:
+        `scan_sensitivity_known` beside it is what says the reading was incomplete, and no
+        clause rests on this column."""
+        self.assertEqual(
+            _zdp_weakest({"8001": "block-ip", "8002": "block-ip", "8003": "block-ip",
+                          "8006": "block-ip"}, ""),
+            "block-ip-source")
+
+    def test_the_exemption_count_walks_BOTH_address_leaves(self):
+        # CONSTRUCTED IN ONE HALF, and the half that is constructed is the one this lab cannot
+        # discriminate: oep-zdp6-p03 holds two entries each carrying exactly one `ipv4` and no
+        # `ipv6`, so an entry count and an address count are EQUAL on every profile in this
+        # estate and a mutation counting entries moved nothing. The Help describes ONE address
+        # field with a type selector and the configuration holds TWO leaves, so a reader
+        # checking one of them sees half the list.
+        self._merged(profiles=[{"@name": "p-wl", "scan-white-list": {"entry": [
+            {"@name": "oep-zdp6-wl1", "ipv4": "10.90.1.10/32"},
+            {"@name": "both", "ipv4": "10.90.1.11/32", "ipv6": "2001:db8::1/128"},
+        ]}}])
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="p-wl")
+
+        self.assertEqual(row.scan_white_list_count, 3)
+        self.assertEqual(len(row.scan_white_list), 2)
+
+    def test_the_two_reference_verdicts_are_NOT_each_others_negation(self):
+        """They answer the same join and carry OPPOSITE defaults, because the two controls that
+        read them fail in opposite directions: a content control that falls silent hides a real
+        exposure, and a hygiene control that fires wrongly gets a profile deleted."""
+        self._merged(
+            profiles=[{"@name": "oep-zdp6-p02"}, {"@name": "oep-zdp6-p12"}],
+            zones=[{"@name": "oep-zdp6-z02", "network": {
+                "layer3": {"member": "ethernet1/1"},
+                "zone-protection-profile": "oep-zdp6-p02"}}])
+        _zdp_zones(self.point)
+        _zdp_profiles(self.appliance)
+
+        attached = _ZdpProfile.objects.get(profile_name="oep-zdp6-p02")
+        self.assertEqual(attached.attached_zone_count, 1)
+        self.assertTrue(attached.is_in_force)
+        self.assertFalse(attached.is_unreferenced)
+
+        orphan = _ZdpProfile.objects.get(profile_name="oep-zdp6-p12")
+        self.assertEqual(orphan.attached_zone_count, 0)
+        self.assertFalse(orphan.is_in_force)
+        self.assertTrue(orphan.is_unreferenced)
+
+    def test_an_INCOMPLETE_sweep_suppresses_the_deletion_candidate_and_nothing_else(self):
+        # CONSTRUCTED: no appliance in this lab has a shared gateway, which needs multi-vsys
+        # with external zones, so the readback proved only the complete arm and a mutation
+        # hardcoding false was caught on the flag alone. The suppression is the behaviour that
+        # matters - PAN-ZON-008's remediation is a DELETION.
+        self._merged(profiles=[{"@name": "oep-zdp6-p12"}], zones=[],
+                     extra_device={"shared-gateway": {"entry": [{"@name": "sg1"}]}})
+        _zdp_profiles(self.appliance)
+        row = _ZdpProfile.objects.get(profile_name="oep-zdp6-p12")
+
+        self.assertFalse(row.attachment_sweep_complete)
+        self.assertFalse(row.is_unreferenced)
+        # AND THE CONTENT CONTROLS STILL SEE THE ROW: `is_in_force` does not depend on the
+        # sweep, so an incomplete sweep costs a deletion candidate and not five findings.
+        self.assertFalse(row.is_in_force)
+
+    def test_an_appliance_with_no_shared_gateway_HAS_a_complete_sweep(self):
+        """The measured lab state on both appliances, and the reason the flag is not simply
+        false for ever: the question is whether a surface exists to have been missed."""
+        self.assertTrue(_zdp_sweep({"vsys": {"entry": []}}))
+        self.assertFalse(_zdp_sweep({"shared-gateway": {"entry": [{"@name": "sg1"}]}}))
+
+    def test_a_profile_whose_name_differs_only_in_CASE_is_not_in_force(self):
+        # CONSTRUCTED, and this is the second branch the readback could not discriminate: no
+        # name pair on this lab differs only in case, so a mutation that case-folded the join
+        # moved nothing. Profile names are case-sensitive and not normalised (help p.663), so a
+        # case-folded join would report a profile as attached that the dataplane does not
+        # resolve - which is the unsafe direction for `is_in_force`.
+        self.assertTrue(_zdp_verdict("OEP-ZDP6-P02", {"oep-zdp6-p02"}))
+        self.assertFalse(_zdp_verdict("oep-zdp6-p02", {"oep-zdp6-p02"}))
+
+
+class ZoneAttachmentColumnTests(_ZoneDosBase):
+    """PAN-ZON-001's three columns on the shipped `Zone`."""
+
+    def test_a_zone_naming_a_profile_that_does_NOT_EXIST_reads_as_unresolved(self):
+        """THE COLUMN THE MEASUREMENT BOUGHT. The configuration expresses no referential
+        integrity at this leaf - stage 4 measured it as a free string - so a dangling name
+        reads as configured and the zone meters nothing. `is_empty` on
+        `zone_protection_profile` is the clause a reviewer would write and it misses this."""
+        self._merged(
+            profiles=[{"@name": "oep-zdp6-p02"}],
+            zones=[{"@name": "z-dangling", "network": {
+                "layer3": {"member": "ethernet1/1"},
+                "zone-protection-profile": "a-profile-that-is-not-there"}}])
+        _zdp_zones(self.point)
+        _zdp_profiles(self.appliance)
+        row = Zone.objects.get(name="z-dangling")
+
+        self.assertEqual(row.zone_protection_profile, "a-profile-that-is-not-there")
+        self.assertTrue(row.zone_protection_unresolved)
+
+    def test_a_zone_with_NO_attachment_leaf_reads_as_unresolved(self):
+        """24 committed zones across four appliances have never held the key, and a zone with
+        no attachment has NO entry in `show zone-protection` at all."""
+        self._merged(profiles=[], zones=[{"@name": "oep-zdp6-z21", "network": {
+            "external": {"member": "vsys2"}}}])
+        _zdp_zones(self.point)
+        row = Zone.objects.get(name="oep-zdp6-z21")
+
+        self.assertEqual(row.zone_protection_profile, "")
+        self.assertTrue(row.zone_protection_unresolved)
+
+    def test_a_zone_naming_a_profile_that_EXISTS_reads_as_resolved(self):
+        self._merged(
+            profiles=[{"@name": "oep-zdp6-p02"}],
+            zones=[{"@name": "oep-zdp6-z02", "network": {
+                "layer3": {"member": "ethernet1/1"},
+                "zone-protection-profile": "oep-zdp6-p02"}}])
+        _zdp_zones(self.point)
+        self.assertFalse(Zone.objects.get(name="oep-zdp6-z02").zone_protection_unresolved)
+
+    def test_an_EXTERNAL_zone_with_no_interfaces_stays_IN_the_population(self):
+        """oep-zdp6-z21's shape. An external zone carries inter-vsys traffic and has no
+        interface list of its own, and it still offers the attachment - so the applicability
+        gate is a DISJUNCTION and not a count."""
+        self.assertTrue(_zdp_can_receive("external", 0))
+        self.assertTrue(_zdp_can_receive("layer3", 1))
+        self.assertFalse(_zdp_can_receive("layer3", 0))
+
+    def test_a_zone_with_NO_type_subtree_is_OUTSIDE_the_population(self):
+        """oep-zdp6-z24's shape: committed carrying no `network` subtree at all, which stage 4
+        measured is a legal committable state. Such a zone receives no traffic, so it is
+        outside PAN-ZON-001 rather than at the gentle end of it."""
+        self._merged(profiles=[], zones=[{"@name": "oep-zdp6-z24"}])
+        _zdp_zones(self.point)
+        row = Zone.objects.get(name="oep-zdp6-z24")
+
+        self.assertEqual(row.zone_type, "unknown")
+        self.assertEqual(row.interface_count, 0)
+        self.assertFalse(row.can_receive_traffic)
+
+    def test_the_interface_count_matches_the_type_subtrees_member_list(self):
+        self._merged(profiles=[], zones=[{"@name": "trust", "network": {
+            "layer3": {"member": ["ethernet1/1", "ethernet1/2", "loopback.906"]}}}])
+        _zdp_zones(self.point)
+        row = Zone.objects.get(name="trust")
+
+        self.assertEqual(row.interface_count, 3)
+        self.assertTrue(row.can_receive_traffic)
+
+
+class DosPolicyRuleTests(_ZoneDosBase):
+    """PAN-ZON-007's rulebase - the rule that reads as protection and consults nothing."""
+
+    def _rules(self, entries):
+        self._merged(rulebase={"dos": {"rules": {"entry": entries}}})
+        return _zdp_rules(self.point)
+
+    def test_the_action_is_WHICH_CHILD_EXISTS_and_only_protect_consults_the_profile(self):
+        """Three child nodes, not three values, with the stored shape
+        `action: {'protect': None}`. A later stage reading the parent's path expecting a string
+        gets an ELEMENT instead."""
+        self._rules([
+            {"@name": "oep-zdp6-r01", "action": {"protect": None}, "disabled": "yes",
+             "protection": {"aggregate": {"profile": "oep-zdp6-d01"}}},
+            {"@name": "oep-zdp6-r02", "action": {"allow": None}, "disabled": "yes",
+             "protection": {"aggregate": {"profile": "oep-zdp6-d01"}}},
+        ])
+        rows = {r.rule_name: r for r in _ZdpRule.objects.all()}
+
+        self.assertEqual(rows["oep-zdp6-r01"].rule_action, "protect")
+        self.assertEqual(rows["oep-zdp6-r02"].rule_action, "allow")
+        # Both NAME a profile; only one consults it, and that is the finding PAN-ZON-007 makes.
+        self.assertTrue(rows["oep-zdp6-r01"].names_a_profile)
+        self.assertTrue(rows["oep-zdp6-r02"].names_a_profile)
+
+    def test_the_applicability_gate_reads_BOTH_profile_slots(self):
+        """A GATE THAT READS ONE SLOT CALLS EVERY CLASSIFIED-ONLY RULE INAPPLICABLE: the
+        catalogue row for this control asserts the AGGREGATE slot alone, and the two are
+        sibling nodes with no exclusivity the grammar expresses."""
+        self._rules([
+            {"@name": "oep-zdp6-r03", "action": {"deny": None}, "disabled": "yes",
+             "protection": {"classified": {
+                 "profile": "oep-zdp6-d02",
+                 "classification-criteria": {"address": "source-ip-only"}}}},
+            {"@name": "oep-zdp6-r04", "action": {"deny": None}, "disabled": "yes"},
+        ])
+        rows = {r.rule_name: r for r in _ZdpRule.objects.all()}
+
+        self.assertEqual(rows["oep-zdp6-r03"].classified_profile, "oep-zdp6-d02")
+        self.assertEqual(rows["oep-zdp6-r03"].aggregate_profile, "")
+        self.assertTrue(rows["oep-zdp6-r03"].names_a_profile)
+        self.assertFalse(rows["oep-zdp6-r04"].names_a_profile)
+
+    def test_an_absent_AGGREGATE_profile_means_no_aggregate_thresholds_are_in_force(self):
+        """help p.205 - 'An Aggregate profile setting of None means there are no threshold
+        settings in place for the aggregate traffic' - measured on the bare committed rule."""
+        self._rules([{"@name": "r-bare", "action": {"deny": None}}])
+        row = _ZdpRule.objects.get(rule_name="r-bare")
+
+        self.assertEqual(row.aggregate_profile, "")
+        self.assertEqual(
+            row.provenance_for("aggregate_profile").provenance_type, "pan_os_default")
+
+    def test_the_three_UNMEASURED_rule_keys_store_nothing_and_say_so(self):
+        """The classified arm was never written and the one surface that renders an answer is a
+        dialog measured to prefill - and the prefill is the value the vendor WARNS about for an
+        internet-facing zone. `disabled` is unmeasured on this object too: the shipped
+        `SecurityRule` and `DecryptionRule` both materialise false off THEIR own measurements,
+        and carrying that across would assume two rulebases share a default."""
+        self._rules([{"@name": "r-bare", "action": {"deny": None}}])
+        row = _ZdpRule.objects.get(rule_name="r-bare")
+
+        for column in ("classified_profile", "classification_address", "rule_disabled"):
+            self.assertEqual(getattr(row, column), "", column)
+            self.assertEqual(
+                row.provenance_for(column).provenance_type, "not_configured", column)
+
+    def test_the_array_ORDER_is_preserved_because_no_key_holds_it(self):
+        """The order is the evaluation order and no key holds it, so a reader that does not
+        preserve array order loses the only statement the device makes about sequence."""
+        self._rules([{"@name": f"r{n}", "action": {"deny": None}} for n in range(1, 5)])
+        self.assertEqual(
+            [(r.rule_name, r.rule_position) for r in _ZdpRule.objects.all()],
+            [("r1", 1), ("r2", 2), ("r3", 3), ("r4", 4)])
+
+    def test_the_rulebase_is_part_of_the_identity(self):
+        """One rule name can exist in the vsys-local rulebase and in a pushed pre- and
+        post-rulebase at once, which are three objects at three evaluation positions."""
+        self._rules([{"@name": "shared-name", "action": {"deny": None}}])
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            enforcement_point=self.point, source_type="show_pushed_shared_policy_vsys",
+            collected_at=timezone.now(),
+            payload={"policy": {"panorama": {
+                "pre-rulebase": {"dos": {"rules": {"entry": [
+                    {"@name": "shared-name", "action": {"protect": None},
+                     "@loc": "dg-edge",
+                     "protection": {"aggregate": {"profile": "oep-zdp6-d01"}}}]}}}}}})
+        _zdp_rules(self.point)
+
+        rows = {r.config_source: r for r in _ZdpRule.objects.filter(rule_name="shared-name")}
+        self.assertEqual(sorted(rows), ["local", "pushed_pre"])
+        self.assertEqual(rows["pushed_pre"].rule_action, "protect")
+        self.assertEqual(
+            rows["pushed_pre"].provenance_for("__entry__").provenance_type, "device_group")
+
+
+class DosProtectionProfileKindTests(_ZoneDosBase):
+    """The DoS kind on the shipped `SecurityProfile` - two columns and the referrer walk."""
+
+    def test_an_absent_type_stores_NOTHING_because_the_key_is_MANDATORY_at_commit(self):
+        """Measured rather than inferred: stage 4 built a second bare profile for this question
+        alone and the commit was refused with `missing 'type'`. The merge view is
+        candidate-derived, so a STAGED profile can reach a normaliser without it, and the blank
+        says exactly that rather than naming a default."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.zone_dos_protection import (  # noqa: E501
+            dos_protection_profile_values,
+        )
+        values, provenance = dos_protection_profile_values({"@name": "oep-zdp-dosp2"})
+
+        self.assertEqual(values["profile_type"], "")
+        self.assertIsNone(values["flood_and_resource_settings"])
+        self.assertEqual(provenance[0][0], "profile_type")
+        self.assertEqual(provenance[0][1].provenance_type, "not_configured")
+
+    def test_the_two_types_are_read_as_the_device_spells_them(self):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.zone_dos_protection import (  # noqa: E501
+            dos_protection_profile_values,
+        )
+        for token in ("aggregate", "classified"):
+            values, _p = dos_protection_profile_values({"@name": "d", "type": token})
+            self.assertEqual(values["profile_type"], token)
+
+    def test_the_flood_structure_carries_the_TYPE_beside_the_numbers(self):
+        """A threshold means two different things under `aggregate` and under `classified` -
+        the whole matched group counted together, or each device in it individually - so a
+        number read without the type is ambiguous."""
+        settings = _zdp_dos_settings(
+            {"type": "classified",
+             "flood": {"udp": {"enable": "yes", "red": {
+                 "activate-rate": "1000", "block-probability": "50",
+                 "block": {"duration": "300"}}}},
+             "resource": {"sessions": {"enabled": "yes",
+                                       "max-concurrent-limit": "1024"}}},
+            "classified")
+
+        self.assertEqual(settings["profile_type"], "classified")
+        self.assertEqual(settings["flood"]["udp"]["activate-rate"], "1000")
+        self.assertEqual(settings["flood"]["udp"]["block-probability"], "50")
+        self.assertEqual(settings["flood"]["udp"]["block/duration"], "300")
+        self.assertEqual(settings["resource"]["max-concurrent-limit"], "1024")
+
+    def test_the_DOS_flood_node_is_NOT_the_zone_profiles_flood_node(self):
+        """Measured on three appliances: this object's `flood` has FIVE children - no
+        `sctp-init`, and `action=complete` at `flood/sctp-init` answers code=6. A reader that
+        shared the zone profile's constant would store a key this object cannot hold."""
+        settings = _zdp_dos_settings(
+            {"flood": {"sctp-init": {"enable": "yes",
+                                     "red": {"activate-rate": "1"}}}}, "aggregate")
+
+        self.assertIsNone(settings)
+
+    def test_the_referrer_walk_reads_BOTH_slots_at_EVERY_rulebase(self):
+        """THE SURFACE THE SHIPPED WALK CANNOT SEE. `collect_profile_and_group_references`
+        matches a payload key whose NAME is a profile kind carrying a member list, and a DoS
+        rule names its profile at `protection/aggregate/profile` - a text leaf under a key
+        called `profile`. Without this the reach would read `unreferenced` on every DoS profile
+        in every estate with nothing erroring."""
+        root = {
+            "rulebase": {"dos": {"rules": {"entry": [
+                {"@name": "r01", "protection": {"aggregate": {"profile": "d01"}}},
+                {"@name": "r03", "protection": {"classified": {"profile": "d02"}}},
+                {"@name": "r04"},
+            ]}}},
+            "pre-rulebase": {"dos": {"rules": {"entry": [
+                {"@name": "r-pushed", "@loc": "shared",
+                 "protection": {"aggregate": {"profile": "d05"},
+                                "classified": {"profile": "d06"}}},
+            ]}}},
+        }
+        found = _zdp_refs(root)
+
+        self.assertEqual(
+            sorted((name, referrer) for name, referrer, _loc in found),
+            [("d01", "rulebase/dos/r01"), ("d02", "rulebase/dos/r03"),
+             ("d05", "pre-rulebase/dos/r-pushed"), ("d06", "pre-rulebase/dos/r-pushed")])
+        # THE @loc TRAVELS OUT UNINTERPRETED, so the caller classifies scope from the marker
+        # and never from which query returned the entry.
+        self.assertEqual({loc for name, _r, loc in found if name == "d05"}, {"shared"})
+
+    def test_a_rulebase_with_no_dos_node_contributes_no_referrer(self):
+        """The measured state of vsys1 on 691665AC334B458: the whole `rulebase/dos` node is
+        absent, parent and all."""
+        self.assertEqual(_zdp_refs({"rulebase": {"security": {"rules": {}}}}), [])
+        self.assertEqual(_zdp_refs(None), [])
+
+
+class SessionSettingsDosColumnTests(_NetworkHardeningBase):
+    """PAN-ZON-006's device-wide half, on the class that already owns the node."""
+
+    def test_an_absent_key_means_the_firewall_DOES_reject_non_SYN_TCP(self):
+        """THE REASSURING SIDE, AND CORRECT ANYWAY. Measured in both directions on a committed
+        state: the node has never existed on 691665AC334B458 and `show session info` answers
+        `tcp-nonsyn-rej: True`; `no` committed moved it to False; the leaf deleted and that
+        delete committed returned it to True. A collector reporting 'not configured' here
+        would be reporting the OPPOSITE of what the firewall does."""
+        self._merged(deviceconfig={"setting": {"config": {"rematch": "no"}}})
+        _nh_session(self.appliance)
+        row = _NhSession.objects.get()
+
+        self.assertTrue(row.tcp_reject_non_syn)
+        self.assertEqual(
+            row.provenance_for("tcp_reject_non_syn").provenance_type, "pan_os_default")
+
+    def test_a_configured_no_is_read_and_marked_LOCAL(self):
+        """oep-zdp6-sess's shape on 6A9C0A9904E7D6E, which is the only reason PAN-ZON-006's
+        deferring state is demonstrable at all."""
+        self._merged(deviceconfig={"setting": {
+            "session": {"tcp-reject-non-syn": "no"}}})
+        _nh_session(self.appliance)
+        row = _NhSession.objects.get()
+
+        self.assertFalse(row.tcp_reject_non_syn)
+        self.assertEqual(row.provenance_for("tcp_reject_non_syn").provenance_type, "local")
+
+    def test_the_three_absence_shapes_of_this_node_all_read_as_the_default(self):
+        """Stage 4 measured all three: `action=get` returns None where the node has never
+        existed, `{'session': null}` - TRUTHY, with a single null value - where it is committed
+        and empty, and a truthy dict of @admin/@dirtyId/@time with no child where it is empty
+        and uncommitted."""
+        for shape in ({}, {"setting": {"session": None}},
+                      {"setting": {"session": {"@admin": "admin", "@dirtyId": "1"}}}):
+            _NhSession.objects.all().delete()
+            Snapshot.objects.all().delete()
+            self._merged(deviceconfig=shape)
+            _nh_session(self.appliance)
+            self.assertTrue(_NhSession.objects.get().tcp_reject_non_syn, shape)

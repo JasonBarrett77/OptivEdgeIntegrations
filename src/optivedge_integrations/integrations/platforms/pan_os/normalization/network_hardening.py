@@ -111,6 +111,25 @@ IPV6_FIREWALLING_ABSENT = Implicit.measured(
     "places it describes the field while giving explicit defaults for several neighbours "
     "on the same screen, so the silence is selective.")
 
+#: `deviceconfig/setting/session/tcp-reject-non-syn`. PAN-ZON-006's device-wide half, added by
+#: the `zone-dos-protection` domain. THE SECOND MEASUREMENT IN THIS NODE WHERE THE ABSENCE
+#: REASSURES, and like `ipv6-firewalling` above it was paid in both directions on a committed
+#: state - which is why it carries a citation rather than an inference.
+#:
+#: WHAT KEEPS THE REASSURING VALUE OFF A FINDING is that no control clauses on the column: the
+#: assertion clauses on `ZoneProtectionProfile.non_syn_reject_effective`, which resolves this
+#: value through the profile's own three-valued pointer and whose own default is the firing side.
+TCP_REJECT_NON_SYN_ABSENT = Implicit.measured(
+    True,
+    "stage4-zone-dos-protection.json, session-settings.tcp-reject-non-syn: measured "
+    "2026-10-25 on 691665AC334B458 (PA-VM 11.2.5) in BOTH directions on a committed state - "
+    "the node has never existed on that appliance and `show session info` answers "
+    "`tcp-nonsyn-rej: True`; `no` written and committed and the same oracle reports False; "
+    "the leaf deleted and that delete committed, and the oracle reports True again, with the "
+    "per-zone `show zone-protection` report moving in step both times. `show system state "
+    "filter *non-syn*` answers NO_MATCHES, so the dataplane read is the only oracle and the "
+    "CLI command index is the only thing that finds it.")
+
 #: `network/lldp/enable`. Stage 4 left the meaning of the absence unsettled IN BOTH
 #: DIRECTIONS and the write that would have settled it failed with ConnectTimeout when
 #: Panorama became unreachable.
@@ -448,7 +467,7 @@ def out_of_service_residue(*, profile_name: str, restricted: bool, zone_name: st
 # ---------------------------------------------------------------------------
 
 def normalize_session_settings(appliance: Appliance) -> dict[str, int]:
-    """Device > Setup > Session. PAN-NET-002 and PAN-NET-005.
+    """Device > Setup > Session. PAN-NET-002, PAN-NET-005 and PAN-ZON-006's device-wide half.
 
     The row is anchored to the MERGED snapshot, so an appliance that was collected gets a
     row whatever its `deviceconfig/setting` holds - which is what makes "the key is absent"
@@ -466,13 +485,25 @@ def normalize_session_settings(appliance: Appliance) -> dict[str, int]:
     ipv6, ipv6_rk, ipv6_rv = parse_yes_no_field(
         _dict(setting.get("session")).get("ipv6-firewalling"),
         implicit=IPV6_FIREWALLING_ABSENT)
+    # PAN-ZON-006's device-wide half, out of the SAME node `ipv6-firewalling` comes from. Read
+    # here rather than in a model of its own: ruling P374a, one model per PAN-OS node.
+    #
+    # `parse_yes_no_field` reads anything that is not `yes` as false, which is the firing side
+    # of the resolution downstream - and that is the right way round for this leaf, because
+    # stage 4 measured a `global` WRITE being accepted here and never committed, so whether a
+    # third value can reach a committed configuration is not established.
+    non_syn, non_syn_rk, non_syn_rv = parse_yes_no_field(
+        _dict(setting.get("session")).get("tcp-reject-non-syn"),
+        implicit=TCP_REJECT_NON_SYN_ABSENT)
 
     write_node_row(
         PanOsSessionSettings, appliance, snapshot,
-        {"session_rematch": rematch, "ipv6_firewalling": ipv6},
+        {"session_rematch": rematch, "ipv6_firewalling": ipv6,
+         "tcp_reject_non_syn": non_syn},
         provenance=(
             ("session_rematch", rematch_rk, rematch_rv),
             ("ipv6_firewalling", ipv6_rk, ipv6_rv),
+            ("tcp_reject_non_syn", non_syn_rk, non_syn_rv),
         ),
     )
     return {"pan_os_session_settings": 1}

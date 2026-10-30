@@ -73,6 +73,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     pushed_shared,
     pushed_vsys_panorama,
     pushed_vsys_profiles,
+    SHARED_LOC,
     scalar_value, parse_text_field, parse_yes_no_field, Implicit, was_absent,
     DESCRIPTION_ABSENT)
 # THE SAME FUNCTION THIS DOMAIN NEEDS, ALREADY WRITTEN AND ALREADY MEASURED, under a private
@@ -136,13 +137,28 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.snapshot
 from optivedge_integrations.integrations.platforms.pan_os.normalization.types import (
     PolicyObjectIssue,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.zone_dos_protection import (
+    dos_profile_references,
+    dos_protection_profile_values,
+)
 
 #: Every profile kind normalized into rows. Antivirus is here for PAN-AVW-006 and so a rule's
 #: `virus` profile resolves to an object; it writes no severity verdicts - see below.
 PROFILE_KINDS = (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY,
                 SecurityProfile.KIND_VIRUS, SecurityProfile.KIND_WILDFIRE_ANALYSIS,
                 SecurityProfile.KIND_FILE_BLOCKING, SecurityProfile.KIND_DATA_FILTERING,
-                SecurityProfile.KIND_DECRYPTION, SecurityProfile.KIND_URL_FILTERING)
+                SecurityProfile.KIND_DECRYPTION, SecurityProfile.KIND_URL_FILTERING,
+                SecurityProfile.KIND_DOS_PROTECTION)
+
+#: THE DOS KIND IS IN `PROFILE_KINDS` AND THAT COLLECTS ITS DEFINITIONS AND NOT ITS
+#: REFERRERS, which is worth stating because the silence would be invisible.
+#: `collect_profile_and_group_references` matches a payload key whose NAME is a profile kind
+#: carrying a member list - `{"spyware": {"member": [...]}}` - and a DoS rule names its
+#: profile at `protection/aggregate/profile`, a text leaf under a key called `profile`. No
+#: node anywhere in the payload is a `dos-protection` member list, so that walk finds nothing
+#: to refer to a DoS profile and `reference_reach` would read `unreferenced` on every one of
+#: them in every estate with nothing erroring. `dos_profile_references` is the second surface
+#: and is collected beside the first below.
 
 #: The file types PAN-FIL-001 asserts a profile must stop, SPELLED AS THE DEVICE SPELLS THEM.
 #: Nine come from the control's own command and `PE` is the tenth. The case matters and is
@@ -1133,6 +1149,10 @@ class NormalizedSecurityProfile:
     #: computed in the persist loop from this dict and a `UrlFilteringContext` - the same place
     #: and for the same reason as the antivirus aggregates over the satellite rows.
     url_filtering: dict[str, Any] = field(default_factory=dict)
+    #: DOS PROTECTION ONLY: the mandatory `type` key and the flood-and-resource structure. Both
+    #: come off this entry alone - no rulebase, no catalogue, no satellite rows - so unlike the
+    #: url-filtering dict there is nothing for the persist loop to compute over it.
+    dos_protection: dict[str, Any] = field(default_factory=dict)
     #: VULNERABILITY ONLY: the profile's own `cloud-inline-analysis` reading. THE SAME KEY
     #: `cloud_inline_analysis` above reads, held in a second field because that one is gated to
     #: the SPYWARE kind and stores a hardcoded False everywhere else - see the two columns'
@@ -1855,6 +1875,14 @@ def normalize_security_profile(
     if kind in SecurityProfile.URL_FILTERING_KINDS:
         url_filtering_values, url_filtering_provenance = url_filtering_profile_values(
             entry, predefined=namespace_type == PolicyObjectNamespace.PREDEFINED)
+    # DOS PROTECTION ONLY. Two columns off this entry: the mandatory `type` key, which carries a
+    # provenance row because the only way it can be absent is a candidate-only entry that never
+    # passed commit validation; and the flood and resource structure, which is computed and
+    # carries none.
+    dos_values: dict[str, Any] = {}
+    dos_provenance: list[tuple[str, Any, str | None]] = []
+    if kind in SecurityProfile.DOS_PROTECTION_KINDS:
+        dos_values, dos_provenance = dos_protection_profile_values(entry)
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -1938,6 +1966,7 @@ def normalize_security_profile(
         raw_profile=entry,
         decryption=decryption_values,
         url_filtering=url_filtering_values,
+        dos_protection=dos_values,
         field_provenance_data=[
             ("__entry__", entry_rk, entry_rv),
             ("description", description_rk, description_rv),
@@ -1948,7 +1977,7 @@ def normalize_security_profile(
         # the difference between the value the device holds and the one this project infers.
         + ([("inline_cloud_analysis_enabled", vln_cloud_rk, vln_cloud_rv)]
            if kind == SecurityProfile.KIND_VULNERABILITY else []) + decryption_provenance
-        + url_filtering_provenance,
+        + url_filtering_provenance + dos_provenance,
     )
 
 
@@ -2374,6 +2403,22 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
             root, where=where, shared_root=shared_root, pushed=pushed)
         build.references.extend(profile_refs)
         build.group_references.extend(group_refs)
+        # THE DOS RULEBASE'S TWO PROFILE SLOTS, the surface the walk above cannot see. Both
+        # slots, at the vsys-local rulebase and at both pushed ones: they are sibling nodes
+        # with no exclusivity the grammar expresses, so a walk that reads one of them calls
+        # every classified-only profile unreferenced - and PAN-ZON-008's remediation is a
+        # DELETION, which is the worst direction for a hygiene control to be wrong in.
+        #
+        # The references are built as ordinary `ProfileReference`s with `via=VIA_RULE`, so
+        # `attribute_references`, `reference_reach_by_key` and `_reach_for_build` fill
+        # `referrer_count`, `is_used`, `referrers`, `reference_reach` and
+        # `reference_reach_resolved` for this kind with no change of their own.
+        for dos_name, dos_referrer, dos_loc in dos_profile_references(root):
+            build.references.append(ProfileReference(
+                kind=SecurityProfile.KIND_DOS_PROTECTION, name=dos_name,
+                referrer=f"{where}{dos_referrer}",
+                shared_scope=(dos_loc == SHARED_LOC) if pushed else shared_root,
+                via=VIA_RULE))
         # THE RULE SURFACE for a custom URL category. The profile surfaces are read off the
         # normalized profiles below rather than walked again, because their eleven member lists
         # have already been read through the one reader that survives a pushed member.
@@ -2606,6 +2651,11 @@ def replace_security_profiles(
             # rows. EMPTY for every other kind, so the model's own defaults stand - which are
             # the firing side, kept off the wrong rows by the `kind` clause every query over
             # this model carries. Same convention as `file_blocking` and `decryption` above.
+            # THE TWO DOS-PROTECTION COLUMNS. EMPTY for every other kind, so the model's own
+            # defaults stand - a blank `profile_type` and a null `flood_and_resource_settings`,
+            # neither of which any clause on another kind reads. Same convention as the three
+            # families above.
+            **normalized.dos_protection,
             **normalized.url_filtering,
             **(url_filtering_verdicts(
                 normalized.url_filtering, namespace_type=normalized.namespace_type,

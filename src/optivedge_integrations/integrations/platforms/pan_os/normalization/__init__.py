@@ -163,6 +163,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.decrypti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.zones import (
     normalize_zones,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.zone_dos_protection import (
+    normalize_dos_policy_rules,
+    normalize_zone_protection_profiles,
+)
 
 
 def normalize_collected_response(
@@ -262,6 +266,18 @@ def normalize_enforcement_point_vsys_rule_posture(
 
 def normalize_enforcement_point_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
     return normalize_zones(enforcement_point)
+
+
+def normalize_enforcement_point_dos_policy_rules(
+    enforcement_point: EnforcementPoint,
+) -> list:
+    """This point's DoS rulebase - the vsys-local one and both pushed ones. PAN-ZON-007.
+
+    Depends on nothing else in the point tuple: the rules come out of the merged and pushed
+    reads directly, and the profile they name is resolved by the SECURITY PROFILE pass's
+    referrer walk rather than here.
+    """
+    return normalize_dos_policy_rules(enforcement_point)
 
 
 def normalize_enforcement_point_rulebase_device_match(
@@ -638,6 +654,23 @@ def normalize_appliance_interfaces(appliance: Appliance) -> NormalizedInterfaces
     return normalize_interfaces(appliance)
 
 
+def normalize_appliance_zone_protection_profiles(appliance: Appliance) -> list:
+    """Every zone protection profile on one appliance, attached or not. PAN-ZON-001 to 008.
+
+    MUST RUN AFTER `normalize_enforcement_point_zones` FOR EVERY VSYS OF THIS APPLIANCE, and the
+    dependency is on the caller's order rather than on an import - the same shape
+    `normalize_enforcement_point_rulebase_device_match` carries. It is not a dependency for the
+    PROFILE columns: the attachment count comes out of the merged payload directly, so it is
+    right whether the zones were normalized or not. What needs the zone rows is the ZONE side of
+    the same join, `Zone.zone_protection_unresolved`, which this pass resolves in place.
+
+    Run first, the profile rows are complete and correct and every zone row keeps the firing
+    default its own normalizer set - which reports rather than reassures, so the order costs
+    over-reporting and not silence.
+    """
+    return normalize_zone_protection_profiles(appliance)
+
+
 def normalize_appliance_session_settings(appliance: Appliance) -> dict:
     """Device > Setup > Session - policy rematch and IPv6 firewalling. PAN-NET-002 and 005.
 
@@ -834,6 +867,10 @@ __all__ = [
     "normalize_ipsec_tunnels",
     "normalize_monitor_profiles",
     "normalize_zones",
+    "normalize_zone_protection_profiles",
+    "normalize_appliance_zone_protection_profiles",
+    "normalize_dos_policy_rules",
+    "normalize_enforcement_point_dos_policy_rules",
     "normalize_appliance_content_update_schedule",
     "normalize_station_content_deployment_schedule",
     "normalize_content_deployment_schedule",

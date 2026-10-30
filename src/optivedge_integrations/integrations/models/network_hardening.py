@@ -116,6 +116,43 @@ class PanOsSessionSettings(ProvenancedMixin, SyncTrackedModel):
     #: absent key rather than from a configured `yes`.
     ipv6_firewalling = models.BooleanField(default=True)
 
+    #: `deviceconfig/setting/session/tcp-reject-non-syn`. Whether this appliance rejects TCP
+    #: segments that are not the opening of a session, device-wide - THE NODE A ZONE PROTECTION
+    #: PROFILE'S `global` POINTER RESOLVES TO, and the half of PAN-ZON-006's answer that no
+    #: profile row carries.
+    #:
+    #: ADDED BY THE `zone-dos-protection` DOMAIN, WHICH DECLARED A `SessionSettings` MODEL OF ITS
+    #: OWN. It is a column here instead, by ruling P374a - one model per PAN-OS node - because
+    #: this class already owns `deviceconfig/setting/session` for `ipv6_firewalling`, which is
+    #: PAN-NET-005's subject in the same container. Stage 5 named that collision itself without
+    #: drawing the conclusion: its own note says `ipv6-firewalling` is "PAN-NET-005's subject in
+    #: the same container - a shared container and a different subject".
+    #:
+    #: NON-NULLABLE WITH A MEASURED DEFAULT OF TRUE, and TRUE IS THE COMPLIANT SIDE - the
+    #: uncomfortable combination, and the default is correct anyway. Measured, 2026-10-25 on
+    #: pan-fw-201 (PA-VM 11.2.5), as a natural experiment needing no writes plus a two-direction
+    #: control: the node has never existed on this appliance and `show session info` answers
+    #: `tcp-nonsyn-rej: True`; written `no` and committed it moved to False; deleted and
+    #: committed it returned to True, with the per-zone dataplane report moving in step both
+    #: times. Stage 4's own words are that a collector reporting "not configured" here would be
+    #: reporting the OPPOSITE of what the firewall does.
+    #:
+    #: WHAT MAKES THE REASSURING DEFAULT SAFE IS THAT NO CONTROL CLAUSES ON THIS COLUMN. The
+    #: assertion clauses on `ZoneProtectionProfile.non_syn_reject_effective`, which is derived
+    #: from this column AND from the profile's own three-valued pointer and whose own default is
+    #: `no` - the FIRING side. So a comparison here reading an uncollected appliance as one that
+    #: rejects non-SYN TCP is never the last word. IF A LATER CONTROL EVER CLAUSES ON THIS COLUMN
+    #: DIRECTLY IT OWES A COMPANION COLUMN AND AN UNDETERMINED GROUP, and this sentence is the
+    #: warning stage 5 asked to be carried.
+    #:
+    #: A REFUSAL STAGE 4 RECORDED BECAUSE IT LOOKS LIKE EVIDENCE AND IS NOT: writing `global`
+    #: here - the third keyword the PROFILE's same-named leaf accepts - was ACCEPTED AT THE WRITE
+    #: and never committed, because that batch's commit was refused for an unrelated reason. So
+    #: whether commit validation rejects `global` on a <yes|no> leaf IS NOT ESTABLISHED, and the
+    #: normalizer must not assume this column can only ever come from the two values: anything
+    #: that is not `yes` reads false, which is the firing side of the resolution above.
+    tcp_reject_non_syn = models.BooleanField(default=True)
+
     class Meta:
         ordering = ["appliance__hostname"]
         constraints = [

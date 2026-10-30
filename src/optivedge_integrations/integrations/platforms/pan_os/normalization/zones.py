@@ -101,6 +101,13 @@ class NormalizedZone:
     prenat_source_policy_lookup: bool
     prenat_source_ip_downstream: bool
     raw_entry: dict[str, Any]
+    #: PAN-ZON-001's three. `interface_count` and `can_receive_traffic` come out of this entry;
+    #: `zone_protection_unresolved` needs the appliance's PROFILE COLLECTION, which is
+    #: device-wide and sits in the same payload, so all three are resolved here rather than in
+    #: a second pass over the rows.
+    interface_count: int = 0
+    can_receive_traffic: bool = True
+    zone_protection_unresolved: bool = True
     interfaces: list[NormalizedZoneInterface] = field(default_factory=list)
 
 
@@ -110,6 +117,20 @@ def _text(node: Any) -> str:
         return node.strip()
     value, _raw_key, _raw_prov = scalar_value(node)
     return value.strip()
+
+
+def _device_entry(payload: dict[str, Any]) -> dict[str, Any]:
+    """The first device entry of a merged-config payload, or an empty dict.
+
+    `device_configuration.device_entry_from_snapshot` RAISES on a payload it does not recognise
+    and takes a Snapshot; this module is handed a bare payload and degrades to "no zones"
+    rather than raising, which is the behaviour its own docstring records as deliberate while
+    the shapes were guesses and as a known liability now. Kept consistent rather than mixed.
+    """
+    config = payload.get("config") if isinstance(payload, dict) else None
+    devices = config.get("devices") if isinstance(config, dict) else None
+    entries = ensure_list(devices.get("entry")) if isinstance(devices, dict) else []
+    return entries[0] if entries and isinstance(entries[0], dict) else {}
 
 
 def _members(node: Any) -> list[str]:
@@ -186,6 +207,79 @@ def _unit_entries(node: Any) -> list[dict[str, Any]]:
     return units
 
 
+# ---------------------------------------------------------------------------
+# PAN-ZON-001 - three pure functions, imported by normalization/zone_dos_protection.py
+# ---------------------------------------------------------------------------
+
+def zone_protection_profile_names(device_entry: dict[str, Any]) -> set[str]:
+    """Every zone protection profile name defined on this appliance, CASE PRESERVED.
+
+    THE COLLECTION HAS EXACTLY ONE SCOPE ON A FIREWALL and that is a measurement, not a
+    simplification: `action=complete` answers code=6 Invalid sequence at both
+    `/config/shared/network/profiles/zone-protection-profile` and the vsys spelling. So the
+    resolution order a zone's attachment walks has a SINGLE member and there is no second scope
+    to fall through to - which is the whole reason this returns a flat set rather than a
+    scope-ordered mapping the way `_profiles_by_scope` has to for a policy object.
+
+    Imported by `zone_dos_protection.py` so that the zone side of the attachment join and the
+    profile side read the same bytes in the same pass. The alternative - having one normalizer
+    read the other's rows back - is what `interface_management_profiles.py` had to do and had to
+    raise about, because it makes one pass depend on the other having run.
+    """
+    network = device_entry.get("network") if isinstance(device_entry, dict) else None
+    profiles = network.get("profiles") if isinstance(network, dict) else None
+    collection = profiles.get("zone-protection-profile") if isinstance(profiles, dict) else None
+    if not isinstance(collection, dict):
+        return set()
+    return {
+        name
+        for entry in ensure_list(collection.get("entry")) if isinstance(entry, dict)
+        if (name := _text(entry.get("@name")))
+    }
+
+
+def zone_attachment_verdict(
+    zone_protection_profile: str, profile_names: set[str],
+) -> bool:
+    """`Zone.zone_protection_unresolved`. True means NO profile is in force on the zone.
+
+    TWO STATES, ONE COLUMN, and the second is what the measurement bought: the attachment leaf
+    is empty, OR it names a profile that does not exist. The configuration expresses NO
+    referential integrity here - stage 4 measured the leaf as a free string - so a dangling name
+    reads as configured and the zone meters nothing. `is_empty` on
+    `Zone.zone_protection_profile` is the clause a reviewer would write and it misses that case.
+
+    THE COMPARISON IS CASE-SENSITIVE AND MUST STAY SO. Profile names are case-sensitive and not
+    normalised (help p.663), so a case-insensitive resolution would report a profile as attached
+    that the dataplane does not resolve.
+    """
+    name = (zone_protection_profile or "").strip()
+    if not name:
+        return True
+    return name not in profile_names
+
+
+def zone_can_receive_traffic(zone_type: str, interface_count: int) -> bool:
+    """`Zone.can_receive_traffic`. Whether PAN-ZON-001 applies to this zone at all.
+
+    A DISJUNCTION, which is why it is computed here: the zone carries one of the six type
+    subtrees AND either names at least one interface OR is an EXTERNAL zone, which has no
+    interfaces of its own and still offers the attachment. A predicate has no quantifier over
+    related rows and this contract's clause is one conjunction.
+
+    `unknown` IS OUTSIDE THE POPULATION RATHER THAN AT THE GENTLE END OF IT: stage 4 measured
+    that a zone carrying no `network` subtree at all is a legal committable state, and such a
+    zone receives no traffic. That is the one case this returns False for, and it is a FALSE
+    computed from a type that was read rather than from a row nobody recomputed - the model's
+    default of True is what covers the latter.
+    """
+    if zone_type == Zone.TYPE_UNKNOWN:
+        return False
+    if zone_type == Zone.TYPE_EXTERNAL:
+        return True
+    return interface_count > 0
+
+
 def build_interface_address_index(payload: dict[str, Any]) -> dict[str, list[str]]:
     """Map interface name -> configured addresses, from the device-wide network tree.
 
@@ -194,10 +288,7 @@ def build_interface_address_index(payload: dict[str, Any]) -> dict[str, list[str
     code has not heard of still contributes its interfaces instead of silently dropping
     them.
     """
-    config = payload.get("config") if isinstance(payload, dict) else None
-    devices = config.get("devices") if isinstance(config, dict) else None
-    device_entries = ensure_list(devices.get("entry")) if isinstance(devices, dict) else []
-    device_entry = device_entries[0] if device_entries and isinstance(device_entries[0], dict) else {}
+    device_entry = _device_entry(payload)
     network = device_entry.get("network") if isinstance(device_entry, dict) else None
     interfaces = network.get("interface") if isinstance(network, dict) else None
     if not isinstance(interfaces, dict):
@@ -237,6 +328,11 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
         return []
 
     address_index = build_interface_address_index(payload)
+    # DEVICE-WIDE, and read once per build rather than once per zone: the zone protection
+    # profile collection has exactly ONE scope on a firewall, measured - `action=complete`
+    # answers code=6 Invalid sequence at both the shared and the vsys spellings - so there is no
+    # per-vsys copy and no second scope to fall through to.
+    zone_protection_profiles = zone_protection_profile_names(_device_entry(payload))
 
     zones = []
     for entry in ensure_list(zone_node.get("entry")):
@@ -322,10 +418,25 @@ def build_normalized_zones(payload: dict[str, Any], vsys_name: str) -> list[Norm
         device_include_members = _members(device_acl.get("include-list"))
         device_exclude_members = _members(device_acl.get("exclude-list"))
 
+        # PAN-ZON-001'S THREE COLUMNS. `zone_protection_profile` below is the NAIVE reading and
+        # these are what the measurement bought: a zone naming a profile that does not exist
+        # reads as configured and meters nothing, because the configuration expresses no
+        # referential integrity at that leaf - stage 4 measured it as a free string.
+        #
+        # THE PROFILE NAMES COME OUT OF THIS SAME PAYLOAD, resolved by the shared reader in
+        # `zone_dos_protection.py` that the profile normalizer also calls. Reading them here
+        # rather than joining to `ZoneProtectionProfile` rows is what makes the two directions
+        # of one comparison unable to disagree and removes the ordering dependency.
+        attachment = _text(network.get("zone-protection-profile"))
+        can_receive = zone_can_receive_traffic(zone_type, len(interface_names))
         zones.append(
             NormalizedZone(
                 name=name,
                 zone_type=zone_type,
+                interface_count=len(interface_names),
+                can_receive_traffic=can_receive,
+                zone_protection_unresolved=zone_attachment_verdict(
+                    attachment, zone_protection_profiles),
                 enable_user_identification=enable_user_identification,
                 zone_protection_profile=_text(network.get("zone-protection-profile")),
                 log_setting=_text(network.get("log-setting")),
@@ -391,6 +502,9 @@ def normalize_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
                 name=normalized.name,
                 zone_type=normalized.zone_type,
                 zone_protection_profile=normalized.zone_protection_profile,
+                interface_count=normalized.interface_count,
+                can_receive_traffic=normalized.can_receive_traffic,
+                zone_protection_unresolved=normalized.zone_protection_unresolved,
                 log_setting=normalized.log_setting,
                 packet_buffer_protection=normalized.packet_buffer_protection,
                 net_inspection=normalized.net_inspection,

@@ -139,6 +139,15 @@ class SecurityProfile(ScopedPolicyObject):
         # this project INFERS for an absent key - stage4-vulnerability-protection.json declined
         # to call that implicit measured.
         "widest_exemption_surface",
+        # DOS PROTECTION, added for PAN-ZON-007. A keyed summary of the flood and resource
+        # subtrees rather than a read of any one leaf, so it has no payload key of its own and
+        # can never carry a provenance row.
+        #
+        # `profile_type` IS DELIBERATELY NOT HERE. It reads the entry's own mandatory `type`
+        # leaf and writes a `FieldProvenance` row - and on this object that row is what tells a
+        # reader the difference between a key the device holds and a candidate-only entry that
+        # never passed commit validation, which is the only way the key can be absent.
+        "flood_and_resource_settings",
     )
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
@@ -148,6 +157,27 @@ class SecurityProfile(ScopedPolicyObject):
     KIND_DATA_FILTERING = "data-filtering"
     KIND_DECRYPTION = "decryption"
     KIND_URL_FILTERING = "url-filtering"
+    #: PAN-ZON-007 and PAN-ZON-008's DoS half. THE CHEAPEST KIND ON THIS MODEL and the
+    #: reason is a measured scope match rather than a resemblance: stage 4 measured a DoS
+    #: protection profile at `vsys/entry/profiles/dos-protection` AND at
+    #: `/config/shared/profiles/dos-protection` - the shared write was ACCEPTED, which is the
+    #: measured contrast with the ZONE protection profile beside it, whose shared spelling is
+    #: refused code=13 "Could not find schema node for xpath" - with a device-group scope
+    #: derived from the grammar, and a DoS POLICY RULE is what names it. That is
+    #: `ScopedPolicyObject`'s shape exactly, and it is why this is a kind and not a model.
+    #:
+    #: ADDING A KIND MAKES EVERY CONTROL ALREADY ON THIS MODEL SEE THE NEW ROWS, and nothing
+    #: downstream enforces the `kind` clause that keeps them off - no catalog schema check, no
+    #: compiler check, no lint, no generic test. A control on one of the eight existing kinds
+    #: that does not clause on `kind` begins firing on DoS protection profiles the day this
+    #: ships, and its columns hold their defaults on those rows. Stage 5 named that as the cost
+    #: of the proposal and this comment is the only place in the code it can be named.
+    #:
+    #: The class docstring enumerates the kinds it expected next and DoS protection is not
+    #: among them. The line it says to hold is held: nothing true of only this kind is on this
+    #: model beyond the two columns below, and the flood thresholds, the block durations and
+    #: the concurrent-session ceiling are in ONE json column rather than twenty.
+    KIND_DOS_PROTECTION = "dos-protection"
     KIND_CHOICES = [
         (KIND_SPYWARE, "Anti-Spyware"),
         (KIND_VULNERABILITY, "Vulnerability Protection"),
@@ -157,6 +187,7 @@ class SecurityProfile(ScopedPolicyObject):
         (KIND_DATA_FILTERING, "Data Filtering"),
         (KIND_DECRYPTION, "Decryption"),
         (KIND_URL_FILTERING, "URL Filtering"),
+        (KIND_DOS_PROTECTION, "DoS Protection"),
     ]
 
     #: How far the reference walk behind `reference_reach` got. FOUR values, not a boolean,
@@ -191,6 +222,11 @@ class SecurityProfile(ScopedPolicyObject):
     #: never collected" - which is true of them and means nothing, because they have no
     #: catalogue. A clause written without `kind eq url-filtering` fires on all of them.
     URL_FILTERING_KINDS = (KIND_URL_FILTERING,)
+    #: Which kinds answer the DoS-protection questions. The same rule as the four above:
+    #: `profile_type` is blank and `flood_and_resource_settings` is null on every other kind,
+    #: and the `kind eq dos-protection` clause every query over them carries is what keeps a
+    #: DoS assertion off an antivirus row. Nothing downstream enforces that clause.
+    DOS_PROTECTION_KINDS = (KIND_DOS_PROTECTION,)
 
     #: The three categories PAN-URL-001 asserts must be refused outright. THE VENDOR NAMES
     #: ELEVEN (Help p.297, URL guide p.133) and stage 3 asserts these three; widening the set
@@ -963,6 +999,70 @@ class SecurityProfile(ScopedPolicyObject):
     #: over the `allow` list alone - cannot produce it.
     weakest_permitted_custom_category_action = models.CharField(
         max_length=32, null=True, blank=True, default=None)
+
+    # ----------------------------------------------------------------- DOS PROTECTION
+    #
+    # PAN-ZON-007 and PAN-ZON-008. TWO COLUMNS, and stage 5 declared only two on purpose: stage
+    # 4 enumerated 58 key paths on this object and both halves of PAN-ZON-007 are discharged
+    # without a scalar for any of them - the first onto the customer's asset inventory, the
+    # second onto the RULE's action on `DosPolicyRule`. A scalar column here would be a column
+    # no clause names, resting on an implicit nobody measured, on an object whose only oracle is
+    # a form that was measured to prefill.
+    #
+    # THE REFERENCE WALK IS WHERE THE WORK IS, and it is not here: `referrer_count`, `is_used`,
+    # `referrers`, `reference_reach` and `reference_reach_resolved` all ship and all now answer
+    # for this kind too, because the DoS rulebase's two profile slots are collected into
+    # `build.references` beside every other kind's referrer. See
+    # `normalization/zone_dos_protection.py::dos_profile_references`.
+
+    #: `type`. DOS PROTECTION ONLY, blank on every other kind. Whether this profile's thresholds
+    #: count the WHOLE matched group of traffic together (`aggregate`) or EACH device in it
+    #: individually (`classified`) - the per-device form PAN-ZON-007 is about.
+    #:
+    #: NOT `kind`, AND THE TWO ARE ONE LETTER APART IN MEANING: `kind` is this store's own
+    #: discriminator for WHICH COLLECTION the entry was read from, invented here because PAN-OS
+    #: has no such key; `profile_type` is the device's own mandatory `type` leaf on a DoS
+    #: profile. A clause that confuses them compares a store token against a device value.
+    #:
+    #: MANDATORY AT COMMIT VALIDATION, measured rather than inferred: stage 4 built a second
+    #: bare profile for this question alone and the commit was refused with `Validation Error:
+    #: profiles -> dos-protection -> oep-zdp-dosp2 is missing 'type'`. So it is never observed
+    #: absent on a committed profile and a blank here is a candidate-only entry.
+    #:
+    #: THE GRID AND THE DIALOG DISAGREED ABOUT THIS KEY AND THE DISAGREEMENT DISSOLVED, which a
+    #: normalizer author reading a screen would have got wrong: on a bare profile the grid's Type
+    #: column rendered BLANK and the dialog's Type radio rendered `Aggregate` SELECTED, in the
+    #: same minute on the same entry - the grid honestly, the dialog by prefilling what OK would
+    #: write. Neither was describing a state a running device holds.
+    #:
+    #: THE KEY SET DOES NOT VARY BY TYPE - both kinds carry the same flood and resource children,
+    #: measured - but what the thresholds COUNT does, and a rule's reference is
+    #: eligibility-filtered on it, so every query reporting a threshold from this object has to
+    #: carry this column beside it or the number means two different things.
+    PROFILE_TYPE_AGGREGATE = "aggregate"
+    PROFILE_TYPE_CLASSIFIED = "classified"
+    profile_type = models.CharField(max_length=16, blank=True, default="")
+
+    #: The flood thresholds, block durations, block probabilities and concurrent-session ceiling
+    #: this profile stores, as read, keyed by flood type - held for a reader, with NO reachable
+    #: scalar beside it. NULL on every other kind and on a DoS profile storing none of them.
+    #:
+    #: NOTHING CLAUSES ON IT AND NOTHING MAY: a finding must not rest on a stored structure, and
+    #: a consumer test refuses to register a JSON column as searchable at all.
+    #:
+    #: ITS CONTENT IS A SUBSET OF `raw_profile` BELOW, which holds the whole entry. It is kept
+    #: separate because it is NORMALISED - keyed by flood type and threshold with the profile's
+    #: own type beside them - where `raw_profile` is the payload as parsed, and because a
+    #: remediation reads this one.
+    #:
+    #: STAGE 4 MEASURED NONE OF THESE IMPLICITS ON THIS OBJECT and said why: no control was paid
+    #: here, this object's only oracle is the web interface, and carrying the ZONE protection
+    #: profile's measurement across would assume that two nodes sharing a leaf name share a
+    #: default, which this very object disproves - its `flood` node has FIVE children where the
+    #: zone profile's has six, and its `red` container has FIVE where the zone profile's has
+    #: three, adding `block` and `block-probability`. Same two node names, two key sets. So an
+    #: absent key puts NOTHING in this column.
+    flood_and_resource_settings = models.JSONField(null=True, blank=True, default=None)
 
     raw_profile = models.JSONField(default=dict, blank=True)
 
