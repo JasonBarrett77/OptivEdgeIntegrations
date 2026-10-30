@@ -48,7 +48,6 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_ntp,
     collect_show_device_telemetry_settings,
     collect_show_dhcp_client_mgmt_interface_state,
-    collect_log_alarm_settings,
     collect_show_running_resource_monitor,
     collect_show_masterkey_properties,
     collect_show_panorama_status,
@@ -927,35 +926,20 @@ def collect_appliance_platform_lifecycle(
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
     user_agent: str = DEFAULT_USER_AGENT,
 ) -> tuple[list[PANOSPersistedCollection], list[str]]:
-    """PAN-PLT-003's and PAN-PLT-006's own sources. No configuration read carries any of them.
+    """PAN-PLT-006's own source. No configuration read carries it.
 
-    TWO READS ON ONE SESSION, COLLECTED INDEPENDENTLY, for the same reason
-    `collect_appliance_device_identification` gives: they answer unrelated questions and letting
-    one exception abandon the other is expensive here in particular, because each is the ONLY
-    thing that can tell its own unknown from its own zero. Losing the alarm read to a failure in
-    the resource monitor would move an appliance from "the node is absent" to "nobody measured
-    it", and those are different findings.
+    ONE READ ON ONE SESSION, AND IT WAS THREE TWO DAYS AGO. `show running resource-monitor` is an
+    operational command and the only thing that answers what it answers. The other two were
+    `type=config&action=show` of one xpath each - `collect_device_telemetry` and
+    `collect_log_alarm_settings` - and both are GONE, with the collectors themselves, by Jason's
+    ruling `OptivEdgeProbe/reference/standing-rulings.md` section 5: A CONTROL USES THE
+    CONFIGURATION THAT WAS COLLECTED. Both of those nodes are in the merged configuration this
+    pass already collects, measured read-only on 2026-10-30, and both normalizers read it there.
 
-    IT WAS THREE UNTIL 2026-10-29 AND IS TWO FOR A DIFFERENT REASON NOW.
-    `collect_device_telemetry` moved to `collect_appliance_device_services` under ruling P374a,
-    and was then removed from the collection altogether under USE THE CONFIGURATION THAT WAS
-    COLLECTED - the telemetry row is normalised from the merged configuration. The collector is
-    still DEFINED in this domain's collectors module and is now called by nothing; it is left
-    rather than deleted because `collect_log_alarm_settings` beside it is the same mechanism and
-    its own node may genuinely be absent from the merged view, which is unmeasured on this
-    estate. See the board.
-
-    ONE OF THE TWO IS A COMMITTED-LOCAL CONFIGURATION READ, the first in this package. An absence
-    at its xpath is the READING rather than a failure, and the collector records it as an empty
-    result; anything else propagates into `failures` below, which is what keeps an unreachable
-    appliance from reading as a configured-nothing one.
-
-    THE FOURTH AND FIFTH READS THIS DOMAIN NEEDS ARE NOT HERE AND BOTH ABSENCES ARE DELIBERATE.
-    `show system info` and `request license info` are taken by
-    `collect_appliance_device_identification` already, so four of this domain's nine subjects need
-    no new call at all. And `show config saved` is not collectable: its argument is mandatory, the
-    bare form answers code=17 on all four lab appliances, and nothing enumerates the snapshot
-    names - so `ConfigurationBackupEvidence` is written from no snapshot and says so.
+    THE LOOP AND THE FAILURE LIST ARE KEPT FOR ONE READ ON PURPOSE. They cost nothing and the next
+    operational read this domain needs inherits the shape: a failure leaves a verdict at its
+    firing default rather than leaving a configuration column wrong, and those are different
+    outcomes for a reader to act on.
 
     Failures are returned rather than swallowed, so a partial collection is visible as partial.
     """
@@ -969,8 +953,7 @@ def collect_appliance_platform_lifecycle(
     persisted: list[PANOSPersistedCollection] = []
     failures: list[str] = []
     for collect in (
-        collect_log_alarm_settings,
-        collect_show_running_resource_monitor,
+            collect_show_running_resource_monitor,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))

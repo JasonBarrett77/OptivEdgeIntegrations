@@ -725,17 +725,22 @@ class DeviceTelemetry(ProvenancedMixin, SyncTrackedModel):
     normalizer were deleted in migration `0115_one_telemetry_model`; nothing clauses on PAN-PLT-003
     through them, and this row is the input it reads now.
 
-    WHAT THAT MERGE CARRIED ACROSS, and it is the half this model did not start with: the node
-    is read from the COMMITTED-local snapshot `config_device_telemetry` and never from the
-    merged view, because merged follows the candidate and a STAGED opt-in would read as
-    enforced. The lab has that exact hazard live - an uncommitted telemetry edit was sitting on
-    691665AC334B458 on 2026-10-29 and was re-staged after the runs read it - so this is not a
-    theoretical preference. `telemetry_switches_known` came across with it.
+    WHAT THAT MERGE CARRIED ACROSS: `telemetry_switches_known`, which the absorbed model
+    invented. It carried a second thing for one day - a dedicated committed-local read of this
+    node - and that is gone: `OptivEdgeProbe/reference/standing-rulings.md` section 5, A CONTROL
+    USES THE CONFIGURATION THAT WAS COLLECTED. **THIS ROW COMES FROM THE MERGED CONFIGURATION THE
+    PASS ALREADY COLLECTS**, and the reasoning that briefly moved it off is worth knowing because
+    it was correct and still wrong to act on: merged follows the candidate, so a staged opt-in
+    reads as enforced - measured on 691665AC334B458, where `action=show` answers `No such node`
+    while `show config merged` reports all three switches `yes` with no dirty marker. That is
+    equally true of every control in the assessment, which is why it is a ruling and not a column's
+    private workaround.
 
     THE VALUE COLUMNS MUST NEVER BE READ WITHOUT THAT COMPANION. All three switches are
-    non-nullable and default True, so an appliance nobody asked about and an appliance measured
+    non-nullable and default True, so an appliance whose node is absent and an appliance measured
     as sharing store the same three values. `telemetry_switches_known` is the only thing that
-    tells them apart, and it is false until a read answers AND carries all three keys.
+    tells them apart, and it is false unless the node is in the collected subtree AND carries all
+    three keys.
 
     The constraint is named `unique_device_services_telemetry_per_appliance` for the related
     name on this model. It was first named that to dodge the other model's constraint; the other

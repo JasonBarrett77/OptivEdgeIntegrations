@@ -13,8 +13,8 @@ four different payloads between them. None depends on another and they may be re
 
 THERE WAS A SEVENTH, `normalize_device_telemetry_settings`, and ruling P374a deleted it on
 2026-10-29: `device_services.py` covers that node with one model for both domains. Two of this
-module's helpers survived it and are used from there - `latest_device_telemetry_snapshot` and
-`node_from_committed_read`, which is public for that reason.
+module's helpers survived that for a day and were removed on 2026-10-30 with the dedicated read
+they served: `OptivEdgeProbe/reference/standing-rulings.md` section 5.
 
 EVERY ROW IS ANCHORED TO THE MERGED SNAPSHOT, not to the read that fills it. An appliance that
 was collected and never asked for its licence table or its dataplane load still gets a row, with the companion column saying so - and the companion is the only thing in
@@ -233,31 +233,6 @@ def _system_info_node(snapshot: Snapshot | None) -> dict[str, Any] | None:
     return system if isinstance(system, dict) else payload
 
 
-def node_from_committed_read(
-        snapshot: Snapshot | None, tag: str) -> tuple[bool, dict[str, Any] | None]:
-    """(did the read answer, the node) for one committed-local read. FOUR STATES, ALL DIFFERENT.
-
-        no snapshot                  (False, None)   nobody asked
-        payload without the tag      (True,  None)   the read answered; the node is NOT in the
-                                                     committed configuration - what the collector
-                                                     records for a `No such node` refusal
-        payload with the tag null    (True,  {})     the node EXISTS and holds nothing
-        payload with the tag a dict  (True,  node)   the node and its children
-
-    THE THIRD STATE IS NOT THE SECOND, which is the distinction stage 6 built its own teardown
-    around: deleting the leaves of the alarm node and leaving the container reads as PRESENT, and
-    that is a different verdict from the node being absent. Collapsing them would make an emptied
-    container indistinguishable from one nobody ever created.
-    """
-    if snapshot is None:
-        return False, None
-    payload = snapshot.payload
-    if not isinstance(payload, dict) or tag not in payload:
-        return True, None
-    node = payload.get(tag)
-    return True, node if isinstance(node, dict) else {}
-
-
 def _latest(appliance: Appliance, source_type: str) -> Snapshot | None:
     """The newest snapshot of one source type for one appliance.
 
@@ -271,14 +246,6 @@ def _latest(appliance: Appliance, source_type: str) -> Snapshot | None:
         .order_by("-collected_at", "-pk")
         .first()
     )
-
-
-def latest_device_telemetry_snapshot(appliance: Appliance) -> Snapshot | None:
-    return _latest(appliance, "config_device_telemetry")
-
-
-def latest_log_alarm_snapshot(appliance: Appliance) -> Snapshot | None:
-    return _latest(appliance, "config_log_alarm_settings")
 
 
 def latest_resource_monitor_snapshot(appliance: Appliance) -> Snapshot | None:
@@ -461,9 +428,10 @@ def normalize_platform_content_streams(appliance: Appliance) -> dict[str, int]:
 
 # DEVICE TELEMETRY IS NORMALIZED IN `device_services.py` AND NOT HERE, by ruling P374a,
 # 2026-10-29. `normalize_device_telemetry_settings`, `build_device_telemetry` and
-# `TELEMETRY_SWITCH_IMPLICIT` were deleted with the model they filled; `latest_device_telemetry_snapshot`
-# and `node_from_committed_read` stayed, because the surviving normalizer reads this domain's
-# committed snapshot through both of them.
+# `TELEMETRY_SWITCH_IMPLICIT` were deleted with the model they filled. Two snapshot helpers stayed
+# for a day so that normalizer could read a dedicated committed snapshot of the node, and went on
+# 2026-10-30 when the read did: `OptivEdgeProbe/reference/standing-rulings.md` section 5, A CONTROL
+# USES THE CONFIGURATION THAT WAS COLLECTED.
 
 
 # ---------------------------------------------------------------------------
@@ -1121,9 +1089,6 @@ __all__ = [
     "build_log_alarm_settings",
     "build_portal_presence",
     "content_currency_state",
-    "latest_device_telemetry_snapshot",
-    "node_from_committed_read",
-    "latest_log_alarm_snapshot",
     "latest_resource_monitor_snapshot",
     "normalize_configuration_backup_evidence",
     "normalize_dataplane_utilisation",

@@ -16568,11 +16568,8 @@ from optivedge_integrations.integrations.models import (  # noqa: E402
     LicenceInventory as _PltInventory,
     LogAlarmSettings as _PltAlarm)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.platform_lifecycle import (  # noqa: E402
-    DEVICE_TELEMETRY_XPATH as _PLT_TELEMETRY_XPATH,
-    LOG_ALARM_SETTINGS_XPATH as _PLT_ALARM_XPATH,
     SHOW_RESOURCE_MONITOR_COMMAND as _PLT_RM_COMMAND,
-    collect_device_telemetry as _plt_collect_telemetry,
-    collect_log_alarm_settings as _plt_collect_alarm)
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.platform_lifecycle import (  # noqa: E402
     alarm_mechanism_state as _plt_alarm_state,
     build_content_streams as _plt_build_streams,
@@ -17138,31 +17135,30 @@ class PlatformLifecycleCollectorTests(SimpleTestCase):
                 raise self.error
             return {"response": {"@status": "success", "result": self.result}}
 
-    def test_no_such_node_is_recorded_as_an_empty_result(self):
-        """The refusal IS the reading. An empty result is the same shape the helper already
-        produces for an xpath that matches nothing, so the normalizer has one thing to read."""
-        session = self._Session(error=_PltAPIError("No such node"))
-        collected = _plt_collect_alarm(session)
-        self.assertEqual(collected.source_type, "config_log_alarm_settings")
-        self.assertEqual(collected.response["response"]["result"], {})
-        params, target = session.calls[0]
-        self.assertEqual(params["action"], "show")
-        self.assertEqual(params["xpath"], _PLT_ALARM_XPATH)
-        self.assertEqual(target, "SERIAL-PLT-001")
+    def test_this_module_issues_no_config_mode_read(self):
+        """THREE TESTS OF TWO COLLECTORS LIVED HERE AND WENT WITH THEM, 2026-10-30, under
+        `OptivEdgeProbe/reference/standing-rulings.md` section 5 - A CONTROL USES THE
+        CONFIGURATION THAT WAS COLLECTED. They asserted that `collect_device_telemetry` and
+        `collect_log_alarm_settings` issued `action=show` at their xpath and recorded a
+        `No such node` refusal as an empty result. Both nodes are in the merged configuration this
+        package already collects, measured read-only on 2026-10-30, and both normalizers read it
+        there.
 
-    def test_any_other_refusal_propagates_so_no_snapshot_is_written(self):
-        """An unreachable appliance must not read as a configured-nothing one: no snapshot at
-        all is the third state, and it is what the companion columns report."""
-        session = self._Session(error=_PltAPIError("Invalid credential"))
-        with self.assertRaises(_PltAPIError):
-            _plt_collect_telemetry(session)
+        WHAT REPLACES THEM IS THIS, and it is the only form that survives the collectors being
+        gone: no read in this module asks for configuration. A config-mode `show` that SUCCEEDS is
+        reading the running configuration, so whatever it returns is in the merged configuration
+        too - which means a successful `action=show` can never justify its own collection, and
+        reinstating one here should fail something.
+        """
+        import inspect
 
-    def test_a_present_node_comes_back_as_the_node(self):
-        session = self._Session(result={"device-telemetry": {"product-usage": "yes"}})
-        collected = _plt_collect_telemetry(session)
-        self.assertEqual(collected.response["response"]["result"],
-                         {"device-telemetry": {"product-usage": "yes"}})
-        self.assertEqual(session.calls[0][0]["xpath"], _PLT_TELEMETRY_XPATH)
+        from optivedge_integrations.integrations.platforms.pan_os.collectors import (
+            platform_lifecycle as module)
+
+        source = inspect.getsource(module)
+        # the tombstone names them in prose, so look for the mechanism rather than the names
+        self.assertNotIn('action="show"', source)
+        self.assertNotIn("PANOSConfigRequest", source)
 
     def test_the_resource_monitor_command_names_one_window_and_not_the_bare_form(self):
         """The bare form returns all five windows at once - 43,184 bytes against 13,587 for the
@@ -17179,8 +17175,12 @@ class PlatformLifecycleCollectorTests(SimpleTestCase):
         from optivedge_integrations.integrations.platforms.pan_os import flows
 
         source = inspect.getsource(flows.collect_appliance_platform_lifecycle)
-        for name in ("collect_log_alarm_settings", "collect_show_running_resource_monitor"):
-            self.assertIn(name, source, name)
+        self.assertIn("collect_show_running_resource_monitor", source)
+        # AND NEITHER CONFIG-MODE READ. Both were removed on 2026-10-30 with their collectors,
+        # under `standing-rulings.md` section 5. Asserted by MECHANISM and not by name, because
+        # the module's tombstone names them in prose.
+        self.assertNotIn("collect_device_telemetry,", source)
+        self.assertNotIn("collect_log_alarm_settings,", source)
         # NOT CALLED FROM ANYWHERE NOW. It moved to the device-services collection under ruling
         # P374a and was removed from the collection altogether under USE THE CONFIGURATION THAT
         # WAS COLLECTED. The collector is still DEFINED in this domain's collectors module, which

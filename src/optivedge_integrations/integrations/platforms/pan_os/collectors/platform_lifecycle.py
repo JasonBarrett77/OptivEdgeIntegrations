@@ -1,18 +1,33 @@
-"""PAN-OS collectors for platform-lifecycle state no existing read carries.
+"""PAN-OS collector for the one platform-lifecycle read no existing read carries.
 
-THREE NEW READS, AND TWO OF THEM ARE THE FIRST COMMITTED-LOCAL READS IN THIS PACKAGE. Every
-other configuration collector asks for the merged view or a pushed limb, both of which follow
-the CANDIDATE - so they report what an administrator typed. Two of this domain's subjects rest
-on what the firewall is ENFORCING, and for an absence the difference is the whole reading:
+ONE READ NOW, AND IT WAS THREE. `show running resource-monitor` is an operational command and
+nothing else answers what it answers. The other two were `type=config&action=show` of one xpath
+each - the telemetry node and the log-database alarm node - and both are GONE, with
+`_collect_committed_node` and its `No such node` handling, on 2026-10-30.
 
-    action=get   absent node -> a bare `null`, and a staged edit looks identical to a committed one
-    action=show  absent node -> status=error, "No such node", about the COMMITTED configuration
+WHY, AND IT IS THE RULE AND NOT A TIDY-UP. Jason's ruling,
+`OptivEdgeProbe/reference/standing-rulings.md` section 5: A CONTROL USES THE CONFIGURATION THAT
+WAS COLLECTED. Which config files are collected was decided once; a control reads them and does
+not re-open whether a value is enforced now or staged to be enforced. The reasoning those two
+reads rested on was that the merged view follows the CANDIDATE, so a staged edit reads as
+enforced - which is true, measured, and true of **every control in the assessment**, not of two
+nodes. A per-node second read is one domain paying for a condition that belongs to the pipeline.
 
-So `_collect_committed_node` catches exactly that refusal and records it as an ANSWER - an
-empty result - because the absence is what the column stores. Anything else propagates and no
-snapshot is written at all, which is how "the node is absent" stays distinguishable from "the
-read never happened". Those two are different columns downstream and conflating them would make
-an unreachable appliance read as a configured-nothing one.
+AND THE MEASUREMENT THAT RETIRED THEM, which is the part to reuse: a config-mode `show` that
+SUCCEEDS is reading the running configuration, so whatever it returns is in the merged
+configuration too. Read-only on 2026-10-30, both nodes were compared key by key between
+`action=show` and `show config merged` on every appliance holding them - identical. **A successful
+`action=show` can therefore never justify its own collection.** The only thing a dedicated read
+establishes that the merged view cannot is the candidate-versus-running difference, and section 5
+is the ruling that closes that question.
+
+ONE OF THOSE TWO JUSTIFICATIONS WAS ALSO STALE, and that is recorded rather than buried: the
+alarm read existed because the merged view's carriage of its node was untestable - the node was
+absent on all four lab appliances when that was written. Fixtures were built afterwards and
+nothing re-read it. `reference/field-notes.md` carries it under the heading about a justification
+that said "could not be tested on this estate".
+
+WHAT IS NOT HERE, and each omission is a measurement rather than an oversight:
 
 WHAT IS NOT HERE, and each omission is a measurement rather than an oversight:
 
@@ -41,27 +56,17 @@ normalizer reads it from there and reports how many vsys it saw.
 from __future__ import annotations
 
 from optivedge_integrations.integrations.platforms.pan_os.collectors.base import (
-    collect_config_response,
     collect_op_response,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import (
     PANOSCollectedResponse,
-    PANOSConfigRequest,
     PANOSOperationRequest,
 )
 from optivedge_integrations.integrations.platforms.pan_os.session import (
     PANSession,
-    PANSessionAPIError,
 )
 
 
-DEVICE_TELEMETRY_XPATH = (
-    "/config/devices/entry[@name='localhost.localdomain']/deviceconfig/system/device-telemetry"
-)
-LOG_ALARM_SETTINGS_XPATH = (
-    "/config/devices/entry[@name='localhost.localdomain']/deviceconfig/setting/management"
-    "/common-criteria-alarm-generation"
-)
 
 #: THE WINDOW IS PART OF THE COMMAND AND THE BARE FORM MUST NOT BE USED. `show running
 #: resource-monitor` with no window returns all five at once - 43,184 bytes on a PA-5220
@@ -83,111 +88,24 @@ SHOW_RESOURCE_MONITOR_COMMAND = (
     "</last></minute></resource-monitor></running></show>"
 )
 
-#: The refusal that means "this node is not in the committed configuration". Matched on the
-#: MESSAGE and not on a code: the reply carries `@code` 7 for this shape, and matching the text
-#: is what keeps a code reused for something else from being read as an absence. Measured on all
-#: four lab appliances at both xpaths above.
-_NO_SUCH_NODE = "no such node"
 
 
-def _is_no_such_node(error: PANSessionAPIError) -> bool:
-    """Is this refusal the one that reports an absence rather than a failure?"""
-    return _NO_SUCH_NODE in str(error).lower()
-
-
-def _collect_committed_node(
-    session: PANSession,
-    *,
-    source_type: str,
-    xpath: str,
-    command_name: str,
-) -> PANOSCollectedResponse:
-    """One committed-local node, where ABSENCE IS THE ANSWER AND NOT A FAILED READ.
-
-    The empty result this returns for a `No such node` refusal is the same shape
-    `collect_config_response` already produces for an xpath that matches nothing, so the
-    normalizer has one thing to read: the node's own key is in the payload or it is not. A
-    snapshot that does not exist at all is the third state and means nobody asked.
-    """
-    request = PANOSConfigRequest(
-        xpath=xpath,
-        action="show",
-        target=session.target,
-        metadata={"command_name": command_name},
-    )
-    try:
-        return collect_config_response(session, source_type=source_type, request=request)
-    except PANSessionAPIError as error:
-        if not _is_no_such_node(error):
-            raise
-        return PANOSCollectedResponse(
-            source_type=source_type,
-            request=request,
-            response={"response": {"@status": "success", "result": {}}},
-        )
-
-
-def collect_device_telemetry(session: PANSession) -> PANOSCollectedResponse:
-    """One appliance's device-telemetry sharing switches, as COMMITTED.
-
-    Four keys when the node is there - `device-health-performance`, `product-usage`,
-    `threat-prevention` and `region` - and nothing when it is not. Both states are in this lab:
-    the node is absent on 691665AC334B458, present with all three switches `yes` on
-    6A9C0A9904E7D6E, and present with all three `no` on both PA-5220s.
-
-    AN ABSENT KEY HERE IS NOT `no`. Nothing on the device says what it does with the node
-    missing, so the normalizer stores NULL for a switch it did not read and the companion
-    column carries the uncertainty. KEY ORDER DIFFERS BETWEEN APPLIANCES - one returns `region`
-    first where the others return it last - so every reader must key on names.
-
-    The committed view is chosen over the merged one deliberately: merged follows the candidate,
-    so a staged opt-in would read as enforced.
-    """
-    return _collect_committed_node(
-        session,
-        source_type="config_device_telemetry",
-        xpath=DEVICE_TELEMETRY_XPATH,
-        command_name="show config at deviceconfig/system/device-telemetry",
-    )
-
-
-def collect_log_alarm_settings(session: PANSession) -> PANOSCollectedResponse:
-    """One appliance's log-database alarm node, as COMMITTED.
-
-    **NOT CALLED BY ANY FLOW SINCE 2026-10-30, AND THE SENTENCE BELOW IS WHY IT IS STILL HERE.**
-    `standing-rulings.md` section 5 - a control uses the configuration that was collected - and
-    the measurement that this node IS in the merged view. Left defined because the ruling governs
-    what a control rests on and not this package's collection surface; `normalize_log_alarm_settings`
-    reads the merged configuration now.
-
-    THE JUSTIFICATION BELOW WAS TRUE WHEN WRITTEN AND WAS STALE WHEN IT WAS ACTED ON, which is the
-    most useful thing about this collector. It read: "the node was absent on all four lab
-    appliances before any fixture was built, at the container and at all twenty-one leaves, and the
-    1.2 MB merged body contains no `common-criteria-alarm-generation` string at all - so the claim
-    that the merged view carries this node is UNTESTED and could not be tested on this estate."
-    Measured read-only on 2026-10-30, both halves are false: the node is present in RUNNING on two
-    appliances with different values on each, and `show config merged` carries it field-for-field
-    identically on both. Fixtures were built after that sentence and nobody re-read it. The general
-    rule it should have been: a config-mode `show` that SUCCEEDS is reading the running
-    configuration, so whatever it returns is in the merged configuration too, and a successful
-    `action=show` can never justify its own collection.
-
-    THE PARENT IS SHARED FURNITURE. `deviceconfig/setting/management` carries
-    `hostname-type-in-syslog`, `quota-settings`, `rule-require-audit-comment` and another
-    domain's `enable-certificate-expiration-check`, so this read is addressed at the alarm
-    container and never at its parent.
-
-    THE CONTAINER FORM IS TRUSTED rather than read leaf by leaf. One get against twenty-one is
-    the whole difference in per-appliance cost, and the container carries every child that is
-    set - verified against a built fixture on two appliances, where six written leaves came back
-    from one read.
-    """
-    return _collect_committed_node(
-        session,
-        source_type="config_log_alarm_settings",
-        xpath=LOG_ALARM_SETTINGS_XPATH,
-        command_name="show config at common-criteria-alarm-generation",
-    )
+# THE TWO DEDICATED CONFIG-MODE READS LIVED HERE AND WERE REMOVED ON 2026-10-30, with
+# `_collect_committed_node` and its `No such node` handling, by Jason's ruling
+# `OptivEdgeProbe/reference/standing-rulings.md` section 5 - A CONTROL USES THE CONFIGURATION THAT
+# WAS COLLECTED.
+#
+# `collect_device_telemetry` and `collect_log_alarm_settings` each issued `type=config&action=show`
+# at one xpath, so a control could read the RUNNING view of that node rather than the merged
+# configuration the pass already collects. The rule that retired them: a config-mode `show` which
+# SUCCEEDS is reading the running configuration, so whatever it returns is in the merged
+# configuration too - measured on both nodes, read-only, on 2026-10-30. A successful `action=show`
+# can therefore never justify its own collection. Both normalizers read the merged configuration.
+#
+# WHAT THEY WERE FOR, SO NOBODY REBUILDS THEM FOR THE SAME REASON: the only thing a dedicated read
+# establishes that the merged view cannot is the candidate-versus-running difference, and section 5
+# is the ruling that closes that question for controls. If you want one for something that is not
+# a control, that is outside the ruling and outside this module's history.
 
 
 def collect_show_running_resource_monitor(session: PANSession) -> PANOSCollectedResponse:
