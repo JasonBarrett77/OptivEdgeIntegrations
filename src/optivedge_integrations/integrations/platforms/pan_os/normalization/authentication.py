@@ -1,7 +1,17 @@
-"""Authentication profiles - PAN-AUTH-018, 020 and 025.
+"""Authentication profiles - PAN-AUTH-018, 020 and 025, and PAN-AAA-007 to 011.
 
 Reads every scope the object can occupy by reusing `scoped_entries`, which walks shared and
 every vsys. Authentication profiles have no predefined namespace, so none is passed.
+
+THREE SHAPES ON THIS OBJECT THAT A READER WRITTEN FROM ONE SCREEN GETS WRONG:
+
+    a realm lives on TWO keys     `single-sign-on/realm` has a labelled control on the first
+                                  tab; `method/kerberos/realm` has no vendor page at all
+    an EMPTY allow list is not    an empty list admits NOBODY (Help p.839) and `all` admits
+      the same as `all`           everyone, and both are "no named group"
+    the SAML trust anchor is on   the IdP server profile's validation switch does nothing
+      THIS object                 unless an authentication profile naming it also names a
+                                  certificate profile - Help p.937
 """
 
 from __future__ import annotations
@@ -20,6 +30,36 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.certific
 # "'Appliance' object has no attribute 'appliance'", which reads like a model problem.
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     latest_merged_snapshot)
+
+
+#: A realm, a certificate profile and a signing certificate all store NULL when their key is
+#: absent rather than a blank. Stage 4 held every one of these readings back - two are
+#: `not_reached` because no subject carrying the key could be built on the estate, and the two
+#: realms' positive controls were never paid - so nothing is assumed about what an absent key
+#: means. `is_empty` compiles to `field=""` and matches a blank but NOT a null, so a blank here
+#: would answer a question nobody settled, in whichever direction that clause happens to fall.
+NOT_ASSUMED_REALM = Implicit.not_assumed(
+    "stage4-auth-servers.json objects.authentication-profile.fields.single-sign-on/realm: the "
+    "Kerberos Realm control renders EMPTY with the reader's is_hint flag TRUE on a committed "
+    "profile carrying no single-sign-on branch, but the positive control was HELD BACK, so "
+    "whether an absent key means no realm or an unread one was never settled. "
+    "method/kerberos/realm is `not_reached` outright: no subject with a kerberos method branch "
+    "existed when it was measured")
+NOT_ASSUMED_SAML_REFERENCE = Implicit.not_assumed(
+    "stage4-auth-servers.json objects.authentication-profile.fields."
+    "method/saml-idp/certificate-profile and .../request-signing-certificate are both "
+    "`not_reached`: no certificate profile existed on any appliance that run read, so no "
+    "subject carrying either key could be built and an absence on a profile with no saml-idp "
+    "branch asserts nothing about it")
+
+
+def _branch(node: Any, *names: str) -> dict[str, Any]:
+    """A nested container, or {} - so a reader never has to guard each level by hand."""
+    for name in names:
+        if not isinstance(node, dict):
+            return {}
+        node = node.get(name)
+    return node if isinstance(node, dict) else {}
 
 
 def _method_of(entry: dict[str, Any]) -> str:
@@ -81,12 +121,39 @@ def _profile_fields(entry: dict[str, Any]) -> tuple[dict[str, Any], list]:
             "answer a wrong guess must not fabricate, because the modifier decides what username "
             "is actually presented to the directory"))
 
+    # PAN-AAA-007. TWO KEYS, and a reader that knows one misses every profile using the other.
+    sso_realm, sso_rk, sso_rv = parse_text_field(
+        _branch(entry, "single-sign-on").get("realm"), implicit=NOT_ASSUMED_REALM)
+    method_realm, mrealm_rk, mrealm_rv = parse_text_field(
+        _branch(entry, "method", "kerberos").get("realm"), implicit=NOT_ASSUMED_REALM)
+    # PAN-AAA-008 and 009, both on the saml-idp METHOD BRANCH of this object.
+    saml = _branch(entry, "method", "saml-idp")
+    cert_profile, cert_rk, cert_rv = parse_text_field(
+        saml.get("certificate-profile"), implicit=NOT_ASSUMED_SAML_REFERENCE)
+    signing_cert, signing_rk, signing_rv = parse_text_field(
+        saml.get("request-signing-certificate"), implicit=NOT_ASSUMED_SAML_REFERENCE)
+
     factors = [str(f) for f in ensure_list((mfa.get("factors") or {}).get("member"))
                if f is not None] if isinstance(mfa.get("factors"), dict) else []
     allow = [str(a) for a in ensure_list((entry.get("allow-list") or {}).get("member"))
              if a is not None] if isinstance(entry.get("allow-list"), dict) else []
     allow_is_all = any(a.strip().lower() == "all" for a in allow)
-
+    # PAN-AAA-010's grading. The three states do not order, so this is a classification and not
+    # a comparison - and EMPTY has to be placed explicitly rather than falling out of a
+    # comparison, because an empty list is the state that admits nobody and `all` is the state
+    # that admits everyone.
+    allow_width = (AuthenticationProfile.AllowListWidth.ALL if allow_is_all
+                   else AuthenticationProfile.AllowListWidth.EMPTY if not allow
+                   else AuthenticationProfile.AllowListWidth.NAMED_GROUP)
+    # PAN-AAA-007. The realm the device holds is compared against its OWN upper-cased form,
+    # character for character, because every text operator in the field registry is
+    # case-insensitive and no clause can tell EXAMPLE.COM from example.com.
+    #
+    # WHERE BOTH KEYS HOLD A REALM, BOTH HAVE TO BE UPPERCASE. Stage 5 says only "the realm
+    # string this profile stores", which does not settle a profile carrying two - so this takes
+    # the firing side: a lower-case realm on either key reports, because either can be the one
+    # the firewall uses and the control is about the form a realm is stored in.
+    realms = [r for r in (sso_realm.strip(), method_realm.strip()) if r]
     fields = {
         "method": _method_of(entry),
         "lockout_failed_attempts": failed,
@@ -99,6 +166,16 @@ def _profile_fields(entry: dict[str, Any]) -> tuple[dict[str, Any], list]:
         "allow_list_is_all": allow_is_all,
         "user_domain": domain or "",
         "username_modifier": modifier or "",
+        "allow_list_width": allow_width,
+        # `parse_text_field` reads an absent key and an empty element alike as "". The device
+        # refuses an empty element on all four of these keys, so the absent case is the only
+        # one reachable and `or None` is exact rather than a convenience.
+        "sso_realm": sso_realm or None,
+        "kerberos_method_realm": method_realm or None,
+        "kerberos_realm_configured": bool(realms),
+        "kerberos_realm_is_uppercase": bool(realms) and all(r == r.upper() for r in realms),
+        "saml_certificate_profile": cert_profile or None,
+        "saml_request_signing_certificate": signing_cert or None,
     }
     provenance = [
         ("lockout_failed_attempts", failed_rk, failed_rv),
@@ -106,6 +183,10 @@ def _profile_fields(entry: dict[str, Any]) -> tuple[dict[str, Any], list]:
         ("mfa_enabled", mfa_rk, mfa_rv),
         ("user_domain", domain_rk, domain_rv),
         ("username_modifier", mod_rk, mod_rv),
+        ("sso_realm", sso_rk, sso_rv),
+        ("kerberos_method_realm", mrealm_rk, mrealm_rv),
+        ("saml_certificate_profile", cert_rk, cert_rv),
+        ("saml_request_signing_certificate", signing_rk, signing_rv),
     ]
     return fields, provenance
 

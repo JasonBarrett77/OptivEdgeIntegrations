@@ -66,6 +66,23 @@ def normalize_authentication_sequences(appliance: Appliance) -> dict[str, int]:
                     for m in members]
         local = [m for m, method in zip(members, resolved) if method in LOCAL_METHODS]
         unresolved = sum(1 for method in resolved if method is None)
+        # PAN-AAA-012's grading, and the reason `has_local_member` is not enough for it: the
+        # vendor's own description of `none` is that it performs no authentication at all, while
+        # `local-database` checks a credential the firewall holds, and stage 3 grades the two
+        # differently. One boolean reports both at the baseline severity.
+        #
+        # WEAKEST_FIRST is the order, on the model beside the column, so the ordering is stated
+        # once. Blank where every resolved member reaches an authority off the box - and blank
+        # where nothing resolved, which `unresolved_member_count` beside it is what separates.
+        #
+        # `ike.py::_weakest(offered, order)` IS THE NEAR-MATCH AND IS DELIBERATELY NOT USED.
+        # Its documented behaviour where the offer set holds nothing the order places is to
+        # return the member the DEVICE listed first, so the grading can mark it unranked - the
+        # right answer for a cipher list and the wrong one here, where "every member is
+        # external" has to read as blank rather than as `ldap`. Filtering the members down to
+        # the local ones first would make its fallback unreachable and leave a reader asking
+        # which of the two behaviours this column relies on.
+        weakest = next((m for m in AuthenticationSequence.WEAKEST_FIRST if m in resolved), "")
         exit_on_failure, exit_on_failure_rk, exit_on_failure_rv = parse_yes_no_field(
             scoped.entry.get("exit-sequence-on-failure"),
             implicit=Implicit.measured(
@@ -90,6 +107,7 @@ def normalize_authentication_sequences(appliance: Appliance) -> dict[str, int]:
             "member_methods": [method or "" for method in resolved],
             "local_member_names": local,
             "has_local_member": bool(local),
+            "weakest_member_method": weakest,
             "unresolved_member_count": unresolved,
             "all_members_external": bool(members) and not unresolved and all(
                 method in AuthenticationProfile.EXTERNAL_METHODS for method in resolved),

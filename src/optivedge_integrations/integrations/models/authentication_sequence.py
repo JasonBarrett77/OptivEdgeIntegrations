@@ -7,6 +7,7 @@ so it carries the scope column the authentication profiles do.
 
 from __future__ import annotations
 
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from .base import ApplianceScopedObject
@@ -35,6 +36,7 @@ class AuthenticationSequence(ApplianceScopedObject):
         "has_local_member",
         "unresolved_member_count",
         "all_members_external",
+        "weakest_member_method",
         "referrer_paths",
         "referrer_count",
         "is_administrative",
@@ -59,6 +61,15 @@ class AuthenticationSequence(ApplianceScopedObject):
     #: Every member resolved and every method external. What an administrator bound to this
     #: sequence needs for PAN-AUTH-019's first half; false for an empty sequence.
     all_members_external = models.BooleanField(default=False)
+    #: PAN-AAA-012's severity grading, which reads ONE column. `has_local_member` above cannot
+    #: tell `none` from `local-database`, and the two are graded differently: the vendor's own
+    #: description of `none` is that it performs no authentication at all, while
+    #: `local-database` checks a credential the firewall holds. A single boolean reports both at
+    #: the baseline severity.
+    #:
+    #: Blank where every resolved member reaches an authority off the box, and blank where
+    #: nothing resolved - `unresolved_member_count` is what separates those two.
+    weakest_member_method = models.CharField(max_length=32, blank=True)
 
     #: Implicit NO - measured 2026-09-11: the device stores none of these three flags unless the
     #: form sets them, and the committed sequence and the empty Add form render the same.
@@ -90,3 +101,17 @@ class AuthenticationSequence(ApplianceScopedObject):
                 fields=["appliance", "scope", "vsys_name", "name"],
                 name="unique_authentication_sequence_per_scope"),
         ]
+
+    #: Worst first. A member resolving to one of these is a credential the firewall itself
+    #: checks; everything else in `AuthenticationProfile.EXTERNAL_METHODS` reaches off the box.
+    WEAKEST_FIRST = ("none", "local-database")
+
+    def clean(self) -> None:
+        """The columns derived from `member_methods` must agree with it - the convention every
+        JSON-derived column here follows."""
+        methods = [str(m) for m in (self.member_methods or [])]
+        if self.member_count != len(self.member_names or []):
+            raise ValidationError("member_count must match member_names.")
+        expected = next((m for m in self.WEAKEST_FIRST if m in methods), "")
+        if self.weakest_member_method != expected:
+            raise ValidationError("weakest_member_method must match member_methods.")

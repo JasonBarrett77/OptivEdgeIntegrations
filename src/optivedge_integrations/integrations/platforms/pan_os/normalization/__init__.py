@@ -142,6 +142,11 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.ike impo
     normalize_ike_crypto_profiles,
     normalize_ike_gateways,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.ipsec import (
+    normalize_ipsec_crypto_profiles,
+    normalize_ipsec_tunnels,
+    normalize_monitor_profiles,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
     normalize_management_interfaces,
 )
@@ -487,10 +492,23 @@ def normalize_appliance_wildfire_settings(appliance: Appliance) -> dict:
 
 
 def normalize_appliance_device_services(appliance: Appliance) -> dict:
-    """NTP, SNMP and system identity. PAN-SVC-001, 002, 004, 005, 007 and 009.
+    """All six device-services models. PAN-SVC-001 to PAN-SVC-010.
 
-    MUST run after `normalize_appliance_management_interfaces`: whether SNMP is reachable is a
-    property of the surfaces that normalizer writes, not of the `snmp-setting` subtree.
+    NTP, SNMP, system identity, the management resolvers, the telemetry decision and one
+    service-paths row per enforcement point - the appliance, then every vsys it names. One walk
+    of `deviceconfig/system` plus the appliance's own `shared` subtree and three operational
+    snapshots.
+
+    MUST run after `normalize_appliance_management_interfaces`, and for TWO reasons now: whether
+    SNMP is reachable is a property of the surfaces that normalizer writes, and so is whether
+    the surfaces were walked AT ALL - which is what separates
+    `default_community_exposure`'s "every surface refuses" from "nobody looked". Run first, this
+    would find last run's rows, or none, and reduce a credential finding's severity on the
+    strength of a walk that never happened.
+
+    A MISSING OPERATIONAL SNAPSHOT IS A READING and not an ordering problem: it leaves
+    `time_source_in_force` at its firing member, `hostname_in_force_known` false and
+    `telemetry_delivery_state` empty, which is what those three exist to say.
     """
     return normalize_device_services(appliance)
 
@@ -762,5 +780,8 @@ __all__ = [
     "normalize_show_managed_devices",
     "normalize_ike_crypto_profiles",
     "normalize_ike_gateways",
+    "normalize_ipsec_crypto_profiles",
+    "normalize_ipsec_tunnels",
+    "normalize_monitor_profiles",
     "normalize_zones",
 ]

@@ -9,6 +9,8 @@ the same rule BELOW it, which is the accepted cost.
 
 from __future__ import annotations
 
+from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
@@ -16,12 +18,14 @@ from optivedge_integrations.integrations.models import (
     Appliance,
     ApplianceGroup,
     Certificate,
+    CustomUrlCategory,
     DataFilteringPosture,
     DecryptionSettings,
     EnforcementNode,
     EnforcementPoint,
     FieldProvenance,
     ManagementStation,
+    NormalizationIssue,
     PolicyObjectNamespace,
     SecurityProfile,
     SecurityProfileInlineDetector,
@@ -79,7 +83,28 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     build_pushed_vsys_profiles_xpath,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    classify_prov_type,
     pushed_vsys_profiles,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.url_filtering import (
+    PROFILE_REFERENCE_SURFACES,
+    profile_category_references,
+    CategoryReference,
+    NormalizedCustomUrlCategory,
+    UrlFilteringContext,
+    attribute_category_references,
+    categories_in_scope,
+    effective_credential_action,
+    effective_site_access_action,
+    normalize_custom_url_category,
+    rule_category_references,
+    url_category_catalogue,
+    url_filtering_profile_values,
+    url_filtering_verdicts,
+)
+from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined import (
+    SHOW_PREDEFINED_URL_CATEGORIES_COMMAND,
+    SHOW_PREDEFINED_URL_LISTS_COMMAND,
 )
 
 SPY = SecurityProfile.KIND_SPYWARE
@@ -2192,3 +2217,1066 @@ class CertificateHsmCustodyTests(TestCase):
         self.assertIs(PRIVATE_KEY_ON_HSM_ABSENT.value, False)
         self.assertEqual(PRIVATE_KEY_ON_HSM_ABSENT.provenance_type, "assumed_default",
                          "assumed and not measured - stage 4's own disposition")
+
+
+# =============================================================================================
+# URL FILTERING - PAN-URL-001 to PAN-URL-006
+# =============================================================================================
+#
+# Every payload shape below is what the lab STORED, read back after commit on 2026-10-29 off
+# serials 691665AC334B458 (PA-VM 11.2.5) and 6A9C0A9904E7D6E (PA-VM 11.2.3-h3) through
+# Panorama's proxy - not a shape reconstructed from documentation. Where a case is synthetic it
+# says so and says why: THREE BRANCHES OF THIS DOMAIN'S NORMALIZER CANNOT BE DISCRIMINATED BY
+# THIS LAB AT ALL, established by mutation-testing the readback harness against the real
+# payloads, and those three are the reason some of the cases here are built by hand rather than
+# quoted.
+
+URLF = SecurityProfile.KIND_URL_FILTERING
+
+
+def urlf_values(entry, *, predefined=False):
+    return url_filtering_profile_values(entry, predefined=predefined)[0]
+
+
+def urlf_provenance(entry, *, predefined=False):
+    return {name: classify_prov_type(rk)
+            for name, rk, _rv in url_filtering_profile_values(entry, predefined=predefined)[1]}
+
+
+def urlf_verdicts(entry, *, catalogue=("malware", "phishing", "command-and-control"),
+                  collected=True, categories=(), namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
+                  predefined=False):
+    return url_filtering_verdicts(
+        urlf_values(entry, predefined=predefined), namespace_type=namespace_type,
+        context=UrlFilteringContext(catalogue=tuple(catalogue), collected=collected,
+                                    categories=list(categories)))
+
+
+def custom_category(name, *, category_type="URL List", entries=("a.example/",),
+                    namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1"):
+    """A NormalizedCustomUrlCategory without a snapshot, for the pure-function tests."""
+    return NormalizedCustomUrlCategory(
+        source_snapshot=None, config_source=SecurityRule.SOURCE_LOCAL, name=name,
+        namespace_type=namespace_type, namespace_value=namespace_value,
+        precedence_rank=10, category_type=category_type,
+        match_entries=None if entries is None else list(entries),
+        raw_category={}, field_provenance_data=[])
+
+
+#: THE DEVICE'S OWN CATALOGUE, read 2026-10-29. Ninety names on both PA-VMs and eighty-eight on
+#: both PA-5220s; the two the PA-5220s lack are `browser-runtime-attack` and `file-converter`.
+#: Only the names the gradings place plus a handful of ordinary ones are needed here, and the
+#: tests that care about the SIZE say what the real number is rather than listing ninety.
+LAB_CATALOGUE = ("command-and-control", "malware", "phishing", "high-risk", "medium-risk",
+                 "low-risk", "unknown", "newly-registered-domain", "not-resolved", "gambling",
+                 "adult", "shopping", "travel")
+
+
+class UrlFilteringImplicitTests(SimpleTestCase):
+    """WHAT AN ABSENT KEY ASSERTS, per key, with the provenance type each one records.
+
+    `oep-url-05` is the measured subject: a committed url-filtering profile carrying NO child
+    key at all, standing at vsys1 of serial 691665AC334B458. Every assertion here is what that
+    entry produces, and the split between the three kinds of declaration is stage 4's rather
+    than a shape of the data - three site-access lists and one credential list were given a
+    positive control and the rest were not.
+    """
+
+    BARE = {"@name": "oep-url-05"}
+
+    def test_the_three_lists_with_a_positive_control_materialise_an_empty_list(self):
+        v = urlf_values(self.BARE)
+        self.assertEqual(v["block_categories"], [])
+        self.assertEqual(v["allow_categories"], [])
+        self.assertEqual(v["isolate_categories"], [])
+        self.assertEqual(v["credential_block_categories"], [])
+
+    def test_the_six_lists_without_one_store_nothing_rather_than_an_empty_list(self):
+        # A NULL IS NOT AN EMPTY LIST. State C never wrote a member to any of these six, so
+        # nothing establishes what their absence asserts, and a materialised [] would be a
+        # measurement nobody took. The verdict columns read a null as "the categories in this
+        # list are not known", which is why they land on the failing side.
+        v = urlf_values(self.BARE)
+        for column in ("alert_categories", "continue_categories", "override_categories",
+                       "credential_alert_categories", "credential_allow_categories",
+                       "credential_continue_categories"):
+            self.assertIsNone(v[column], column)
+
+    def test_an_absent_credential_node_asserts_disabled_and_that_fires(self):
+        # `disabled` is the value PAN-URL-003's first half reports on, so materialising it is
+        # what makes a profile nobody has edited produce the finding rather than disappear from
+        # the result set. Measured on three appliances across two major versions.
+        self.assertEqual(urlf_values(self.BARE)["credential_detection_mode"], "disabled")
+
+    def test_all_three_request_headers_read_absence_as_not_recorded(self):
+        v = urlf_values(self.BARE)
+        self.assertFalse(v["log_http_header_user_agent"])
+        self.assertFalse(v["log_http_header_referer"])
+        self.assertFalse(v["log_http_header_xff"])
+
+    def test_only_one_of_the_three_headers_records_a_MEASURED_default(self):
+        # The other two are inferred - four of the method's five points paid and the positive
+        # control on the key itself not paid - and the report has to say so. THE DIFFERENCE IS
+        # THE WHOLE POINT OF THIS TEST: all three store the same value and two of them are a
+        # claim nobody has checked.
+        p = urlf_provenance(self.BARE)
+        self.assertEqual(p["log_http_header_user_agent"], "pan_os_default")
+        self.assertEqual(p["log_http_header_referer"], "assumed_default")
+        self.assertEqual(p["log_http_header_xff"], "assumed_default")
+
+    def test_the_cloud_engine_is_off_when_the_key_is_absent(self):
+        self.assertFalse(urlf_values(self.BARE)["cloud_inline_categorization"])
+        self.assertEqual(urlf_provenance(self.BARE)["cloud_inline_categorization"],
+                         "pan_os_default")
+
+    def test_the_on_box_engine_stores_NOTHING_because_its_implicit_is_a_relation(self):
+        # Measured: a committed key-less profile renders the box TICKED on both PA-VMs and
+        # UNTICKED on the PA-5220, with the positive control paid on both sides. Materialising
+        # `yes` from a PA-VM reading onto a PA-5220 would report an on-box analysis engine the
+        # device's own interface says is off, so nothing is materialised at any price.
+        self.assertIsNone(urlf_values(self.BARE)["local_inline_categorization"])
+        self.assertEqual(urlf_provenance(self.BARE)["local_inline_categorization"],
+                         "not_configured")
+
+    def test_container_page_only_is_the_one_key_whose_absence_asserts_yes(self):
+        # And its security direction is INVERTED: true means LESS is logged. Vendor Help p.299
+        # documents it as default enabled and the device agrees on every appliance.
+        self.assertTrue(urlf_values(self.BARE)["log_container_page_only"])
+        self.assertEqual(urlf_provenance(self.BARE)["log_container_page_only"],
+                         "pan_os_default")
+
+    def test_an_absent_exemption_list_is_the_one_materialised_default_that_reassures(self):
+        # Safe because the key is NEGATED: an empty exemption list IS the good state, measured.
+        self.assertEqual(urlf_values(self.BARE)["inline_analysis_exemptions"], [])
+        self.assertEqual(urlf_provenance(self.BARE)["inline_analysis_exemptions"],
+                         "pan_os_default")
+
+    def test_every_one_of_the_eighteen_measured_columns_records_a_provenance_row(self):
+        # A tracked field read through bare `scalar_value` gets ABSENT and writes no row, which
+        # then states "nothing tracks this field" about a field nobody configured. Eighteen is
+        # the whole measured set.
+        self.assertEqual(len(urlf_provenance(self.BARE)), 18)
+
+
+class UrlFilteringPushedShapeTests(SimpleTestCase):
+    """THE PUSHED MEMBER SHAPE, which is the reading that fails without raising.
+
+    Measured on all four lab appliances: a pushed member is {"@loc": ..., "#text": ...} and a
+    local one is the bare string, so `"malware" in members` is FALSE on every pushed profile in
+    this estate and raises nothing. `oep-url-pushed-weak`, pushed from device group
+    `prod-west-2` to serial 6A9C0A9904E7D6E, is the entry below.
+    """
+
+    PUSHED = {
+        "@name": "oep-url-pushed-weak", "@loc": "prod-west-2",
+        "block": {"@loc": "prod-west-2", "member": [
+            {"@loc": "prod-west-2", "#text": "abortion"},
+            {"@loc": "prod-west-2", "#text": "abused-drugs"},
+            {"@loc": "prod-west-2", "#text": "test_custom_url_category_name_2"}]},
+        "alert": {"@loc": "prod-west-2", "member": [
+            {"@loc": "prod-west-2", "#text": "adult"},
+            {"@loc": "prod-west-2", "#text": "gambling"}]},
+        "continue": {"@loc": "prod-west-2", "member": [
+            {"@loc": "prod-west-2", "#text": "weapons"}]},
+    }
+
+    def test_a_pushed_member_list_reads_as_the_names_and_not_as_dicts(self):
+        v = urlf_values(self.PUSHED)
+        self.assertEqual(v["block_categories"],
+                         ["abortion", "abused-drugs", "test_custom_url_category_name_2"])
+        self.assertEqual(v["alert_categories"], ["adult", "gambling"])
+        self.assertEqual(v["continue_categories"], ["weapons"])
+
+    def test_a_pushed_lists_marker_reaches_the_provenance_row(self):
+        # The field-level type for an @loc marker is `device_group` whatever the marker's VALUE
+        # is - `classify_prov_type` maps the KEY - while the ENTRY's namespace comes from the
+        # value through `pushed_entry_scope`. The marker's value is kept in `raw_value`.
+        self.assertEqual(urlf_provenance(self.PUSHED)["block_categories"], "device_group")
+
+    def test_a_pushed_credential_mode_choice_node_still_reads_its_arm(self):
+        # `zz_urlfilt_shared`, pushed from Panorama Shared and present on all four appliances.
+        entry = {"@name": "zz_urlfilt_shared", "@loc": "shared",
+                 "credential-enforcement": {"@loc": "shared",
+                                            "mode": {"@loc": "shared",
+                                                     "ip-user": {"@loc": "shared"}},
+                                            "log-severity": {"@loc": "shared",
+                                                             "#text": "medium"}}}
+        self.assertEqual(urlf_values(entry)["credential_detection_mode"], "ip-user")
+
+
+class UrlFilteringPredefinedEntryTests(SimpleTestCase):
+    """The vendor's shipped `default`, which carries keys and which no administrator can edit.
+
+    NO PAYLOAD KEY MARKS A PREDEFINED ENTRY and `classify_prov_type`'s fallthrough is `local`,
+    so without the reading site saying so every leaf of this entry records "defined on this
+    device". Read off serial 691665AC334B458 on 2026-10-29.
+    """
+
+    DEFAULT = {
+        "@name": "default",
+        "block": {"member": ["adult", "questionable", "abused-drugs", "hacking", "gambling",
+                             "weapons", "malware", "phishing", "command-and-control",
+                             "grayware", "ransomware", "scanning-activity"]},
+        "alert": {"member": ["high-risk", "medium-risk", "newly-registered-domain"]},
+        # @minver IS NOT A PROVENANCE MARKER, so the text reads correctly through it - and the
+        # key is PRESENT, which is what makes the predefined classification necessary.
+        "local-inline-cat": {"@minver": "10.2.0", "#text": "yes"},
+    }
+
+    def test_the_shipped_profile_stores_the_on_box_engine_as_ON(self):
+        self.assertTrue(urlf_values(self.DEFAULT, predefined=True)["local_inline_categorization"])
+
+    def test_a_present_key_on_a_shipped_entry_records_predefined_and_not_local(self):
+        p = urlf_provenance(self.DEFAULT, predefined=True)
+        self.assertEqual(p["block_categories"], "predefined")
+        self.assertEqual(p["alert_categories"], "predefined")
+        self.assertEqual(p["local_inline_categorization"], "predefined")
+
+    def test_an_absent_key_on_a_shipped_entry_keeps_its_own_declaration(self):
+        # What PAN-OS does WITHOUT the key is the same fact whoever shipped the entry, so the
+        # Implicit survives rather than being overwritten with `predefined`.
+        p = urlf_provenance(self.DEFAULT, predefined=True)
+        self.assertEqual(p["log_http_header_user_agent"], "pan_os_default")
+        self.assertEqual(p["log_http_header_xff"], "assumed_default")
+        self.assertEqual(p["credential_alert_categories"], "not_configured")
+
+    def test_without_the_predefined_flag_the_same_entry_reads_as_locally_configured(self):
+        # The failure this flag exists to prevent, pinned: a remediation saying "edit the
+        # profile" aimed at a node the firewall refuses to accept.
+        self.assertEqual(urlf_provenance(self.DEFAULT)["block_categories"], "local")
+
+
+class UrlFilteringEffectiveActionTests(SimpleTestCase):
+    """The traversal, and the two DIFFERENT defaults that make it one."""
+
+    def test_an_unnamed_predefined_category_is_permitted_because_the_permit_is_the_omission(self):
+        self.assertEqual(
+            effective_site_access_action("shopping", urlf_values({"@name": "p"}),
+                                         is_custom=False), "allow")
+
+    def test_an_unnamed_CUSTOM_category_is_inert_and_not_permitted(self):
+        # Measured: a key-less profile renders every custom category at `none` and every
+        # predefined one at `allow`. THIS IS THE MUTATION THE LAB DOES DISCRIMINATE - treating a
+        # custom category like a predefined one moved fifty-two stored columns in the readback.
+        self.assertEqual(
+            effective_site_access_action("oep-url-cat-01", urlf_values({"@name": "p"}),
+                                         is_custom=True), "none")
+
+    def test_the_first_of_the_six_mutually_exclusive_lists_holding_the_name_wins(self):
+        entry = {"@name": "p", "override": {"member": ["malware"]}}
+        self.assertEqual(
+            effective_site_access_action("malware", urlf_values(entry), is_custom=False),
+            "override")
+
+    def test_a_site_access_refusal_refuses_credentials_with_no_credential_key_written(self):
+        # THE COUPLING. On the predefined `default`, which has no credential-enforcement node at
+        # all, the dialog grid reads 13 credential blocks on 6A9C0A9904E7D6E, 12 on
+        # 691665AC334B458 and 13 on 013201001475 - each set equal to its own site-access block
+        # set - while the LIST grid reads `Block Categories (0)` on the same entry in the same
+        # minute. A query joining on membership of the credential lists reports every estate's
+        # credential posture as fully permissive.
+        #
+        # SYNTHETIC BECAUSE THE LAB CANNOT DISCRIMINATE IT. Mutation-tested 2026-10-29: dropping
+        # the coupling altogether changed NO stored column on any of the eighteen rows this
+        # estate holds, because the only column it can move is
+        # `credential_submission_blocked_for_every_category` and that is false on every profile
+        # here. Without this case the coupling could be deleted and nothing would fail.
+        values = urlf_values({"@name": "p", "block": {"member": ["malware"]}})
+        self.assertEqual(effective_credential_action("malware", values, "block"), "block")
+        self.assertEqual(effective_credential_action("shopping", values, "allow"), "allow")
+
+    def test_an_explicit_credential_list_decides_a_category_site_access_permits(self):
+        values = urlf_values({"@name": "p", "credential-enforcement": {
+            "mode": {"ip-user": None}, "alert": {"member": ["shopping"]}}})
+        self.assertEqual(effective_credential_action("shopping", values, "allow"), "alert")
+
+
+class UrlFilteringVerdictTests(SimpleTestCase):
+    """The twenty-seven derived columns, and the direction each default points."""
+
+    def test_an_uncollected_catalogue_puts_every_verdict_on_the_firing_side(self):
+        # The state every row is in between the migration that adds this model and the pass
+        # that issues the catalogue read. A denominator of zero would make the most permissive
+        # profile in an estate pass every control here.
+        v = urlf_verdicts({"@name": "p"}, collected=False)
+        self.assertFalse(v["category_catalogue_collected"])
+        self.assertIsNone(v["category_catalogue_size"])
+        self.assertFalse(v["all_hostile_categories_blocked"])
+        self.assertFalse(v["all_reachable_categories_logged"])
+        self.assertFalse(v["all_reachable_categories_credential_restricted"])
+        self.assertFalse(v["credential_submission_blocked_for_every_category"])
+        self.assertIsNone(v["reachable_unlogged_category_count"])
+        self.assertIsNone(v["credential_permissive_category_count"])
+        self.assertIsNone(v["weakest_hostile_category_action"])
+
+    def test_a_key_less_profile_permits_every_hostile_category(self):
+        v = urlf_verdicts({"@name": "oep-url-05"}, catalogue=LAB_CATALOGUE)
+        self.assertFalse(v["all_hostile_categories_blocked"])
+        self.assertEqual(v["weakest_hostile_category_action"], "allow")
+        self.assertEqual(
+            sorted(c["category"] for c in v["unblocked_hostile_categories"]),
+            ["command-and-control", "malware", "phishing"])
+
+    def test_the_three_hostile_categories_blocked_outright_satisfies_the_verdict(self):
+        # `oep-url-01`, standing at vsys1 of serial 691665AC334B458.
+        v = urlf_verdicts({"@name": "oep-url-01", "block": {
+            "member": ["command-and-control", "malware", "phishing"]}}, catalogue=LAB_CATALOGUE)
+        self.assertTrue(v["all_hostile_categories_blocked"])
+        self.assertEqual(v["weakest_hostile_category_action"], "block")
+        self.assertEqual(v["unblocked_hostile_categories"], [])
+
+    def test_the_weakest_hostile_action_follows_the_vendors_order(self):
+        for key, expected in (("override", "override"), ("continue", "continue"),
+                              ("alert", "alert")):
+            v = urlf_verdicts({"@name": "p", key: {"member": ["malware", "phishing"]},
+                               "block": {"member": ["command-and-control"]}},
+                              catalogue=LAB_CATALOGUE)
+            self.assertEqual(v["weakest_hostile_category_action"], expected, key)
+
+    def test_an_isolated_category_is_reachable_and_unlogged(self):
+        # SYNTHETIC, AND THE LAB CANNOT DISCRIMINATE IT. `isolate` exists on 11.2 builds only
+        # and no profile in this estate populates it, so mutation-testing the readback showed
+        # that treating an isolated category as logged changed no stored column anywhere.
+        # Measured and worse than out of scope: a category CAN be put at `isolate` by API on a
+        # PA-VM, the interface then renders it as `allow`, and no screen shows otherwise.
+        v = urlf_verdicts({"@name": "p", "isolate": {"member": ["gambling"]},
+                           "alert": {"member": ["adult", "shopping", "travel", "high-risk",
+                                                "medium-risk", "low-risk", "unknown",
+                                                "newly-registered-domain", "not-resolved"]},
+                           "block": {"member": ["command-and-control", "malware", "phishing"]}},
+                          catalogue=LAB_CATALOGUE)
+        self.assertFalse(v["all_reachable_categories_logged"])
+        self.assertEqual(v["reachable_unlogged_category_count"], 1)
+        self.assertEqual(v["reachable_unlogged_categories"],
+                         [{"category": "gambling", "action": "isolate"}])
+
+    def test_an_isolated_category_is_weaker_than_alert_and_stronger_than_a_bare_permit(self):
+        # STAGE 5 DECLINED TO PLACE `isolate` and this is where the placement lives. Ranking it
+        # below `allow` would overstate - remote browser isolation does something - and ranking
+        # it as a restriction would hide it from the unlogged set above.
+        order = SecurityProfile.URL_ACTION_WEAKEST_FIRST
+        self.assertLess(order.index("allow"), order.index("isolate"))
+        self.assertLess(order.index("isolate"), order.index("alert"))
+
+    def test_the_hostile_three_are_excluded_from_the_logging_verdict(self):
+        # PAN-URL-001 owns them, so PAN-URL-002 is computed over the catalogue MINUS those
+        # three - otherwise one finding is raised twice over one configuration.
+        v = urlf_verdicts({"@name": "p", "alert": {"member": [
+            n for n in LAB_CATALOGUE if n not in SecurityProfile.HOSTILE_URL_CATEGORIES]}},
+            catalogue=LAB_CATALOGUE)
+        self.assertTrue(v["all_reachable_categories_logged"])
+        self.assertEqual(v["reachable_unlogged_category_count"], 0)
+
+    def test_the_worst_unlogged_category_follows_stage_3s_placement(self):
+        v = urlf_verdicts({"@name": "p", "alert": {"member": ["shopping"]}},
+                          catalogue=("shopping", "low-risk", "medium-risk", "high-risk"))
+        self.assertEqual(v["worst_reachable_unlogged_category"], "high-risk")
+        v = urlf_verdicts({"@name": "p"}, catalogue=("shopping", "low-risk"))
+        self.assertEqual(v["worst_reachable_unlogged_category"], "low-risk")
+
+    def test_an_unplaced_category_still_reaches_the_column(self):
+        # Stage 3 placed six names of eighty-eight-to-ninety and said the rest take the
+        # baseline. Returning None would read as "nobody collected this", which is a different
+        # claim - so an unplaced member comes back as the device gave it and matches no
+        # calibration query.
+        v = urlf_verdicts({"@name": "p"}, catalogue=("shopping",))
+        self.assertEqual(v["worst_reachable_unlogged_category"], "shopping")
+
+    def test_a_credential_blocked_but_site_access_refused_category_is_not_permissive(self):
+        # A CATEGORY WHOSE SITE ACCESS IS REFUSED IS NOT IN THIS SET AT ALL, so its membership
+        # of the restricted set is PAN-URL-001's outcome and not evidence about PAN-URL-003.
+        v = urlf_verdicts({"@name": "p", "block": {"member": ["malware"]}},
+                          catalogue=("malware", "shopping"))
+        self.assertEqual([c["category"] for c in v["credential_permissive_categories"]],
+                         ["shopping"])
+        self.assertEqual(v["credential_permissive_category_count"], 1)
+
+    def test_the_applicability_exception_defaults_to_the_control_RUNNING(self):
+        # FALSE means the exception does not apply. A default of true would suppress
+        # PAN-URL-003's first half on every unrecomputed profile - a clause that reads as
+        # careful and silences a control that should fire.
+        self.assertFalse(urlf_verdicts({"@name": "p"}, catalogue=LAB_CATALOGUE)[
+            "credential_submission_blocked_for_every_category"])
+
+    def test_refusing_every_category_outright_satisfies_the_exception(self):
+        v = urlf_verdicts({"@name": "p", "block": {"member": list(LAB_CATALOGUE)}},
+                          catalogue=LAB_CATALOGUE)
+        self.assertTrue(v["credential_submission_blocked_for_every_category"])
+        self.assertTrue(v["all_reachable_categories_credential_restricted"])
+
+    def test_the_header_columns_are_answered_without_a_catalogue(self):
+        # The only four columns in this family that are answered on every row: their three
+        # inputs are this row's own booleans and are never null.
+        v = urlf_verdicts({"@name": "oep-url-07", "log-http-hdr-referer": "yes",
+                           "log-http-hdr-xff": "yes"}, collected=False)
+        self.assertFalse(v["records_all_request_headers"])
+        self.assertEqual(v["unrecorded_request_headers"], ["User-Agent"])
+        self.assertEqual(v["unrecorded_request_header_count"], 1)
+        self.assertEqual(v["worst_unrecorded_request_header"], "User-Agent")
+
+    def test_the_forwarded_for_address_is_the_worst_header_to_be_missing(self):
+        # It is the only one of the three that recovers the originating address where a proxy or
+        # source translation has replaced it. `oep-url-08` is the subject: user-agent and xff
+        # set, referer absent.
+        v = urlf_verdicts({"@name": "p", "log-http-hdr-user-agent": "yes"})
+        self.assertEqual(v["worst_unrecorded_request_header"], "X-Forwarded-For")
+        v = urlf_verdicts({"@name": "oep-url-08", "log-http-hdr-user-agent": "yes",
+                           "log-http-hdr-xff": "yes"})
+        self.assertEqual(v["worst_unrecorded_request_header"], "Referer")
+
+    def test_all_three_headers_recorded_leaves_the_worst_column_empty(self):
+        v = urlf_verdicts({"@name": "oep-url-01", "log-http-hdr-user-agent": "yes",
+                           "log-http-hdr-referer": "yes", "log-http-hdr-xff": "yes"})
+        self.assertTrue(v["records_all_request_headers"])
+        self.assertEqual(v["unrecorded_request_header_count"], 0)
+        self.assertEqual(v["worst_unrecorded_request_header"], "")
+
+    def test_an_absent_on_box_key_reports_the_engine_off_AND_says_it_is_undetermined(self):
+        # The false positive is real, bounded and declared: on both PA-VMs an absent key means
+        # the engine IS on. The companion is true on precisely the rows where the finding may
+        # be wrong.
+        v = urlf_verdicts({"@name": "oep-url-05"})
+        self.assertFalse(v["local_inline_categorization_on"])
+        self.assertTrue(v["local_inline_categorization_undetermined"])
+        self.assertFalse(v["any_inline_analysis_engine_on"])
+
+    def test_an_explicit_on_box_yes_is_determined(self):
+        v = urlf_verdicts({"@name": "oep-url-01", "local-inline-cat": "yes"})
+        self.assertTrue(v["local_inline_categorization_on"])
+        self.assertFalse(v["local_inline_categorization_undetermined"])
+        self.assertTrue(v["any_inline_analysis_engine_on"])
+
+    def test_the_cloud_engine_alone_satisfies_the_disjunction(self):
+        v = urlf_verdicts({"@name": "oep-url-09", "cloud-inline-cat": "yes"})
+        self.assertTrue(v["any_inline_analysis_engine_on"])
+        self.assertTrue(v["local_inline_categorization_undetermined"])
+
+    def test_an_exemption_list_is_counted_and_said_to_be_counted(self):
+        v = urlf_verdicts({"@name": "oep-url-09",
+                           "mlav-category-exception": {"member": ["oep-url-cat-03"]}})
+        self.assertEqual(v["inline_analysis_exemption_count"], 1)
+        self.assertTrue(v["inline_analysis_exemptions_computed"])
+
+    def test_the_exemption_count_reads_as_compliant_when_nobody_looked_and_says_so(self):
+        # THE ONE CLAUSE COLUMN IN THIS FAMILY THAT READS AS COMPLIANT ON AN UNKNOWN, and the
+        # companion is the whole answer. A row that was never recomputed holds 0 - the passing
+        # state - while `inline_analysis_exemptions_computed` is false and fires.
+        row = SecurityProfile(kind=URLF)
+        self.assertEqual(row.inline_analysis_exemption_count, 0)
+        self.assertFalse(row.inline_analysis_exemptions_computed)
+
+    def test_the_broadest_exemption_type_is_resolved_through_the_reference(self):
+        # A query cannot follow a reference, so the reach across to the category's own type is
+        # a derived column or it is nothing. `oep-url-09` names a Category Match and
+        # `oep-url-10` a URL List, both standing at vsys1 of serial 691665AC334B458.
+        cats = [custom_category("oep-url-cat-03", category_type="Category Match"),
+                custom_category("oep-url-cat-04", category_type="URL List")]
+        v = urlf_verdicts({"@name": "oep-url-09",
+                           "mlav-category-exception": {"member": ["oep-url-cat-04",
+                                                                  "oep-url-cat-03"]}},
+                          categories=cats)
+        self.assertEqual(v["broadest_inline_analysis_exemption_type"], "Category Match")
+        v = urlf_verdicts({"@name": "oep-url-10",
+                           "mlav-category-exception": {"member": ["oep-url-cat-04"]}},
+                          categories=cats)
+        self.assertEqual(v["broadest_inline_analysis_exemption_type"], "URL List")
+
+    def test_an_exemption_whose_target_row_is_missing_resolves_to_nothing(self):
+        # Which on an estate whose custom categories all arrive through the pushed read is what
+        # an uninstrumented collector gets: the firewall's own containers are absent on three of
+        # the four lab appliances while 22 categories are in force.
+        v = urlf_verdicts({"@name": "p",
+                           "mlav-category-exception": {"member": ["not-collected"]}})
+        self.assertEqual(v["inline_analysis_exemption_count"], 1)
+        self.assertIsNone(v["broadest_inline_analysis_exemption_type"])
+
+    def test_a_permitted_custom_category_is_a_carve_out_and_is_counted(self):
+        # `oep-url-11`. A permitted CUSTOM category has to be written into the `allow` list,
+        # because the device's own default for one is the inert action rather than the permit -
+        # which is what makes a carve-out readable from the configuration at all.
+        v = urlf_verdicts({"@name": "oep-url-11", "allow": {"member": ["oep-url-cat-05"]}},
+                          categories=[custom_category("oep-url-cat-05")])
+        self.assertEqual(v["permitted_custom_category_count"], 1)
+        self.assertEqual(v["permitted_custom_categories"],
+                         [{"category": "oep-url-cat-05", "action": "allow"}])
+        self.assertEqual(v["weakest_permitted_custom_category_action"], "allow")
+
+    def test_a_predefined_name_in_the_allow_list_is_not_a_custom_carve_out(self):
+        # The predicate cannot tell a custom category's name from a predefined one - they share
+        # the member namespace and are told apart only by @type, which is not in the
+        # configuration at all - so the discrimination is a reach into a second collection.
+        v = urlf_verdicts({"@name": "p", "allow": {"member": ["shopping"]}},
+                          catalogue=LAB_CATALOGUE, categories=[custom_category("other")])
+        self.assertEqual(v["permitted_custom_category_count"], 0)
+        self.assertIsNone(v["weakest_permitted_custom_category_action"])
+
+
+class UrlFilteringScopeDenominatorTests(SimpleTestCase):
+    """THE DENOMINATOR IS A PROPERTY OF THE PROFILE'S SCOPE AND NOT OF THE APPLIANCE.
+
+    Measured: a vsys-scoped key-less profile's Categories grid has 113 rows on serial
+    691665AC334B458 - 90 predefined plus the custom ones - and a SHARED-scoped profile on the
+    same appliance in the same session has 90 and no custom category at all.
+    """
+
+    CATS = [custom_category("oep-url-cat-01"),
+            custom_category("url_list", namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
+                            namespace_value="shared")]
+
+    def test_a_vsys_scoped_profile_sees_the_custom_categories(self):
+        v = urlf_verdicts({"@name": "p"}, catalogue=("a", "b"), categories=self.CATS,
+                          namespace_type=PolicyObjectNamespace.LOCAL_VSYS)
+        self.assertEqual(v["category_catalogue_size"], 4)
+
+    def test_a_device_group_scoped_profile_is_vsys_scoped_and_sees_them_too(self):
+        v = urlf_verdicts({"@name": "p"}, catalogue=("a", "b"), categories=self.CATS,
+                          namespace_type=PolicyObjectNamespace.PANORAMA_DEVICE_GROUP)
+        self.assertEqual(v["category_catalogue_size"], 4)
+
+    def test_a_shared_scoped_profile_sees_NONE_of_them(self):
+        for namespace in (PolicyObjectNamespace.LOCAL_SHARED,
+                          PolicyObjectNamespace.PANORAMA_SHARED):
+            v = urlf_verdicts({"@name": "p"}, catalogue=("a", "b"), categories=self.CATS,
+                              namespace_type=namespace)
+            self.assertEqual(v["category_catalogue_size"], 2, namespace)
+            self.assertEqual(categories_in_scope(self.CATS, namespace), {})
+
+    def test_a_vsys_definition_shadows_a_shared_one_of_the_same_name(self):
+        cats = [custom_category("dup", category_type="Category Match"),
+                custom_category("dup", category_type="URL List",
+                                namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
+                                namespace_value="shared")]
+        self.assertEqual(categories_in_scope(cats, PolicyObjectNamespace.LOCAL_VSYS),
+                         {"dup": "Category Match"})
+
+
+class CustomUrlCategoryReaderTests(SimpleTestCase):
+    """The second subject's own reads, and the dict-valued type leaf."""
+
+    def test_a_local_entry_reads_its_type_and_members(self):
+        c = normalize_custom_url_category(
+            source_snapshot=None, config_source=SecurityRule.SOURCE_LOCAL,
+            namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1",
+            entry={"@name": "oep-url-cat-02", "@uuid": "5b922d23-12ed-42d2-8f6d-1f4b26bc7cdd",
+                   "type": "Category Match", "list": {"member": ["abortion", "adult"]}})
+        self.assertEqual(c.category_type, "Category Match")
+        self.assertEqual(c.match_entries, ["abortion", "adult"])
+        self.assertEqual(c.match_entry_count, 2)
+
+    def test_a_pushed_entrys_TYPE_LEAF_VALUE_is_a_dict_and_still_reads(self):
+        # ON A PUSHED ENTRY @loc DECORATES THE LEAF'S VALUE as well as the entry: `type` reads
+        # {"@loc": "shared", "#text": "URL List"} on every one of this estate's 22 pushed
+        # categories, so `type == "URL List"` is FALSE on all of them and DOES NOT RAISE.
+        c = normalize_custom_url_category(
+            source_snapshot=None, config_source=SecurityRule.SOURCE_PUSHED_PRE,
+            namespace_type=PolicyObjectNamespace.PANORAMA_SHARED, namespace_value="shared",
+            entry={"@name": "url_list", "@loc": "shared",
+                   "type": {"@loc": "shared", "#text": "URL List"},
+                   "list": {"@loc": "shared", "member": [
+                       {"@loc": "shared", "#text": "validator.example/"},
+                       {"@loc": "shared", "#text": "www.google.com/"}]}})
+        self.assertEqual(c.category_type, "URL List")
+        self.assertEqual(c.match_entries, ["validator.example/", "www.google.com/"])
+        self.assertEqual(dict((n, classify_prov_type(rk))
+                              for n, rk, _ in c.field_provenance_data)["category_type"],
+                         "device_group")
+
+    def test_an_absent_member_list_stores_NOTHING_and_leaves_the_count_null(self):
+        # A null is NOT an empty list: an entry with no members matches nothing, which for a
+        # URL List is inert and for a Category Match is unmeasured, and state C wrote no member
+        # to this key at all.
+        c = normalize_custom_url_category(
+            source_snapshot=None, config_source=SecurityRule.SOURCE_LOCAL,
+            namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1",
+            entry={"@name": "c", "type": "URL List"})
+        self.assertIsNone(c.match_entries)
+        self.assertIsNone(c.match_entry_count)
+        self.assertEqual(dict((n, classify_prov_type(rk))
+                              for n, rk, _ in c.field_provenance_data)["match_entries"],
+                         "not_configured")
+
+    def test_an_absent_type_leaf_stores_NOTHING_because_the_key_is_mandatory(self):
+        # The key is mandatory at COMMIT validation, so it has no absent state and an absence
+        # asserts nothing. Stage 2 recorded a schema default of `URL List` for this leaf and it
+        # asserts nothing - materialising it would describe a candidate no committed device can
+        # hold.
+        c = normalize_custom_url_category(
+            source_snapshot=None, config_source=SecurityRule.SOURCE_LOCAL,
+            namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1",
+            entry={"@name": "c", "list": {"member": ["a.example/"]}})
+        self.assertEqual(c.category_type, "")
+        self.assertEqual(dict((n, classify_prov_type(rk))
+                              for n, rk, _ in c.field_provenance_data)["category_type"],
+                         "not_configured")
+
+
+class CustomUrlCategoryReferenceTests(SimpleTestCase):
+    """Who names a custom URL category, and what `unreferenced` is allowed to mean."""
+
+    def test_a_security_rules_category_member_is_a_reference(self):
+        root = {"rulebase": {"security": {"rules": {"entry": [
+            {"@name": "r1", "category": {"member": ["Camera-access", "any"]}}]}}}}
+        refs = rule_category_references(root, where="vsys1 ", pushed=False, shared_root=False)
+        self.assertEqual([r.name for r in refs], ["Camera-access"],
+                         "`any` is the wildcard and not a category")
+        self.assertEqual(refs[0].surface, "rulebase/security/rules/entry/category/member")
+
+    def test_a_profile_RULES_category_leaf_is_not_one(self):
+        # It is a TEXT leaf on a spyware or vulnerability rule, so the shape test alone skips
+        # it. Measured over a 1.3 MB merged payload: `category` appears as a member list at the
+        # security rulebase and nowhere else.
+        root = {"profiles": {"spyware": {"entry": [{"@name": "p", "rules": {"entry": [
+            {"@name": "r", "category": "adware"}]}}]}}}
+        self.assertEqual(
+            rule_category_references(root, where="vsys1 ", pushed=False, shared_root=False), [])
+
+    def test_a_pushed_rules_category_member_reads_through_the_member_shape(self):
+        root = {"pre-rulebase": {"security": {"rules": {"entry": [
+            {"@name": "r1", "@loc": "shared", "category": {"@loc": "shared", "member": [
+                {"@loc": "shared", "#text": "url_list"}]}}]}}}}
+        refs = rule_category_references(root, where="pushed ", pushed=True, shared_root=False)
+        self.assertEqual([(r.name, r.shared_scope) for r in refs], [("url_list", True)])
+
+    def test_every_one_of_the_eleven_profile_lists_is_a_reference_surface(self):
+        # The site-access pool and the credential pool are identical, measured by
+        # `action=complete` at both positions, and the exemption list is the one surface where a
+        # custom category is the ONLY possible referent.
+        self.assertEqual(len(PROFILE_REFERENCE_SURFACES), 11)
+        self.assertEqual(len(CustomUrlCategory.REFERENCE_SURFACES), 12,
+                         "the eleven profile surfaces plus the rule one")
+
+    def test_a_reference_resolves_to_the_most_specific_scope_that_can_see_it(self):
+        cats = [custom_category("dup"),
+                custom_category("dup", namespace_type=PolicyObjectNamespace.PANORAMA_SHARED,
+                                namespace_value="shared")]
+        vsys_ref = CategoryReference(name="dup", referrer="r", surface="s", shared_scope=False)
+        shared_ref = CategoryReference(name="dup", referrer="r2", surface="s",
+                                       shared_scope=True)
+        attributed, unresolved = attribute_category_references([vsys_ref, shared_ref], cats)
+        self.assertEqual(unresolved, [])
+        self.assertEqual(attributed[("dup", PolicyObjectNamespace.LOCAL_VSYS, "vsys1")], ["r"])
+        self.assertEqual(
+            attributed[("dup", PolicyObjectNamespace.PANORAMA_SHARED, "shared")], ["r2"])
+
+    def test_one_profile_naming_a_category_in_two_LISTS_is_two_references(self):
+        """FOUND BY THE READBACK, 2026-10-29, and it was off by exactly one everywhere.
+
+        The site-access `allow` list and `credential-enforcement/allow` are different surfaces
+        whose last-but-one path element is the same word, so a referrer label built from that
+        word produced one string for both - and `attribute_category_references` de-duplicates by
+        the string. Measured: on serial 6A9C0A9904E7D6E the local profile
+        `all_site_access_actions` names seventeen of the estate's twenty-two categories in both
+        of those lists, and every one of their stored referrer counts came back one short of
+        what the payload says.
+        """
+        profile = NormalizedSecurityProfile(
+            source_snapshot=None, config_source=SecurityRule.SOURCE_LOCAL, kind=URLF,
+            name="all_site_access_actions", namespace_type=PolicyObjectNamespace.LOCAL_VSYS,
+            namespace_value="vsys1", precedence_rank=10, description="", rule_count=0,
+            threat_exception_count=0, exception_surfaces={}, verdicts={}, decoders=[],
+            ml_models={}, application_overrides=[], wildfire_rules=[], inline_detectors={},
+            inline_detector_ldl={}, threat_exceptions=[], cloud_inline_analysis=False,
+            category_verdicts={}, dns_signature_sources=[], dns_categories=[],
+            dns_sinkhole_ipv4="", dns_sinkhole_ipv6="", has_rules=False, file_blocking={},
+            data_filtering={}, pattern_names=[], raw_profile={}, field_provenance_data=[],
+            url_filtering={"allow_categories": ["url_list"],
+                           "credential_allow_categories": ["url_list"]})
+        refs = profile_category_references([profile])
+        self.assertEqual(len(refs), 2)
+        self.assertEqual(len({r.referrer for r in refs}), 2,
+                         "two surfaces must not produce one referrer string")
+        attributed, _ = attribute_category_references(
+            refs, [custom_category("url_list")])
+        self.assertEqual(
+            len(attributed[("url_list", PolicyObjectNamespace.LOCAL_VSYS, "vsys1")]), 2)
+
+    def test_a_reference_naming_nothing_is_recorded_rather_than_raising(self):
+        # MEASURED ON BOTH PA-5220s, 2026-10-29: a security rule's `category` names `Camera`
+        # and the nearest thing that exists is the pushed category `Camera-access`. Somebody
+        # wrote that rule before this pipeline existed, so it must not take down an enforcement
+        # point's whole build.
+        ref = CategoryReference(name="Camera", referrer="rule", surface="s", shared_scope=False)
+        attributed, unresolved = attribute_category_references(
+            [ref], [custom_category("Camera-access")])
+        self.assertEqual(attributed, {})
+        self.assertEqual([r.name for r in unresolved], ["Camera"])
+
+
+class UrlCategoryCatalogueTests(SimpleTestCase):
+    """The operational read, which is the DENOMINATOR and never the numerator."""
+
+    PAYLOAD = {"pan-url-categories": {"@minver": "9.2.0", "entry": [
+        {"@name": "real-estate", "@id": "3010", "index": "1"},
+        {"@name": "malware", "@id": "10100", "index": "2"}]}}
+
+    def test_the_names_are_read_and_the_content_release_ids_are_not(self):
+        self.assertEqual(url_category_catalogue(self.PAYLOAD), ["real-estate", "malware"])
+
+    def test_it_is_found_under_either_envelope_the_read_arrives_in(self):
+        self.assertEqual(url_category_catalogue({"result": self.PAYLOAD}),
+                         ["real-estate", "malware"])
+        self.assertEqual(
+            url_category_catalogue({"response": {"result": self.PAYLOAD}}),
+            ["real-estate", "malware"])
+
+    def test_an_unrecognisable_payload_answers_EMPTY_and_not_a_denominator(self):
+        # Which the caller turns into `category_catalogue_collected = False`. A denominator of
+        # zero would make every verdict read "no category is unlogged".
+        self.assertEqual(url_category_catalogue(None), [])
+        self.assertEqual(url_category_catalogue({"result": {"something-else": {}}}), [])
+
+    def test_the_collector_asks_for_the_CATEGORY_catalogue_and_not_the_url_LISTS(self):
+        self.assertIn("/predefined/pan-url-categories",
+                      SHOW_PREDEFINED_URL_CATEGORIES_COMMAND)
+        self.assertNotEqual(SHOW_PREDEFINED_URL_CATEGORIES_COMMAND,
+                            SHOW_PREDEFINED_URL_LISTS_COMMAND)
+
+
+class UrlFilteringNormalizationTests(TestCase):
+    """End to end, over payloads shaped like the ones read off serial 691665AC334B458 and
+    6A9C0A9904E7D6E on 2026-10-29 through Panorama's proxy.
+
+    The shapes are quoted and the SUBJECT NAMES are the ones stage 6 left standing, so a reader
+    can go and look at the same objects. Every assertion here would fail if the normalizer
+    stopped writing the column it names - which is the point: the implicit tests above prove
+    what a reader returns and these prove it reaches a row.
+    """
+
+    CATALOGUE = {"pan-url-categories": {"entry": [
+        {"@name": n} for n in ("command-and-control", "malware", "phishing", "high-risk",
+                               "medium-risk", "shopping")]}}
+
+    def _point(self, *, merged, pushed=None, catalogue=True, predefined=None, serial="URL7"):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname=f"pano-{serial}")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name=f"grp-{serial}",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=station, appliance_group=group, serial_number=serial,
+            hostname=f"host-{serial}", software_version="11.2.5")
+        group.active_appliance = appliance
+        group.save()
+        point = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group, vsys_name="vsys1", in_scope=True)
+        EnforcementNode.objects.create(
+            management_station=station, enforcement_point=point, appliance=appliance)
+        now = timezone.now()
+        Snapshot.objects.create(management_station=station, appliance=appliance,
+                                source_type="show_merged_config", collected_at=now,
+                                payload=merged)
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance, collected_at=now,
+            source_type="config_predefined_security_profiles",
+            payload={"profiles": predefined or {}})
+        Snapshot.objects.create(management_station=station, appliance_group=group, collected_at=now,
+                                source_type="show_pushed_shared_policy",
+                                payload=pushed or {"policy": {"panorama": {}}})
+        Snapshot.objects.create(management_station=station, enforcement_point=point,
+                                source_type="show_pushed_shared_policy_vsys", scope_name="vsys1",
+                                collected_at=now, payload=pushed or {"policy": {"panorama": {}}})
+        if catalogue:
+            Snapshot.objects.create(
+                management_station=station, appliance=appliance, collected_at=now,
+                source_type="show_predefined_url_categories", payload=self.CATALOGUE)
+        return station, group, point
+
+    @staticmethod
+    def _merged(vsys=None, shared=None):
+        return {"config": {
+            "shared": shared or {},
+            "devices": {"entry": [{"@name": "localhost.localdomain", "vsys": {"entry": [
+                dict({"@name": "vsys1"}, **(vsys or {}))]}}]}}}
+
+    def _run(self, group, point):
+        normalize_appliance_group_security_profiles(group)
+        return normalize_security_profiles(point)
+
+    def test_a_vsys_profile_and_its_categories_land_with_the_scope_denominator(self):
+        merged = self._merged(vsys={"profiles": {
+            "url-filtering": {"entry": [
+                {"@name": "oep-url-01",
+                 "block": {"member": ["command-and-control", "malware", "phishing"]},
+                 "credential-enforcement": {"mode": {"ip-user": None},
+                                            "log-severity": "informational",
+                                            "block": {"member": ["high-risk"]}},
+                 "log-http-hdr-user-agent": "yes", "log-http-hdr-referer": "yes",
+                 "log-http-hdr-xff": "yes", "cloud-inline-cat": "yes",
+                 "local-inline-cat": "yes"}]},
+            "custom-url-category": {"entry": [
+                {"@name": "oep-url-cat-01", "@uuid": "85b493f4", "type": "URL List",
+                 "list": {"member": ["oep01.example.net/"]}}]}}})
+        station, group, point = self._point(merged=merged)
+        counts = self._run(group, point)
+        self.assertEqual(counts["custom_url_categories"], 1)
+        row = SecurityProfile.objects.get(kind=URLF, name="oep-url-01")
+        self.assertEqual(row.enforcement_point_id, point.pk)
+        self.assertEqual(row.namespace_type, PolicyObjectNamespace.LOCAL_VSYS)
+        # 6 predefined + 1 custom in scope at vsys scope.
+        self.assertEqual(row.category_catalogue_size, 7)
+        self.assertTrue(row.category_catalogue_collected)
+        self.assertTrue(row.all_hostile_categories_blocked)
+        self.assertEqual(row.credential_detection_mode, "ip-user")
+        self.assertTrue(row.records_all_request_headers)
+        self.assertTrue(row.local_inline_categorization_on)
+        self.assertFalse(row.local_inline_categorization_undetermined)
+        self.assertTrue(row.any_inline_analysis_engine_on)
+
+    def test_a_shared_profile_is_owned_by_the_group_and_sees_no_custom_category(self):
+        # Measured: a SHARED-scoped profile's Categories grid carries 90 rows and no custom
+        # category, where a vsys-scoped one on the same appliance in the same session has 113.
+        merged = self._merged(
+            vsys={"profiles": {"custom-url-category": {"entry": [
+                {"@name": "oep-url-cat-01", "type": "URL List",
+                 "list": {"member": ["a.example/"]}}]}}},
+            shared={"profiles": {"url-filtering": {"entry": [
+                {"@name": "oep-url-sh-01",
+                 "block": {"member": ["command-and-control", "malware", "phishing"]}}]}}})
+        station, group, point = self._point(merged=merged)
+        self._run(group, point)
+        row = SecurityProfile.objects.get(kind=URLF, name="oep-url-sh-01")
+        self.assertEqual(row.appliance_group_id, group.pk)
+        self.assertIsNone(row.enforcement_point_id)
+        self.assertEqual(row.category_catalogue_size, 6)
+        self.assertEqual(row.precedence_rank, 20)
+
+    def test_a_key_less_committed_profile_reports_on_every_assertion(self):
+        # `oep-url-05`: the whole object is the entry and its name. Every predefined category
+        # therefore resolves to the permit, no header is recorded, neither engine is switched
+        # on and there is no credential node.
+        station, group, point = self._point(merged=self._merged(
+            vsys={"profiles": {"url-filtering": {"entry": [{"@name": "oep-url-05"}]}}}))
+        self._run(group, point)
+        row = SecurityProfile.objects.get(kind=URLF, name="oep-url-05")
+        self.assertFalse(row.all_hostile_categories_blocked)
+        self.assertFalse(row.all_reachable_categories_logged)
+        self.assertFalse(row.all_reachable_categories_credential_restricted)
+        self.assertFalse(row.records_all_request_headers)
+        self.assertFalse(row.credential_submission_blocked_for_every_category)
+        self.assertTrue(row.local_inline_categorization_undetermined)
+        self.assertEqual(row.credential_detection_mode, "disabled")
+        self.assertEqual(row.weakest_hostile_category_action, "allow")
+        self.assertEqual(row.reachable_unlogged_category_count, 3)
+        self.assertTrue(row.log_container_page_only)
+
+    def test_without_the_catalogue_read_every_verdict_reports_and_the_counts_are_null(self):
+        # THE STATE EVERY ROW IS IN until the operational collector runs, declared rather than
+        # discovered: the read is new in this change and a collection taken before it exists
+        # has no catalogue at all.
+        station, group, point = self._point(
+            merged=self._merged(vsys={"profiles": {"url-filtering": {"entry": [
+                {"@name": "oep-url-01",
+                 "block": {"member": ["command-and-control", "malware", "phishing"]}}]}}}),
+            catalogue=False)
+        self._run(group, point)
+        row = SecurityProfile.objects.get(kind=URLF, name="oep-url-01")
+        self.assertFalse(row.category_catalogue_collected)
+        self.assertIsNone(row.category_catalogue_size)
+        self.assertFalse(row.all_hostile_categories_blocked,
+                         "blocked on the device, and unprovable without the denominator")
+        self.assertIsNone(row.reachable_unlogged_category_count)
+        self.assertIsNone(row.credential_permissive_category_count)
+        # The header family is answered anyway: its inputs are this row's own booleans.
+        self.assertFalse(row.records_all_request_headers)
+        self.assertEqual(row.unrecorded_request_header_count, 3)
+
+    def test_the_pushed_categories_are_the_only_ones_this_estate_has(self):
+        # ALL 22 OF THIS LAB'S CUSTOM CATEGORIES ARRIVE THROUGH THE PUSHED READ and the
+        # firewall's own containers are absent on three of the four appliances. A collector
+        # reading only the merged view reports no custom categories at all.
+        pushed = {"shared": {"profiles": {"custom-url-category": {"entry": [
+            {"@name": "url_list", "@loc": "shared",
+             "type": {"@loc": "shared", "#text": "URL List"},
+             "list": {"@loc": "shared", "member": [
+                 {"@loc": "shared", "#text": "validator.example/"}]}}]}}}}
+        station, group, point = self._point(merged=self._merged(), pushed=pushed)
+        self._run(group, point)
+        row = CustomUrlCategory.objects.get(name="url_list")
+        self.assertEqual(row.namespace_type, PolicyObjectNamespace.PANORAMA_SHARED)
+        self.assertEqual(row.appliance_group_id, group.pk)
+        self.assertEqual(row.category_type, "URL List")
+        self.assertEqual(row.match_entries, ["validator.example/"])
+        self.assertEqual(row.match_entry_count, 1)
+        self.assertTrue(row.match_entry_count_computed)
+
+    def test_a_profile_list_naming_a_category_marks_it_used_and_says_where_it_looked(self):
+        merged = self._merged(vsys={"profiles": {
+            "url-filtering": {"entry": [
+                {"@name": "oep-url-09",
+                 "mlav-category-exception": {"member": ["oep-url-cat-03"]}},
+                {"@name": "oep-url-11", "allow": {"member": ["oep-url-cat-05"]}}]},
+            "custom-url-category": {"entry": [
+                {"@name": "oep-url-cat-03", "type": "Category Match",
+                 "list": {"member": ["abortion", "adult", "gambling"]}},
+                {"@name": "oep-url-cat-05", "type": "URL List",
+                 "list": {"member": ["oep05.example.net/"]}},
+                {"@name": "oep-url-cat-01", "type": "URL List",
+                 "list": {"member": ["oep01.example.net/"]}}]}}})
+        station, group, point = self._point(merged=merged)
+        self._run(group, point)
+        used = CustomUrlCategory.objects.get(name="oep-url-cat-03")
+        self.assertTrue(used.is_used)
+        self.assertEqual(used.referrer_count, 1)
+        self.assertEqual(len(used.reference_surfaces_searched), 12,
+                         "`unreferenced` is never printed without its denominator")
+        unused = CustomUrlCategory.objects.get(name="oep-url-cat-01")
+        self.assertFalse(unused.is_used)
+        self.assertEqual(unused.referrer_count, 0)
+        # And the exemption's breadth reaches the profile row through the reference.
+        exempting = SecurityProfile.objects.get(kind=URLF, name="oep-url-09")
+        self.assertEqual(exempting.broadest_inline_analysis_exemption_type, "Category Match")
+        carving = SecurityProfile.objects.get(kind=URLF, name="oep-url-11")
+        self.assertEqual(carving.permitted_custom_category_count, 1)
+
+    def test_a_rule_naming_a_category_that_does_not_exist_is_an_issue_and_not_a_crash(self):
+        # MEASURED ON BOTH PA-5220s: a security rule's `category` names `Camera` and the
+        # nearest thing that exists is the pushed category `Camera-access`.
+        merged = self._merged(vsys={
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r1", "category": {"member": ["Camera"]}}]}}},
+            "profiles": {"custom-url-category": {"entry": [
+                {"@name": "Camera-access", "type": "URL List",
+                 "list": {"member": ["cam.example/"]}}]}}})
+        station, group, point = self._point(merged=merged)
+        self._run(group, point)
+        self.assertFalse(CustomUrlCategory.objects.get(name="Camera-access").is_used)
+        issues = NormalizationIssue.objects.filter(kind="custom url category")
+        self.assertTrue(any("Camera" in i.reason for i in issues),
+                        "the unresolved reference is the only evidence the name is dead")
+
+    def test_a_rule_naming_a_category_that_does_exist_marks_it_used(self):
+        merged = self._merged(vsys={
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r1", "category": {"member": ["Camera-access", "any"]}}]}}},
+            "profiles": {"custom-url-category": {"entry": [
+                {"@name": "Camera-access", "type": "URL List",
+                 "list": {"member": ["cam.example/"]}}]}}})
+        station, group, point = self._point(merged=merged)
+        self._run(group, point)
+        self.assertTrue(CustomUrlCategory.objects.get(name="Camera-access").is_used)
+
+    def test_a_rule_naming_a_url_filtering_profile_directly_marks_it_used(self):
+        # STAGE 5 RECORDED THAT NOT ONE SECURITY RULE IN THIS LAB NAMED A URL-FILTERING PROFILE
+        # DIRECTLY, measured on all four appliances on 2026-10-27. By 2026-10-29 one did -
+        # `oep-sas6-url-a` at vsys1 of serial 691665AC334B458 - so the one-hop path is live and
+        # this is what it produces.
+        merged = self._merged(vsys={
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r1", "profile-setting": {"profiles": {
+                    "url-filtering": {"member": ["oep-sas6-url-a"]}}}}]}}},
+            "profiles": {"url-filtering": {"entry": [
+                {"@name": "oep-sas6-url-a"}, {"@name": "oep-sas6-url-b"}]}}})
+        station, group, point = self._point(merged=merged)
+        self._run(group, point)
+        self.assertTrue(SecurityProfile.objects.get(kind=URLF, name="oep-sas6-url-a").is_used)
+        self.assertFalse(SecurityProfile.objects.get(kind=URLF, name="oep-sas6-url-b").is_used)
+
+    def test_the_shipped_default_profile_is_a_row_and_records_predefined_provenance(self):
+        predefined = {"url-filtering": {"entry": [
+            {"@name": "default",
+             "block": {"member": ["malware", "phishing", "command-and-control"]},
+             "alert": {"member": ["high-risk", "medium-risk"]},
+             "local-inline-cat": {"@minver": "10.2.0", "#text": "yes"}}]}}
+        station, group, point = self._point(merged=self._merged(), predefined=predefined)
+        self._run(group, point)
+        row = SecurityProfile.objects.get(kind=URLF, name="default")
+        self.assertTrue(row.is_predefined)
+        self.assertEqual(row.precedence_rank, 95)
+        self.assertTrue(row.all_hostile_categories_blocked)
+        self.assertTrue(row.local_inline_categorization)
+        # THE CREDENTIAL COUPLING, end to end: the three blocked categories are
+        # credential-refused with no credential node written at all, so the permissive set is
+        # the catalogue minus those three. `high-risk` and `medium-risk` are at `alert`, which
+        # is site-access reachable and says nothing about credentials, so they are permissive -
+        # which is the same arithmetic the device's own dialog grid shows on the real entry: 90
+        # categories, 12 blocked, 78 credential-permissive on serial 691665AC334B458.
+        self.assertEqual(sorted(c["category"] for c in row.credential_permissive_categories),
+                         ["high-risk", "medium-risk", "shopping"])
+        self.assertEqual(row.credential_permissive_category_count, 3)
+        ct = ContentType.objects.get_for_model(SecurityProfile)
+        types = dict(FieldProvenance.objects.filter(content_type=ct, object_id=row.pk)
+                     .values_list("field_name", "provenance_type"))
+        self.assertEqual(types["block_categories"], "predefined")
+        self.assertEqual(types["local_inline_categorization"], "predefined")
+        self.assertEqual(types["log_http_header_xff"], "assumed_default")
+
+    def test_two_kinds_sharing_a_name_stay_two_rows(self):
+        # The predefined `default` url-filtering profile and the predefined `default` antivirus
+        # profile both exist on every appliance in this lab. Without the kind in the uniqueness
+        # constraint they would collapse into one row.
+        predefined = {"url-filtering": {"entry": [{"@name": "default"}]},
+                      "virus": {"entry": [{"@name": "default"}]}}
+        station, group, point = self._point(merged=self._merged(), predefined=predefined)
+        self._run(group, point)
+        self.assertEqual(SecurityProfile.objects.filter(name="default").count(), 2)
+        self.assertEqual(
+            sorted(SecurityProfile.objects.filter(name="default")
+                   .values_list("kind", flat=True)),
+            sorted([SecurityProfile.KIND_VIRUS, URLF]))
+
+    def test_a_url_filtering_column_is_left_at_its_default_on_another_kind(self):
+        # And the defaults are the FIRING side, which is why every query over this model has to
+        # clause on the kind: an antivirus row reads as "the URL category catalogue was never
+        # collected", which is true of it and means nothing.
+        predefined = {"virus": {"entry": [{"@name": "default"}]}}
+        station, group, point = self._point(merged=self._merged(), predefined=predefined)
+        self._run(group, point)
+        row = SecurityProfile.objects.get(kind=SecurityProfile.KIND_VIRUS, name="default")
+        self.assertFalse(row.category_catalogue_collected)
+        self.assertTrue(row.local_inline_categorization_undetermined)
+        self.assertEqual(row.block_categories, [])
+        self.assertEqual(row.credential_detection_mode, "disabled")
+        ct = ContentType.objects.get_for_model(SecurityProfile)
+        self.assertFalse(
+            FieldProvenance.objects.filter(content_type=ct, object_id=row.pk,
+                                           field_name="block_categories").exists(),
+            "a kind with no such key must not record a provenance row for it")
+
+    def _shared_owner(self):
+        """A station and group, so `ScopedPolicyObject.clean()` reaches the checks below.
+
+        A shared-scoped row owned by the group is the one shape whose clean() returns before it
+        needs a snapshot, which keeps these four cases about the count/list agreement.
+        """
+        station, group, _point = self._point(merged=self._merged(), serial="CLN7")
+        return station, group
+
+    def test_a_count_that_disagrees_with_its_list_is_refused(self):
+        station, group = self._shared_owner()
+        row = SecurityProfile(
+            kind=URLF, management_station=station, appliance_group=group,
+            namespace_type=PolicyObjectNamespace.LOCAL_SHARED, namespace_value="shared",
+            name="p", precedence_rank=20, unrecorded_request_header_count=1,
+            unrecorded_request_headers=[])
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+    def test_the_carve_out_count_is_checked_against_the_PERMITS_in_the_list(self):
+        # The count is declared over the `allow` list alone, so it is checked against the
+        # PERMITS in the inventory rather than against its length.
+        station, group = self._shared_owner()
+        row = SecurityProfile(
+            kind=URLF, management_station=station, appliance_group=group,
+            namespace_type=PolicyObjectNamespace.LOCAL_SHARED, namespace_value="shared",
+            name="p", precedence_rank=20, permitted_custom_category_count=1,
+            permitted_custom_categories=[{"category": "c", "action": "none"}])
+        with self.assertRaises(ValidationError):
+            row.clean()
+        row.permitted_custom_categories = [{"category": "c", "action": "allow"}]
+        row.clean()
+
+    def test_a_category_count_that_disagrees_with_its_list_is_refused(self):
+        station, group = self._shared_owner()
+        row = CustomUrlCategory(
+            management_station=station, appliance_group=group, name="c",
+            namespace_type=PolicyObjectNamespace.LOCAL_SHARED, namespace_value="shared",
+            precedence_rank=20, match_entry_count=3, match_entries=["a"])
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+    def test_a_null_category_count_has_no_list_to_disagree_with(self):
+        station, group = self._shared_owner()
+        CustomUrlCategory(
+            management_station=station, appliance_group=group, name="c",
+            namespace_type=PolicyObjectNamespace.LOCAL_SHARED, namespace_value="shared",
+            precedence_rank=20, match_entry_count=None, match_entries=None).clean()

@@ -22,6 +22,14 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.platform_li
     collect_log_alarm_settings,
     collect_show_running_resource_monitor,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.device_services import (
+    SHOW_DEVICE_TELEMETRY_SETTINGS_COMMAND,
+    SHOW_DHCP_CLIENT_MGMT_INTERFACE_STATE_COMMAND,
+    SHOW_NTP_COMMAND,
+    collect_show_device_telemetry_settings,
+    collect_show_dhcp_client_mgmt_interface_state,
+    collect_show_ntp,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.managed_devices import (
     SHOW_MANAGED_DEVICES_COMMAND,
     collect_show_managed_devices,
@@ -95,6 +103,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.predefined 
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
     collect_show_predefined_ssl_exclude_cert,
+    collect_show_predefined_url_categories,
     collect_show_predefined_url_lists,
 )
 from optivedge_integrations.integrations.platforms.pan_os.collectors.types import (
@@ -142,6 +151,12 @@ __all__ = [
     "collect_device_telemetry",
     "collect_log_alarm_settings",
     "collect_show_running_resource_monitor",
+    "SHOW_NTP_COMMAND",
+    "SHOW_DEVICE_TELEMETRY_SETTINGS_COMMAND",
+    "SHOW_DHCP_CLIENT_MGMT_INTERFACE_STATE_COMMAND",
+    "collect_show_ntp",
+    "collect_show_device_telemetry_settings",
+    "collect_show_dhcp_client_mgmt_interface_state",
     "build_clear_target_vsys_command",
     "build_set_target_vsys_command",
     "build_show_external_list_command",
@@ -164,6 +179,7 @@ __all__ = [
     "collect_predefined_ssl_tls_service_profiles",
     "collect_show_predefined_ip_block_lists",
     "collect_show_predefined_ssl_exclude_cert",
+    "collect_show_predefined_url_categories",
     "collect_show_predefined_url_lists",
     "PREDEFINED_GP_APP_CONFIG_SOURCE_TYPE",
     "PREDEFINED_SSL_EXCLUDE_CERT_SOURCE_TYPE",

@@ -16,6 +16,7 @@ unsigned.
 
 from __future__ import annotations
 
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from .base import ApplianceScopedObject
@@ -30,6 +31,9 @@ class ServerProfile(ApplianceScopedObject):
         "server_count",
         "referrer_paths",
         "referrer_count",
+        "secret_shortest_stored_length",
+        "secret_weakness",
+        "message_signing_effective",
     )
 
     class Kind(models.TextChoices):
@@ -42,6 +46,19 @@ class ServerProfile(ApplianceScopedObject):
         #: A kind PAN-OS grew that this enum has not. The row is still written - an unfamiliar
         #: profile is still a profile, and dropping it is how a list looks complete and is not.
         UNKNOWN = "unknown", "Unknown"
+
+    class SecretWeakness(models.TextChoices):
+        """PAN-AAA-005's three states, worst first. The ORDER here is the verdict's order.
+
+        Two weaknesses are visible in a configuration export and one is not: whether the same
+        secret is used on more than one appliance, and how long the plaintext was. The third
+        token says neither was found, which is not the same as "the secret is strong" - a
+        configuration cannot show whether the plaintext is guessable.
+        """
+
+        REUSED_ACROSS_APPLIANCES = "reused_across_appliances", "Reused across appliances"
+        BELOW_SIXTEEN_CHARACTERS = "below_sixteen_characters", "Below sixteen characters"
+        MEETS_FLOOR = "meets_floor", "Meets the floor"
 
     name = models.CharField(max_length=64)
     kind = models.CharField(max_length=24, choices=Kind.choices, default=Kind.UNKNOWN)
@@ -84,10 +101,67 @@ class ServerProfile(ApplianceScopedObject):
     #: Normalized to the plain string here.
     protocol = models.CharField(max_length=32, blank=True)
 
+    #: PAN-AAA-005. AN EQUALITY-GROUP ID PER SERVER ENTRY - never the secret, and never the
+    #: form the device stores it in.
+    #:
+    #: Each id is `HMAC-SHA256(station key, the stored form)` truncated to 32 hex characters, one
+    #: per server entry that carries a secret, in the entries' own order. Two entries hold the
+    #: same secret exactly when their ids match, anywhere in one management station; the id says
+    #: nothing else and cannot be turned back into anything. The key is
+    #: `SecretFingerprintKey.key_for(station)` - see that model for why a KEYED digest and not a
+    #: bare one, and for what it does and does not protect.
+    #:
+    #: THE VALUE IS NEVER STORED, which is Jason's standing ruling and the shipped reading of
+    #: every other secret-shaped column here: `ike.py::IkeGateway` keeps `uses_pre_shared_key` as
+    #: a presence test and says "No column holds the ciphertext", and
+    #: `device_services.py::SnmpSettings` keeps `community_is_default` and lets the community
+    #: string stay in the snapshot it came from. The only question PAN-AAA-005 asks of this
+    #: column is whether two entries are identical, which an id answers exactly as well as a
+    #: value does - so the per-entry evidence of WHICH entries share a secret is kept and the
+    #: secret is not.
+    #:
+    #: WHERE THIS CANNOT FOLLOW ike.py. That precedent keeps its column MEASURED so the
+    #: FieldProvenance row exists, because with no value stored the row is the only record of
+    #: whether a template or the local device set the credential. A FieldProvenance row is per
+    #: FIELD and a secret is per SERVER ENTRY, so one row here would have to pick an entry and
+    #: speak for the rest. None is written, exactly as for `server_addresses`, and who set a
+    #: secret stays unrecorded - which is a real gap and is named in this domain's stage 7
+    #: artifact rather than papered over with a row that picks.
+    secret_digests = models.JSONField(default=list, blank=True)
+    #: The shortest stored form's LENGTH, measured on the way past and before the id is computed
+    #: - a character count of the stored form rather than of the plaintext, which is not
+    #: recoverable. `SECRET_STORED_LENGTH_FOR_ONE_BLOCK` in the normalizer maps one to the other
+    #: and says what was measured.
+    #:
+    #: ike.py's objection to a length comparison is that it "would measure the ENCODING and pass
+    #: a four-character key". It is answered rather than ignored: the encoding's step was measured
+    #: at the BOUNDARY on committed objects, so a stored length of one cipher block is a
+    #: plaintext of fifteen characters or fewer and a four-character key lands in that band with
+    #: everything else short. The band is all this column claims; it does not claim a length.
+    secret_shortest_stored_length = models.PositiveIntegerField(default=0)
+    #: The single verdict PAN-AAA-005's severity grading reads. Blank where no secret was seen -
+    #: every other kind, and a radius profile whose server entries carry none.
+    #:
+    #: WRITTEN OVER THE WHOLE MANAGEMENT STATION rather than per appliance, because
+    #: `reused_across_appliances` is a comparison between two rows on different appliances and
+    #: one appliance's rows cannot answer it. See the normalizer.
+    secret_weakness = models.CharField(
+        max_length=32, choices=SecretWeakness.choices, blank=True)
+
     # --- SAML ---------------------------------------------------------------------------
     #: BOTH IMPLICIT YES. PAN-AAA-008 and 009 fire only on an explicit `no`.
     saml_validate_idp_certificate = models.BooleanField(default=True)
     saml_want_auth_requests_signed = models.BooleanField(default=True)
+    #: PAN-AAA-009, and it spans TWO objects. `want-auth-requests-signed` asks the firewall to
+    #: sign; the certificate it signs WITH is named on the authentication profile, as
+    #: `method/saml-idp/request-signing-certificate`. Help p.939: the firewall signs "using the
+    #: Certificate for Signing Requests that you specify in an authentication profile", so the
+    #: flag on with no certificate named is a request to sign with nothing.
+    #:
+    #: False where no authentication profile reaches this IdP profile at all: nothing sends a
+    #: message, so nothing is signed, and the firing side is the safe one for an unreferenced
+    #: profile. A query on the flag alone reports the first state as compliant.
+    message_signing_effective = models.BooleanField(default=False)
 
     # --- MFA ----------------------------------------------------------------------------
     mfa_vendor_type = models.CharField(max_length=64, blank=True)
@@ -115,6 +189,30 @@ class ServerProfile(ApplianceScopedObject):
                 fields=["appliance", "scope", "vsys_name", "kind", "name"],
                 name="unique_server_profile_per_scope"),
         ]
+
+    #: Every equality-group id is exactly this wide. The invariant below is what keeps a STORED
+    #: FORM out of the column: one is 57 or 77 characters and fails this on sight.
+    EQUALITY_GROUP_HEX_LENGTH = 32
+
+    def clean(self) -> None:
+        """What the row can still cross-check once the value is gone.
+
+        THE OLD INVARIANT IS NOT AVAILABLE AND ITS ABSENCE IS THE POINT. This used to assert
+        `secret_shortest_stored_length == min(len(d) for d in secret_digests)`, which only holds
+        while the column carries the stored forms - a fixed-width id cannot reproduce a length it
+        was computed from, and a column that could would be a column still holding the secret's
+        shape. What is left is the pair's presence, which catches the two states a reader would
+        misread, and the id's WIDTH, which is what refuses a stored form.
+        """
+        digests = [str(d) for d in (self.secret_digests or [])]
+        if bool(digests) != bool(self.secret_shortest_stored_length):
+            raise ValidationError(
+                "secret_shortest_stored_length and secret_digests must both be set or "
+                "both be empty.")
+        if any(len(d) != self.EQUALITY_GROUP_HEX_LENGTH for d in digests):
+            raise ValidationError(
+                "secret_digests holds an entry that is not an equality-group id. A stored "
+                "secret must never reach this column.")
 
     def __str__(self) -> str:
         return f"{self.appliance} / {self.get_kind_display()} / {self.name}"

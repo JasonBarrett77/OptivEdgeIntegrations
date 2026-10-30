@@ -28,6 +28,7 @@ from .certificates import (
 from .certificate_settings import CertificateSettings
 from .interface_management_profile import InterfaceManagementProfile
 from .ike import IkeCryptoProfile, IkeGateway
+from .ipsec import IpsecCryptoProfile, IpsecTunnel, MonitorProfile
 from .interfaces import Interface
 from .platform_lifecycle import (
     ALARM_MECHANISM_STATES,
@@ -87,13 +88,15 @@ from .management_ssh import ManagementSshSettings
 from .high_availability import HighAvailabilityConfig
 from .panorama_registration import PanoramaRegistration
 from .master_key import MasterKey
+from .secret_fingerprint import SecretFingerprintKey
 from .device_identification import (
     DeviceIdentificationState,
     RulebaseDeviceMatchVerdict,
 )
 from .wildfire_settings import WildfireSettings
 from .services_settings import LoggingSettings, UpdateServerSettings
-from .device_services import NtpSettings, SnmpSettings, SystemIdentity
+from .device_services import (
+    DeviceTelemetry, DnsSettings, NtpSettings, ServiceRoute, SnmpSettings, SystemIdentity)
 from .password_complexity import PasswordComplexityPolicy
 from .password_profile import PasswordProfile, expiration_weakens
 from .notes import Note
@@ -136,6 +139,7 @@ from .policy import (
     AddressObjectResolvedEntry,
     AddressObjectTag,
     CONFIG_SOURCE_CHOICES,
+    CustomUrlCategory,
     DataFilteringPosture,
     PolicyObjectBase,
     PolicyObjectNamespace,
@@ -193,6 +197,7 @@ __all__ = [
     "SslDecryptionExclusion",
     "SslDecryptionVendorExclusionOptOut",
     "Appliance",
+    "CustomUrlCategory",
     "DataFilteringPosture",
     "FieldProvenance",
     "ProvenancedMixin",
@@ -246,10 +251,14 @@ __all__ = [
     "PanoramaRegistration",
     "DeviceIdentificationState",
     "MasterKey",
+    "SecretFingerprintKey",
     "RulebaseDeviceMatchVerdict",
     "NtpSettings",
     "SnmpSettings",
     "SystemIdentity",
+    "DnsSettings",
+    "DeviceTelemetry",
+    "ServiceRoute",
     "UpdateServerSettings",
     "PasswordComplexityPolicy",
     "PasswordProfile",
@@ -261,6 +270,9 @@ __all__ = [
     "InterfaceManagementProfile",
     "IkeCryptoProfile",
     "IkeGateway",
+    "IpsecCryptoProfile",
+    "IpsecTunnel",
+    "MonitorProfile",
     "SslTlsServiceProfile",
     "ManagementInterface",
     "ManagementService",

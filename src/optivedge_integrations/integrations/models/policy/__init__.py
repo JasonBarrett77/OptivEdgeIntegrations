@@ -33,6 +33,7 @@ from .security_profiles import (
     SecurityProfileCategoryVerdict,
     SecurityProfileSeverityVerdict,
 )
+from .url_categories import CustomUrlCategory
 from .rule_posture import (
     PolicyRuleSettings,
     VsysRulePosture,

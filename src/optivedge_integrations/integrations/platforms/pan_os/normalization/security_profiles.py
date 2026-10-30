@@ -101,6 +101,27 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.decrypti
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
     effective_in_scope_order,
 )
+# THE URL-FILTERING KIND'S OWN READERS AND VERDICTS, and the custom-URL-category collection
+# beside it. A separate module because the kind adds forty-five columns and a second model, and
+# because every read both subjects need is already issued here - the profiles arrive as a
+# SIBLING COLLECTION of profiles/spyware in the same payload, and the custom categories as a
+# sibling of the profiles themselves. See that module's docstring for the three measured
+# payload shapes its readers exist to survive.
+from optivedge_integrations.integrations.platforms.pan_os.normalization.url_filtering import (
+    CATEGORY_COLLECTION,
+    CategoryReference,
+    NormalizedCustomUrlCategory,
+    UrlFilteringContext,
+    attribute_category_references,
+    latest_url_category_catalogue_snapshot,
+    normalize_custom_url_category,
+    profile_category_references,
+    replace_custom_url_categories,
+    rule_category_references,
+    url_category_catalogue,
+    url_filtering_profile_values,
+    url_filtering_verdicts,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.services_settings import (
     write_node_row,
 )
@@ -121,7 +142,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.types im
 PROFILE_KINDS = (SecurityProfile.KIND_SPYWARE, SecurityProfile.KIND_VULNERABILITY,
                 SecurityProfile.KIND_VIRUS, SecurityProfile.KIND_WILDFIRE_ANALYSIS,
                 SecurityProfile.KIND_FILE_BLOCKING, SecurityProfile.KIND_DATA_FILTERING,
-                SecurityProfile.KIND_DECRYPTION)
+                SecurityProfile.KIND_DECRYPTION, SecurityProfile.KIND_URL_FILTERING)
 
 #: The file types PAN-FIL-001 asserts a profile must stop, SPELLED AS THE DEVICE SPELLS THEM.
 #: Nine come from the control's own command and `PE` is the tenth. The case matters and is
@@ -181,7 +202,8 @@ GROUP_MEMBER_TYPES = ("virus", "spyware", "vulnerability", "url-filtering", "fil
 
 PREDEFINED_PROFILES_SOURCE_TYPE = "config_predefined_security_profiles"
 
-ISSUE_KINDS = ("security profile", "security profile group", "security profile reference")
+ISSUE_KINDS = ("security profile", "security profile group", "security profile reference",
+               "custom url category")
 
 _DETAIL_MAX = 255
 
@@ -1051,6 +1073,14 @@ class NormalizedSecurityProfile:
     #: breaks the fixture builder the reference tests share. A default at the end costs nothing
     #: and the one production construction site passes it explicitly.
     decryption: dict[str, Any] = field(default_factory=dict)
+    #: The eighteen MEASURED url-filtering columns, keyed by field name. EMPTY for every other
+    #: kind, so the model's own defaults stand. Defaulted for the same reason `decryption` is.
+    #:
+    #: The twenty-seven DERIVED ones are NOT here: they need the device's own category
+    #: catalogue and the custom-category rows, neither of which is on this entry, so they are
+    #: computed in the persist loop from this dict and a `UrlFilteringContext` - the same place
+    #: and for the same reason as the antivirus aggregates over the satellite rows.
+    url_filtering: dict[str, Any] = field(default_factory=dict)
 
     @property
     def is_predefined(self) -> bool:
@@ -1161,6 +1191,21 @@ class SecurityProfileBuild:
     decryption_rulebase_collected: bool = False
     #: The owning appliance's build, for resolving a ceiling stored as the literal `max`.
     software_version: str = ""
+    #: Every category name the DEVICE reports, from its own operational catalogue. EMPTY where
+    #: the read was not issued, which is what `url_category_catalogue_collected` says - and a
+    #: denominator of zero would make every url-filtering verdict read "no category is
+    #: unlogged", which is the most permissive profile in an estate passing every control.
+    url_category_catalogue: tuple[str, ...] = ()
+    #: Whether the catalogue read AND the custom-category reads both answered for this point.
+    #: False is the firing side and it is what `SecurityProfile.category_catalogue_collected`
+    #: stores.
+    url_category_catalogue_collected: bool = False
+    #: The custom URL categories visible from this point, at every scope. A second model, and
+    #: the owner split is the same one the profiles use.
+    custom_url_categories: list[NormalizedCustomUrlCategory] = field(default_factory=list)
+    #: Things naming a custom URL category - the url-filtering profiles' eleven member lists and
+    #: the security rulebase's `category` members.
+    category_references: list[CategoryReference] = field(default_factory=list)
 
 
 def profile_ml_models(entry: dict[str, Any]) -> dict[str, str]:
@@ -1655,6 +1700,21 @@ def normalize_security_profile(
     if kind in SecurityProfile.DECRYPTION_KINDS:
         decryption_values, decryption_provenance = decryption_profile_values(
             entry, software_version=software_version)
+    # URL FILTERING ONLY. Eighteen measured columns off this entry, each carrying a provenance
+    # row: two of the three request-header booleans rest on an ASSUMED default and the report
+    # has to say so, and `local-inline-cat` stores NOTHING because its implicit value is a
+    # relation to the appliance rather than a constant.
+    #
+    # `predefined` IS PASSED FROM THE NAMESPACE, because no payload key marks a vendor-shipped
+    # entry and `classify_prov_type`'s fallthrough is `local` - so without it every leaf of the
+    # shipped `default` profile would record "defined on this device" about a node no
+    # administrator wrote and the dialog greys out. The predefined entry really does carry
+    # keys: `local-inline-cat` reads {"@minver": "10.2.0", "#text": "yes"} on both PA-VMs.
+    url_filtering_values: dict[str, Any] = {}
+    url_filtering_provenance: list[tuple[str, Any, str | None]] = []
+    if kind in SecurityProfile.URL_FILTERING_KINDS:
+        url_filtering_values, url_filtering_provenance = url_filtering_profile_values(
+            entry, predefined=namespace_type == PolicyObjectNamespace.PREDEFINED)
     return NormalizedSecurityProfile(
         source_snapshot=source_snapshot,
         config_source=config_source,
@@ -1720,11 +1780,13 @@ def normalize_security_profile(
                            if kind == SecurityProfile.KIND_VULNERABILITY else {}),
         raw_profile=entry,
         decryption=decryption_values,
+        url_filtering=url_filtering_values,
         field_provenance_data=[
             ("__entry__", entry_rk, entry_rv),
             ("description", description_rk, description_rv),
         ] + ([("cloud_inline_analysis", cloud_inline_rk, cloud_inline_rv)]
-             if kind == SecurityProfile.KIND_SPYWARE else []) + decryption_provenance,
+             if kind == SecurityProfile.KIND_SPYWARE else []) + decryption_provenance
+        + url_filtering_provenance,
     )
 
 
@@ -2096,6 +2158,49 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
                             namespace_value="predefined", entry=entry,
                             software_version=software_version))
 
+    # THE CUSTOM URL CATEGORIES, a second model out of the same payloads. NO PREDEFINED ARM:
+    # there is no predefined custom-category namespace - the predefined CATALOGUE is a
+    # different collection reached by an op command - so a vendor-scoped row cannot arise here.
+    #
+    # ALL 22 OF THIS LAB'S CATEGORIES ARRIVE THROUGH THE PUSHED READ and the firewall's own
+    # containers are mostly ABSENT: measured 2026-10-29, `action=get` answers `null` at vsys1
+    # of serial 6A9C0A9904E7D6E and at vsys1 of 013201001475, an EMPTY committed container
+    # ({"custom-url-category": null}) at vsys3 of 013201001475, and five entries at vsys1 of
+    # 691665AC334B458. So a collector reading only the merged view reports no custom categories
+    # at all on an estate holding 22, and every custom-category member of every profile list
+    # would point at no row.
+    for root, namespace_type, namespace_value, source, shared in local_sources:
+        profiles_root = root.get("profiles") if isinstance(root.get("profiles"), dict) else {}
+        for entry in _entries(profiles_root, CATEGORY_COLLECTION):
+            collect(build.custom_url_categories, "custom url category",
+                    f"profiles/{CATEGORY_COLLECTION}", source, entry,
+                    lambda entry=entry, namespace_type=namespace_type,
+                    namespace_value=namespace_value: normalize_custom_url_category(
+                        source_snapshot=merged_snapshot,
+                        config_source=SecurityRule.SOURCE_LOCAL,
+                        namespace_type=namespace_type, namespace_value=namespace_value,
+                        entry=entry),
+                    shared=shared)
+    category_entries, category_notes = merge_pushed_entries(
+        pushed_profile_reads, CATEGORY_COLLECTION, vsys_name=vsys,
+        label=str(enforcement_point))
+    for severity, reason, entry in category_notes:
+        build.issues.append(PolicyObjectIssue(
+            kind="custom url category", name=str(entry.get("@name") or ""), severity=severity,
+            node=f"profiles/{CATEGORY_COLLECTION}", source="pushed", reason=reason,
+            raw_entry=entry, disposition=PolicyObjectIssue.KEPT,
+            shared_scope=is_shared_scope(pushed_entry_scope(entry, vsys)[0])))
+    for entry, snapshot, namespace_type, namespace_value in category_entries:
+        collect(build.custom_url_categories, "custom url category",
+                f"profiles/{CATEGORY_COLLECTION}", "pushed", entry,
+                lambda entry=entry, snapshot=snapshot, namespace_type=namespace_type,
+                namespace_value=namespace_value: normalize_custom_url_category(
+                    source_snapshot=snapshot,
+                    config_source=SecurityRule.SOURCE_PUSHED_PRE,
+                    namespace_type=namespace_type, namespace_value=namespace_value,
+                    entry=entry),
+                shared=is_shared_scope(namespace_type))
+
     for root, where, shared_root, pushed in (
         (merged_root, f"{vsys} ", False, False),
         (merged_shared_root, "shared ", True, False),
@@ -2107,6 +2212,40 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
             root, where=where, shared_root=shared_root, pushed=pushed)
         build.references.extend(profile_refs)
         build.group_references.extend(group_refs)
+        # THE RULE SURFACE for a custom URL category. The profile surfaces are read off the
+        # normalized profiles below rather than walked again, because their eleven member lists
+        # have already been read through the one reader that survives a pushed member.
+        build.category_references.extend(rule_category_references(
+            root, where=where, shared_root=shared_root, pushed=pushed))
+    build.category_references.extend(profile_category_references(build.profiles))
+
+    # THE DEVICE'S OWN CATEGORY CATALOGUE, which is the DENOMINATOR for every per-category
+    # verdict and is NEVER the numerator: it reports the catalogue, not the effective action.
+    # An absent snapshot is reported as an issue and leaves the catalogue empty, which routes
+    # every url-filtering row of this point into the undetermined group through
+    # `category_catalogue_collected` rather than letting a denominator of zero report an estate
+    # with nothing unlogged.
+    catalogue_snapshot = latest_url_category_catalogue_snapshot(enforcement_point)
+    if catalogue_snapshot is None:
+        if any(p.kind == SecurityProfile.KIND_URL_FILTERING for p in build.profiles):
+            build.issues.append(PolicyObjectIssue(
+                kind="custom url category", name="", severity=PolicyObjectIssue.WARNING,
+                node="predefined/pan-url-categories", source="predefined",
+                disposition=PolicyObjectIssue.KEPT, raw_entry={},
+                reason=("the URL category catalogue was not collected for this appliance, so "
+                        "no url-filtering profile of this point can be shown to restrict or "
+                        "log every category the device offers")))
+    else:
+        build.url_category_catalogue = tuple(
+            url_category_catalogue(catalogue_snapshot.payload))
+    # THE CUSTOM CATEGORIES ARE PART OF THE SAME ANSWER for a vsys-scoped profile, so the
+    # catalogue is only `collected` when the reads behind both halves answered. For a
+    # Panorama-managed point the pushed shared read is already required above, so this is an
+    # explicit statement of what the flag means rather than a second gate.
+    build.url_category_catalogue_collected = bool(
+        build.url_category_catalogue
+        and (not is_panorama_managed(enforcement_point)
+             or pushed_shared_snapshot is not None))
 
     # The pattern objects behind the data-filtering posture verdict. NO MODEL AND NO ROW: the
     # only thing that needs them is the verdict, and `/config/.../profiles/data-objects` is the
@@ -2203,6 +2342,7 @@ def replace_security_profiles(
     reach_resolved: dict[tuple[str, str, str, str], bool] | None = None,
     decryption_facts: dict[str, dict[str, Any]] | None = None,
     decryption_rulebase_collected: bool = False,
+    url_filtering: UrlFilteringContext | None = None,
 ) -> tuple[list[SecurityProfile], list[SecurityProfileGroup]]:
     """Write the definitions `owner` owns, replacing what it holds. As replace_addresses: the
     caller passes everything and this keeps its own share."""
@@ -2219,6 +2359,11 @@ def replace_security_profiles(
                 for name, rk, rv in data if rk is not ABSENT]
         if rows:
             FieldProvenance.objects.bulk_create(rows)
+
+    # DEFAULTED, and the default is the firing side on every one of the twenty-seven columns:
+    # an empty catalogue that was not collected. A caller that cannot say what the device's
+    # category catalogue holds must not leave a row saying every category is restricted.
+    url_filtering = url_filtering or UrlFilteringContext()
 
     profile_ct = ContentType.objects.get_for_model(SecurityProfile)
     group_ct = ContentType.objects.get_for_model(SecurityProfileGroup)
@@ -2292,6 +2437,16 @@ def replace_security_profiles(
             # firing side. The four rule-facing ones are in `reference_columns` above, because
             # two of them are the same columns every other kind writes from `used_by`.
             **normalized.decryption,
+            # THE URL-FILTERING COLUMNS: the eighteen read off the entry, and the twenty-seven
+            # derived over them, the device's own category catalogue and the custom-category
+            # rows. EMPTY for every other kind, so the model's own defaults stand - which are
+            # the firing side, kept off the wrong rows by the `kind` clause every query over
+            # this model carries. Same convention as `file_blocking` and `decryption` above.
+            **normalized.url_filtering,
+            **(url_filtering_verdicts(
+                normalized.url_filtering, namespace_type=normalized.namespace_type,
+                context=url_filtering)
+               if normalized.kind in SecurityProfile.URL_FILTERING_KINDS else {}),
             raw_profile=normalized.raw_profile, last_synced_at=normalized.source_snapshot.collected_at,
         )
         # One row per severity the profile actually answers for. A kind with no threat rules
@@ -2520,6 +2675,28 @@ def _unresolved_issues(unresolved: list[ProfileReference]) -> list[PolicyObjectI
         raw_entry={}, shared_scope=ref.shared_scope) for ref in unresolved]
 
 
+def _unresolved_category_issues(
+    unresolved: list[CategoryReference],
+) -> list[PolicyObjectIssue]:
+    """One WARNING per thing naming a custom URL category that resolves to no row.
+
+    A WARNING AND NOT AN ERROR, because the measured cause in this lab is not a collection
+    fault: both PA-5220s hold a security rule whose `category` names `Camera`, and the nearest
+    thing that exists is the pushed category `Camera-access`. Somebody wrote that rule before
+    this pipeline existed. Recorded rather than raised, and recorded rather than dropped - the
+    reference is the only evidence that a name a rule depends on resolves to nothing.
+    """
+    return [PolicyObjectIssue(
+        kind="custom url category", name=reference.name,
+        severity=PolicyObjectIssue.WARNING, node=reference.surface,
+        source=reference.referrer, disposition=PolicyObjectIssue.KEPT, raw_entry={},
+        shared_scope=reference.shared_scope,
+        reason=(f"{reference.referrer} names custom URL category {reference.name!r} at "
+                f"{reference.surface}, and no collected definition answers to that name in "
+                f"any scope it can see"))
+        for reference in unresolved]
+
+
 def _own_issues(owner, issues: list[PolicyObjectIssue]) -> list[PolicyObjectIssue]:
     # replace_normalization_issues filters by scope only for the address kinds, so do it here:
     # both passes see every issue, and without this each is stored twice.
@@ -2572,12 +2749,22 @@ def normalize_security_profiles(enforcement_point: EnforcementPoint) -> dict[str
         referrers, unresolved = attribute_references(build.references, build.profiles)
         reach, resolved = _reach_for_build(build)
         issues = build.issues + _unresolved_issues(unresolved)
+        category_referrers, unresolved_categories = attribute_category_references(
+            build.category_references, build.custom_url_categories)
         profiles, groups = replace_security_profiles(
             enforcement_point, build.profiles, build.groups, referrers, reach, resolved,
-            build.decryption_facts, build.decryption_rulebase_collected)
+            build.decryption_facts, build.decryption_rulebase_collected,
+            UrlFilteringContext(
+                catalogue=build.url_category_catalogue,
+                collected=build.url_category_catalogue_collected,
+                categories=build.custom_url_categories))
+        categories = replace_custom_url_categories(
+            enforcement_point, build.custom_url_categories, category_referrers)
+        issues = issues + _unresolved_category_issues(unresolved_categories)
         replace_normalization_issues(enforcement_point, _own_issues(enforcement_point, issues), kinds=ISSUE_KINDS)
         postures = replace_data_filtering_posture(enforcement_point, build, reach)
     return {"security_profiles": len(profiles), "security_profile_groups": len(groups),
+            "custom_url_categories": len(categories),
             "data_filtering_postures": postures, "issues": len(issues)}
 
 
@@ -2610,10 +2797,45 @@ def normalize_appliance_group_security_profiles(appliance_group: ApplianceGroup)
     # not established, which has to route the row into the undetermined group.
     decryption_facts: dict[str, dict[str, Any]] = {}
     decryption_collected = True
+    # THE SHARED CUSTOM URL CATEGORIES, and their referrers, unioned for the same reason the
+    # shared profiles are: Panorama pushes only what each device group references, so no single
+    # point is guaranteed to see every shared definition, and a profile list in ANY vsys can
+    # name one.
+    shared_categories: dict[tuple[str, str, str], NormalizedCustomUrlCategory] = {}
+    category_referrers: dict[tuple[str, str, str], list[str]] = {}
+    unresolved_categories: list[CategoryReference] = []
+    # THE CATALOGUE IS PER APPLIANCE and this pass spans a group, so the names are UNIONED and
+    # `collected` is an AND. Union rather than intersection deliberately: a category any
+    # appliance of the group reports is one a shared profile has to decide about, and the larger
+    # denominator is the direction that FIRES - an intersection would shrink the set a shared
+    # profile is graded against and could report it as leaving nothing unlogged. The AND is the
+    # same rule the decryption flag follows: a read that failed anywhere did not establish the
+    # shared row.
+    catalogue: list[str] = []
+    catalogue_collected = True
     with transaction.atomic():
         for point in points:
             build = build_normalized_security_profiles(point)
             issues.extend(build.issues)
+            catalogue_collected = catalogue_collected and build.url_category_catalogue_collected
+            for name in build.url_category_catalogue:
+                if name not in catalogue:
+                    catalogue.append(name)
+            point_category_referrers, point_unresolved = attribute_category_references(
+                build.category_references, build.custom_url_categories)
+            unresolved_categories.extend(point_unresolved)
+            for category in build.custom_url_categories:
+                if not is_shared_scope(category.namespace_type):
+                    continue
+                existing = shared_categories.setdefault(category.key, category)
+                if existing.raw_category != category.raw_category:
+                    raise ValueError(
+                        f"conflicting shared custom URL category definitions for "
+                        f"{category.name!r} across the enforcement points of "
+                        f"{appliance_group}: shared scope is one namespace")
+                for referrer in point_category_referrers.get(category.key, []):
+                    if referrer not in category_referrers.setdefault(category.key, []):
+                        category_referrers[category.key].append(referrer)
             decryption_collected = decryption_collected and build.decryption_rulebase_collected
             for name, fact in build.decryption_facts.items():
                 merged = decryption_facts.setdefault(
@@ -2650,9 +2872,19 @@ def normalize_appliance_group_security_profiles(appliance_group: ApplianceGroup)
             fact["decryption_rulebase_collected"] = decryption_collected
         profiles, groups = replace_security_profiles(
             appliance_group, list(shared_profiles.values()), list(shared_groups.values()),
-            referrers, reach, resolved, decryption_facts, decryption_collected)
+            referrers, reach, resolved, decryption_facts, decryption_collected,
+            # A SHARED-SCOPED PROFILE HAS NO CUSTOM CATEGORY IN SCOPE - measured, its
+            # Categories grid carries none - so the category list is passed for completeness
+            # and `categories_in_scope` returns {} for every row this pass writes.
+            UrlFilteringContext(
+                catalogue=tuple(catalogue), collected=catalogue_collected,
+                categories=list(shared_categories.values())))
+        categories = replace_custom_url_categories(
+            appliance_group, list(shared_categories.values()), category_referrers)
+        issues = issues + _unresolved_category_issues(unresolved_categories)
         replace_normalization_issues(appliance_group, _own_issues(appliance_group, issues), kinds=ISSUE_KINDS)
-    return {"security_profiles": len(profiles), "security_profile_groups": len(groups), "issues": len(issues)}
+    return {"security_profiles": len(profiles), "security_profile_groups": len(groups),
+            "custom_url_categories": len(categories), "issues": len(issues)}
 
 
 # --------------------------------------------------------------------------------------------

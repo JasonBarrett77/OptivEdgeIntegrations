@@ -45,6 +45,9 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_logging_status,
     collect_show_system_info,
     collect_device_telemetry,
+    collect_show_ntp,
+    collect_show_device_telemetry_settings,
+    collect_show_dhcp_client_mgmt_interface_state,
     collect_log_alarm_settings,
     collect_show_running_resource_monitor,
     collect_show_masterkey_properties,
@@ -53,6 +56,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_predefined_ssl_tls_service_profiles,
     collect_show_predefined_ip_block_lists,
     collect_show_predefined_ssl_exclude_cert,
+    collect_show_predefined_url_categories,
     collect_show_predefined_url_lists,
     collect_show_pushed_shared_policy,
     collect_show_pushed_shared_policy_vsys,
@@ -411,6 +415,15 @@ class PANOSInScopeConfigCollection:
     device_identification_collections: list[PANOSApplianceCollectedSnapshot] = field(
         default_factory=list)
     device_identification_failures: list[PANOSApplianceCollectionFailure] = field(
+        default_factory=list)
+    #: The three device-services op reads - `show ntp`, `show device-telemetry settings` and
+    #: `show dhcp client mgmt-interface-state`. Their own pair for the same reason the
+    #: device-identification pair is its own: a failure here leaves PAN-SVC-001's second half,
+    #: the whole of PAN-SVC-003's lease question and PAN-SVC-008's delivery state resting on
+    #: columns that FIRE, which a reader acts on differently from a value that came back wrong.
+    device_services_collections: list[PANOSApplianceCollectedSnapshot] = field(
+        default_factory=list)
+    device_services_failures: list[PANOSApplianceCollectionFailure] = field(
         default_factory=list)
     management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = field(
         default_factory=list)
@@ -810,6 +823,11 @@ def collect_appliance_predefined_catalogs(
     failures: list[str] = []
     for collect in (
         collect_show_predefined_ip_block_lists,
+        # PAN-URL-001/002/003's DENOMINATOR, and the only route to it: nothing in any
+        # configuration view carries the URL category catalogue. One op call per appliance.
+        # Without it every per-category verdict on a url-filtering profile holds its firing
+        # default and `category_catalogue_collected` is false on every row.
+        collect_show_predefined_url_categories,
         collect_show_predefined_url_lists,
         collect_predefined_ssl_tls_service_profiles,
         collect_predefined_certificates,
@@ -929,6 +947,55 @@ def collect_appliance_platform_lifecycle(
         collect_device_telemetry,
         collect_log_alarm_settings,
         collect_show_running_resource_monitor,
+    ):
+        try:
+            persisted.append(persist_appliance_collected_response(appliance, collect(session)))
+        except Exception as exc:  # noqa: BLE001 - recorded and reported, not suppressed
+            failures.append(f"{collect.__name__}: {exc}")
+    return persisted, failures
+
+
+def collect_appliance_device_services(
+    appliance: Appliance,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> tuple[list[PANOSPersistedCollection], list[str]]:
+    """PAN-SVC-001's, 003's and 008's runtime halves. No configuration read carries any of them.
+
+    THREE OP CALLS ON ONE SESSION, COLLECTED INDEPENDENTLY, for the reason
+    `collect_appliance_device_identification` gives: they answer unrelated questions and letting
+    one exception abandon the others is expensive here in particular, because each is the ONLY
+    thing that can tell its own unknown from its own zero. Losing the lease read to a failure in
+    the telemetry read would move an appliance from "resolving through an address nobody chose"
+    to "nobody measured it", and those are different findings.
+
+    THE FOURTH READ THIS DOMAIN NEEDS IS NOT HERE AND THE ABSENCE IS DELIBERATE. `show system
+    info` is taken by `collect_appliance_device_identification` already, so
+    `SystemIdentity.hostname_in_force` and its companion need no new call.
+
+    ONE OF THE THREE TREATS A REFUSAL AS AN ANSWER. `show dhcp client mgmt-interface-state`
+    RAISES on a statically addressed appliance, naming the effective mode, and its collector
+    records that as an empty result - because "this interface is not a DHCP client" is a reading.
+    Anything else propagates into `failures` below, which is what keeps an unreachable appliance
+    from reading as a statically-addressed one.
+
+    Failures are returned rather than swallowed, so a partial collection is visible as partial.
+    """
+    session = open_session(
+        appliance.management_station,
+        credentials_provider=credentials_provider,
+        target=appliance.serial_number,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+    persisted: list[PANOSPersistedCollection] = []
+    failures: list[str] = []
+    for collect in (
+        collect_show_ntp,
+        collect_show_device_telemetry_settings,
+        collect_show_dhcp_client_mgmt_interface_state,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))
@@ -1099,9 +1166,13 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # depends on nothing else in this tuple.
     ("wildfire settings", normalize_appliance_wildfire_settings),
     # Reads the same device entry as its neighbour above, and additionally resolves whether SNMP
-    # is REACHABLE over the ManagementService rows. Those are written before this loop starts,
-    # by normalize_appliance_management_interfaces - so the dependency is on the surrounding
+    # is REACHABLE - and whether the surfaces were walked at all - over the ManagementService
+    # rows. Those are written before this loop starts, by
+    # normalize_appliance_management_interfaces, so the dependency is on the surrounding
     # function's order rather than on this tuple's, and moving it within the tuple is safe.
+    #
+    # SIX MODELS AS OF 2026-10-29, not three: it also writes the management resolvers, the
+    # telemetry decision and one service-paths row per enforcement point.
     ("device services", normalize_appliance_device_services),
     ("certificate objects", normalize_appliance_certificate_objects),
     # Network > GlobalProtect > Portals, plus the vsys's HIP objects and the licence reply
@@ -1521,6 +1592,8 @@ def collect_in_scope_configuration_snapshots(
     panorama_status_failures: list[PANOSApplianceCollectionFailure] = []
     device_identification_collections: list[PANOSApplianceCollectedSnapshot] = []
     device_identification_failures: list[PANOSApplianceCollectionFailure] = []
+    device_services_collections: list[PANOSApplianceCollectedSnapshot] = []
+    device_services_failures: list[PANOSApplianceCollectionFailure] = []
     shared_policy_collections: list[PANOSApplianceGroupCollectedSnapshot] = []
     shared_policy_failures: list[PANOSApplianceGroupCollectionFailure] = []
     vsys_policy_collections: list[PANOSEnforcementPointCollectedSnapshot] = []
@@ -1680,6 +1753,31 @@ def collect_in_scope_configuration_snapshots(
                 PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
             )
 
+    # ITS OWN LOOP AND ITS OWN FAILURE LIST, for the reason above it. Three op calls per
+    # appliance; per-read failures are reported individually so one unavailable read reads as
+    # one missing read rather than as a lost appliance.
+    for appliance in appliances:
+        try:
+            persisted_list, svc_failures = collect_appliance_device_services(
+                appliance,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        except Exception as exc:
+            device_services_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=str(exc))
+            )
+            continue
+        for error_text in svc_failures:
+            device_services_failures.append(
+                PANOSApplianceCollectionFailure(appliance=appliance, error_text=error_text)
+            )
+        for persisted in persisted_list:
+            device_services_collections.append(
+                PANOSApplianceCollectedSnapshot(appliance=appliance, persisted=persisted)
+            )
+
     for appliance_group in appliance_groups:
         try:
             persisted = collect_appliance_group_pushed_shared_policy(
@@ -1757,6 +1855,8 @@ def collect_in_scope_configuration_snapshots(
         panorama_status_failures=panorama_status_failures,
         device_identification_collections=device_identification_collections,
         device_identification_failures=device_identification_failures,
+        device_services_collections=device_services_collections,
+        device_services_failures=device_services_failures,
         shared_policy_collections=shared_policy_collections,
         shared_policy_failures=shared_policy_failures,
         vsys_policy_collections=vsys_policy_collections,

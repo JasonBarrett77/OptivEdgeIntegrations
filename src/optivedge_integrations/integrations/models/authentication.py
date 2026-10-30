@@ -8,6 +8,7 @@ children are `entry` elements, valid or not.
 
 from __future__ import annotations
 
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from .base import ApplianceScopedObject
@@ -37,6 +38,9 @@ class AuthenticationProfile(ApplianceScopedObject):
         "referrer_paths",
         "referrer_count",
         "is_administrative",
+        "allow_list_width",
+        "kerberos_realm_configured",
+        "kerberos_realm_is_uppercase",
     )
 
     METHOD_NONE = "none"
@@ -60,6 +64,13 @@ class AuthenticationProfile(ApplianceScopedObject):
     #: The six that reach an authority off the box. `none` and `local-database` do not.
     EXTERNAL_METHODS = (METHOD_CLOUD, METHOD_RADIUS, METHOD_TACPLUS, METHOD_LDAP,
                         METHOD_KERBEROS, METHOD_SAML)
+
+    class AllowListWidth(models.TextChoices):
+        """How wide the admitted population is. `EMPTY` admits nobody; `ALL` admits everybody."""
+
+        ALL = "all", "All principals the method can reach"
+        NAMED_GROUP = "named_group", "A named group or user"
+        EMPTY = "empty", "Nobody - the list is empty"
 
     #: Blank when the profile has no `method` node at all, which is distinct from `none`: one
     #: is a profile nobody finished and the other is a deliberate choice to authenticate nothing.
@@ -121,9 +132,50 @@ class AuthenticationProfile(ApplianceScopedObject):
     #: That is the question PAN-AUTH-020 was blocked on for days, now a column.
     is_administrative = models.BooleanField(default=False)
     allow_list_count = models.PositiveIntegerField(default=0)
+    #: PAN-AAA-010's severity grading, which reads ONE column. Three states, and the one the
+    #: column exists to keep apart is EMPTY from `all`: an empty allow list admits nobody - Help
+    #: p.839 and the admin guide's p.288 step 6 both say so - and `all` admits every principal
+    #: the method can reach. Both are "no named group", they mean opposite things, and every
+    #: comparison available in a clause collapses them into one.
+    allow_list_width = models.CharField(
+        max_length=16, choices=AllowListWidth.choices, blank=True)
 
     user_domain = models.CharField(max_length=64, blank=True)
     username_modifier = models.CharField(max_length=64, blank=True)
+
+    # --- Kerberos: PAN-AAA-007 ----------------------------------------------------------
+    #: TWO KEYS CAN HOLD A REALM AND THEY ARE DIFFERENT FIELDS. `single-sign-on/realm` is the
+    #: Kerberos Realm control on the profile's first tab; `method/kerberos/realm` sits on the
+    #: method branch and NO VENDOR PAGE DOCUMENTS IT - the documentation corpus has no section
+    #: for it. A control reading one of the two misses every profile that uses the other.
+    #:
+    #: NULL rather than blank when the key is absent, because stage 4 held the reading back on
+    #: the positive control and nothing is assumed: `is_empty` compiles to `field=""` and
+    #: matches a blank but not a NULL, so storing a blank would answer a question nobody settled.
+    sso_realm = models.CharField(max_length=128, blank=True, null=True)
+    kerberos_method_realm = models.CharField(max_length=128, blank=True, null=True)
+    #: PAN-AAA-007's APPLICABILITY: a realm on either key. The OR cannot be written as a clause -
+    #: there is no is-not-empty operator - so it is a column.
+    kerberos_realm_configured = models.BooleanField(default=False)
+    #: PAN-AAA-007's assertion: the realm is in the all-uppercase form the vendor prescribes.
+    #:
+    #: A COLUMN BECAUSE EVERY TEXT OPERATOR IN THE FIELD REGISTRY IS CASE-INSENSITIVE - the
+    #: compiler maps `eq` to `iexact` and `contains` to `icontains` - so no clause can tell
+    #: EXAMPLE.COM from example.com, and there is no regex and no startswith. False where no
+    #: realm is configured, which `kerberos_realm_configured` is what separates.
+    kerberos_realm_is_uppercase = models.BooleanField(default=False)
+
+    # --- SAML: PAN-AAA-008 and 009 ------------------------------------------------------
+    #: The certificate profile that makes the IdP profile's validation switch do anything.
+    #: Help p.937: "To validate the IdP certificate against the issuing Certificate Authority
+    #: (CA), you must specify a Certificate Profile in any authentication profile that
+    #: references the IdP server profile." So PAN-AAA-008 spans two objects and the server
+    #: profile's checkbox alone cannot answer it.
+    saml_certificate_profile = models.CharField(max_length=64, blank=True, null=True)
+    #: The certificate the firewall signs its SAML requests WITH. `ServerProfile`'s
+    #: `message_signing_effective` is the conjunction of this and the IdP profile's flag.
+    saml_request_signing_certificate = models.CharField(
+        max_length=64, blank=True, null=True)
 
     class Meta:
         ordering = ["management_station__hostname", "appliance__hostname", "scope",
@@ -140,6 +192,18 @@ class AuthenticationProfile(ApplianceScopedObject):
                 fields=["appliance", "scope", "vsys_name", "name"],
                 name="unique_authentication_profile_per_scope"),
         ]
+
+    def clean(self) -> None:
+        """The two columns derived from `allow_list_members` must agree with it. The convention
+        every JSON-derived column here follows, and the pair the grading rests on."""
+        members = [str(m).strip() for m in (self.allow_list_members or [])]
+        if self.allow_list_count != len(members):
+            raise ValidationError("allow_list_count must match allow_list_members.")
+        expected = (self.AllowListWidth.ALL if any(m.lower() == "all" for m in members)
+                    else self.AllowListWidth.EMPTY if not members
+                    else self.AllowListWidth.NAMED_GROUP)
+        if self.allow_list_width != expected:
+            raise ValidationError("allow_list_width must match allow_list_members.")
 
     @property
     def method_is_external(self) -> bool:

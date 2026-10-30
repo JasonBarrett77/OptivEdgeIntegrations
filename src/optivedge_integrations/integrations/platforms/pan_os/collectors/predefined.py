@@ -29,6 +29,33 @@ SHOW_PREDEFINED_URL_LISTS_COMMAND = (
     "<show><predefined><xpath>/predefined/url-predefined</xpath></predefined></show>"
 )
 
+#: THE URL CATEGORY CATALOGUE, which is NOT the URL LIST catalogue above - the constant beside
+#: this one asks `/predefined/url-predefined`, the vendor's shipped URL LISTS, and nothing in
+#: this package asked for the categories until PAN-URL-001 needed a denominator.
+#:
+#: It is the ONLY route to one. Nothing in any configuration view carries the catalogue:
+#: measured 2026-10-29 on all four lab appliances, this command answers 90 entries on both
+#: PA-VMs (11.2.5 and 11.2.3-h3) and 88 on both PA-5220s (11.1.13-h3), the two the PA-5220s
+#: lack being `browser-runtime-attack` and `file-converter`. The difference is confounded
+#: between platform, major version and the url-filtering content release, so the count is read
+#: per appliance at run time and never written down as a number.
+#:
+#: WITHOUT IT every per-category verdict on a url-filtering profile reads as the failing side
+#: and `category_catalogue_collected` is false on every row, because the profile's PERMIT SET
+#: IS NOT IN THE PROFILE: `allow` is what the device omits for a predefined category, so the
+#: permitted set is the catalogue minus the restricting lists and there is no catalogue to
+#: subtract from.
+#:
+#: Appliance-wide and not vsys-scoped, like every `show predefined` read - one call per
+#: appliance per collection.
+#:
+#: A SPELLING NOBODY HAS RECONCILED: this module's own docstring says `show predefined`'s
+#: children are "application, url-categories, service and so on", while what answers is
+#: `/predefined/pan-url-categories`. Both may be valid; only this one is measured.
+SHOW_PREDEFINED_URL_CATEGORIES_COMMAND = (
+    "<show><predefined><xpath>/predefined/pan-url-categories</xpath></predefined></show>"
+)
+
 #: NOT reachable by `show predefined`, despite the two lists above being. Measured 2026-09-02:
 #: `show predefined` addresses the content/App-ID catalog - its children are application,
 #: url-categories, service and so on - and asking it for /predefined/ssl-tls-service-profile
@@ -67,6 +94,20 @@ def collect_show_predefined_url_lists(session: PANSession) -> PANOSCollectedResp
     return collect_op_response(
         session,
         source_type="show_predefined_url_lists",
+        request=request,
+    )
+
+
+def collect_show_predefined_url_categories(session: PANSession) -> PANOSCollectedResponse:
+    """The device's own URL category catalogue - the denominator PAN-URL-001/002/003 need."""
+    request = PANOSOperationRequest(
+        command_xml=SHOW_PREDEFINED_URL_CATEGORIES_COMMAND,
+        target=session.target,
+        metadata={"command_name": "show predefined pan-url-categories"},
+    )
+    return collect_op_response(
+        session,
+        source_type="show_predefined_url_categories",
         request=request,
     )
 

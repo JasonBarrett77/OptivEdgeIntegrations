@@ -9589,6 +9589,16 @@ class ImplicitDeclarationTests(TestCase):
         # records every one of those implicits as unmeasured with disposition not_assumed.
         "device_configuration.py": 7,
         "device_services.py": 2,      # accept-dhcp-hostname, accept-dhcp-domain
+        # The IPSec tunnel's absent `auto-key/ipsec-crypto-profile`, inferred as the literal
+        # `default` on three leads and no measurement; and the monitor profile's absent `action`,
+        # inferred as `wait-recover` on two. BOTH ARE QUEUE ITEMS AND BOTH LAND ON THE FIRING SIDE
+        # of the single control that reads them, which is the only reason either may be stored -
+        # stage 4's words are "an unmeasured implicit here must not be materialised as a pass".
+        # The first needs a negotiating tunnel and `show vpn ipsec-sa`, which needs an IKE gateway
+        # and a reachable peer; the second needs ONE read of the Monitor profile grid or dialog,
+        # which stage 4 could not route to - three guessed hash routes all landed on the Network >
+        # Interfaces grid. So the second is the cheap one and nobody has paid it.
+        "ipsec.py": 2,
         "management_ssh.py": 1,       # the built-in SSH offer of an UNMEASURED release
         "password_profiles.py": 1,    # password-change periods
         # `deviceconfig/setting/cloudapp/disable`, the App-ID Cloud Engine's off switch. Stage 4
@@ -9601,6 +9611,17 @@ class ImplicitDeclarationTests(TestCase):
         "saas_security.py": 1,
         "security_rules.py": 1,       # rule-type absent -> universal; see RULE_TYPE_IMPLICIT
         "server_profiles.py": 1,      # admin-use-only
+        # The `url-filtering` profile's `log-http-hdr-referer` and `log-http-hdr-xff`, the two
+        # of the three request headers PAN-URL-004 asserts whose absent value nobody has
+        # measured. Both are CHEAP QUEUE ITEMS and the write is named: stage 4 paid four of the
+        # method's five points on each - unticked on every key-less committed subject on three
+        # appliances and on the predefined `default`, and still unticked after a seven-key
+        # batch moved their siblings - and did not pay the positive control on the key itself.
+        # `log-http-hdr-xff` was DOWNGRADED from measured by stage 4's own review: the only
+        # write ever attempted on it was the refusal probe `enabled`, so the key was never set.
+        # One `yes` per key, committed, then a read of the profile's URL Filtering Settings tab
+        # clears both. The third header, `log-http-hdr-user-agent`, IS measured and is not here.
+        "url_filtering.py": 2,
         # The four prenat flags, net-inspection and the Device-ID twin - SEVEN leaves shared one
         # closure and `enable-user-identification` was promoted out of it on 2026-10-29, with its
         # own `Implicit.measured` beside it. The count is unchanged because the remaining six
@@ -17457,5 +17478,1964 @@ class UserIdModelShapeTests(SimpleTestCase):
     def test_a_transport_on_a_non_syslog_branch_is_refused(self):
         row = _UidServer(name="s", monitored_server_kind=_UidServer.KIND_EXCHANGE,
                          connection_type="udp")
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    SecretFingerprintKey as _SecretFingerprintKey, ServerProfile as _AaaServerProfile)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.server_profiles import (  # noqa: E402
+    SECRET_STORED_LENGTH_FOR_ONE_BLOCK as _ONE_BLOCK,
+    normalize_server_profiles as _normalize_server_profiles)
+
+
+class AaaSecretAndSigningTests(TestCase):
+    """PAN-AAA-005 and 009 - the two columns on `ServerProfile` that no single key answers.
+
+    THE TWO BRANCHES THE LAB CANNOT DISCRIMINATE ARE HERE ON PURPOSE. A readback over the
+    standing stage 6 subjects proves neither: every RADIUS server entry on the lab carries a
+    secret, so the absent-secret branch is never taken, and a mutation that made an absent
+    secret store "" moved not one row. The same mutation run against this class fails it.
+
+    NO FIXTURE HERE IS A STORED SECRET OR A PLAINTEXT. `_form()` builds a string of the right
+    LENGTH and nothing else: the length is all the band reads, and the equality-group id is a
+    keyed digest of whatever it is given, so a real stored form would prove nothing a filler
+    string does not.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.aaa")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-aaa",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+
+    def _appliance(self, serial):
+        return Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number=serial, hostname=f"fw-{serial.lower()}")
+
+    def _normalize(self, appliance, shared=None, profiles=None):
+        config = {"shared": {"server-profile": shared or {},
+                             "authentication-profile": {"entry": list(profiles or [])}},
+                  "devices": {"entry": [{"@name": "localhost.localdomain"}]}}
+        Snapshot.objects.create(
+            management_station=self.station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": config})
+        _normalize_server_profiles(appliance)
+        return {(p.kind, p.name): p
+                for p in _AaaServerProfile.objects.filter(appliance=appliance)}
+
+    @staticmethod
+    def _form(length, filler="f"):
+        """A string of `length` characters standing in for a stored form. NOT a secret and not
+        the device's encoding of one - `_equality_group` keys a digest over whatever it is
+        handed, and the length band is the only thing that reads the characters' count."""
+        return filler * length
+
+    @staticmethod
+    def _radius(name, *secrets):
+        """A RADIUS profile with one server entry per secret. A `None` secret means the key is
+        absent on that entry, which is the state stage 4 never read."""
+        servers = []
+        for index, secret in enumerate(secrets):
+            entry = {"@name": f"10.0.0.{index}", "ip-address": f"10.0.0.{index}"}
+            if secret is not None:
+                entry["secret"] = secret
+            servers.append(entry)
+        return {"@name": name, "protocol": {"CHAP": None}, "server": {"entry": servers}}
+
+    def test_one_equality_group_id_per_server_entry_and_never_the_secret(self):
+        """Jason's standing ruling, and `ike.py::IkeGateway`'s shipped reading of it: the value
+        is never stored. What the column holds is a keyed id per server entry - equal secrets
+        give equal ids - and the LENGTH is taken before the id is computed."""
+        long_form, short_form = self._form(77, "a"), self._form(57, "b")
+        rows = self._normalize(self._appliance("S-K1"), shared={
+            "radius": {"entry": [self._radius("two-servers", long_form, short_form),
+                                 self._radius("same-twice", long_form, long_form)]}})
+        row = rows[("radius", "two-servers")]
+        self.assertEqual(len(row.secret_digests), 2, "one per server entry, in their own order")
+        for digest in row.secret_digests:
+            self.assertEqual(len(digest), _AaaServerProfile.EQUALITY_GROUP_HEX_LENGTH)
+            self.assertRegex(digest, r"^[0-9a-f]+$")
+        self.assertEqual(row.secret_shortest_stored_length, 57,
+                         "measured on the stored form, before the id replaced it")
+        twice = rows[("radius", "same-twice")].secret_digests
+        self.assertEqual(twice[0], twice[1], "one secret, one group")
+        self.assertNotEqual(row.secret_digests[0], row.secret_digests[1],
+                            "two secrets, two groups")
+        self.assertEqual(row.secret_digests[0], twice[0],
+                         "the same secret on two profiles of one station shares its group")
+
+    def test_the_stored_form_never_appears_in_the_column(self):
+        """The invariant the whole change exists for. A stored form is 57 or 77 characters and an
+        id is 32, so `clean()` refuses one on width alone - and nothing in the row, in any
+        column, contains the string the device sent."""
+        long_form, short_form = self._form(77, "c"), self._form(57, "d")
+        rows = self._normalize(self._appliance("S-K1b"), shared={
+            "radius": {"entry": [self._radius("kept", long_form, short_form)]}})
+        row = rows[("radius", "kept")]
+        row.clean()
+        stored_anywhere = " ".join(
+            str(getattr(row, field.name))
+            for field in row._meta.fields if not field.is_relation)
+        for form in (long_form, short_form):
+            self.assertNotIn(form, stored_anywhere)
+            self.assertNotIn(form[:33], stored_anywhere,
+                             "not even the digest-and-prefix half of it")
+        row.secret_digests = [long_form]
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+    def test_the_id_is_keyed_so_two_stations_do_not_share_a_group(self):
+        """KEYED AND NOT A BARE HASH: PAN-OS's stored form is derivable from a guessed plaintext
+        for its first 33 characters, so a plain digest of it is brute-forceable from a word list.
+        The key is per management station, which is also what keeps the cross-appliance equality
+        test alive - and what makes two estates' ids incomparable, which is correct."""
+        form = self._form(77, "e")
+        first = rows_a = self._normalize(self._appliance("S-K1c"), shared={
+            "radius": {"entry": [self._radius("here", form)]}})[("radius", "here")]
+        other_station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.other")
+        other_group = ApplianceGroup.objects.create(
+            management_station=other_station, name="g-other",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=other_station, appliance_group=other_group,
+            serial_number="S-K1d", hostname="fw-other")
+        Snapshot.objects.create(
+            management_station=other_station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"shared": {"server-profile": {"radius": {"entry": [
+                self._radius("here", form)]}}},
+                "devices": {"entry": [{"@name": "localhost.localdomain"}]}}})
+        _normalize_server_profiles(appliance)
+        second = _AaaServerProfile.objects.get(appliance=appliance, name="here")
+        self.assertNotEqual(first.secret_digests, second.secret_digests)
+        self.assertEqual(_SecretFingerprintKey.objects.count(), 2, "one key per station")
+        self.assertNotEqual(_SecretFingerprintKey.objects.first().key_hex,
+                            _SecretFingerprintKey.objects.last().key_hex)
+        self.assertEqual(len(_SecretFingerprintKey.objects.first().key_hex),
+                         2 * _SecretFingerprintKey.KEY_BYTES)
+        assert rows_a is first
+
+    def test_a_server_entry_with_no_secret_contributes_nothing(self):
+        """THE ABSENT-KEY BEHAVIOUR, which stage 5 declared `not_stored` because stage 4 never
+        read an absent `secret` - the key was written on both of its subjects.
+
+        A "" in the list would make the shortest stored length 0, which is the firing side of a
+        reading nobody took. The lab cannot show this: every RADIUS server entry standing on it
+        has a secret."""
+        rows = self._normalize(self._appliance("S-K2"), shared={
+            "radius": {"entry": [self._radius("one-bare", self._form(77), None),
+                                 self._radius("all-bare", None)]}})
+        self.assertEqual(len(rows[("radius", "one-bare")].secret_digests), 1,
+                         "one server entry had a secret; the other contributes nothing")
+        self.assertEqual(rows[("radius", "one-bare")].secret_shortest_stored_length, 77)
+        self.assertEqual(rows[("radius", "all-bare")].secret_digests, [])
+        self.assertEqual(rows[("radius", "all-bare")].secret_shortest_stored_length, 0)
+        self.assertEqual(rows[("radius", "all-bare")].secret_weakness, "")
+
+    def test_only_a_radius_profile_records_a_secret(self):
+        """A TACACS+ server entry stores a secret too, in the byte-identical form - measured by
+        stage 4 and read back off three committed profiles on 2026-10-29. PAN-AAA-005 is a
+        RADIUS assertion and stage 5 declares these columns on the radius subject alone, so a
+        tacplus row carries no digest and no verdict rather than a digest with no verdict."""
+        rows = self._normalize(self._appliance("S-K3"), shared={
+            "tacplus": {"entry": [{"@name": "tac", "protocol": "CHAP", "server": {"entry": [
+                {"@name": "10.0.0.1", "address": "10.0.0.1",
+                 "secret": self._form(77)}]}}]}})
+        row = rows[("tacplus", "tac")]
+        self.assertEqual(row.secret_digests, [])
+        self.assertEqual(row.secret_shortest_stored_length, 0)
+        self.assertEqual(row.secret_weakness, "")
+
+    def test_the_length_band_sits_at_one_cipher_block(self):
+        """57 characters is one block and means a plaintext of fifteen or fewer; 77 is two.
+        Measured at the boundary on pan-fw-111: stage 6 wrote 15 and 16 characters and this run
+        read 57 and 77 back."""
+        rows = self._normalize(self._appliance("S-K4"), shared={
+            "radius": {"entry": [self._radius("short", self._form(_ONE_BLOCK)),
+                                 self._radius("long", self._form(_ONE_BLOCK + 20))]}})
+        self.assertEqual(rows[("radius", "short")].secret_weakness,
+                         _AaaServerProfile.SecretWeakness.BELOW_SIXTEEN_CHARACTERS)
+        self.assertEqual(rows[("radius", "long")].secret_weakness,
+                         _AaaServerProfile.SecretWeakness.MEETS_FLOOR)
+
+    def test_reuse_is_counted_across_appliances_and_not_within_one(self):
+        """Stage 3's assertion as stage 5 carried it: the stored form is byte-identical to one
+        on ANOTHER appliance. Two profiles on one appliance sharing a secret are not that - and
+        on the lab that is the common state, seven profiles of pan-fw-111 sharing one form."""
+        shared_form = self._form(77, "s")
+        first = self._appliance("S-K5a")
+        second = self._appliance("S-K5b")
+        self._normalize(first, shared={"radius": {"entry": [
+            self._radius("twin-a", shared_form), self._radius("twin-b", shared_form),
+            self._radius("alone", self._form(77, "u"))]}})
+        rows = self._normalize(second, shared={"radius": {"entry": [
+            self._radius("other-appliance", shared_form)]}})
+        self.assertEqual(rows[("radius", "other-appliance")].secret_weakness,
+                         _AaaServerProfile.SecretWeakness.REUSED_ACROSS_APPLIANCES)
+        on_first = {(p.kind, p.name): p
+                    for p in _AaaServerProfile.objects.filter(appliance=first)}
+        self.assertEqual(on_first[("radius", "twin-a")].secret_weakness,
+                         _AaaServerProfile.SecretWeakness.REUSED_ACROSS_APPLIANCES)
+        self.assertEqual(on_first[("radius", "alone")].secret_weakness,
+                         _AaaServerProfile.SecretWeakness.MEETS_FLOOR,
+                         "a secret nobody else holds is not reuse")
+
+    def test_the_station_verdict_does_not_depend_on_which_appliance_ran_first(self):
+        """The first appliance normalized cannot see the second's digests, so the verdict is
+        re-derived for the whole station at the end of every pass. Without that the answer would
+        depend on collection order, which is the asymmetry this shape exists to avoid."""
+        shared_form = self._form(77, "o")
+        first = self._appliance("S-K6a")
+        second = self._appliance("S-K6b")
+        self._normalize(first, shared={
+            "radius": {"entry": [self._radius("early", shared_form)]}})
+        self.assertEqual(
+            _AaaServerProfile.objects.get(appliance=first, name="early").secret_weakness,
+            _AaaServerProfile.SecretWeakness.MEETS_FLOOR,
+            "nothing else held it yet")
+        self._normalize(second, shared={
+            "radius": {"entry": [self._radius("late", shared_form)]}})
+        self.assertEqual(
+            _AaaServerProfile.objects.get(appliance=first, name="early").secret_weakness,
+            _AaaServerProfile.SecretWeakness.REUSED_ACROSS_APPLIANCES,
+            "the appliance that ran first has to be revisited")
+
+    def _saml(self, name, **keys):
+        entry = {"@name": name, "certificate": "cert", "entity-id": f"urn:{name}",
+                 "sso-url": "https://10.0.0.9/sso", "sso-bindings": "post"}
+        entry.update(keys)
+        return entry
+
+    @staticmethod
+    def _saml_user(name, target, certificate=None):
+        branch = {"server-profile": target}
+        if certificate is not None:
+            branch["request-signing-certificate"] = certificate
+        return {"@name": name, "method": {"saml-idp": branch},
+                "allow-list": {"member": ["all"]}}
+
+    def test_message_signing_needs_the_flag_and_a_certificate_to_sign_with(self):
+        """Help p.939: the firewall signs using the Certificate for Signing Requests specified
+        in an AUTHENTICATION PROFILE. So the flag on with nothing named is a request to sign
+        with nothing, and a query on the flag alone reports it as compliant."""
+        rows = self._normalize(
+            self._appliance("S-K7"),
+            shared={"saml-idp": {"entry": [
+                self._saml("signed"),
+                self._saml("no-certificate"),
+                self._saml("flag-off", **{"want-auth-requests-signed": "no"}),
+                self._saml("unreferenced"),
+            ]}},
+            profiles=[self._saml_user("ap-ok", "signed", "signing-cert"),
+                      self._saml_user("ap-none", "no-certificate"),
+                      self._saml_user("ap-off", "flag-off", "signing-cert")])
+        self.assertTrue(rows[("saml-idp", "signed")].message_signing_effective)
+        self.assertFalse(rows[("saml-idp", "no-certificate")].message_signing_effective)
+        self.assertFalse(rows[("saml-idp", "flag-off")].message_signing_effective)
+        self.assertFalse(rows[("saml-idp", "unreferenced")].message_signing_effective,
+                         "nothing sends a message, so nothing is signed")
+        self.assertTrue(rows[("saml-idp", "unreferenced")].saml_want_auth_requests_signed,
+                        "the flag itself is still the vendor's implicit yes")
+
+    def test_one_authentication_profile_without_a_certificate_is_enough_to_fail_it(self):
+        """Two profiles reach one IdP profile and only one names a certificate. The conjunction
+        is over EVERY referrer, because the one that signs with nothing is the one an attacker
+        uses."""
+        rows = self._normalize(
+            self._appliance("S-K8"),
+            shared={"saml-idp": {"entry": [self._saml("two-users")]}},
+            profiles=[self._saml_user("ap-ok", "two-users", "signing-cert"),
+                      self._saml_user("ap-bare", "two-users")])
+        self.assertFalse(rows[("saml-idp", "two-users")].message_signing_effective)
+
+
+class AaaAuthenticationProfileColumnTests(TestCase):
+    """PAN-AAA-007, 008 and 010's columns on `AuthenticationProfile`."""
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.aaap")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-aaap",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-AAAP", hostname="fw-aaap")
+
+    def _normalize(self, *entries):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {
+                "shared": {"authentication-profile": {"entry": list(entries)}},
+                "devices": {"entry": [{"@name": "localhost.localdomain"}]}}})
+        _normalize_profiles(self.appliance)
+        return {p.name: p for p in _AuthenticationProfile.objects.filter(
+            appliance=self.appliance)}
+
+    def test_a_realm_absent_on_both_keys_stores_NULL_and_not_a_blank(self):
+        """Stage 5 declared both `default.stores: null`, `rests_on: not_assumed` - stage 4 held
+        the single-sign-on reading back on its positive control and never reached the method
+        branch at all. `is_empty` compiles to `field=""`, which matches a blank and not a null,
+        so a blank would answer a question nobody settled."""
+        rows = self._normalize({"@name": "no-realm", "method": {"local-database": None},
+                                "allow-list": {"member": ["all"]}})
+        row = rows["no-realm"]
+        self.assertIsNone(row.sso_realm)
+        self.assertIsNone(row.kerberos_method_realm)
+        self.assertFalse(row.kerberos_realm_configured)
+        self.assertFalse(row.kerberos_realm_is_uppercase)
+
+    def test_both_keys_can_hold_a_realm_and_the_method_branch_has_no_vendor_page(self):
+        rows = self._normalize(
+            {"@name": "on-sso", "single-sign-on": {"realm": "EXAMPLE.COM"},
+             "method": {"kerberos": {"server-profile": "k"}},
+             "allow-list": {"member": ["all"]}},
+            {"@name": "on-method",
+             "method": {"kerberos": {"server-profile": "k", "realm": "EXAMPLE.COM"}},
+             "allow-list": {"member": ["all"]}})
+        self.assertEqual(rows["on-sso"].sso_realm, "EXAMPLE.COM")
+        self.assertIsNone(rows["on-sso"].kerberos_method_realm)
+        self.assertEqual(rows["on-method"].kerberos_method_realm, "EXAMPLE.COM")
+        self.assertIsNone(rows["on-method"].sso_realm)
+        for name in ("on-sso", "on-method"):
+            self.assertTrue(rows[name].kerberos_realm_configured)
+            self.assertTrue(rows[name].kerberos_realm_is_uppercase)
+
+    def test_the_case_test_is_exact_because_every_text_operator_is_not(self):
+        """The compiler maps `eq` to `iexact` and `contains` to `icontains`, so no clause can
+        tell EXAMPLE.COM from example.com. A mutation making this comparison case-insensitive
+        moves exactly one row on the lab, which is why it is also asserted here."""
+        rows = self._normalize(
+            {"@name": "lower", "method": {"kerberos": {"realm": "example.com"}},
+             "allow-list": {"member": ["all"]}},
+            {"@name": "mixed", "method": {"kerberos": {"realm": "Example.COM"}},
+             "allow-list": {"member": ["all"]}},
+            {"@name": "upper", "method": {"kerberos": {"realm": "EXAMPLE.COM"}},
+             "allow-list": {"member": ["all"]}},
+            {"@name": "one-of-two-lower", "single-sign-on": {"realm": "EXAMPLE.COM"},
+             "method": {"kerberos": {"realm": "example.com"}},
+             "allow-list": {"member": ["all"]}})
+        self.assertFalse(rows["lower"].kerberos_realm_is_uppercase)
+        self.assertFalse(rows["mixed"].kerberos_realm_is_uppercase)
+        self.assertTrue(rows["upper"].kerberos_realm_is_uppercase)
+        self.assertFalse(rows["one-of-two-lower"].kerberos_realm_is_uppercase,
+                         "either key can be the realm the firewall uses")
+
+    def test_an_empty_allow_list_is_not_the_same_width_as_all(self):
+        """An empty allow list admits NOBODY - Help p.839 and the admin guide's p.288 step 6 -
+        and `all` admits everybody. Both are "no named group" and every comparison a clause can
+        make collapses them into one."""
+        rows = self._normalize(
+            {"@name": "everyone", "method": {"local-database": None},
+             "allow-list": {"member": ["all"]}},
+            {"@name": "nobody", "method": {"local-database": None}, "allow-list": None},
+            {"@name": "a-group", "method": {"local-database": None},
+             "allow-list": {"member": ["cn=admins"]}})
+        self.assertEqual(rows["everyone"].allow_list_width, "all")
+        self.assertEqual(rows["nobody"].allow_list_width, "empty")
+        self.assertEqual(rows["a-group"].allow_list_width, "named_group")
+        self.assertEqual(rows["nobody"].allow_list_count, 0)
+        self.assertFalse(rows["nobody"].allow_list_is_all)
+
+    def test_the_saml_references_store_NULL_when_absent(self):
+        """Both are `not_reached` in stage 4: no certificate profile existed on any appliance it
+        read, so no subject carrying either key could be built."""
+        rows = self._normalize(
+            {"@name": "bare-saml", "method": {"saml-idp": {"server-profile": "idp"}},
+             "allow-list": {"member": ["all"]}},
+            {"@name": "anchored", "method": {"saml-idp": {
+                "server-profile": "idp", "certificate-profile": "cp",
+                "request-signing-certificate": "signing"}},
+             "allow-list": {"member": ["all"]}})
+        self.assertIsNone(rows["bare-saml"].saml_certificate_profile)
+        self.assertIsNone(rows["bare-saml"].saml_request_signing_certificate)
+        self.assertEqual(rows["anchored"].saml_certificate_profile, "cp")
+        self.assertEqual(rows["anchored"].saml_request_signing_certificate, "signing")
+
+    def test_the_width_and_the_count_have_to_agree_with_the_member_list(self):
+        rows = self._normalize({"@name": "ok", "method": {"local-database": None},
+                                "allow-list": {"member": ["all"]}})
+        row = rows["ok"]
+        row.clean()
+        row.allow_list_width = "named_group"
+        with self.assertRaises(ValidationError):
+            row.clean()
+
+
+class AaaSequenceGradingTests(TestCase):
+    """PAN-AAA-012's grading column, and the branch the lab cannot discriminate.
+
+    No sequence standing on the lab holds BOTH a `none` member and a `local-database` one, so a
+    mutation reversing the order of `WEAKEST_FIRST` moved not one row of the readback. That
+    ordering is the whole point of the column - stage 3 grades `none` above `local-database` -
+    so it is asserted here.
+    """
+
+    PROFILES = [
+        {"@name": "ldap-p", "method": {"ldap": {"server-profile": "l"}}},
+        {"@name": "local-p", "method": {"local-database": None}},
+        {"@name": "none-p", "method": {"none": None}},
+    ]
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.aaaq")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-aaaq",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-AAAQ", hostname="fw-aaaq")
+
+    def _normalize(self, *sequences):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {
+                "shared": {"authentication-profile": {"entry": list(self.PROFILES)},
+                           "authentication-sequence": {"entry": list(sequences)}},
+                "devices": {"entry": [{"@name": "localhost.localdomain"}]}}})
+        _normalize_profiles(self.appliance)
+        _normalize_sequences(self.appliance)
+        return {s.name: s for s in _AuthenticationSequence.objects.filter(
+            appliance=self.appliance)}
+
+    @staticmethod
+    def _seq(name, *members):
+        return {"@name": name, "authentication-profiles": {"member": list(members)}}
+
+    def test_none_is_graded_worse_than_local_database(self):
+        rows = self._normalize(
+            self._seq("both", "ldap-p", "local-p", "none-p"),
+            self._seq("local-only", "ldap-p", "local-p"),
+            self._seq("none-only", "ldap-p", "none-p"),
+            self._seq("external-only", "ldap-p"),
+            self._seq("empty"))
+        self.assertEqual(rows["both"].weakest_member_method, "none",
+                         "the vendor's own description of `none` is no authentication at all")
+        self.assertEqual(rows["local-only"].weakest_member_method, "local-database")
+        self.assertEqual(rows["none-only"].weakest_member_method, "none")
+        self.assertEqual(rows["external-only"].weakest_member_method, "")
+        self.assertEqual(rows["empty"].weakest_member_method, "")
+
+    def test_an_unresolvable_member_leaves_the_grading_blank_rather_than_guessing(self):
+        """Stage 4's reading: an unresolvable member proves NOTHING about where the credential
+        is checked. `unresolved_member_count` is the column that reports it."""
+        rows = self._normalize(self._seq("ghost", "no-such-profile"))
+        self.assertEqual(rows["ghost"].weakest_member_method, "")
+        self.assertEqual(rows["ghost"].unresolved_member_count, 1)
+        self.assertFalse(rows["ghost"].has_local_member)
+        self.assertFalse(rows["ghost"].all_members_external)
+
+    def test_the_grading_has_to_agree_with_the_resolved_methods(self):
+        rows = self._normalize(self._seq("both", "local-p", "none-p"))
+        row = rows["both"]
+        row.clean()
+        row.weakest_member_method = "local-database"
+        with self.assertRaises(ValidationError):
+            row.clean()
+# ===========================================================================
+# device-services, stage 7: PAN-SVC-001 to PAN-SVC-010
+#
+# EVERY MEASURED ABSENCE IN THIS DOMAIN GETS A TEST THAT ASSERTS ITS VALUE, not its shape.
+# That is the floor stage 7's contract writes down: the device reading sits in a handback, the
+# value sits in the normalizer, and without a test nothing fails when a later edit changes what
+# an absence stores. A test that would still pass if the normalizer stopped storing the column
+# is not that test.
+# ===========================================================================
+
+from optivedge_integrations.integrations.models.device_services import (  # noqa: E402
+    NtpSettings as _SvcNtp,
+    SnmpSettings as _SvcSnmp,
+    SystemIdentity as _SvcIdentity,
+    AddressingModePosture as _SvcAddrPosture,
+    DefaultCommunityExposure as _SvcCommunityExposure,
+    DeviceTelemetry as _SvcTelemetry,
+    DnsSettings as _SvcDns,
+    HostnamePosture as _SvcHostPosture,
+    ManagementResolverPosture as _SvcResolverPosture,
+    PerSystemPathPosture as _SvcPerSystemPosture,
+    RecordedDecisionReconciliation as _SvcReconciliation,
+    ResolverMechanism as _SvcResolverMechanism,
+    ServerAuthenticationMechanism as _SvcAuthMechanism,
+    ServicePathPosture as _SvcPathPosture,
+    ServiceRoute as _SvcRoute,
+    ServiceRouteScope as _SvcRouteScope,
+    SnmpVersionInForce as _SvcVersionInForce,
+    TimeSourceInForce as _SvcTimeSource,
+    TimezoneOffsetClass as _SvcOffsetClass,
+)
+from optivedge_integrations.integrations.platforms.pan_os.collectors.device_services import (  # noqa: E402
+    SHOW_DEVICE_TELEMETRY_SETTINGS_COMMAND as _SVC_TELEMETRY_COMMAND,
+    SHOW_DHCP_CLIENT_MGMT_INTERFACE_STATE_COMMAND as _SVC_DHCP_COMMAND,
+    SHOW_NTP_COMMAND as _SVC_NTP_COMMAND,
+    _is_not_set_to_dhcp as _svc_is_not_dhcp,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.device_services import (  # noqa: E402
+    DNS_PROXY_OBJECT_ABSENT as _SVC_PROXY_ABSENT,
+    ENCRYPTED_DNS_NOT_ON_THIS_BUILD as _SVC_EDNS_ABSENT,
+    NTP_AUTH_IMPLICIT as _SVC_NTP_AUTH_IMPLICIT,
+    RESOLVER_ADDRESS_UNMEASURED as _SVC_RESOLVER_UNMEASURED,
+    TELEMETRY_REGION_IMPLICIT as _SVC_REGION_IMPLICIT,
+    TELEMETRY_SHARING_IMPLICIT as _SVC_SHARING_IMPLICIT,
+    ZONE_KEYS_AT_ZERO_OFFSET_TODAY as _SVC_ZERO_TODAY,
+    ZONE_KEYS_DECLARING_ZERO_OFFSET as _SVC_ZERO_DECLARED,
+    _node_at as _svc_node_at,
+    _op_result as _svc_op_result,
+    _originates as _svc_originates,
+    chosen_paths as _svc_chosen_paths,
+    dns_resolver_posture as _svc_resolver_posture,
+    hostname_posture as _svc_hostname_posture,
+    ntp_authentication_mechanism as _svc_auth_mechanism,
+    ntp_time_source as _svc_time_source,
+    per_system_verdicts as _svc_per_system,
+    service_path_verdicts as _svc_path_verdicts,
+    services_originated as _svc_originated,
+    snmp_default_community_exposure as _svc_community_exposure,
+    snmp_version_in_force as _svc_version_in_force,
+    telemetry_delivery_state as _svc_delivery_state,
+    timezone_offset_class as _svc_offset_class,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.device_services import (  # noqa: E402
+    addressing_mode_posture as _svc_addr_posture)
+
+
+class DeviceServicesMeasuredAbsenceTests(SimpleTestCase):
+    """What each MEASURED absence in this domain stores, asserted as a VALUE.
+
+    These are the declarations a later edit could reverse without a single failure, which is
+    what this class exists to stop. Each one names the measurement it rests on.
+    """
+
+    def test_an_absent_ntp_authentication_type_stores_none(self):
+        """Measured on 691665AC334B458 against a slot built WITHOUT the key and committed:
+        `show ntp` reported `authentication-type: none`, paid in both directions, and
+        013201001475 - never written to - stores `none` explicitly and reads identically."""
+        self.assertEqual(_SVC_NTP_AUTH_IMPLICIT.value, "none")
+        self.assertIsNotNone(_SVC_NTP_AUTH_IMPLICIT.citation)
+        self.assertEqual(_SVC_NTP_AUTH_IMPLICIT.provenance_type, "pan_os_default")
+
+    def test_an_absent_telemetry_switch_stores_true_and_that_fires(self):
+        """THE MATERIALISED DEFAULT THAT MATTERS MOST IN THIS DOMAIN. `True` means an appliance
+        whose telemetry node was never written reports as SHARING, which is the state both lab
+        PA-VMs are in - and the vendor's own guide says the reverse verbatim."""
+        self.assertIs(_SVC_SHARING_IMPLICIT.value, True)
+        self.assertEqual(_SVC_SHARING_IMPLICIT.provenance_type, "pan_os_default")
+        for column in ("shares_device_health_performance", "shares_product_usage",
+                       "shares_threat_prevention"):
+            field = _SvcTelemetry._meta.get_field(column)
+            self.assertIs(field.default, True, column)
+            self.assertFalse(field.null, column)
+
+    def test_an_absent_telemetry_region_stores_the_americas_case_folded(self):
+        """Measured on 691665AC334B458 with the key deleted and committed: the command answered
+        `Americas` and the device's own dialog, which appears ONLY in that state, says so
+        verbatim. Stored LOWERCASE because that is the wire form the completion offers."""
+        self.assertEqual(_SVC_REGION_IMPLICIT.value, "americas")
+        self.assertEqual(_SvcTelemetry._meta.get_field("telemetry_region").default, "americas")
+
+    def test_an_absent_dns_proxy_object_is_measured_as_nothing_bound(self):
+        """Measured as a natural experiment on all four appliances with no write, INCLUDING the
+        two holding a populated `servers` branch in the same pass - which is what makes it a
+        reading about the branch rather than about the node."""
+        self.assertIsNone(_SVC_PROXY_ABSENT.value)
+        self.assertIsNotNone(_SVC_PROXY_ABSENT.citation)
+        self.assertEqual(_SVC_PROXY_ABSENT.provenance_type, "pan_os_default")
+
+    def test_an_absent_resolver_address_is_not_assumed(self):
+        """FENCED FOR WRITES, so a `servers` branch existing with no address leaf has never been
+        observed. `not_assumed` stores nothing and types the row `not_configured`, which is the
+        only honest answer and is what the readback showed on both PA-VMs."""
+        self.assertIsNone(_SVC_RESOLVER_UNMEASURED.value)
+        self.assertIsNone(_SVC_RESOLVER_UNMEASURED.citation)
+        self.assertEqual(_SVC_RESOLVER_UNMEASURED.provenance_type, "not_configured")
+
+
+    def test_encrypted_dns_is_not_assumed_because_the_node_is_not_on_every_build(self):
+        """`action=complete` answers `code=6 Invalid sequence` on 11.1.13-h3 and returns three
+        children on 11.2 - so on 11.1 there is no key there to BE absent. The store cannot say
+        that, and `not_assumed` is the nearest honest thing it can say."""
+        self.assertIsNone(_SVC_EDNS_ABSENT.value)
+        self.assertEqual(_SVC_EDNS_ABSENT.provenance_type, "not_configured")
+
+
+class DeviceServicesNtpGradingTests(SimpleTestCase):
+    """PAN-SVC-001's second half and PAN-SVC-002's grading."""
+
+    def test_an_unread_appliance_is_not_synchronised_rather_than_passing(self):
+        synched, klass = _svc_time_source(False, "", ["us.pool.ntp.org"])
+        self.assertFalse(synched)
+        self.assertEqual(klass, _SvcTimeSource.NOT_SYNCHRONISED_OR_NEVER_READ)
+
+    def test_local_is_not_a_configured_server(self):
+        """Measured on three of the four lab appliances, one of which has TWO servers BOTH on a
+        symmetric key, both rejected, and `synched: LOCAL` - a configuration that passes the
+        countable half and is keeping no time at all."""
+        synched, klass = _svc_time_source(
+            True, "LOCAL", ["us.pool.ntp.org", "time.google.com"])
+        self.assertFalse(synched)
+        self.assertEqual(klass, _SvcTimeSource.NOT_SYNCHRONISED_OR_NEVER_READ)
+
+    def test_a_source_the_configuration_does_not_name_is_its_own_rank(self):
+        synched, klass = _svc_time_source(True, "10.0.0.9", ["us.pool.ntp.org"])
+        self.assertFalse(synched)
+        self.assertEqual(klass, _SvcTimeSource.SYNCHRONISED_TO_AN_UNNAMED_SOURCE)
+
+    def test_a_configured_server_matches_case_insensitively(self):
+        """Measured on 013201001475: `synched: time.google.com` against a configured
+        `time.google.com`. An FQDN's case is not significant and the reply echoes what was
+        configured, so the comparison folds case rather than trusting the echo."""
+        synched, klass = _svc_time_source(
+            True, "TIME.GOOGLE.COM", ["us.pool.ntp.org", "time.google.com"])
+        self.assertTrue(synched)
+        self.assertEqual(klass, _SvcTimeSource.SYNCHRONISED_TO_A_CONFIGURED_SERVER)
+
+    def test_no_configured_server_is_the_baseline_mechanism_and_not_a_fourth_state(self):
+        self.assertEqual(_svc_auth_mechanism([]), _SvcAuthMechanism.NONE)
+
+    def test_autokey_wins_over_a_mixture_because_the_remediation_differs(self):
+        """Stage 3 insists the finding NAME autokey - the remediation is not "turn
+        authentication on" - so a mixture that hid it behind the milder member would lose that
+        sentence."""
+        self.assertEqual(
+            _svc_auth_mechanism(["autokey", "symmetric-key"]), _SvcAuthMechanism.AUTOKEY)
+
+    def test_a_mixture_of_symmetric_key_and_none_is_its_own_rank(self):
+        """The measured state of 013201001475: symmetric-key on the first slot, none on the
+        second."""
+        self.assertEqual(
+            _svc_auth_mechanism(["symmetric-key", "none"]),
+            _SvcAuthMechanism.SOME_BUT_NOT_ALL)
+
+    def test_every_configured_server_on_a_symmetric_key_is_the_passing_rank(self):
+        self.assertEqual(
+            _svc_auth_mechanism(["symmetric-key", "symmetric-key"]),
+            _SvcAuthMechanism.EVERY_SERVER)
+
+    def test_none_on_every_slot_is_none_and_not_a_mixture(self):
+        self.assertEqual(_svc_auth_mechanism(["none", "none"]), _SvcAuthMechanism.NONE)
+
+
+class DeviceServicesSnmpGradingTests(SimpleTestCase):
+    """PAN-SVC-004's and PAN-SVC-005's gradings."""
+
+    def test_an_implicit_version_is_kept_apart_from_an_explicit_cleartext_choice(self):
+        """The two states `version` CANNOT tell apart - both read `v2c` - and the whole reason
+        this column exists beside `uses_v2c`."""
+        self.assertEqual(
+            _svc_version_in_force(True, True, "v2c"),
+            _SvcVersionInForce.CONFIGURED_WITH_NO_VERSION_RECORDED)
+        self.assertEqual(_svc_version_in_force(True, False, "v2c"), _SvcVersionInForce.V2C)
+
+    def test_no_agent_is_its_own_member_and_not_a_cleartext_one(self):
+        self.assertEqual(
+            _svc_version_in_force(False, False, ""), _SvcVersionInForce.NO_AGENT_CONFIGURED)
+
+    def test_the_authenticated_version_is_the_passing_member(self):
+        self.assertEqual(_svc_version_in_force(True, False, "v3"), _SvcVersionInForce.V3)
+
+    def test_an_unwalked_surface_set_does_not_reduce_the_credential_finding(self):
+        """Only a MEASURED refusal earns the reduction. The per-surface switch's behaviour when
+        absent is not obtainable from any corpus this project can reach, so the unknown must not
+        relax the finding."""
+        self.assertEqual(
+            _svc_community_exposure(True, False, []),
+            _SvcCommunityExposure.SET_AND_REACHABILITY_NOT_ESTABLISHED)
+
+    def test_a_walked_surface_set_with_nothing_listening_does_reduce_it(self):
+        """The measured state of 013201001085, which stores `public`: every one of its eight
+        surfaces carries an `snmp` row and every one is disabled."""
+        self.assertEqual(
+            _svc_community_exposure(True, True, []),
+            _SvcCommunityExposure.SET_AND_EVERY_SURFACE_REFUSES)
+
+    def test_a_live_surface_is_the_high_severity_member(self):
+        self.assertEqual(
+            _svc_community_exposure(True, True, ["mgt"]),
+            _SvcCommunityExposure.SET_AND_A_SURFACE_ACCEPTS_QUERIES)
+
+    def test_no_default_credential_outranks_every_exposure_answer(self):
+        for walked in (True, False):
+            for surfaces in ([], ["mgt"]):
+                self.assertEqual(
+                    _svc_community_exposure(False, walked, surfaces),
+                    _SvcCommunityExposure.NO_DEFAULT_CREDENTIAL_SET)
+
+
+class DeviceServicesSystemIdentityGradingTests(SimpleTestCase):
+    """PAN-SVC-007's, 009's and 010's gradings, and the zone classification."""
+
+    def test_the_zone_vocabulary_has_exactly_eighteen_declared_spellings(self):
+        """Stage 3 says "eighteen of the spellings declare zero offset" and names none of them.
+        Measured 2026-10-29 by `action=complete` at the timezone leaf - 566 members on both a
+        PA-5220 and a PA-VM, identical - filtered to the members whose own TEXT names zero
+        offset. It came to exactly eighteen, which is what makes the name test the right reading
+        of that sentence rather than an offset test."""
+        self.assertEqual(len(_SVC_ZERO_DECLARED), 18)
+        self.assertIn("utc", _SVC_ZERO_DECLARED)
+        self.assertIn("etc/gmt+0", _SVC_ZERO_DECLARED)
+
+    def test_a_zero_offset_zone_that_does_not_declare_it_is_the_middle_rank(self):
+        """`Atlantic/Reykjavik` is the lab subject stage 6 built for exactly this column, and it
+        is where `timezone_is_utc` reports a finding on a compliant device."""
+        declares, klass = _svc_offset_class("Atlantic/Reykjavik")
+        self.assertFalse(declares)
+        self.assertEqual(klass, _SvcOffsetClass.ZERO_TODAY_BUT_NOT_DECLARED)
+        self.assertIn("iceland", _SVC_ZERO_TODAY)
+
+    def test_utc_declares_zero_offset_whatever_its_case(self):
+        for spelling in ("UTC", "utc", "Etc/UTC", "Zulu", "GMT0"):
+            declares, klass = _svc_offset_class(spelling)
+            self.assertTrue(declares, spelling)
+            self.assertEqual(klass, _SvcOffsetClass.DECLARES_ZERO_OFFSET, spelling)
+
+    def test_no_zone_recorded_is_its_own_member_and_not_a_non_zero_one(self):
+        """691665AC334B458's measured state: `action=show` raises `No such node` at the timezone
+        leaf and the merged view carries no key, so nothing is stored."""
+        declares, klass = _svc_offset_class("")
+        self.assertFalse(declares)
+        self.assertEqual(klass, _SvcOffsetClass.NO_ZONE_RECORDED)
+
+    def test_a_shifting_zone_and_an_unknown_one_both_fire(self):
+        """`Europe/London` sits at zero offset for part of the year and shifts, so it is NOT the
+        middle rank; and a key neither set names falls to the same firing member, which is the
+        safe direction for a zone nobody has classified."""
+        for spelling in ("Europe/London", "US/Eastern", "Mars/Olympus"):
+            declares, klass = _svc_offset_class(spelling)
+            self.assertFalse(declares, spelling)
+            self.assertEqual(klass, _SvcOffsetClass.NON_ZERO_OR_SHIFTS, spelling)
+
+    def test_an_appliance_nobody_asked_cannot_reach_a_chosen_name_in_force(self):
+        """The companion column's whole purpose: `accept_dhcp_hostname` is never null, so
+        without this gate an appliance nobody asked reports the stored name AS the name in
+        force."""
+        self.assertEqual(
+            _svc_hostname_posture("edge-01", False, False, False),
+            _SvcHostPosture.CHOSEN_NAME_THE_LEASE_MAY_REPLACE)
+        self.assertEqual(
+            _svc_hostname_posture("edge-01", False, False, True),
+            _SvcHostPosture.A_CHOSEN_NAME_IN_FORCE)
+
+    def test_a_lease_that_may_replace_the_name_is_the_third_rank(self):
+        """The measured state of 6A9C0A9904E7D6E: a chosen name with
+        `accept-dhcp-hostname: yes`, which `hostname_is_factory_default` reports identically to
+        a chosen name in force."""
+        self.assertEqual(
+            _svc_hostname_posture("pan-fw-111", False, True, True),
+            _SvcHostPosture.CHOSEN_NAME_THE_LEASE_MAY_REPLACE)
+
+    def test_nothing_stored_and_the_model_name_are_different_members(self):
+        self.assertEqual(
+            _svc_hostname_posture("", True, False, True), _SvcHostPosture.NO_NAME_STORED)
+        self.assertEqual(
+            _svc_hostname_posture("PA-VM", True, False, True),
+            _SvcHostPosture.STORED_NAME_IS_THE_MODEL)
+
+    def test_the_cloud_member_is_never_reached_and_a_lease_fires_on_hardware(self):
+        """`Appliance.model` says `PA-VM` for a PA-VM on a laptop and a PA-VM in Azure alike, so
+        nothing on the device or in either input says which cloud an appliance runs in. The
+        cloud member is the one that REDUCES severity, so an unclassified appliance must not
+        receive it."""
+        self.assertEqual(
+            _svc_addr_posture("dhcp-client"), _SvcAddrPosture.LEASED_ON_A_HARDWARE_APPLIANCE)
+        self.assertEqual(_svc_addr_posture("static"), _SvcAddrPosture.FIXED)
+        self.assertNotIn(
+            _SvcAddrPosture.LEASED_IN_A_PUBLIC_CLOUD,
+            {_svc_addr_posture("dhcp-client"), _svc_addr_posture("static")})
+
+
+class DeviceServicesResolverTests(SimpleTestCase):
+    """PAN-SVC-003: the management resolvers, and the half the configuration shows nothing of."""
+
+    def test_no_resolver_on_a_leased_address_is_a_different_finding_from_a_fixed_one(self):
+        """The measured state of both lab PA-VMs: no `dns-setting` node at all, a DHCP-client
+        management interface, and a lease carrying `dns-server: 168.63.129.16`. A query reading
+        configuration alone reports them IDENTICALLY to an appliance with no DNS at all."""
+        self.assertEqual(
+            _svc_resolver_posture(0, True, _SvcResolverMechanism.NONE, "dhcp-client"),
+            _SvcResolverPosture.NONE_ON_A_LEASED_ADDRESS)
+        self.assertEqual(
+            _svc_resolver_posture(0, False, _SvcResolverMechanism.NONE, "static"),
+            _SvcResolverPosture.NONE_ON_A_FIXED_ADDRESS)
+
+    def test_an_unread_lease_does_not_move_an_appliance_off_the_baseline_member(self):
+        """`follows_lease` is False where nothing established a lease, so the ADDRESSING MODE is
+        what separates the first two members - not the lease read, which may not have happened."""
+        self.assertEqual(
+            _svc_resolver_posture(0, False, _SvcResolverMechanism.NONE, "dhcp-client"),
+            _SvcResolverPosture.NONE_ON_A_LEASED_ADDRESS)
+
+    def test_one_resolver_and_two_are_different_ranks(self):
+        """013201001085's measured state is one: a committed `servers` branch carrying `primary`
+        and no `secondary`."""
+        self.assertEqual(
+            _svc_resolver_posture(1, False, _SvcResolverMechanism.SERVERS, "static"),
+            _SvcResolverPosture.ONE_RESOLVER_ONLY)
+        self.assertEqual(
+            _svc_resolver_posture(2, False, _SvcResolverMechanism.SERVERS, "static"),
+            _SvcResolverPosture.TWO_OR_MORE)
+
+
+class DeviceServicesTelemetryTests(SimpleTestCase):
+    """PAN-SVC-008: the delivery state, and the decision nobody can ingest."""
+
+    def test_an_unread_delivery_state_is_empty_rather_than_a_verdict(self):
+        self.assertEqual(_svc_delivery_state(False, {"status": "whatever"}), "")
+
+    def test_the_delivery_state_is_the_devices_own_words(self):
+        """Measured on all four appliances: `Device Certificate does not exist` or `Device
+        Certificate is expired`, while both PA-VMs have all three categories `yes`. The recorded
+        decision is "share" and the delivery state is "cannot"."""
+        self.assertEqual(
+            _svc_delivery_state(True, {"status": "Device Certificate does not exist"}),
+            "Device Certificate does not exist")
+
+    def test_the_reconciliation_holds_its_firing_member_because_nothing_can_fill_it(self):
+        """The estate has NO MECHANISM TO INGEST AN ENGINEER'S DOCUMENT, so this is what every
+        row reports until one exists - stage 3's own direction: a device whose sharing nobody has
+        agreed to must not read as compliant because the setting happens to be tidy."""
+        field = _SvcTelemetry._meta.get_field("recorded_decision_reconciliation")
+        self.assertEqual(field.default, _SvcReconciliation.NO_RECORDED_DECISION_LOCATED)
+
+
+class DeviceServicesServicePathTests(SimpleTestCase):
+    """PAN-SVC-006: which services an enforcement point originates, and which have a path."""
+
+    def test_an_entry_naming_an_interface_and_no_address_is_not_a_chosen_path(self):
+        """Stage 5's own definition is stricter than "an entry exists": an entry naming an
+        interface and no address does not determine the source, and PAN-OS accepts it."""
+        v4, v6 = _svc_chosen_paths({
+            "dns": {"source": {"interface": "ethernet1/1"}},
+            "ntp": {"source": {"interface": "ethernet1/1", "address": "10.0.0.5"}},
+        })
+        self.assertEqual(v4, {"ntp"})
+        self.assertEqual(v6, set())
+
+    def test_a_v6_source_is_counted_separately_from_a_v4_one(self):
+        v4, v6 = _svc_chosen_paths({
+            "dns": {"source": {"interface": "e1/1", "address": "10.0.0.5"},
+                    "source-v6": {"interface": "e1/1", "address": "2001:db8::5"}},
+        })
+        self.assertEqual(v4, {"dns"})
+        self.assertEqual(v6, {"dns"})
+
+    def test_an_empty_container_originates_nothing(self):
+        """Measured on vsys6 of both PA-5220s: `log-settings: {"profiles": null}`, an emptied
+        container. Reporting that vsys as originating a syslog flow would put a finding on a
+        system that sends no logs anywhere."""
+        self.assertFalse(_svc_originates({"log-settings": None}, ("log-settings", "syslog")))
+        self.assertFalse(_svc_originates({"log-settings": {}}, ("log-settings", "syslog")))
+        self.assertFalse(
+            _svc_originates({"log-settings": {"syslog": None}}, ("log-settings", "syslog")))
+        self.assertTrue(
+            _svc_originates({"log-settings": {"syslog": {"entry": []}}},
+                            ("log-settings", "syslog")))
+
+    def test_a_container_holding_only_candidate_decorations_originates_nothing(self):
+        """A node carrying only `@`-prefixed attributes is a marker on an empty container."""
+        self.assertFalse(
+            _svc_originates({"log-settings": {"syslog": {"@ptpl": "t"}}},
+                            ("log-settings", "syslog")))
+
+    def test_the_firewall_wide_set_reads_the_deviceconfig_sources_and_every_vsys(self):
+        """A profile ANYWHERE on the appliance originates a flow the firewall-wide paths govern,
+        so the device-local row sweeps `shared` and every vsys - which is why a vsys-only syslog
+        profile reaches the firewall-wide row."""
+        device_entry = {
+            "deviceconfig": {"system": {
+                "dns-setting": {"servers": {"primary": "192.168.250.1"}},
+                "ntp-servers": {"primary-ntp-server": {"ntp-server-address": "a"}},
+                "update-server": "updates.paloaltonetworks.com",
+                "panorama": {"local-panorama": {"panorama-server": "20.185.152.225"}},
+            }},
+            "vsys": {"entry": [{"@name": "vsys1",
+                                "log-settings": {"syslog": {"entry": [{"@name": "s"}]}}}]},
+        }
+        self.assertEqual(
+            _svc_originated(device_entry, {}, None),
+            ["dns", "ntp", "paloalto-networks-services", "panorama", "syslog"])
+
+    def test_a_per_vsys_row_reads_only_that_vsys(self):
+        """The 13-member per-vsys set has no deviceconfig member in it, so a per-system row must
+        not inherit `dns`, `ntp`, `panorama` or the update endpoint from the appliance."""
+        device_entry = {"deviceconfig": {"system": {"update-server": "x", "ntp-servers": {
+            "primary-ntp-server": {"ntp-server-address": "a"}}}}}
+        vsys = {"@name": "vsys1", "server-profile": {"ldap": {"entry": [{"@name": "p"}]}}}
+        self.assertEqual(_svc_originated(device_entry, {}, vsys), ["ldap"])
+
+    def test_an_enforcement_point_originating_nothing_still_fires_on_the_posture(self):
+        """`False` on the boolean would be vacuous on a device that originates nothing, so an
+        empty set reads as TRUE there - and the posture column carries the firing default
+        instead, which is stage 5's own arrangement. Measured on vsys10 of 013201001085."""
+        values = _svc_path_verdicts([], set(), set())
+        self.assertTrue(values["every_originated_service_has_a_chosen_path"])
+        self.assertEqual(values["service_path_posture"], _SvcPathPosture.NO_PATH_SET)
+
+    def test_one_address_family_only_is_its_own_rank(self):
+        values = _svc_path_verdicts(["dns"], {"dns"}, set())
+        self.assertTrue(values["every_originated_service_has_a_chosen_path"])
+        self.assertFalse(values["path_covers_both_address_families"])
+        self.assertEqual(values["service_path_posture"], _SvcPathPosture.ONE_FAMILY_ONLY)
+
+    def test_both_families_on_every_originated_service_is_the_passing_rank(self):
+        values = _svc_path_verdicts(["dns", "ntp"], {"dns", "ntp"}, {"dns", "ntp"})
+        self.assertEqual(values["services_with_a_chosen_path"], 2)
+        self.assertEqual(values["service_path_posture"], _SvcPathPosture.EVERY_SERVICE)
+
+    def test_no_recorded_per_system_choice_is_the_firing_member(self):
+        """The measured state of every vsys of every lab appliance: there is no
+        `vsys/entry/route/service` node anywhere, at either scope, on any of the four."""
+        values = _svc_per_system(False, ["syslog"], 0)
+        self.assertFalse(values["per_system_path_choice_recorded"])
+        self.assertEqual(
+            values["per_system_path_posture"], _SvcPerSystemPosture.NEITHER_RECORDED)
+
+    def test_a_recorded_choice_covering_only_some_services_is_the_middle_rank(self):
+        values = _svc_per_system(True, ["syslog", "ldap"], 1)
+        self.assertEqual(
+            values["per_system_path_posture"], _SvcPerSystemPosture.SOME_SERVICES_ONLY)
+        values = _svc_per_system(True, ["syslog"], 1)
+        self.assertEqual(
+            values["per_system_path_posture"], _SvcPerSystemPosture.DECIDED_EITHER_WAY)
+
+    def test_the_identity_is_one_row_per_enforcement_point(self):
+        """A table, a uniqueness constraint and a migration are each one per model, and this
+        model's row is a verdict per enforcement point - the appliance, then each vsys."""
+        names = {c.name for c in _SvcRoute._meta.constraints}
+        self.assertIn("unique_service_route_per_enforcement_point", names)
+        constraint = next(c for c in _SvcRoute._meta.constraints
+                          if c.name == "unique_service_route_per_enforcement_point")
+        self.assertEqual(list(constraint.fields), ["appliance", "scope", "vsys_name"])
+
+    def test_the_scope_column_has_no_default_so_an_undecided_write_cannot_succeed(self):
+        """Stage 5 declares this column precisely because a statement that does not decide the
+        scope would produce a silently wrong row."""
+        field = _SvcRoute._meta.get_field("scope")
+        self.assertIs(field.has_default(), False)
+        self.assertEqual(
+            {value for value, _label in field.choices},
+            {_SvcRouteScope.DEVICE_LOCAL, _SvcRouteScope.VSYS})
+
+
+class DeviceServicesCollectorTests(SimpleTestCase):
+    """The three op reads, and the refusal that is an answer."""
+
+    def test_every_command_closes_the_element_it_opens(self):
+        """`collectors/merged_config.py` carries the measured note that an unclosed `<system>`
+        answers HTTP 400 on all four lab appliances, so a collector that had never once
+        succeeded looked exactly like a device with nothing to report."""
+        for command in (_SVC_NTP_COMMAND, _SVC_TELEMETRY_COMMAND, _SVC_DHCP_COMMAND):
+            self.assertEqual(command.count("<"), command.count(">"), command)
+            self.assertEqual(
+                command.count("</"), command.count("<") - command.count("</"), command)
+
+    def test_a_static_interface_refusal_is_an_answer_and_not_a_failure(self):
+        """Measured on both PA-5220s: `Firewall management interface is not set to DHCP`.
+        Recording it as a failed read would turn "this appliance is statically addressed" into
+        "nobody asked", which is what `management_resolver_posture` grades on."""
+        self.assertTrue(_svc_is_not_dhcp(
+            _PltAPIError("Firewall management interface is not set to DHCP")))
+        self.assertFalse(_svc_is_not_dhcp(_PltAPIError("Timeout connecting to device")))
+
+    def test_the_three_states_of_an_operational_snapshot_stay_apart(self):
+        """"We never asked" must not look like "we asked and it was fine"."""
+        answered, body = _svc_op_result(None)
+        self.assertFalse(answered)
+        self.assertEqual(body, {})
+
+    def test_the_collectors_and_normalizers_are_wired_into_the_flow(self):
+        """Nothing fails if a collector is written and never called: the snapshot never exists
+        and every column resting on it holds its default for ever."""
+        import inspect
+
+        from optivedge_integrations.integrations.platforms.pan_os import flows
+
+        source = inspect.getsource(flows.collect_appliance_device_services)
+        for name in ("collect_show_ntp", "collect_show_device_telemetry_settings",
+                     "collect_show_dhcp_client_mgmt_interface_state"):
+            self.assertIn(name, source, name)
+        orchestrator = inspect.getsource(flows.collect_in_scope_configuration_snapshots)
+        self.assertIn("collect_appliance_device_services", orchestrator)
+        self.assertIn(("device services", flows.normalize_appliance_device_services),
+                      flows.APPLIANCE_OBJECT_NORMALIZERS)
+
+
+class DeviceServicesSchemaTests(SimpleTestCase):
+    """What the new columns are declared as, and what fires."""
+
+    def test_every_new_classification_defaults_to_its_firing_member(self):
+        """A migration creates a column and only normalization fills it, so a migrate-and-reseed
+        without a re-normalize must be loud rather than reporting a clean estate."""
+        for model, column, expected in (
+            (_SvcNtp, "time_source_in_force",
+             _SvcTimeSource.NOT_SYNCHRONISED_OR_NEVER_READ),
+            (_SvcNtp, "server_authentication_mechanism", _SvcAuthMechanism.NONE),
+            (_SvcSnmp, "snmp_version_in_force", _SvcVersionInForce.V2C),
+            (_SvcSnmp, "default_community_exposure",
+             _SvcCommunityExposure.SET_AND_REACHABILITY_NOT_ESTABLISHED),
+            (_SvcIdentity, "hostname_posture", _SvcHostPosture.NO_NAME_STORED),
+            (_SvcIdentity, "timezone_offset_class", _SvcOffsetClass.NO_ZONE_RECORDED),
+            (_SvcIdentity, "addressing_mode_posture",
+             _SvcAddrPosture.LEASED_ON_A_HARDWARE_APPLIANCE),
+            (_SvcDns, "management_resolver_posture",
+             _SvcResolverPosture.NONE_ON_A_LEASED_ADDRESS),
+            (_SvcRoute, "service_path_posture", _SvcPathPosture.NO_PATH_SET),
+            (_SvcRoute, "per_system_path_posture", _SvcPerSystemPosture.NEITHER_RECORDED),
+        ):
+            self.assertEqual(
+                model._meta.get_field(column).default, expected,
+                f"{model.__name__}.{column}")
+
+    def test_the_two_ntp_classifications_are_wide_enough_for_their_own_vocabulary(self):
+        """Stage 5 declared `max_length: 48` for both and its own value-set members are 56 and
+        55 characters, which fails Django's `fields.E009` before a migration can be written.
+        The member list is authoritative; the declared length was a proposal and was checked."""
+        for model, column in ((_SvcNtp, "time_source_in_force"),
+                              (_SvcNtp, "server_authentication_mechanism")):
+            field = model._meta.get_field(column)
+            longest = max(len(value) for value, _label in field.choices)
+            self.assertGreaterEqual(field.max_length, longest, f"{column} {longest}")
+
+    def test_the_runtime_columns_are_declared_derived_because_no_payload_key_holds_them(self):
+        """`show ntp`, `show system info` and `show device-telemetry settings` are operational:
+        there is no configuration key for a provenance row to point at."""
+        for model, columns in (
+            (_SvcNtp, ("synched_to_a_configured_server", "time_source_in_force",
+                           "server_authentication_mechanism")),
+            (_SvcIdentity, ("hostname_in_force_known", "hostname_in_force")),
+            (_SvcTelemetry, ("telemetry_delivery_state",)),
+        ):
+            for column in columns:
+                self.assertIn(column, model.DERIVED_FIELDS, f"{model.__name__}.{column}")
+
+    def test_the_measured_telemetry_columns_are_not_declared_derived(self):
+        """They come off a configuration leaf and carry a MEASURED default, so normalization
+        must write them real provenance rows - which is the only place "this value is the
+        vendor's default and not a choice" is ever recorded."""
+        for column in ("shares_device_health_performance", "shares_product_usage",
+                       "shares_threat_prevention", "telemetry_region"):
+            self.assertNotIn(column, _SvcTelemetry.DERIVED_FIELDS, column)
+
+    def test_the_second_telemetry_model_does_not_collide_with_the_first(self):
+        """`platform_lifecycle.py::DeviceTelemetrySettings` already holds
+        `unique_device_telemetry_per_appliance` over the same node, with NULLABLE switches and
+        its own stage 4 run recording the absent-key behaviour as unmeasured. The two readings
+        of one node disagree and neither is this model's to overrule."""
+        names = {c.name for c in _SvcTelemetry._meta.constraints}
+        self.assertIn("unique_device_services_telemetry_per_appliance", names)
+        self.assertNotIn("unique_device_telemetry_per_appliance", names)
+        other = {c.name for c in _PltTelemetry._meta.constraints}
+        self.assertIn("unique_device_telemetry_per_appliance", other)
+        self.assertFalse(names & other)
+
+    def test_a_node_walk_never_raises_on_a_missing_step(self):
+        self.assertIsNone(_svc_node_at({}, ("route", "service")))
+        self.assertIsNone(_svc_node_at({"route": "text"}, ("route", "service")))
+        self.assertEqual(_svc_node_at({"route": {"service": {}}}, ("route", "service")), {})
+
+
+class DeviceServicesAbsentHostnameTests(TestCase):
+    """What the normalizer STORES for an absent hostname, asserted end to end.
+
+    STAGE 5's DECISION, AND THE SHIPPED CODE SAT ON THE OTHER SIDE OF IT until 2026-10-29.
+
+    The implicit hostname is a FUNCTION of the appliance - its own model - and no column can
+    hold a function, so stage 5 decided `default.stores: null` and said why: a consumer that
+    materialised it would store the literal `PA-5220` on every appliance of that model.
+
+    THIS TEST HOLDS THE DISAGREEMENT and asserts the VALUE rather than the shape. Without it the
+    materialisation could come back and nothing would fail - `hostname_is_factory_default`
+    answers True either way, which is exactly why no existing test noticed.
+
+    IT ALSO EXERCISES THE BRANCH THE LAB CANNOT REACH. Measured 2026-10-29: the merged view
+    MATERIALISES this key, so `show config merged` carries `PA-VM` on the one lab appliance whose
+    committed configuration holds no hostname at all - and the readback therefore never reaches
+    the absent case.
+    """
+
+    def _row(self, system):
+        station, appliance, _point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-SVC-HOSTNAME", appliance_hostname="svc-hostname")
+        appliance.model = "PA-VM"
+        appliance.save(update_fields=["model"])
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"deviceconfig": {"system": system}}}}})
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_device_services)
+        normalize_device_services(appliance)
+        return _SvcIdentity.objects.get(appliance=appliance)
+
+    def test_an_absent_hostname_stores_nothing_and_still_fires_the_verdict(self):
+        row = self._row({"timezone": "UTC"})
+        self.assertEqual(row.hostname, "")
+        self.assertTrue(row.hostname_is_factory_default)
+        self.assertEqual(row.hostname_posture, _SvcHostPosture.NO_NAME_STORED)
+
+    def test_the_absence_is_typed_a_vendor_default_and_not_a_local_value(self):
+        """The citation is kept so the row still says the absence is a measured vendor fact -
+        measured on two appliances of two different models, both directions paid on each."""
+        row = self._row({"timezone": "UTC"})
+        provenance = FieldProvenance.objects.get(
+            content_type=ContentType.objects.get_for_model(_SvcIdentity),
+            object_id=row.pk, field_name="hostname")
+        self.assertEqual(provenance.provenance_type, "pan_os_default")
+
+    def test_a_stored_name_equal_to_the_model_is_a_different_member(self):
+        """Which is what the merged view actually hands the collector on 691665AC334B458."""
+        row = self._row({"hostname": "PA-VM"})
+        self.assertEqual(row.hostname, "PA-VM")
+        self.assertTrue(row.hostname_is_factory_default)
+        self.assertEqual(row.hostname_posture, _SvcHostPosture.STORED_NAME_IS_THE_MODEL)
+
+    def test_an_absent_telemetry_node_stores_the_sharing_default_the_lab_cannot_show(self):
+        """THE MOST LOAD-BEARING MATERIALISED DEFAULT IN THIS DOMAIN, and the readback cannot
+        reach it: measured 2026-10-29, the one lab appliance whose committed telemetry node is
+        absent carries an UNCOMMITTED candidate edit at that node - `@dirtyId` under
+        `action=get` - and `show config merged` strips the decoration and hands the values over
+        bare. So every lab row reads `local` and this branch is proved here and nowhere else."""
+        station, appliance, _point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-SVC-TLM", appliance_hostname="svc-telemetry")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"deviceconfig": {"system": {}}}}}})
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_device_services)
+        normalize_device_services(appliance)
+        row = _SvcTelemetry.objects.get(appliance=appliance)
+        self.assertTrue(row.shares_device_health_performance)
+        self.assertTrue(row.shares_product_usage)
+        self.assertTrue(row.shares_threat_prevention)
+        self.assertEqual(row.telemetry_region, "americas")
+        self.assertEqual(row.telemetry_delivery_state, "")
+        provenance = FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_SvcTelemetry), object_id=row.pk)
+        self.assertEqual(
+            {p.provenance_type for p in provenance}, {"pan_os_default"})
+
+    def test_an_absent_resolver_node_fires_on_a_leased_address_without_a_lease_read(self):
+        """`resolution_follows_the_management_lease` is FALSE where nothing established a lease,
+        and the posture must still fire - the ADDRESSING MODE is what separates the first two
+        members, not the lease read, which may not have happened."""
+        station, appliance, _point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-SVC-DNS", appliance_hostname="svc-dns")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"deviceconfig": {"system": {
+                "type": {"dhcp-client": {}}}}}}}})
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_device_services)
+        normalize_device_services(appliance)
+        row = _SvcDns.objects.get(appliance=appliance)
+        self.assertEqual(row.primary_resolver_address, "")
+        self.assertEqual(row.resolver_mechanism, _SvcResolverMechanism.NONE)
+        self.assertEqual(row.chosen_resolver_count, 0)
+        self.assertFalse(row.resolution_follows_the_management_lease)
+        self.assertEqual(row.management_resolvers_in_force, [])
+        self.assertEqual(
+            row.management_resolver_posture, _SvcResolverPosture.NONE_ON_A_LEASED_ADDRESS)
+
+    def test_an_appliance_with_no_merged_snapshot_gets_no_row_at_all(self):
+        """An appliance with no row is visibly uncollected; one with a row full of defaults
+        reads as measured."""
+        _station, appliance, _point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-SVC-NONE", appliance_hostname="svc-none")
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_device_services)
+        counts = normalize_device_services(appliance)
+        self.assertEqual(set(counts.values()), {0})
+        self.assertFalse(_SvcIdentity.objects.filter(appliance=appliance).exists())
+        self.assertFalse(_SvcRoute.objects.filter(appliance=appliance).exists())
+# ---------------------------------------------------------------------------
+# ipsec-crypto: PAN-IPS-001 to PAN-IPS-009. The module and its pure readers are imported here
+# rather than at the top of this file, which is the shape `user_id`'s block above uses.
+# ---------------------------------------------------------------------------
+from optivedge_integrations.integrations.models import (  # noqa: E402
+    IpsecCryptoProfile, IpsecTunnel, MonitorProfile,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization import (  # noqa: E402
+    ipsec as ipsec_norm,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.ipsec import (  # noqa: E402,E501
+    normalize_ipsec_crypto_profiles,
+    normalize_ipsec_tunnels,
+    normalize_monitor_profiles,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (  # noqa: E402,E501
+    Implicit,
+    entry_container,
+)
+
+
+class _IpsecBase(SimpleTestCase):
+    """The payload shapes below are the LAB's, read 2026-10-29 through Panorama's proxy.
+
+    Every entry here was copied out of a live `action=get` at the collection's own xpath on
+    pan-fw-111 (serial 6A9C0A9904E7D6E) or pan-fw-201 (serial 691665AC334B458) - the subjects
+    stage 6 left standing, plus the three factory-named profiles and the factory monitor profile.
+    They are fixtures of a measurement rather than of an understanding, which is the distinction
+    stage 7's contract draws.
+    """
+
+    #: `oep-ips6-p01`: the null cipher with md5, no per-association key agreement, 30 days.
+    P01 = {"@name": "oep-ips6-p01",
+           "esp": {"encryption": {"member": ["null"]},
+                   "authentication": {"member": ["md5"]}},
+           "dh-group": "no-pfs", "lifetime": {"days": "30"}}
+    #: `oep-ips6-p04`: the profile at three of this domain's four boundaries.
+    P04 = {"@name": "oep-ips6-p04",
+           "esp": {"encryption": {"member": ["aes-256-cbc"]},
+                   "authentication": {"member": ["sha384"]}},
+           "dh-group": "group14", "lifetime": {"hours": "1"}}
+    #: `oep-ips6-p05`: the MINUTE branch.
+    P05 = {"@name": "oep-ips6-p05",
+           "esp": {"encryption": {"member": ["aes-256-cbc"]},
+                   "authentication": {"member": ["sha512"]}},
+           "dh-group": "group15", "lifetime": {"minutes": "240"}}
+    #: `oep-ips6-p06`: the SECOND branch.
+    P06 = {"@name": "oep-ips6-p06",
+           "esp": {"encryption": {"member": ["aes-128-cbc"]},
+                   "authentication": {"member": ["sha384"]}},
+           "dh-group": "group16", "lifetime": {"seconds": "43200"}}
+    #: `oep-ips6-p08`: the integrity-only AH branch, no cipher of any kind.
+    P08 = {"@name": "oep-ips6-p08",
+           "ah": {"authentication": {"member": ["sha256"]}},
+           "dh-group": "group14", "lifetime": {"hours": "1"}}
+    #: `oep-ips6-p09`: NOTHING BUT THE MANDATORY LIFETIME. Committed, and standing on the lab.
+    P09 = {"@name": "oep-ips6-p09", "lifetime": {"hours": "1"}}
+    #: `oep-ips6-p10`: the hardened profile - AEAD only, hash declined, group21, one hour.
+    P10 = {"@name": "oep-ips6-p10",
+           "esp": {"encryption": {"member": ["aes-256-gcm"]},
+                   "authentication": {"member": ["none"]}},
+           "dh-group": "group21", "lifetime": {"hours": "1"}}
+    #: `oep-ips6-p11`: a cipher that only encrypts with the hash DECLINED beside it.
+    P11 = {"@name": "oep-ips6-p11",
+           "esp": {"encryption": {"member": ["aes-128-cbc"]},
+                   "authentication": {"member": ["none"]}},
+           "dh-group": "group14", "lifetime": {"hours": "1"}}
+    #: `default` on pan-fw-201: the factory profile, and the content PAN-IPS-009 tests against.
+    SHIPPED = {"@name": "default",
+               "esp": {"encryption": {"member": ["aes-128-cbc", "3des"]},
+                       "authentication": {"member": ["sha1"]}},
+               "dh-group": "group2", "lifetime": {"hours": "1"}}
+
+    #: `oep-ips6-t01`: both switches explicitly OFF.
+    T01 = {"@name": "oep-ips6-t01", "tunnel-interface": "tunnel.61", "disabled": "yes",
+           "anti-replay": "no", "tunnel-monitor": {"enable": "no"}}
+    #: `oep-ips6-t02`: both keys ABSENT ENTIRELY rather than set to no, and no crypto reference.
+    T02 = {"@name": "oep-ips6-t02", "tunnel-interface": "tunnel.61", "disabled": "yes"}
+    #: `oep-ips6-t03`: monitoring on, with a target and a profile that fails over.
+    T03 = {"@name": "oep-ips6-t03", "tunnel-interface": "tunnel.61", "disabled": "yes",
+           "anti-replay": "yes",
+           "tunnel-monitor": {"enable": "yes", "destination-ip": "192.0.2.61",
+                              "tunnel-monitor-profile": "oep-ips6-m01"}}
+    #: `oep-ips6-t04`: the auto-key branch, naming a gateway and the hardened profile.
+    T04 = {"@name": "oep-ips6-t04", "tunnel-interface": "tunnel.61", "disabled": "yes",
+           "auto-key": {"ike-gateway": {"entry": [{"@name": "oep-ike6-g01"}]},
+                        "ipsec-crypto-profile": "oep-ips6-p10"}}
+
+    #: `oep-ips6-m01` / `-m02` / `-m03`: fail-over, wait-recover, and an entry with NO CHILD KEY.
+    M01 = {"@name": "oep-ips6-m01", "interval": "2", "threshold": "2", "action": "fail-over"}
+    M02 = {"@name": "oep-ips6-m02", "interval": "100", "threshold": "10",
+           "action": "wait-recover"}
+    M03 = {"@name": "oep-ips6-m03"}
+
+    def device_entry(self, *, profiles=(), tunnels=(), monitors=(), satellites=None):
+        """A merged-config device entry holding the three collections.
+
+        `satellites=None` leaves `global-protect-site-to-site` ABSENT, which is pan-fw-111's and
+        pan-fw-201's state; `satellites=[]` makes it present and empty, which is both PA-5220s'.
+
+        Deep-copied, because the entries above are CLASS attributes: a test that marks one with
+        `@ptpl` would otherwise leak that marker into every later test in file order, which is
+        exactly what happened the first time this block ran.
+        """
+        import copy
+        profiles = copy.deepcopy(list(profiles))
+        tunnels = copy.deepcopy(list(tunnels))
+        monitors = copy.deepcopy(list(monitors))
+        satellites = None if satellites is None else copy.deepcopy(list(satellites))
+        tunnel_node = {"ipsec": {"entry": list(tunnels)} if tunnels else None}
+        if satellites is not None:
+            tunnel_node["global-protect-site-to-site"] = (
+                {"entry": list(satellites)} if satellites else None)
+        return {
+            "@name": "localhost.localdomain",
+            "network": {
+                "ike": {"crypto-profiles": {
+                    "ipsec-crypto-profiles": (
+                        {"entry": list(profiles)} if profiles else None)}},
+                "tunnel": tunnel_node,
+                "profiles": {"monitor-profile": (
+                    {"entry": list(monitors)} if monitors else None)},
+            },
+        }
+
+    def profile(self, entry):
+        return ipsec_norm.profile_values(entry)[0]
+
+    def tunnel(self, entry, *, profiles=(), monitors=()):
+        content = {e["@name"]: ipsec_norm._profile_content(self.profile(e)) for e in profiles}
+        actions = ipsec_norm.monitor_profile_actions(
+            self.device_entry(monitors=monitors))
+        return ipsec_norm.tunnel_values(
+            entry, profile_content=content, monitor_actions=actions)[0]
+
+
+class IpsecAbsentKeyTests(_IpsecBase):
+    """WHAT EACH ABSENT KEY STORES, asserted on the VALUE and not on the shape.
+
+    Stage 7's contract, as of 2026-10-29: "A column whose absent-key behaviour you measured owes a
+    test asserting it. That is the cheapest place in this pipeline to lose a measurement: the
+    device reading sits in your handback, the value sits in the normaliser, and nothing fails when
+    a later edit changes what an absence stores."
+
+    Nine keys in this domain have a declared absent behaviour - four measured vendor facts, three
+    storing nothing, and two inferences - and every one of them is below. The two inferences are
+    asserted as stage 5 declared them, which is what holds the disagreement in a place a later
+    change cannot quietly resolve.
+    """
+
+    def test_an_absent_cipher_list_stores_null_and_not_an_empty_list(self):
+        """Measured: an absent list means NOTHING IS OFFERED. NULL and `[]` are different
+        answers, and stage 5 declares the materialised value as null - the substitution of `''`
+        or `[]` for a declared null is the defect 0110_wildfire_rule_absence_is_null corrected."""
+        values = self.profile(self.P09)
+        self.assertIsNone(values["esp_encryption"])
+        self.assertIsNone(values["esp_authentication"])
+        self.assertIsNone(values["ah_authentication"])
+
+    def test_an_absent_dh_group_stores_the_measured_group2(self):
+        """THE SHARPEST MEASUREMENT IN THIS DOMAIN, and it FIRES: PAN-IPS-004 ranks group2 high,
+        the key is optional at commit validation, and a profile that simply omits it behaves as a
+        failing value. Leaving the column null would have made the commonest omission in the
+        domain pass every threshold."""
+        self.assertEqual(self.profile(self.P09)["dh_group"], "group2")
+        self.assertFalse(self.profile(self.P09)["dh_group_meets_target"])
+
+    def test_an_absent_disabled_key_stores_false(self):
+        """Measured through commit validation in both directions over three commits: absent
+        behaves identically to `no`. NOT EXERCISED BY THE LAB - all four standing tunnels set
+        `disabled` explicitly - so this test is the only thing holding the measurement."""
+        entry = dict(self.T02)
+        entry.pop("disabled")
+        self.assertIs(self.tunnel(entry)["is_disabled"], False)
+
+    def test_an_absent_anti_replay_stores_nothing_and_the_companion_fires(self):
+        """Stage 4 measured NOTHING about this absence, so neither value may be materialised: a
+        `false` would report a finding nobody measured and a `true` would report a clean estate
+        for the same reason. The firing moves to the companion."""
+        values = self.tunnel(self.T02)
+        self.assertIsNone(values["anti_replay"])
+        self.assertIs(values["anti_replay_determined"], False)
+
+    def test_an_explicit_anti_replay_no_is_not_an_unknown(self):
+        """The distinction the companion column exists to carry: `no` is a reading and an absent
+        key is not, and a clause on `anti_replay` alone cannot tell them apart."""
+        values = self.tunnel(self.T01)
+        self.assertIs(values["anti_replay"], False)
+        self.assertIs(values["anti_replay_determined"], True)
+
+    def test_an_absent_monitor_branch_stores_nothing_and_the_companion_fires(self):
+        """An unmonitored tunnel is the COMMONEST shape of PAN-IPS-007's failure, and a
+        materialised `false` here would match nothing and pass it in silence."""
+        values = self.tunnel(self.T02)
+        self.assertIsNone(values["tunnel_monitor_enable"])
+        self.assertIs(values["tunnel_monitor_enable_determined"], False)
+        self.assertIsNone(values["tunnel_monitor_destination_ip"])
+        self.assertIsNone(values["tunnel_monitor_profile_name"])
+
+    def test_a_monitor_branch_with_the_enable_key_absent_is_also_undetermined(self):
+        """Deliberately the same answer as no branch at all: stage 4 measured no implicit for
+        either, so the two absences assert the same nothing."""
+        entry = {"@name": "t", "tunnel-monitor": {"destination-ip": "192.0.2.1"}}
+        values = self.tunnel(entry)
+        self.assertIsNone(values["tunnel_monitor_enable"])
+        self.assertIs(values["tunnel_monitor_enable_determined"], False)
+        self.assertEqual(values["tunnel_monitor_destination_ip"], "192.0.2.1")
+
+    def test_an_absent_destination_stores_null_rather_than_the_empty_string(self):
+        """`common.py::parse_text_field` COERCES a null implicit to `''` in its own body, so this
+        column goes through `_nullable_text`. `is_empty` compiles to a filter on the empty string
+        and does not match NULL, so the two spellings find different rows."""
+        values = self.tunnel(self.T01)
+        self.assertIsNone(values["tunnel_monitor_destination_ip"])
+        self.assertNotEqual(values["tunnel_monitor_destination_ip"], "")
+
+    def test_an_absent_crypto_profile_reference_stores_the_inferred_default(self):
+        """AN INFERENCE AND NOT A MEASUREMENT, implemented as stage 5 declared it. It is
+        admissible only because it lands on the FIRING side: the literal `default` resolves to
+        nothing on three of the four lab appliances, so the commonest configuration reports."""
+        values = self.tunnel(self.T02)
+        self.assertEqual(values["crypto_profile_name"], "default")
+        self.assertIs(values["crypto_profile_found"], False)
+        self.assertIs(values["effective_crypto_profile_chosen"], False)
+
+    def test_an_absent_ike_gateway_list_stores_nothing(self):
+        """`not_reached` is its own answer: state B could not be run because satisfying the key
+        needs an IKE gateway, which stage 4 declared out of scope before it wrote anything."""
+        self.assertIsNone(self.tunnel(self.T02)["ike_gateway_names"])
+
+    def test_an_absent_monitor_action_stores_the_inferred_wait_recover(self):
+        """The second inference, and it FIRES - `wait-recover` is the value PAN-IPS-007's second
+        record treats as failing, which is the only reason an unmeasured implicit may be
+        materialised here. Standing on the lab as `oep-ips6-m03`, an entry with no child key."""
+        self.assertEqual(ipsec_norm.monitor_profile_values(self.M03)[0]["action"], "wait-recover")
+
+    def test_the_two_inferences_are_the_only_ones_this_module_makes(self):
+        """The census `ImplicitDeclarationTests` enforces, asserted from the other side so that a
+        promotion to `measured` or a new inference shows up as this test's failure too."""
+        inferred = [name for name, value in vars(ipsec_norm).items()
+                    if isinstance(value, Implicit) and value.citation is None
+                    and value.value is not None]
+        self.assertEqual(sorted(inferred),
+                         ["CRYPTO_PROFILE_ABSENT", "MONITOR_ACTION_ABSENT"])
+
+
+class IpsecComputationTests(_IpsecBase):
+    """The derived columns, over the standing subjects and over the states they do not cover."""
+
+    def test_the_protocol_branch_is_whichever_container_exists(self):
+        self.assertEqual(self.profile(self.P04)["protocol_branch"], "esp")
+        self.assertEqual(self.profile(self.P08)["protocol_branch"], "ah")
+        self.assertEqual(self.profile(self.P09)["protocol_branch"], "none")
+
+    def test_the_branchless_profile_fires_every_algorithm_column(self):
+        """`none` is a COMMITTED state - `lifetime` is the only mandatory key - and stage 3's
+        grading had no rank for it. Every verdict over an absent list reads its worst value."""
+        values = self.profile(self.P09)
+        self.assertEqual(values["weakest_encryption_offered"], "")
+        self.assertEqual(values["weakest_integrity_offered"], "")
+        self.assertIs(values["all_offered_ciphers_authenticate"], False)
+        self.assertIs(values["integrity_meets_sha2_floor"], False)
+
+    def test_the_weakest_cipher_is_read_off_the_whole_offer_set(self):
+        """THE LAB CANNOT SHOW THIS AND THE SHIPPED PROFILE CAN: fifteen of the sixteen standing
+        profiles offer exactly ONE cipher, so the ordering is only exercised by `default`, which
+        offers aes-128-cbc beside 3des. A `contains` clause for the strong member would report
+        that profile compliant; the weakest member is 3des and it fires."""
+        self.assertEqual(self.profile(self.SHIPPED)["weakest_encryption_offered"], "3des")
+        self.assertEqual(self.profile(self.P01)["weakest_encryption_offered"], "null")
+        self.assertEqual(self.profile(self.P10)["weakest_encryption_offered"], "aes-256-gcm")
+
+    def test_the_cipher_order_places_the_cleartext_cipher_below_3des(self):
+        """Stage 5 gives a SEVERITY order and not a total one - `null` and `3des` share `high` -
+        so this tie is broken here. It is deliberately inconsequential: a profile offering both
+        reports at `high` whichever way it falls, and the tie-break only decides which value the
+        finding prints."""
+        entry = {"@name": "x", "esp": {"encryption": {"member": ["3des", "null"]},
+                                       "authentication": {"member": ["sha256"]}},
+                 "lifetime": {"hours": "1"}}
+        self.assertEqual(self.profile(entry)["weakest_encryption_offered"], "null")
+
+    def test_the_weakest_integrity_comes_from_whichever_branch_exists(self):
+        """NOT EXERCISED BY THE LAB either: every standing profile offers exactly ONE integrity
+        algorithm, so reversing the order changes no stored row. Two sibling lists with one of
+        them chosen by the presence of a third node is why this is a column and not a clause."""
+        self.assertEqual(self.profile(self.P08)["weakest_integrity_offered"], "sha256")
+        entry = {"@name": "x", "esp": {"encryption": {"member": ["aes-256-cbc"]},
+                                       "authentication": {"member": ["sha512", "md5"]}},
+                 "lifetime": {"hours": "1"}}
+        self.assertEqual(self.profile(entry)["weakest_integrity_offered"], "md5")
+
+    def test_the_ah_branch_never_reads_the_esp_list(self):
+        """One grid column serves both branches, measured, so a reading taken off the screen
+        cannot say which list it came from - which is why they are two columns."""
+        entry = {"@name": "x", "ah": {"authentication": {"member": ["sha256"]}},
+                 "esp": None, "lifetime": {"hours": "1"}}
+        values = self.profile(entry)
+        self.assertEqual(values["protocol_branch"], "ah")
+        self.assertEqual(values["weakest_integrity_offered"], "sha256")
+        self.assertIsNone(values["esp_authentication"])
+
+    def test_an_unranked_cipher_is_returned_as_the_device_gave_it(self):
+        """The value set is a LOWER BOUND - `action=complete` answers a successful EMPTY list at
+        this leaf on all four appliances - so a build offering a member nobody has seen must reach
+        the report unranked rather than as a collection that was never weak."""
+        entry = {"@name": "x", "esp": {"encryption": {"member": ["aes-512-quux"]},
+                                       "authentication": {"member": ["sha384"]}},
+                 "lifetime": {"hours": "1"}}
+        self.assertEqual(self.profile(entry)["weakest_encryption_offered"], "aes-512-quux"[:16])
+        self.assertIs(self.profile(entry)["all_offered_ciphers_authenticate"], False)
+
+    def test_aead_applicability_is_over_every_cipher_and_not_any(self):
+        """The vendor states the hash is IGNORED for these ciphers, so the exclusion holds only
+        where EVERY cipher authenticates. A mixed profile needs `non-auth` for the AEAD member and
+        a SHA-2 member for the other, so `any` would excuse it."""
+        self.assertIs(self.profile(self.P10)["all_offered_ciphers_authenticate"], True)
+        self.assertIs(self.profile(self.P11)["all_offered_ciphers_authenticate"], False)
+        mixed = {"@name": "x",
+                 "esp": {"encryption": {"member": ["aes-256-gcm", "aes-128-cbc"]},
+                         "authentication": {"member": ["none"]}},
+                 "lifetime": {"hours": "1"}}
+        self.assertIs(self.profile(mixed)["all_offered_ciphers_authenticate"], False)
+
+    def test_the_sha2_floor_is_over_every_member(self):
+        self.assertIs(self.profile(self.P04)["integrity_meets_sha2_floor"], True)
+        self.assertIs(self.profile(self.P08)["integrity_meets_sha2_floor"], True)
+        self.assertIs(self.profile(self.P01)["integrity_meets_sha2_floor"], False)
+        self.assertIs(self.profile(self.P10)["integrity_meets_sha2_floor"], False)
+        mixed = {"@name": "x", "esp": {"encryption": {"member": ["aes-256-cbc"]},
+                                       "authentication": {"member": ["sha384", "sha1"]}},
+                 "lifetime": {"hours": "1"}}
+        self.assertIs(self.profile(mixed)["integrity_meets_sha2_floor"], False)
+
+    def test_no_pfs_and_an_absent_key_are_different_facts_that_both_fail(self):
+        """`no-pfs` reuses the key already agreed; an absent key re-keys on a 1024-bit group.
+        Both fail PAN-IPS-004 and the remediation differs, which is why `dh_group` keeps the
+        device's own token rather than collapsing to the verdict."""
+        self.assertEqual(self.profile(self.P01)["dh_group"], "no-pfs")
+        self.assertEqual(self.profile(self.P09)["dh_group"], "group2")
+        self.assertIs(self.profile(self.P01)["dh_group_meets_target"], False)
+
+    def test_a_post_quantum_group_and_the_literal_none_both_fail_the_target(self):
+        """Nineteen values stage 3 leaves UNRANKED reach the report through this column reading
+        false - not because a post-quantum group is weak, but because no ordering places it."""
+        for group in ("kyber-768", "none", "group15", "group2", "group1"):
+            entry = {"@name": "x", "dh-group": group, "lifetime": {"hours": "1"}}
+            self.assertIs(self.profile(entry)["dh_group_meets_target"], False, group)
+        for group in ("group19", "group20", "group21"):
+            entry = {"@name": "x", "dh-group": group, "lifetime": {"hours": "1"}}
+            self.assertIs(self.profile(entry)["dh_group_meets_target"], True, group)
+
+    def test_all_four_lifetime_unit_branches_convert_to_hours(self):
+        """ALL FOUR ARE STANDING ON THE LAB at this path, which they are not at the sibling IKE
+        path: `oep-ips6-p01` writes days, `-p03` hours, `-p05` minutes and `-p06` seconds, and
+        every one of them reads back as a BARE INTEGER STRING. The conversion is arithmetic across
+        a column chosen by WHICH CHILD EXISTS, and a threshold on the number without its unit
+        inverts the verdict."""
+        self.assertEqual(self.profile(self.P01)["lifetime_unit"], "days")
+        self.assertEqual(self.profile(self.P01)["lifetime_hours"], 720)
+        self.assertEqual(self.profile(self.P04)["lifetime_hours"], 1)
+        self.assertEqual(self.profile(self.P05)["lifetime_unit"], "minutes")
+        self.assertEqual(self.profile(self.P05)["lifetime_hours"], 4)
+        self.assertEqual(self.profile(self.P06)["lifetime_unit"], "seconds")
+        self.assertEqual(self.profile(self.P06)["lifetime_hours"], 12)
+
+    def test_a_sub_hour_lifetime_rounds_up_to_one_and_never_to_zero(self):
+        """Forced by stage 5's own declaration - `lifetime_hours` carries `minimum: 1` - so a
+        lifetime under an hour lands IN the acceptable band rather than outside every band. The
+        helper that does it is shared with the sibling IKE normaliser, and this assertion is what
+        makes a change there fail here rather than silently re-grade PAN-IPS-005."""
+        entry = {"@name": "x", "lifetime": {"seconds": "180"}}
+        self.assertEqual(self.profile(entry)["lifetime_hours"], 1)
+        self.assertIs(self.profile(entry)["lifetime_within_target"], True)
+
+    def test_the_lifetime_target_is_one_hour(self):
+        self.assertIs(self.profile(self.P04)["lifetime_within_target"], True)
+        self.assertIs(self.profile(self.P05)["lifetime_within_target"], False)
+        self.assertIs(self.profile(self.P01)["lifetime_within_target"], False)
+
+
+class IpsecBindingTests(_IpsecBase):
+    """The three cross-object columns, every one of which reaches across a name resolution."""
+
+    def test_a_resolvable_hardened_profile_is_the_only_chosen_state(self):
+        values = self.tunnel(self.T04, profiles=[self.P10])
+        self.assertEqual(values["crypto_profile_name"], "oep-ips6-p10")
+        self.assertIs(values["crypto_profile_found"], True)
+        self.assertIs(values["effective_crypto_profile_chosen"], True)
+
+    def test_a_resolvable_profile_carrying_the_shipped_content_is_not_chosen(self):
+        """THE TEST IS ON CONTENT AND NOT ON THE NAME. A renamed copy of the shipped proposal
+        passes a name test and fails this one - which is the inversion stage 3 changed the control
+        for."""
+        renamed = dict(self.SHIPPED, **{"@name": "corporate-standard"})
+        entry = dict(self.T04, **{
+            "auto-key": {"ipsec-crypto-profile": "corporate-standard"}})
+        values = self.tunnel(entry, profiles=[renamed])
+        self.assertIs(values["crypto_profile_found"], True)
+        self.assertIs(values["effective_crypto_profile_chosen"], False)
+
+    def test_the_shipped_content_is_compared_as_a_set_and_not_as_a_list(self):
+        """The device keeps its own order and `action=set` with one member APPENDS, so a
+        reordered copy of the shipped proposal is still the shipped proposal."""
+        reordered = {"@name": "default",
+                     "esp": {"encryption": {"member": ["3des", "aes-128-cbc"]},
+                             "authentication": {"member": ["sha1"]}},
+                     "dh-group": "group2", "lifetime": {"hours": "1"}}
+        entry = dict(self.T04, **{"auto-key": {"ipsec-crypto-profile": "default"}})
+        self.assertIs(
+            self.tunnel(entry, profiles=[reordered])["effective_crypto_profile_chosen"], False)
+
+    def test_a_dangling_reference_is_the_majority_state_in_this_lab(self):
+        """On both PA-5220s and on pan-fw-111 the literal `default` resolves to NOTHING, measured.
+        A null join sits on the compliant side of a plain comparison and is silently dropped,
+        which is why `crypto_profile_found` is a column rather than a join."""
+        entry = dict(self.T04, **{"auto-key": {"ipsec-crypto-profile": "oep-ips6-gone"}})
+        values = self.tunnel(entry, profiles=[self.P10])
+        self.assertIs(values["crypto_profile_found"], False)
+        self.assertIs(values["effective_crypto_profile_chosen"], False)
+
+    def test_the_monitor_action_resolves_through_the_named_profile(self):
+        self.assertEqual(
+            self.tunnel(self.T03, monitors=[self.M01, self.M02])["monitor_action_effective"],
+            "fail-over")
+        entry = dict(self.T03, **{"tunnel-monitor": dict(
+            self.T03["tunnel-monitor"], **{"tunnel-monitor-profile": "oep-ips6-m02"})})
+        self.assertEqual(
+            self.tunnel(entry, monitors=[self.M01, self.M02])["monitor_action_effective"],
+            "wait-recover")
+
+    def test_the_three_blank_states_of_the_monitor_action_are_all_blank(self):
+        """Stage 5 declares all three and says the day a clause is written here they have to be
+        told apart by a companion that fires. Named here so the claim is checked rather than
+        asserted in prose."""
+        self.assertEqual(self.tunnel(self.T02)["monitor_action_effective"], "")
+        self.assertEqual(
+            self.tunnel(self.T03, monitors=[])["monitor_action_effective"], "")
+        self.assertEqual(
+            self.tunnel(self.T01, monitors=[self.M01])["monitor_action_effective"], "")
+
+
+class IpsecBranchesTheLabCannotShowTests(_IpsecBase):
+    """Branches a readback against this estate CANNOT discriminate, each proved by mutation.
+
+    Every case below was found by damaging the real normaliser at one named point and re-running
+    the device readback: the mutation changed no stored column on any of the four appliances, so
+    the lab cannot tell the right behaviour from the wrong one and only these assertions can.
+    """
+
+    def test_the_lsvpn_satellite_reference_is_counted(self):
+        """THE MUTATION THAT PROVED THIS: pointing `SATELLITE_TUNNEL_PATH` at a collection that
+        does not exist changed NOTHING, because no appliance in this lab holds a satellite tunnel
+        entry - the container is absent on the two PA-VMs and present-and-empty on both PA-5220s.
+        Stage 4 settled by enumeration that this leaf draws from the SAME crypto-profile
+        collection, and a count over the auto-key leaf alone reports an LSVPN-only profile as
+        unused - whose remediation is to delete it."""
+        satellite = {"@name": "lsvpn-1",
+                     "client": {"ipsec-crypto-profile": "oep-ips6-p10"}}
+        counts = ipsec_norm.crypto_profile_reference_counts(
+            self.device_entry(profiles=[self.P10], tunnels=[], satellites=[satellite]))
+        self.assertEqual(counts.get("oep-ips6-p10"), 1)
+
+    def test_both_referring_leaves_add_up_on_one_profile(self):
+        counts = ipsec_norm.crypto_profile_reference_counts(self.device_entry(
+            profiles=[self.P10], tunnels=[self.T04],
+            satellites=[{"@name": "lsvpn-1",
+                         "client": {"ipsec-crypto-profile": "oep-ips6-p10"}}]))
+        self.assertEqual(counts["oep-ips6-p10"], 2)
+
+    def test_the_gateway_to_client_leaf_is_not_counted(self):
+        """The third candidate leaf draws from the GlobalProtect app crypto collection and not
+        from this one - stage 4's enumeration pointing the other way, which is what makes the
+        satellite result mean anything."""
+        entry = self.device_entry(profiles=[self.P10])
+        entry["network"]["tunnel"]["global-protect-gateway"] = {"entry": [
+            {"@name": "gw-1", "ipsec": {"ipsec-crypto-profile": "oep-ips6-p10"}}]}
+        self.assertEqual(
+            ipsec_norm.crypto_profile_reference_counts(entry).get("oep-ips6-p10", 0), 0)
+
+    def test_a_tunnel_with_no_reference_is_unchosen_even_where_default_resolves(self):
+        """THE MUTATION THAT PROVED THIS: dropping the was-the-reference-written test changed no
+        stored row, because no appliance holding a tunnel also holds a profile named `default`.
+        Stage 5 declares the no-reference state false unconditionally - a proposal nobody chose is
+        a proposal nobody owns - and on an estate that kept the factory profile the two readings
+        differ."""
+        hardened_default = dict(self.P10, **{"@name": "default"})
+        values = self.tunnel(self.T02, profiles=[hardened_default])
+        self.assertEqual(values["crypto_profile_name"], "default")
+        self.assertIs(values["crypto_profile_found"], True)
+        self.assertIs(values["effective_crypto_profile_chosen"], False)
+
+    def test_a_named_profile_storing_no_action_resolves_to_the_inferred_value(self):
+        """THE MUTATION THAT PROVED THIS: dropping the monitor profile's inferred default changed
+        no stored row, because no standing tunnel names `oep-ips6-m03` - the keyless entry.
+        Resolving such a name to blank would report a monitored tunnel as unresolvable when the
+        device would in fact wait for the dead tunnel, which is the failing answer."""
+        entry = dict(self.T03, **{"tunnel-monitor": dict(
+            self.T03["tunnel-monitor"], **{"tunnel-monitor-profile": "oep-ips6-m03"})})
+        self.assertEqual(
+            self.tunnel(entry, monitors=[self.M03])["monitor_action_effective"], "wait-recover")
+
+    def test_the_integrity_order_is_exercised_by_nothing_on_this_estate(self):
+        """THE MUTATION THAT PROVED THIS: reversing `INTEGRITY_ORDER` changed NOT ONE of the 276
+        compared values, because every one of the sixteen standing profiles offers exactly ONE
+        integrity algorithm. The ordering decides PAN-IPS-003's severity, so it is asserted here
+        rather than resting on a readback that cannot see it."""
+        entry = {"@name": "x", "esp": {"encryption": {"member": ["aes-256-cbc"]},
+                                       "authentication": {"member": [
+                                           "sha512", "sha384", "sha256", "sha1", "md5", "none"]}},
+                 "lifetime": {"hours": "1"}}
+        self.assertEqual(self.profile(entry)["weakest_integrity_offered"], "none")
+        entry["esp"]["authentication"]["member"] = ["sha512", "sha256"]
+        self.assertEqual(self.profile(entry)["weakest_integrity_offered"], "sha256")
+
+
+class IpsecContainerStateTests(_IpsecBase):
+    """ABSENT, EMPTY and POPULATED, which this estate holds all three of at once.
+
+    Measured 2026-10-29 at `action=get` and again through the whole-config merged read:
+    `ipsec-crypto-profiles` is absent on both PA-5220s and populated on both PA-VMs;
+    `tunnel/ipsec` is EMPTY on both PA-5220s, populated on pan-fw-111 and ABSENT on pan-fw-201.
+    A reader testing truthiness reports absent and empty identically.
+    """
+
+    def test_an_empty_collection_yields_no_entry_and_does_not_raise(self):
+        state, entries = entry_container(
+            self.device_entry(), "network", "ike", "crypto-profiles", "ipsec-crypto-profiles")
+        self.assertEqual(state, "empty")
+        self.assertEqual(entries, [])
+
+    def test_an_absent_collection_is_told_apart_from_an_empty_one(self):
+        entry = self.device_entry()
+        del entry["network"]["profiles"]
+        self.assertEqual(
+            entry_container(entry, "network", "profiles", "monitor-profile")[0], "absent")
+        self.assertEqual(
+            entry_container(self.device_entry(), "network", "profiles", "monitor-profile")[0],
+            "empty")
+
+    def test_a_single_entry_iterates_like_many(self):
+        """A single entry arrives as a BARE DICT and not a list of one."""
+        entry = self.device_entry(monitors=[self.M01])
+        entry["network"]["profiles"]["monitor-profile"]["entry"] = self.M01
+        _, entries = entry_container(entry, "network", "profiles", "monitor-profile")
+        self.assertEqual([e["@name"] for e in entries], ["oep-ips6-m01"])
+
+    def test_an_absent_tunnel_collection_leaves_every_profile_unreferenced(self):
+        """pan-fw-201's state. Zero is what an absent container means and not a missing read."""
+        self.assertEqual(
+            ipsec_norm.crypto_profile_reference_counts(self.device_entry(profiles=[self.P10])),
+            {})
+
+
+class IpsecNormalizationTests(TestCase):
+    """The persisted side: rows, the uniqueness constraint, and the provenance census.
+
+    The payload is the lab's, read 2026-10-29 off pan-fw-111 - the thirteen standing profiles
+    reduced to the four that carry this domain's distinct states, plus all four tunnels and all
+    three monitor profiles.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            name="probe", hostname="panorama.test")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="probe-group")
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            hostname="pan-fw-111", serial_number="6A9C0A9904E7D6E")
+        base = _IpsecBase()
+        self.device = base.device_entry(
+            profiles=[base.P01, base.P09, base.P10], tunnels=[base.T02, base.T04],
+            monitors=[base.M01, base.M03])
+        self.snapshot = Snapshot.objects.create(
+            appliance=self.appliance, source_type="show_merged_config",
+            payload={"config": {"devices": {"entry": [self.device]}}},
+            collected_at=timezone.now())
+
+    def _normalize(self):
+        return (normalize_ipsec_crypto_profiles(self.appliance),
+                normalize_ipsec_tunnels(self.appliance),
+                normalize_monitor_profiles(self.appliance))
+
+    def test_every_entry_becomes_exactly_one_row(self):
+        profiles, tunnels, monitors = self._normalize()
+        self.assertEqual([p.profile_name for p in profiles],
+                         ["oep-ips6-p01", "oep-ips6-p09", "oep-ips6-p10"])
+        self.assertEqual([t.tunnel_name for t in tunnels], ["oep-ips6-t02", "oep-ips6-t04"])
+        self.assertEqual([m.profile_name for m in monitors],
+                         ["oep-ips6-m01", "oep-ips6-m03"])
+
+    def test_the_referrer_count_comes_from_the_same_payload_as_the_profiles(self):
+        """So neither normalizer depends on the other having run and the two cannot disagree.
+        `oep-ips6-t04` names `oep-ips6-p10`; `oep-ips6-t02` names nothing and is inferred onto the
+        literal `default`, which does not exist here."""
+        profiles, _, _ = self._normalize()
+        counts = {p.profile_name: p.referencing_tunnel_count for p in profiles}
+        self.assertEqual(counts, {"oep-ips6-p01": 0, "oep-ips6-p09": 0, "oep-ips6-p10": 1})
+
+    def test_the_tunnel_resolves_its_binding_without_the_profile_rows_existing(self):
+        """Normalizing tunnels FIRST, with no profile row in the database at all."""
+        tunnels = normalize_ipsec_tunnels(self.appliance)
+        self.assertEqual(IpsecCryptoProfile.objects.count(), 0)
+        t04 = next(t for t in tunnels if t.tunnel_name == "oep-ips6-t04")
+        self.assertIs(t04.crypto_profile_found, True)
+        self.assertIs(t04.effective_crypto_profile_chosen, True)
+
+    def test_a_second_pass_replaces_rather_than_duplicates(self):
+        self._normalize()
+        self._normalize()
+        self.assertEqual(IpsecCryptoProfile.objects.filter(appliance=self.appliance).count(), 3)
+        self.assertEqual(IpsecTunnel.objects.filter(appliance=self.appliance).count(), 2)
+        self.assertEqual(MonitorProfile.objects.filter(appliance=self.appliance).count(), 2)
+
+    def test_a_second_pass_leaves_no_orphan_provenance_row(self):
+        self._normalize()
+        self._normalize()
+        for model in (IpsecCryptoProfile, IpsecTunnel, MonitorProfile):
+            content_type = ContentType.objects.get_for_model(model)
+            live = set(model.objects.values_list("pk", flat=True))
+            recorded = set(FieldProvenance.objects.filter(
+                content_type=content_type).values_list("object_id", flat=True))
+            self.assertLessEqual(recorded, live, model.__name__)
+
+    def test_an_absent_key_records_a_row_saying_what_the_absence_means(self):
+        """Skipping the absent ones is what left "PAN-OS supplied it", "we inferred it" and
+        "nobody tracks it" sharing one blank. Four of this domain's declarations are measured
+        vendor facts, three store nothing, and two are inferences the report renders as not
+        measured - and all three kinds are below."""
+        profiles, tunnels, monitors = self._normalize()
+        p09 = next(p for p in profiles if p.profile_name == "oep-ips6-p09")
+        self.assertEqual(p09.provenance_for("dh_group").provenance_type, "pan_os_default")
+        self.assertEqual(p09.provenance_for("dh_group").raw_value, "group2")
+        self.assertEqual(p09.provenance_for("esp_encryption").provenance_type, "pan_os_default")
+        t02 = next(t for t in tunnels if t.tunnel_name == "oep-ips6-t02")
+        self.assertEqual(t02.provenance_for("anti_replay").provenance_type, "not_configured")
+        self.assertEqual(
+            t02.provenance_for("crypto_profile_name").provenance_type, "assumed_default")
+        self.assertEqual(t02.provenance_for("crypto_profile_name").raw_value, "default")
+        m03 = next(m for m in monitors if m.profile_name == "oep-ips6-m03")
+        self.assertEqual(m03.provenance_for("action").provenance_type, "assumed_default")
+
+    def test_an_unmarked_entry_is_local_and_never_predefined(self):
+        """The factory-named entries are ordinary writable, deletable config - measured as
+        carrying no attribute but `@name` on all four appliances - so the PREDEFINED sentinel,
+        which asserts "shipped in the release and not editable here", must never be given. That
+        they are deletable is what makes PAN-IPS-009's remedy possible."""
+        profiles, _, _ = self._normalize()
+        for profile in profiles:
+            self.assertEqual(profile.provenance_for("__entry__").provenance_type, "local")
+
+    def test_a_template_marked_entry_records_the_template(self):
+        """NOT EXERCISED BY THIS ESTATE - zero @ptpl at all three paths on all four appliances,
+        measured twice - so the mapping is asserted here rather than by a readback."""
+        self.device["network"]["ike"]["crypto-profiles"]["ipsec-crypto-profiles"]["entry"][0][
+            "@ptpl"] = "tpl-branch"
+        self.snapshot.payload = {"config": {"devices": {"entry": [self.device]}}}
+        self.snapshot.save()
+        profiles = normalize_ipsec_crypto_profiles(self.appliance)
+        row = profiles[0].provenance_for("__entry__")
+        self.assertEqual(row.provenance_type, "template")
+        self.assertEqual(row.raw_value, "tpl-branch")
+
+    def test_the_uniqueness_constraint_is_the_two_columns_stage_5_declared(self):
+        for model, column, name in (
+                (IpsecCryptoProfile, "profile_name",
+                 "integrations_unique_ipsec_crypto_profile_per_appliance"),
+                (IpsecTunnel, "tunnel_name", "integrations_unique_ipsec_tunnel_per_appliance"),
+                (MonitorProfile, "profile_name",
+                 "integrations_unique_monitor_profile_per_appliance")):
+            constraint = next(c for c in model._meta.constraints if c.name == name)
+            self.assertEqual(list(constraint.fields), ["appliance", column], model.__name__)
+
+    def test_an_appliance_with_nothing_writes_no_row_and_raises_nothing(self):
+        """Both PA-5220s' committed state. The entry grain has NO ROW for "no IPSec crypto
+        profile is defined here", so every assertion over "every profile the firewall holds" is
+        VACUOUSLY TRUE on such an appliance - this domain's one wrong-direction limit, recorded in
+        stage 5's `not_stored` and closable only by a per-appliance coverage row."""
+        bare = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            hostname="fw-core-tpa-a", serial_number="013201001475")
+        Snapshot.objects.create(
+            appliance=bare, source_type="show_merged_config",
+            payload={"config": {"devices": {"entry": [
+                {"@name": "localhost.localdomain",
+                 "network": {"tunnel": {"ipsec": None}}}]}}},
+            collected_at=timezone.now())
+        self.assertEqual(normalize_ipsec_crypto_profiles(bare), [])
+        self.assertEqual(normalize_ipsec_tunnels(bare), [])
+        self.assertEqual(normalize_monitor_profiles(bare), [])
+
+    def test_a_missing_snapshot_raises_rather_than_writing_an_empty_estate(self):
+        bare = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            hostname="pan-fw-999", serial_number="999")
+        with self.assertRaises(ValueError):
+            normalize_ipsec_crypto_profiles(bare)
+
+    def test_an_entry_with_no_name_and_a_duplicate_name_are_both_skipped(self):
+        """Neither can satisfy the uniqueness constraint. A duplicate name is not expressible in
+        PAN-OS, so this is defensive rather than observed."""
+        entries = self.device["network"]["ike"]["crypto-profiles"]["ipsec-crypto-profiles"]["entry"]
+        entries.append({"lifetime": {"hours": "1"}})
+        entries.append({"@name": "oep-ips6-p01", "lifetime": {"hours": "2"}})
+        self.snapshot.payload = {"config": {"devices": {"entry": [self.device]}}}
+        self.snapshot.save()
+        profiles = normalize_ipsec_crypto_profiles(self.appliance)
+        self.assertEqual([p.profile_name for p in profiles],
+                         ["oep-ips6-p01", "oep-ips6-p09", "oep-ips6-p10"])
+        self.assertEqual(profiles[0].lifetime_hours, 720)
+
+
+class IpsecModelShapeTests(SimpleTestCase):
+    """What the columns are declared as, where the declaration is the load-bearing part."""
+
+    def test_the_three_models_carry_no_scope_and_no_vsys_column(self):
+        """All three collections are DEVICE-WIDE - one for the whole appliance even on the
+        multi-vsys PA-5220, measured - and stage 5 declared the identity as two columns. The
+        sibling `IkeCryptoProfile` carries both so its constraint matches
+        `ApplianceScopedObject`'s four; this domain was told two."""
+        for model in (IpsecCryptoProfile, IpsecTunnel, MonitorProfile):
+            names = {f.name for f in model._meta.get_fields()}
+            self.assertNotIn("scope", names, model.__name__)
+            self.assertNotIn("vsys_name", names, model.__name__)
+
+    def test_the_columns_a_declared_null_must_reach_the_database_as_null(self):
+        """`is_empty` compiles to a filter on the empty string and does NOT match NULL, so a
+        column stage 5 declared as storing null and one storing a blank find different rows.
+        Migration 0110 on another model is the correction that established this."""
+        for column in ("tunnel_monitor_destination_ip", "tunnel_monitor_profile_name"):
+            self.assertTrue(IpsecTunnel._meta.get_field(column).null, column)
+        for column in ("anti_replay", "tunnel_monitor_enable"):
+            self.assertTrue(IpsecTunnel._meta.get_field(column).null, column)
+        for column in ("esp_encryption", "esp_authentication", "ah_authentication"):
+            self.assertTrue(IpsecCryptoProfile._meta.get_field(column).null, column)
+
+    def test_the_columns_whose_blank_has_to_fire_are_not_nullable(self):
+        """A NEGATED equality over NULL answers NULL and SQL drops the row, so a column whose
+        clause is `is not <value>` must hold the empty string when nobody read it."""
+        for column in ("protocol_branch", "weakest_encryption_offered",
+                       "weakest_integrity_offered", "lifetime_unit"):
+            field = IpsecCryptoProfile._meta.get_field(column)
+            self.assertFalse(field.null, column)
+            self.assertEqual(field.default, "", column)
+        self.assertFalse(IpsecTunnel._meta.get_field("monitor_action_effective").null)
+
+    def test_every_verdict_defaults_to_the_side_that_reports(self):
+        """A row nobody has recomputed is reported rather than cleared, which is rules.md's
+        direction-of-error rule applied to a migration default. `is_disabled` is the one
+        exception and it is a measured vendor fact rather than a convenience."""
+        for column in ("integrity_meets_sha2_floor", "dh_group_meets_target",
+                       "lifetime_within_target", "all_offered_ciphers_authenticate"):
+            self.assertIs(IpsecCryptoProfile._meta.get_field(column).default, False, column)
+        self.assertEqual(IpsecCryptoProfile._meta.get_field("referencing_tunnel_count").default, 0)
+        for column in ("anti_replay_determined", "tunnel_monitor_enable_determined",
+                       "crypto_profile_found", "effective_crypto_profile_chosen"):
+            self.assertIs(IpsecTunnel._meta.get_field(column).default, False, column)
+        self.assertIs(IpsecTunnel._meta.get_field("is_disabled").default, False)
+
+    def test_dh_group_carries_no_choices_tuple(self):
+        """Ten values on 11.1 and twenty-nine on 11.2 - a BUILD difference, with `kyber-768` and
+        the literal `none` accepted on a PA-VM and refused on a PA-5220. A choices list would
+        either refuse a value one build stores or admit one another build refuses."""
+        self.assertFalse(IpsecCryptoProfile._meta.get_field("dh_group").choices)
+
+    def test_the_derived_fields_are_declared_and_the_measured_ones_are_not(self):
+        """A field in neither list reads as untracked; a measured field wrongly declared derived
+        would tell a reader "we computed this" about a value the firewall holds."""
+        self.assertIn("referencing_tunnel_count", IpsecCryptoProfile.DERIVED_FIELDS)
+        self.assertIn("protocol_branch", IpsecCryptoProfile.DERIVED_FIELDS)
+        self.assertNotIn("dh_group", IpsecCryptoProfile.DERIVED_FIELDS)
+        self.assertNotIn("esp_encryption", IpsecCryptoProfile.DERIVED_FIELDS)
+        self.assertIn("crypto_profile_found", IpsecTunnel.DERIVED_FIELDS)
+        self.assertNotIn("crypto_profile_name", IpsecTunnel.DERIVED_FIELDS)
+        self.assertNotIn("action", MonitorProfile.DERIVED_FIELDS)
+
+    def test_a_row_may_not_name_an_appliance_from_another_station(self):
+        other = ManagementStation(pk=99, station_type="pan_panorama", hostname="other")
+        appliance = Appliance(pk=98, management_station=other)
+        row = IpsecCryptoProfile(management_station_id=1, appliance=appliance)
         with self.assertRaises(ValidationError):
             row.clean()

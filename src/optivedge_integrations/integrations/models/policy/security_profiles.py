@@ -38,6 +38,7 @@ about the estate; a rule protected by it is.
 
 from __future__ import annotations
 
+from django.core.exceptions import ValidationError
 from django.db import models
 
 from ..collected import ApplianceGroup, EnforcementPoint, ManagementStation
@@ -90,6 +91,44 @@ class SecurityProfile(ScopedPolicyObject):
         "weakest_broken_primitive_permitted",
         "weakest_non_pfs_or_unauthenticated_permitted",
         "decryption_rulebase_collected",
+        # URL FILTERING, added for PAN-URL-001 to PAN-URL-006. Twenty-seven verdicts, counts,
+        # inventories and position facts over this row's own measured columns, the device's own
+        # category catalogue and the custom-URL-category rows. None of them has a payload key,
+        # so none can carry a provenance row.
+        #
+        # THE EIGHTEEN MEASURED URL-FILTERING COLUMNS ARE DELIBERATELY NOT HERE, for the same
+        # reason the twenty-one decryption ones are not: each has a key under the entry or
+        # under `credential-enforcement/`, each writes a `FieldProvenance` row, and for every
+        # one of them a reader is owed the difference between a value read and a value
+        # inferred - two of the three request-header booleans rest on an ASSUMED default and
+        # the report has to say so.
+        "category_catalogue_size",
+        "category_catalogue_collected",
+        "all_hostile_categories_blocked",
+        "weakest_hostile_category_action",
+        "unblocked_hostile_categories",
+        "all_reachable_categories_logged",
+        "reachable_unlogged_category_count",
+        "reachable_unlogged_categories",
+        "worst_reachable_unlogged_category",
+        "credential_submission_blocked_for_every_category",
+        "all_reachable_categories_credential_restricted",
+        "credential_permissive_category_count",
+        "credential_permissive_categories",
+        "worst_credential_permissive_category",
+        "records_all_request_headers",
+        "unrecorded_request_header_count",
+        "unrecorded_request_headers",
+        "worst_unrecorded_request_header",
+        "local_inline_categorization_on",
+        "local_inline_categorization_undetermined",
+        "any_inline_analysis_engine_on",
+        "inline_analysis_exemption_count",
+        "inline_analysis_exemptions_computed",
+        "broadest_inline_analysis_exemption_type",
+        "permitted_custom_category_count",
+        "permitted_custom_categories",
+        "weakest_permitted_custom_category_action",
     )
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
@@ -98,6 +137,7 @@ class SecurityProfile(ScopedPolicyObject):
     KIND_FILE_BLOCKING = "file-blocking"
     KIND_DATA_FILTERING = "data-filtering"
     KIND_DECRYPTION = "decryption"
+    KIND_URL_FILTERING = "url-filtering"
     KIND_CHOICES = [
         (KIND_SPYWARE, "Anti-Spyware"),
         (KIND_VULNERABILITY, "Vulnerability Protection"),
@@ -106,6 +146,7 @@ class SecurityProfile(ScopedPolicyObject):
         (KIND_FILE_BLOCKING, "File Blocking"),
         (KIND_DATA_FILTERING, "Data Filtering"),
         (KIND_DECRYPTION, "Decryption"),
+        (KIND_URL_FILTERING, "URL Filtering"),
     ]
 
     #: How far the reference walk behind `reference_reach` got. FOUR values, not a boolean,
@@ -133,6 +174,81 @@ class SecurityProfile(ScopedPolicyObject):
     #: `virus` row reads as permitting RC4 and a clause written without `kind eq decryption`
     #: fires on every antivirus profile in the estate. Nothing downstream enforces the clause.
     DECRYPTION_KINDS = (KIND_DECRYPTION,)
+    #: Which kinds answer the URL-filtering questions. The same rule as the three above, and
+    #: the same hazard as the decryption family: `local_inline_categorization_undetermined`
+    #: defaults TRUE and `category_catalogue_collected` defaults FALSE, so every spyware,
+    #: antivirus and decryption row in the estate reads as "the URL category catalogue was
+    #: never collected" - which is true of them and means nothing, because they have no
+    #: catalogue. A clause written without `kind eq url-filtering` fires on all of them.
+    URL_FILTERING_KINDS = (KIND_URL_FILTERING,)
+
+    #: The three categories PAN-URL-001 asserts must be refused outright. THE VENDOR NAMES
+    #: ELEVEN (Help p.297, URL guide p.133) and stage 3 asserts these three; widening the set
+    #: is stage 3's decision and not this model's. All three were confirmed present in the
+    #: device's own catalogue on all four lab appliances, 2026-10-29.
+    HOSTILE_URL_CATEGORIES = ("command-and-control", "malware", "phishing")
+
+    #: The six site-access actions, WEAKEST FIRST, which is the order `_weakest` wants.
+    #:
+    #: `isolate` IS PLACED HERE AND STAGE 5 DECLINED TO PLACE IT, saying only that it sits
+    #: "outside that order". It is ranked immediately above `allow` for two reasons that have
+    #: to hold together: the verdicts treat an isolated category as reachable-and-unlogged,
+    #: because the interface renders it as `allow` and no screen shows otherwise - so it must
+    #: not rank as a restriction - while remote browser isolation does something, so calling it
+    #: weaker than a bare permit would overstate. With `allow` left weakest, a profile whose
+    #: only weakness is an isolated category reports `isolate` and is distinguishable.
+    #:
+    #: `none` IS NOT HERE. The device accepts it on a custom category only and refuses it as a
+    #: member of any site-access list, which is what says `none` is the ABSENCE of membership
+    #: rather than an action.
+    URL_ACTION_WEAKEST_FIRST = ("allow", "isolate", "alert", "continue", "override", "block")
+    URL_ACTION_BLOCK = "block"
+    URL_ACTION_ALLOW = "allow"
+    URL_ACTION_ISOLATE = "isolate"
+    #: What a CUSTOM category named in no list is: inert, matching nothing. Measured - a
+    #: key-less profile renders every custom category at `none` and every predefined one at
+    #: `allow` - and it is the state a category must be put into in every profile before it can
+    #: be deleted, so a category here is mid-retirement rather than carved out.
+    URL_ACTION_NONE = "none"
+    #: The actions that leave a category REACHABLE. `none` is absent because an inert category
+    #: matches nothing, and `block` because it refuses.
+    URL_REACHABLE_ACTIONS = ("allow", "isolate", "alert", "continue", "override")
+    #: Reachable AND invisible: no log entry is written. This is the set PAN-URL-002 tests for
+    #: emptiness, and `isolate` is in it for the reason given above.
+    URL_UNLOGGED_ACTIONS = ("allow", "isolate")
+
+    #: The four credential-detection methods, as `action=complete` enumerates them identically
+    #: on all four appliances. The arms are ELEMENT PRESENCE and only `group-mapping` takes a
+    #: value; the chosen arm is a CHILD ELEMENT and a text value is refused.
+    CREDENTIAL_MODES = ("disabled", "ip-user", "group-mapping", "domain-credentials")
+    CREDENTIAL_MODE_DISABLED = "disabled"
+    #: The credential actions, weakest first. There is no `isolate` arm under
+    #: credential-enforcement and no `override`.
+    CREDENTIAL_ACTION_WEAKEST_FIRST = ("allow", "alert", "continue", "block")
+
+    #: Stage 3's own risk placement for the two "worst category" gradings, WORST FIRST. The
+    #: remaining 80-odd categories the device offers take the assertion's baseline, which this
+    #: tuple expresses by not naming them - `_weakest` returns an unplaced member as the device
+    #: gave it, and no calibration query matches it.
+    URL_CATEGORY_RISK_WORST_FIRST = (
+        "high-risk", "unknown", "medium-risk", "newly-registered-domain", "not-resolved",
+        "low-risk")
+
+    #: The three request headers, by the vendor's own label, WORST-MISSING FIRST. All three are
+    #: placed and the set is whole: the device offers these three and no more at this object on
+    #: all four appliances. The 12.2 screen replaces them with a different field set, which is
+    #: why this column's derivation is not established there.
+    REQUEST_HEADER_LABELS = (
+        ("log_http_header_xff", "X-Forwarded-For"),
+        ("log_http_header_user_agent", "User-Agent"),
+        ("log_http_header_referer", "Referer"),
+    )
+
+    #: A custom category's two stored types, BROADEST FIRST. An external dynamic list is the
+    #: third kind the vendor documents at the exemption field and the device offered no such
+    #: name at that position on any of the three builds read, so it has no placement here
+    #: rather than a guessed one.
+    URL_CATEGORY_TYPE_BROADEST_FIRST = ("Category Match", "URL List")
     #: Kinds built from an ordered rule list matching on SEVERITY, and so the only kinds for
     #: which a severity verdict means anything. Antivirus is deliberately not here: it has
     #: per-protocol decoders instead, and writes no verdict rows.
@@ -488,6 +604,284 @@ class SecurityProfile(ScopedPolicyObject):
     #: makes it possible.
     decryption_rulebase_collected = models.BooleanField(default=False)
 
+    # ----------------------------------------------------------------- URL FILTERING
+    #
+    # PAN-URL-001 to PAN-URL-006. Eighteen measured columns off `profiles/url-filtering/entry`
+    # and twenty-seven derived over them; blank/default on every other kind, which is the
+    # firing side, kept off the wrong rows by the `kind eq url-filtering` clause every query
+    # over this model carries. See URL_FILTERING_KINDS.
+    #
+    # THE SIX SITE-ACCESS LISTS ARE MUTUALLY EXCLUSIVE, measured: adding `gambling` to
+    # `continue` while it sat in `isolate` on the same entry is refused code=12 "'gambling' is
+    # already in use". So a category's action is single-valued by construction and the
+    # effective action of one name is "which of these six holds it, and the per-kind default if
+    # none does".
+    #
+    # AN EMPTY LIST AND AN ABSENT KEY ARE ONE STATE ON THE WIRE - the device drops an empty
+    # container - so `[]` versus `null` here is NOT empty-versus-absent. It is what stage 4
+    # could establish about the absence: `[]` where a positive control was paid, `null` where
+    # none was, and `Implicit.not_assumed` is what writes the second.
+    #
+    # NOTHING CLAUSES ON ANY OF THE SIX. An empty `block` list means nothing is refused and an
+    # empty `allow` list means every predefined category is permitted anyway, so both sit on
+    # the reassuring side if read directly. The verdict columns below compute the device's own
+    # catalogue MINUS these lists, and the empty list is what makes that computation fire.
+    block_categories = models.JSONField(default=list, blank=True)
+    alert_categories = models.JSONField(null=True, blank=True, default=None)
+    #: EXPLICITLY permitted, which on a PREDEFINED category never happens: `allow` is what the
+    #: device omits, so the only names that ever appear here are custom categories, whose own
+    #: default is the inert action rather than the permit.
+    allow_categories = models.JSONField(default=list, blank=True)
+    continue_categories = models.JSONField(null=True, blank=True, default=None)
+    override_categories = models.JSONField(null=True, blank=True, default=None)
+    #: 11.2 ONLY and WORSE THAN OUT OF SCOPE: the key is absent from both PA-5220s' 17-key set
+    #: and a write of it there is refused code=13. A category put here renders as `allow` in
+    #: the Site Access column on a PA-VM and no screen shows otherwise, so a reading taken from
+    #: the screen reports it as permitted-and-unlogged. The column exists so the verdicts can
+    #: tell an isolated category from a permitted one.
+    isolate_categories = models.JSONField(default=list, blank=True)
+
+    #: Which corporate-credential detection method the profile has switched on. The stored
+    #: shape is A CHOICE NODE AND NOT A STRING - `{"mode": {"group-mapping": "any"}}` on the
+    #: wire, `{"mode": {"disabled": null}}` for the empty arm - and a text value is REFUSED:
+    #: `<mode>disabled</mode>` answers code=12 "credential-enforcement -> mode is unexpected".
+    #: So the normalizer reads the single non-@ child key's NAME.
+    #:
+    #: `disabled` is the measured absent value and the FIRING side of PAN-URL-003's first half,
+    #: so materialising it is what makes a profile nobody has edited produce the finding rather
+    #: than disappear from the result set.
+    credential_detection_mode = models.CharField(max_length=32, blank=True, default="disabled")
+
+    #: THE FOUR CREDENTIAL LISTS, and an empty `credential_block_categories` DOES NOT MEAN NO
+    #: CATEGORY REFUSES CREDENTIALS. Measured on the predefined `default`, which carries no
+    #: credential-enforcement node at all and whose dialog grid reads 13 credential blocks on
+    #: pan-fw-111, 12 on pan-fw-201 and 13 on fw-core-tpa-a - each set equal to its own
+    #: site-access `block` set - while the LIST grid's credential cell reads
+    #: `Allow Categories (90)` / `Block Categories (0)` in the same minute on the same entry.
+    #: The dialog is right: the device DERIVES `block` for every category the site-access
+    #: `block` list names, without anything being written here. A query joining on membership
+    #: of these four reports every estate's credential posture as fully permissive.
+    credential_block_categories = models.JSONField(default=list, blank=True)
+    credential_alert_categories = models.JSONField(null=True, blank=True, default=None)
+    credential_allow_categories = models.JSONField(null=True, blank=True, default=None)
+    credential_continue_categories = models.JSONField(null=True, blank=True, default=None)
+
+    #: THE THREE REQUEST HEADERS. POSITIVE polarity, so false is the firing side and false is
+    #: what an absent key stores. Only `log-http-hdr-user-agent` carries a MEASURED absent
+    #: value; the other two are `Implicit.assumed` - four of the method's five points paid and
+    #: the positive control on the key itself not paid - so the sheet renders them as "assumed,
+    #: not measured" and one write per key would close it.
+    #:
+    #: WHAT `log_http_header_xff` RECORDS IS NOT ONLY ABOUT THIS OBJECT. Two device-wide
+    #: settings on Device > Setup > Content-ID - `strip-x-fwd-for` and the x-forwarded-for
+    #: parsing mode - decide whether the header reaches the firewall at all, so `true` here on
+    #: a firewall that strips it logs nothing while the column reads true.
+    log_http_header_user_agent = models.BooleanField(default=False)
+    log_http_header_referer = models.BooleanField(default=False)
+    log_http_header_xff = models.BooleanField(default=False)
+
+    #: THE VENDOR'S CLOUD-SIDE REAL-TIME PAGE ANALYSIS. SWITCHED ON IS NOT WORKING: the engine
+    #: is subscription-gated and device-certificate-gated and this column says nothing about
+    #: either. No appliance in this lab has both - `Advanced URL Filtering` is licensed on
+    #: serial 691665AC334B458 alone and that serial has NO device certificate, while serial
+    #: 6A9C0A9904E7D6E holds the lab's only device certificate, which expired on 2026/01/12,
+    #: and carries no URL filtering licence at all. A report must not read true as analysis
+    #: happening.
+    cloud_inline_categorization = models.BooleanField(default=False)
+
+    #: THE ON-BOX ENGINE, AND THE ONE KEY ON THIS OBJECT WHOSE IMPLICIT IS A RELATION RATHER
+    #: THAN A CONSTANT. Nullable and NOTHING IS MATERIALISED: on a committed key-less profile
+    #: the box renders TICKED on serials 691665AC334B458 (PA-VM 11.2.5) and 6A9C0A9904E7D6E
+    #: (PA-VM 11.2.3-h3) and UNTICKED on 013201001475 (PA-5220 11.1.13-h3), with the positive
+    #: control paid on both sides. Materialising `yes` from a PA-VM reading onto a PA-5220
+    #: would report an on-box analysis engine the device's own interface says is off.
+    #:
+    #: Null means THE KEY WAS ABSENT, which is the common case and does not mean off. Nothing
+    #: clauses on this column - `local_inline_categorization_on` and
+    #: `local_inline_categorization_undetermined` are what a query reads.
+    local_inline_categorization = models.BooleanField(null=True, blank=True, default=None)
+
+    #: Every custom URL category exempted from BOTH real-time page analysis engines. One list
+    #: serves both engines, so one entry can empty the whole assertion rather than half of it.
+    #: NEGATED KEY: its presence weakens the control and its absence satisfies it, which is why
+    #: the materialised `[]` here is the one default in this family that legitimately reassures.
+    #:
+    #: It can only name a CUSTOM category: `action=complete` at this position offers 22
+    #: candidates on all four appliances, every one @type `Panorama pushed
+    #: custom-url-category`, and not one predefined category. So a profile can only exempt URLs
+    #: somebody has gathered into a custom category.
+    inline_analysis_exemptions = models.JSONField(default=list, blank=True)
+
+    #: THE ONLY KEY ON THIS OBJECT WHOSE IMPLICIT IS `yes` ON EVERY APPLIANCE, and its security
+    #: direction is INVERTED: true means LESS is logged - one entry for the container page and
+    #: none for the resources inside it. Vendor Help p.299 documents it as default enabled and
+    #: the device agrees.
+    #:
+    #: CARRIED WITHOUT AN ASSERTION ON PURPOSE. No control in the corpus names it, so nothing
+    #: fires on it; it exists so a finding about log richness cannot say "headers are recorded"
+    #: about a profile logging one entry per page.
+    log_container_page_only = models.BooleanField(default=True)
+
+    #: ----- the derived half. See DERIVED_FIELDS: no payload key, so no provenance row.
+    #:
+    #: THE DENOMINATOR EVERY PER-CATEGORY VERDICT IS COMPUTED AGAINST, and it is not one
+    #: number: 90 on both PA-VMs and 88 on both PA-5220s, measured, with the difference
+    #: confounded between platform, major version and the url-filtering content release. It is
+    #: also a property of the PROFILE'S SCOPE and not of the appliance: a vsys-scoped
+    #: key-less profile's grid has 113 rows on serial 691665AC334B458 - 90 predefined plus the
+    #: custom categories - and a SHARED-scoped one on the same appliance in the same session
+    #: has 90 and no custom category at all.
+    #:
+    #: NULL RATHER THAN 0, and the reason is the whole point: the device reports 88 or 90, so a
+    #: stored 0 would make every verdict read "no category is unlogged" - the most permissive
+    #: profile in an estate passing every control here.
+    category_catalogue_size = models.PositiveIntegerField(null=True, blank=True, default=None)
+
+    #: THE SANCTIONED COMPANION, and the mechanism rules.md prescribes for a reading that
+    #: cannot tell ZERO from UNKNOWN. There is no is-null operator in the query language, so
+    #: "is `category_catalogue_size` unknown" cannot be asked of it directly; this inverted
+    #: boolean is that question, written at normalization time.
+    #:
+    #: FALSE means every per-category verdict on this row is resting on nothing. It is the
+    #: default, so between the migration that adds this model and the pass that issues the
+    #: catalogue read every row says so, and every assertion's undetermined query reports those
+    #: rows rather than letting them look clean.
+    category_catalogue_collected = models.BooleanField(default=False)
+
+    #: PAN-URL-001. The three confirmed-hostile categories, read as the EFFECTIVE action rather
+    #: than as membership of a list. FALSE means "not all three are refused" - the failing side
+    #: - so an uncomputed row, a row whose catalogue was never read and a row that genuinely
+    #: permits a hostile category all report alike; `category_catalogue_collected` and
+    #: `unblocked_hostile_categories` are what tell them apart on the sheet.
+    all_hostile_categories_blocked = models.BooleanField(default=False)
+    #: The weakest action any of the three holds, for the grading. NULL rather than `allow`:
+    #: `allow` is a real and critical configuration, and a column defaulting to it would make
+    #: every unrecomputed row produce a critical finding on a profile nobody has read.
+    weakest_hostile_category_action = models.CharField(
+        max_length=32, null=True, blank=True, default=None)
+    #: Which of the three are not refused, and what each one's effective action is instead -
+    #: the list an engineer reads to know which line to change. Empty is indistinguishable from
+    #: the compliant state, which is why nothing clauses on it.
+    unblocked_hostile_categories = models.JSONField(default=list, blank=True)
+
+    #: PAN-URL-002. Whether EVERY category this profile does not refuse is nonetheless held to
+    #: an action that writes a log entry. THE PROFILE'S PERMIT SET IS NOT IN THE PROFILE -
+    #: every permitted predefined category is absent from every list, because `allow` is what
+    #: the device omits - so the answer is the catalogue minus the restricting lists, which is
+    #: why this is a column and not a clause. FALSE is the failing side AND the default: a
+    #: default of true would make every unrecomputed profile report that no category is
+    #: unlogged, which is exactly the reading stage 3 inverted.
+    all_reachable_categories_logged = models.BooleanField(default=False)
+    #: The size of the finding, for the sheet and the grading. NULLABLE deliberately: a stored
+    #: 0 is the compliant reading, so `reachable_unlogged_category_count gt 0` passes a row
+    #: nobody computed - which is why PAN-URL-002 clauses on the boolean above instead.
+    reachable_unlogged_category_count = models.PositiveIntegerField(
+        null=True, blank=True, default=None)
+    reachable_unlogged_categories = models.JSONField(default=list, blank=True)
+    #: The highest-risk member, by the ranking stage 3 placed. Null matches no placement, so
+    #: the finding reports at the assertion's own baseline severity rather than at one derived
+    #: from a value nobody computed.
+    worst_reachable_unlogged_category = models.CharField(
+        max_length=64, null=True, blank=True, default=None)
+
+    #: PAN-URL-003's EXCEPTION, and the one column in this family whose direction is an
+    #: APPLICABILITY decision rather than an assertion. FALSE means the exception does not
+    #: apply and the control RUNS. A default of true would suppress PAN-URL-003's first half on
+    #: every unrecomputed profile - a clause that reads as careful and silences a control that
+    #: should fire - which is why the column is phrased as "blocked for every category" rather
+    #: than as its negation.
+    credential_submission_blocked_for_every_category = models.BooleanField(default=False)
+    #: PAN-URL-003. Whether every category the profile still lets users reach carries SOME
+    #: decision about corporate credential submission. The coupling is what makes this a
+    #: column: a category in the site-access `block` list is credential-refused without
+    #: anything being written in the credential lists at all, so no predicate can express
+    #: "this category is credential-refused because a DIFFERENT list names it".
+    all_reachable_categories_credential_restricted = models.BooleanField(default=False)
+    credential_permissive_category_count = models.PositiveIntegerField(
+        null=True, blank=True, default=None)
+    credential_permissive_categories = models.JSONField(default=list, blank=True)
+    #: A CATEGORY WHOSE SITE ACCESS IS REFUSED IS NOT IN THIS SET AT ALL - the device refuses
+    #: its credentials automatically - so its membership of the restricted set is
+    #: PAN-URL-001's outcome and not evidence about this control.
+    worst_credential_permissive_category = models.CharField(
+        max_length=64, null=True, blank=True, default=None)
+
+    #: PAN-URL-004. The conjunction over the three header booleans, promoted into a column
+    #: because the DOWNSTREAM query encodes the failing condition - "any of the three is not
+    #: yes" - which is a disjunction stage 5's clause grammar has no way to write.
+    #:
+    #: All three sources materialise false on an absent key, so a correctly-computed row and an
+    #: uncomputed row agree here, and both report. TWO OF THE THREE REST ON AN ASSUMED DEFAULT,
+    #: so this finding is partly resting on an inference - which the sheet shows on those two
+    #: fields and which one write per key would close.
+    records_all_request_headers = models.BooleanField(default=False)
+    #: NOT NULLABLE, unlike the catalogue-derived counts, because its three inputs are never
+    #: null. So the only unknown it can hold is "not yet recomputed" - and 0 is the compliant
+    #: reading AND the migration default, which is why nothing clauses on it.
+    unrecorded_request_header_count = models.PositiveIntegerField(default=0)
+    unrecorded_request_headers = models.JSONField(default=list, blank=True)
+    #: Which missing header costs an investigator most: the forwarded-for address first,
+    #: because it is the only one of the three that recovers the originating address where a
+    #: proxy or source translation has replaced it. EMPTY means no header is missing OR the row
+    #: was not recomputed; neither matches a placement, so the baseline severity stands.
+    worst_unrecorded_request_header = models.CharField(max_length=32, blank=True, default="")
+
+    #: PAN-URL-005. Whether the CONFIGURATION SAYS the on-box engine is on - true only where
+    #: the key is present and `yes`. FALSE BY DEFAULT, AND ON BOTH PA-VMs AN ABSENT KEY MEANS
+    #: THE ENGINE IS ON, so this default produces a FALSE POSITIVE on exactly those rows. That
+    #: is declared rather than hidden and it is the direction rules.md chooses: a finding
+    #: raised on a healthy appliance is checkable in a minute, where a missing reading reported
+    #: as compliant is a customer told they are safe on the strength of nothing. The companion
+    #: below is true on precisely the rows where the finding may be wrong.
+    local_inline_categorization_on = models.BooleanField(default=False)
+    #: TRUE BY DEFAULT, which is the entire purpose: before the first normalization pass every
+    #: row's on-box engine state is undetermined and saying so is what the column is for. A
+    #: default of false would claim the key was read.
+    #:
+    #: WHAT NO COLUMN CAN HOLD is the relation itself - that an absent key means `yes` on a
+    #: PA-VM and `no` on a PA-5220, with platform, major version, vsys mode and content release
+    #: moving together so the estate cannot take the bundle apart.
+    local_inline_categorization_undetermined = models.BooleanField(default=True)
+    #: The disjunction over the two engines, carried for the sheet and DELIBERATELY NOT CLAUSED
+    #: ON AS AN APPLICABILITY TEST: an applicability clause on a column whose unknown state is
+    #: false would silence the exemption control on every profile whose engine state nobody
+    #: established. It is here so a reader can see why that gating was declined.
+    any_inline_analysis_engine_on = models.BooleanField(default=False)
+
+    #: PAN-URL-005's third record. THE ONE CLAUSE COLUMN IN THIS FAMILY THAT READS AS COMPLIANT
+    #: WHEN NOBODY LOOKED, and it is still the right column to clause on: the assertion is that
+    #: an exemption EXISTS and is broad, so the finding must fire on a positive count, and
+    #: there is no boolean form of it that fires on the unknown side without also firing on
+    #: every profile that correctly exempts nothing - which is most of the estate. The unknown
+    #: is carried by `inline_analysis_exemptions_computed`, which defaults to FALSE and fires.
+    inline_analysis_exemption_count = models.PositiveIntegerField(default=0)
+    #: FALSE means the count beside it is a migration default and not a reading.
+    inline_analysis_exemptions_computed = models.BooleanField(default=False)
+    #: The broadest exempted category's stored type, RESOLVED THROUGH THE REFERENCE - a
+    #: multi-category target is broader than a list of named sites, because its reach follows
+    #: the database rather than a list somebody wrote. A query cannot follow a reference, so
+    #: the reach across to `CustomUrlCategory.category_type` is a derived column or it is
+    #: nothing. Null also means the TARGET row is missing, which on an estate whose custom
+    #: categories all arrive through the pushed read is what an uninstrumented collector gets.
+    broadest_inline_analysis_exemption_type = models.CharField(
+        max_length=32, null=True, blank=True, default=None)
+
+    #: PAN-URL-006's second record. How many custom URL categories this profile PERMITS - a
+    #: live carve-out in force, as distinct from a category left at the inert action. A custom
+    #: category's own default IS the inert action and not the permit, which is the opposite of
+    #: a predefined category and is what makes this readable from the configuration at all.
+    #:
+    #: 0 IS BOTH THE COMPLIANT READING AND THE MIGRATION DEFAULT. The companion is
+    #: `category_catalogue_collected`, which is false on exactly the rows whose custom
+    #: categories were never collected.
+    permitted_custom_category_count = models.PositiveIntegerField(default=0)
+    permitted_custom_categories = models.JSONField(default=list, blank=True)
+    #: The weakest action any permitted custom category holds. See the normalizer: the declared
+    #: value set admits the inert action as well as the permit, and the declared derivation -
+    #: over the `allow` list alone - cannot produce it.
+    weakest_permitted_custom_category_action = models.CharField(
+        max_length=32, null=True, blank=True, default=None)
+
     raw_profile = models.JSONField(default=dict, blank=True)
 
     class Meta:
@@ -507,6 +901,50 @@ class SecurityProfile(ScopedPolicyObject):
                 name="integrations_unique_security_profile_per_group_namespace",
             ),
         ]
+
+    def clean(self) -> None:
+        """The scoped-object checks, plus the URL-filtering count/list agreement.
+
+        CLAUDE.md: "A column derived from a JSON field gets a `clean()` asserting the two
+        agree." Gated on the kind, because every other kind keeps the defaults - a 0 count
+        beside an empty list, which agrees trivially - and because the counts mean nothing on
+        a row that has no URL category catalogue.
+
+        The nullable counts are checked only when they hold a number: null is "nobody
+        computed this", which has no list to disagree with.
+        """
+        super().clean()
+        if self.kind != self.KIND_URL_FILTERING:
+            return
+        pairs = [
+            ("unrecorded_request_header_count", self.unrecorded_request_header_count,
+             "unrecorded_request_headers", self.unrecorded_request_headers),
+            ("reachable_unlogged_category_count", self.reachable_unlogged_category_count,
+             "reachable_unlogged_categories", self.reachable_unlogged_categories),
+            ("credential_permissive_category_count", self.credential_permissive_category_count,
+             "credential_permissive_categories", self.credential_permissive_categories),
+        ]
+        if self.inline_analysis_exemptions_computed:
+            pairs.append(
+                ("inline_analysis_exemption_count", self.inline_analysis_exemption_count,
+                 "inline_analysis_exemptions", self.inline_analysis_exemptions))
+        for count_name, count, list_name, values in pairs:
+            if count is None:
+                continue
+            if count != len(values or []):
+                raise ValidationError(
+                    f"{count_name}={count} disagrees with {list_name}, which holds "
+                    f"{len(values or [])}")
+        # THE CARVE-OUT PAIR IS CHECKED AGAINST THE PERMITS IN THE LIST AND NOT AGAINST ITS
+        # LENGTH, because the list is the inventory stage 3 asks for and the count is declared
+        # over the `allow` list alone. See the normalizer.
+        permits = [c for c in (self.permitted_custom_categories or [])
+                   if (c or {}).get("action") == self.URL_ACTION_ALLOW]
+        if self.permitted_custom_category_count != len(permits):
+            raise ValidationError(
+                f"permitted_custom_category_count={self.permitted_custom_category_count} "
+                f"disagrees with the {len(permits)} permitted entries in "
+                f"permitted_custom_categories")
 
     @property
     def disabled_ml_models(self) -> list[str]:
