@@ -269,6 +269,65 @@ def profile_rules(entry: dict[str, Any]) -> list[dict[str, Any]]:
             if isinstance(r, dict)]
 
 
+def _severity_sides(kind: str) -> tuple:
+    """The host sides a severity has to be judged on separately, for this kind.
+
+    Vulnerability rules match on host and anti-spyware rules do not, so one kind is judged twice
+    and the other once. Extracted so the verdict and the weakest-action axis beside it cannot
+    walk different sides - which would let a profile fail on the server side and be graded by
+    the client side's action.
+    """
+    return ("client", "server") if kind == SecurityProfile.KIND_VULNERABILITY else (None,)
+
+
+def _severity_matching(kind: str, rules: list[dict[str, Any]], severity: str,
+                       side: str | None) -> list[dict[str, Any]]:
+    """The rules that can match this severity on this host side.
+
+    `any` at the severity member position is the device's own schema default, help-string `All
+    severities`, so a rule naming it matches every band; the same reading for `host`, where an
+    absent key and the literal `any` are one state.
+
+    ONE READER FOR THE TWO CALLERS - `severity_verdict` and `severity_weakest_action`. They were
+    one loop and a copy until 2026-10-30, and the copy is the shape this repo has paid for six
+    times over in flatteners.
+    """
+    matching = []
+    for rule in rules:
+        severities = _members(rule.get("severity"))
+        if severity not in severities and "any" not in severities:
+            continue
+        if side is not None and (_text(rule.get("host")) or "any") not in ("any", side):
+            continue
+        matching.append(rule)
+    return matching
+
+
+def severity_weakest_action(kind: str, rules: list[dict[str, Any]], severity: str) -> str:
+    """The WEAKEST action any rule covering this band takes, on either host side, or "".
+
+    PAN-VLN-001's grading axis as a VALUE, where `severity_verdict` beside it answers only
+    whether. Same rule list, same sides, same `is_catch_all` reading of what COVERS a band - so
+    the two cannot disagree about which rules were looked at.
+
+    THE EMPTY STRING MEANS NO RULE COVERS THE BAND and is not an action value - stage 3 is
+    explicit that this is a different failure from a weak action. A side with no catch-all rule
+    contributes it, and it sorts weakest over any action, so one uncovered side decides.
+
+    EVERY MATCHING RULE IS READ AND NOT ONLY THE CATCH-ALL ONE. A narrow rule can only open a
+    hole - it is why `severity_verdict` fails the band when any matching rule is non-blocking -
+    so the weakest action on offer is the weakest of all of them.
+    """
+    found: list[str] = []
+    for side in _severity_sides(kind):
+        matching = _severity_matching(kind, rules, severity, side)
+        if not any(is_catch_all(kind, r) for r in matching):
+            found.append("")
+            continue
+        found.extend(rule_action(r) for r in matching)
+    return SecurityProfileSeverityVerdict.weakest_of(found)
+
+
 def severity_verdict(kind: str, rules: list[dict[str, Any]], severity: str) -> tuple[bool, str]:
     """(blocked, detail) for one severity, ORDER-INDEPENDENT - see the model's docstring.
 
@@ -276,18 +335,11 @@ def severity_verdict(kind: str, rules: list[dict[str, Any]], severity: str) -> t
     and the server side and must pass on both: a catch-all rule for `host client` leaves every
     server-side exploit of that severity unmatched.
     """
-    sides = ("client", "server") if kind == SecurityProfile.KIND_VULNERABILITY else (None,)
+    sides = _severity_sides(kind)
     reasons: dict[Any, str | None] = {}
     actions: list[str] = []
     for side in sides:
-        matching = []
-        for rule in rules:
-            severities = _members(rule.get("severity"))
-            if severity not in severities and "any" not in severities:
-                continue
-            if side is not None and (_text(rule.get("host")) or "any") not in ("any", side):
-                continue
-            matching.append(rule)
+        matching = _severity_matching(kind, rules, severity, side)
         if not any(is_catch_all(kind, r) for r in matching):
             reasons[side] = "no catch-all rule"
             continue
@@ -1081,6 +1133,23 @@ class NormalizedSecurityProfile:
     #: computed in the persist loop from this dict and a `UrlFilteringContext` - the same place
     #: and for the same reason as the antivirus aggregates over the satellite rows.
     url_filtering: dict[str, Any] = field(default_factory=dict)
+    #: VULNERABILITY ONLY: the profile's own `cloud-inline-analysis` reading. THE SAME KEY
+    #: `cloud_inline_analysis` above reads, held in a second field because that one is gated to
+    #: the SPYWARE kind and stores a hardcoded False everywhere else - see the two columns'
+    #: comments on the model, where the hazard is written down. False where the key is absent,
+    #: which on this kind is an INFERENCE and not a measurement.
+    #:
+    #: Defaulted for the same reason `decryption` is: this dataclass has no field defaults, so an
+    #: undefaulted field is a required positional argument at every construction site including
+    #: the fixture builder the reference tests share.
+    inline_cloud_analysis_enabled: bool = False
+    #: VULNERABILITY ONLY: the widest exemption shape, "" for none. See
+    #: `widest_exemption_surface()`, and the model column for why a shape and not a count.
+    widest_exemption_surface: str = ""
+    #: BOTH THREAT-RULE KINDS: {severity: weakest action any covering rule takes}, "" where no
+    #: rule covers the band. Written beside `verdicts`, from the same rule list and the same host
+    #: sides, so the verdict and its grading axis cannot be computed off different readings.
+    severity_weakest_actions: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_predefined(self) -> bool:
@@ -1281,6 +1350,26 @@ CLOUD_INLINE_ANALYSIS_ABSENT = Implicit.measured(
     "where the key is absent on the keyless standing profile and on BOTH predefined profiles. "
     "stage4-anti-spyware.json anti-spyware-profile.fields['cloud-inline-analysis'].implicit")
 
+#: WHAT AN ABSENT `cloud-inline-analysis` KEY MEANS ON A VULNERABILITY PROFILE, and it is an
+#: INFERENCE rather than the measurement above. `Implicit.assumed`, so the provenance row records
+#: `assumed_default` and never `pan_os_default`: presenting this as a vendor default would be a
+#: fabricated fact about a customer's firewall.
+#:
+#: The spyware reading is of a DIFFERENT KIND'S ENTRY and is deliberately not borrowed, which is
+#: what stage4-vulnerability-protection.json decided when it recorded `unmeasured` with
+#: `consumer_disposition: assumed` and `may_materialise: false` for this key.
+VULNERABILITY_CLOUD_INLINE_ABSENT = Implicit.assumed(
+    False,
+    "three readings agree and none of them is behavioural: the Inline Cloud Analysis tab's "
+    "`Enable cloud inline analysis` box renders UNTICKED on a committed vulnerability profile "
+    "storing no such key (DOM and screenshot), all nine pre-existing lab profiles omit the key "
+    "with two of them carrying detector entries at reset-both, and the vendor describes the "
+    "control as an Enable checkbox. WHAT WAS NOT PAID IS THE POSITIVE CONTROL on this kind: "
+    "nothing was written to `yes` and re-read, so `renders the implicit value` cannot be told "
+    "apart from `renders an unticked box for this field whatever the config says`. "
+    "stage4-vulnerability-protection.json vulnerability-protection-profile."
+    "fields['cloud-inline-analysis'].implicit, status unmeasured")
+
 
 INLINE_DETECTOR_NODE = {
     SecurityProfile.KIND_SPYWARE: "mica-engine-spyware-enabled",
@@ -1322,6 +1411,50 @@ def exception_surfaces(entry: dict[str, Any]) -> dict[str, int]:
     for key in ("inline-exception-ip-address", "inline-exception-edl-url"):
         counts[key] = len([m for m in _members(entry.get(key)) if m])
     return {surface: n for surface, n in counts.items() if n}
+
+
+#: The two surfaces of `exception_surfaces` that lift every detector on the profile for a whole
+#: POPULATION. Named here rather than re-spelled inside the classification, because they are the
+#: same two keys that function counts and a third spelling could drift from both.
+INLINE_EXEMPTION_SURFACES = ("inline-exception-ip-address", "inline-exception-edl-url")
+
+
+def widest_exemption_surface(surfaces: dict[str, int],
+                             exceptions: list[tuple[str, str, int]]) -> str:
+    """The WIDEST exemption shape this profile carries, or "" for none. PAN-VLN-004's grading.
+
+    A SHAPE AND NOT A COUNT. One exemption nobody can justify is the finding and twenty
+    documented ones are not worse in any way the configuration can show, so the severity turns
+    on how wide the widest one is. The count is `threat_exception_count` and the map is
+    `exception_surfaces`; this is the only stored place the WIDTH is a value.
+
+    Taken from the two readings the profile already has rather than from the entry again, so it
+    cannot disagree with the count beside it: `surfaces` is `exception_surfaces()`'s output and
+    `exceptions` is `profile_threat_exceptions()`'s.
+
+    THE WIDTH ORDER, widest last, is `SecurityProfile.EXEMPTION_WIDTH_ORDER`:
+
+        ""                           no exemption on any surface - the PASSING state
+        signature-scoped             a per-signature exception narrowed to named addresses
+        signature-unscoped           a per-signature exception with NO address scope
+        inline-analysis-population   an entry on either real-time-analysis exclusion list
+
+    AN EXEMPTION IS WIDEST WHEN ITS `exempt-ip` IS ABSENT, measured - so the shape turns on an
+    absence, and zero entries under the node is the same state as no node at all, which is why
+    `profile_threat_exceptions` counts entries rather than testing presence.
+
+    THE INLINE SURFACES OUTRANK AN UNSCOPED SIGNATURE EXCEPTION because they take a REFERENCE to
+    an external dynamic list or an address group and refuse a literal: one entry can be any
+    number of hosts and nothing in the configuration says how many, while an unscoped signature
+    exception at least names the one signature it hands back.
+    """
+    if any(surfaces.get(key) for key in INLINE_EXEMPTION_SURFACES):
+        return SecurityProfile.EXEMPTION_INLINE_POPULATION
+    if not exceptions:
+        return SecurityProfile.EXEMPTION_NONE
+    if any(count == 0 for _threat_id, _action, count in exceptions):
+        return SecurityProfile.EXEMPTION_SIGNATURE_UNSCOPED
+    return SecurityProfile.EXEMPTION_SIGNATURE_SCOPED
 
 
 def profile_inline_detectors(kind: str, entry: dict[str, Any]) -> dict[str, str]:
@@ -1690,6 +1823,13 @@ def normalize_security_profile(
                   if kind in SecurityProfile.THREAT_RULE_KINDS else [])
     cloud_inline, cloud_inline_rk, cloud_inline_rv = parse_yes_no_field(
         entry.get("cloud-inline-analysis"), implicit=CLOUD_INLINE_ANALYSIS_ABSENT)
+    # THE SAME KEY, PARSED A SECOND TIME WITH A DIFFERENT DECLARATION OF WHAT AN ABSENCE MEANS.
+    # Not a duplicate reading: the implicit above is MEASURED on an anti-spyware entry and the
+    # one below is an INFERENCE on a vulnerability entry, so the two write different provenance
+    # types for the same absent key, and `parse_yes_no_field` returns the declaration itself as
+    # the provenance row's reason. One call with one implicit could only be honest about one kind.
+    vln_cloud_inline, vln_cloud_rk, vln_cloud_rv = parse_yes_no_field(
+        entry.get("cloud-inline-analysis"), implicit=VULNERABILITY_CLOUD_INLINE_ABSENT)
     # DECRYPTION ONLY. Twenty-one measured columns and five verdicts over them, all from this
     # entry; the four rule-facing columns need the rulebase and are applied at persist time.
     # Computed HERE rather than in the persist loop, unlike the antivirus aggregates, because
@@ -1745,9 +1885,26 @@ def normalize_security_profile(
         # them - which is the firing side, kept off the wrong rows by the `kind` clause every
         # query over this model carries.
         cloud_inline_analysis=(cloud_inline if kind == SecurityProfile.KIND_SPYWARE else False),
+        # VULNERABILITY ONLY, the mirror image of the line above and over the SAME DEVICE KEY.
+        # Two columns over one node, recorded as a hazard on the model rather than merged here:
+        # merging means widening a column another domain measured and tested for its own kind.
+        inline_cloud_analysis_enabled=(
+            vln_cloud_inline if kind == SecurityProfile.KIND_VULNERABILITY else False),
+        # VULNERABILITY ONLY. The three shapes it ranks are that kind's three surfaces; an
+        # anti-spyware profile has five, two of them in the botnet tree, and no member of this
+        # vocabulary describes those - so the blank the model defaults to stands there, which the
+        # `kind` clause keeps off the wrong rows.
+        widest_exemption_surface=(widest_exemption_surface(surfaces, exceptions)
+                                  if kind == SecurityProfile.KIND_VULNERABILITY else ""),
         verdicts=({severity: severity_verdict(kind, rules, severity)
                    for severity in ASSESSED_SEVERITIES}
                   if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
+        # BESIDE `verdicts` AND FROM THE SAME RULE LIST, for both threat-rule kinds: a blank here
+        # states "no rule covers the band", which would be false of a spyware row where one does.
+        # Only the vulnerability domain asserts it, and the computation is kind-generic.
+        severity_weakest_actions=({severity: severity_weakest_action(kind, rules, severity)
+                                   for severity in ASSESSED_SEVERITIES}
+                                  if kind in SecurityProfile.THREAT_RULE_KINDS else {}),
         # VULNERABILITY ONLY, because `brute-force` is a member of the vulnerability rule's
         # category set and PAN-VLN-002 is the only control asking. A kind that does not answer
         # writes no row, the same rule as the severity verdict - so an antivirus profile is
@@ -1785,7 +1942,12 @@ def normalize_security_profile(
             ("__entry__", entry_rk, entry_rv),
             ("description", description_rk, description_rv),
         ] + ([("cloud_inline_analysis", cloud_inline_rk, cloud_inline_rv)]
-             if kind == SecurityProfile.KIND_SPYWARE else []) + decryption_provenance
+             if kind == SecurityProfile.KIND_SPYWARE else [])
+        # THE VULNERABILITY HALF OF THE SAME KEY, and the provenance row is the whole point of
+        # storing it: on this kind an absent key writes `assumed_default`, so a reader is told
+        # the difference between the value the device holds and the one this project infers.
+        + ([("inline_cloud_analysis_enabled", vln_cloud_rk, vln_cloud_rv)]
+           if kind == SecurityProfile.KIND_VULNERABILITY else []) + decryption_provenance
         + url_filtering_provenance,
     )
 
@@ -2410,6 +2572,8 @@ def replace_security_profiles(
             dns_sinkhole_ipv4=normalized.dns_sinkhole_ipv4,
             dns_sinkhole_ipv6=normalized.dns_sinkhole_ipv6,
             cloud_inline_analysis=normalized.cloud_inline_analysis,
+            inline_cloud_analysis_enabled=normalized.inline_cloud_analysis_enabled,
+            widest_exemption_surface=normalized.widest_exemption_surface,
             **reference_columns,
             has_rules=normalized.has_rules,
             # DEFAULTED where the caller passed no reach: `undetermined` and False, which are
@@ -2526,7 +2690,12 @@ def replace_security_profiles(
         ])
         SecurityProfileSeverityVerdict.objects.bulk_create([
             SecurityProfileSeverityVerdict(
-                security_profile=row, severity=severity, blocked=blocked, detail=detail)
+                security_profile=row, severity=severity, blocked=blocked, detail=detail,
+                # THE GRADING AXIS BESIDE THE VERDICT, from the same walk - see
+                # `severity_weakest_actions`. `.get` and not `[severity]` so a caller that built
+                # a NormalizedSecurityProfile without it writes a blank rather than raising:
+                # blank is "no rule covers the band", which is the firing side of its own axis.
+                weakest_action=normalized.severity_weakest_actions.get(severity, ""))
             for severity, (blocked, detail) in verdict.items()
         ])
         SecurityProfileDnsSignatureSource.objects.bulk_create([
@@ -3055,6 +3224,22 @@ def _inline_verdict_for_rule(profile) -> tuple[bool, str]:
     return False, f"inline detectors not blocking: {', '.join(not_blocking)}"
 
 
+def _inline_switch_verdict_for_rule(profile) -> tuple[bool, str]:
+    """PAN-VLN-003's FIRST HALF, per rule: is the real-time analysis switched on at all?
+
+    SEPARATE FROM `_inline_verdict_for_rule` AND NOT A STRICTER VERSION OF IT. That one reads the
+    per-detector actions under `mica-engine-vulnerability-enabled`; this reads the profile's own
+    `cloud-inline-analysis` switch, which is what decides whether those actions are in effect or
+    merely stored. A profile with every detector at reset-both and the switch off satisfies the
+    detector assertion and inspects nothing in real time, which is why stage 3 splits the control
+    in two and why this is a twelfth assertion rather than a condition folded into the eleventh.
+    """
+    if profile.inline_cloud_analysis_enabled:
+        return True, ""
+    return False, ("the profile-wide real-time cloud analysis switch is off, so the per-detector "
+                   "actions are stored and not in effect")
+
+
 def _dns_sinkhole_verdict_for_rule(profile) -> tuple[bool, str]:
     """PAN-SPY-002, per rule."""
     if profile.dns_sinkholes_malicious_queries:
@@ -3120,6 +3305,8 @@ RULE_PROFILE_ASSERTIONS = {
     _V.VULNERABILITY_INLINE: (SecurityProfile.KIND_VULNERABILITY, _inline_verdict_for_rule),
     _V.VULNERABILITY_EXCEPTIONS: (
         SecurityProfile.KIND_VULNERABILITY, _exceptions_verdict_for_rule),
+    _V.VULNERABILITY_INLINE_ENABLED: (
+        SecurityProfile.KIND_VULNERABILITY, _inline_switch_verdict_for_rule),
 }
 
 
@@ -3134,26 +3321,63 @@ RULE_PROFILE_GRADINGS = {
     _V.SPYWARE_SEVERITIES: lambda profile: profile.worst_unstopped_severity,
     _V.SPYWARE_DNS_SINKHOLE: lambda profile: profile.dns_content_list_action,
     _V.SPYWARE_INLINE: lambda profile: profile.worst_inline_detector_action,
+    # THE THREE VULNERABILITY AXES stage 3 grades PAN-VLN-001, -003 and -004 on. Each reads a
+    # property or column the profile already holds - the per-band verdicts' own weakest action,
+    # the engine rows, and the exemption classification - so none of them costs a read, a column
+    # on the rule, or a second walk.
+    #
+    # THE SEVERITY AXIS IS AN ACTION AND THE SPYWARE ONE IS A BAND, over the same satellite and
+    # the same control shape. Not a mistake in either: PAN-SPY-001 grades on WHICH BAND is left
+    # un-stopped and PAN-VLN-001 on WHAT THE PROFILE DOES about critical and high, and the two
+    # stage 3 records say so in those words.
+    _V.VULNERABILITY_SEVERITIES: lambda profile: profile.weakest_assessed_severity_action,
+    _V.VULNERABILITY_INLINE: lambda profile: profile.worst_inline_detector_action,
+    _V.VULNERABILITY_EXCEPTIONS: lambda profile: profile.widest_exemption_surface,
 }
 
 
-def spyware_profile_is_resolved(rule, groups_by_name, profiles_by_kind_and_name) -> bool:
-    """Did this rule's anti-spyware binding resolve to a definition the store holds?
+def profile_is_resolved(rule, groups_by_name, profiles_by_kind_and_name, kind: str) -> bool:
+    """Did this rule's binding of one profile KIND resolve to a definition the store holds?
 
-    THE THIRD ATTACHMENT STATE - see `SecurityRule.spyware_profile_resolved`. A rule binding a
-    name through a group whose `spyware` key names a profile that does not exist in scope answers
-    False here and True on `has_spyware_profile`, and the two together are what separate "repair
-    the profile" from "attach one".
+    THE THIRD ATTACHMENT STATE - see `SecurityRule.spyware_profile_resolved`, whose comment is
+    the argument. A rule binding a name through a group whose key for this kind names a profile
+    that does not exist in scope answers False here and True on `has_<kind>_profile`, and the two
+    together are what separate "repair the profile" from "attach one".
 
     Resolution is by name AND scope, exactly as the verdict pass resolves it, so this cannot
     disagree with the verdict rows written beside it.
+
+    KIND-PARAMETERISED SINCE 2026-10-30, when the vulnerability domain needed the same question.
+    It was spyware-only and a copy for the second kind would have been a second resolution free
+    to drift from the first - which is the whole hazard this column exists to close.
     """
-    name = profile_names_in_force(rule, groups_by_name).get(SecurityProfile.KIND_SPYWARE)
+    name = profile_names_in_force(rule, groups_by_name).get(kind)
     if not name:
         return False
     return effective_in_scope_order(
-        name, profiles_by_kind_and_name.get(SecurityProfile.KIND_SPYWARE, {}),
-        "spyware profile") is not None
+        name, profiles_by_kind_and_name.get(kind, {}), f"{kind} profile") is not None
+
+
+def spyware_profile_is_resolved(rule, groups_by_name, profiles_by_kind_and_name) -> bool:
+    """The anti-spyware case of `profile_is_resolved`. PAN-SPY-001 to -005.
+
+    Kept as its own name because the suite and the coverage pass already call it; the body moved
+    to the generic above rather than being duplicated for the vulnerability kind.
+    """
+    return profile_is_resolved(rule, groups_by_name, profiles_by_kind_and_name,
+                               SecurityProfile.KIND_SPYWARE)
+
+
+def vulnerability_profile_is_resolved(rule, groups_by_name, profiles_by_kind_and_name) -> bool:
+    """The vulnerability case of `profile_is_resolved`. PAN-VLN-004's applicability test.
+
+    THE POLARITY OF ITS USE IS THE OPPOSITE OF THE SPYWARE COLUMN'S and the difference matters:
+    PAN-VLN-004 clauses `equals true`, so a False here EXCLUDES the rule from that control rather
+    than reporting it. What keeps that safe is `SecurityRule.vulnerability_verdict_written`, which
+    carries no applicability clause - see both columns' comments.
+    """
+    return profile_is_resolved(rule, groups_by_name, profiles_by_kind_and_name,
+                               SecurityProfile.KIND_VULNERABILITY)
 
 
 def rule_profile_verdicts(rule, groups_by_name, profiles_by_kind_and_name) -> list[tuple]:
@@ -3245,6 +3469,7 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
     counts["wildfire_analysis_gap"] = 0
     counts["profile_verdict_failures"] = 0
     counts["spyware_profile_unresolved"] = 0
+    counts["vulnerability_profile_unresolved"] = 0
     counts["threat_profile_kinds_missing"] = 0
     verdict_rows: list[SecurityRuleProfileVerdict] = []
     # `securityrulecategorys` is prefetched for `url_inspection_posture`: without it the posture
@@ -3282,6 +3507,21 @@ def normalize_security_rule_profile_coverage(enforcement_point: EnforcementPoint
             changed.append("spyware_profile_resolved")
         if not resolved_spyware:
             counts["spyware_profile_unresolved"] += 1
+        resolved_vulnerability = vulnerability_profile_is_resolved(
+            rule, groups_by_name, profiles_by_kind_and_name)
+        if rule.vulnerability_profile_resolved != resolved_vulnerability:
+            rule.vulnerability_profile_resolved = resolved_vulnerability
+            changed.append("vulnerability_profile_resolved")
+        if not resolved_vulnerability:
+            counts["vulnerability_profile_unresolved"] += 1
+        # SET UNCONDITIONALLY TRUE FOR EVERY RULE THIS PASS REACHES, because the verdict rows are
+        # written below for every assertion including the no-profile case. It is not "a profile
+        # resolved" and not "the verdict passed" - it is "somebody looked", and the only thing it
+        # can be False on is a rule the pass has never run over: one collected before the column
+        # existed, or a refresh that failed between rule normalization and this pass.
+        if not rule.vulnerability_verdict_written:
+            rule.vulnerability_verdict_written = True
+            changed.append("vulnerability_verdict_written")
         submits_all, detail = wildfire_analysis_verdict(
             rule, groups_by_name, profiles_by_name)
         if submits_all is not True:

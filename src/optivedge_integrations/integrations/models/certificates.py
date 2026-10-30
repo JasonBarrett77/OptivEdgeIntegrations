@@ -218,6 +218,8 @@ class SslTlsServiceProfile(ApplianceScopedObject):
         "explicit_algorithms",
         "protocol_algorithms",
         "min_version_rank",
+        # Added by the `globalprotect-gateway` domain for PAN-GPG-001.
+        "has_explicit_protocol_settings",
     )
 
     #: The ORDER of the four version tokens the device offers, measured identical on all four
@@ -268,6 +270,27 @@ class SslTlsServiceProfile(ApplianceScopedObject):
     #: pan-fw-111's writes all of them as `yes`, and the two are identical once expanded.
     #: An engineer remediating them does different work in each case.
     explicit_algorithms = models.JSONField(default=list, blank=True)
+
+    #: Whether this profile states a protocol RANGE of its own at all - true where a
+    #: `protocol-settings` node is present carrying at least one version bound, false where the
+    #: profile leaves the range to whatever the platform asserts.
+    #:
+    #: PAN-GPG-001's input, and the question it answers is not the one `min_version` answers. An
+    #: ABSENT FLOOR IS NOT A LOW FLOOR: an absent `protocol-settings` node asserts a TLS 1.2 floor
+    #: on a profile that exists, measured with a positive control in both directions - so a
+    #: gateway binding such a profile is not insecure, it is UNDECIDED, and the gateway's own
+    #: verdict column needs to tell "somebody chose a floor" from "nobody did". `min_version`
+    #: cannot: it stores the empty string for both an unwritten key and an uncollected profile,
+    #: and there is no is-not-empty operator to ask with.
+    #:
+    #: NOT A DUPLICATE OF `explicit_algorithms` BESIDE IT, which records which ALGORITHM keys the
+    #: configuration wrote; this records whether the node holding the VERSION bounds exists. That
+    #: one is a JSON column and deliberately unsearchable, so it could not carry this either way.
+    #:
+    #: False is the migration default and the side a gateway control fires on. The CONTAINER is
+    #: mandatory on a committed profile, measured twice by two domains - so false on a collected
+    #: profile means the two version children are both absent, not that the node is.
+    has_explicit_protocol_settings = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["appliance__hostname", "scope", "name"]

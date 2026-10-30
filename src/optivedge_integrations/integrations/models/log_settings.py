@@ -162,11 +162,23 @@ class LogServerTarget(ProvenancedMixin, SyncTrackedModel):
     #: device - `gateway` is mandatory at commit validation, measured - and on the syslog kind
     #: the absence was never observed, so nothing is assumed either way.
     server_address = models.CharField(max_length=255, blank=True)
-    #: NULL IS DELIBERATE AND 514/25 ARE NOT STORED. The grid renders 514 under transport SSL
-    #: where the vendor's own completion help names 6514, and every email wire test wrote 2525
-    #: because 25 is privileged on the test host - so nothing available tells a real implicit
-    #: value from a renderer constant, and a stored number would be a statement about the device
-    #: that no oracle supports. Nothing clauses on this column; a finding prints it.
+    #: THE IMPLICIT IS MATERIALISED PER KIND - 514 on syslog, 25 on email - AND IT WAS NULL
+    #: UNTIL 2026-10-30. The earlier reading declined to store anything, because the grid renders
+    #: 514 under transport SSL where the vendor's own completion help names 6514, and every email
+    #: wire test wrote a high port since 25 is privileged on the test host, so no oracle could
+    #: separate a real implicit value from a renderer constant.
+    #:
+    #: WHAT SUPERSEDED IT IS A MEASUREMENT: the 2026-10-26 re-run named the discriminator that
+    #: pass lacked - the write path refuses 0 and 70000 with "should be equal to or between 1 and
+    #: 65535", so 514 sits inside the range and is not a sentinel - and read the cell rendering
+    #: 514 on an entry whose transport is the secure value, so it is a constant rather than a
+    #: function of the transport. The stored defaults are the CLEARTEXT ports, which is the side a
+    #: reader should worry about: an entry nobody could read reports as reaching a cleartext port.
+    #:
+    #: WHAT IS STILL OPEN: no oracle has watched an absent-port entry's datagrams on the wire.
+    #: Nothing clauses on this column - a secure session on another agreed port still satisfies
+    #: the assertion - so the open part is about what a finding PRINTS. The normalizer's implicit
+    #: block carries both readings and says a person should settle it.
     port = models.PositiveIntegerField(
         null=True, blank=True,
         validators=[MinValueValidator(1), MaxValueValidator(65535)])

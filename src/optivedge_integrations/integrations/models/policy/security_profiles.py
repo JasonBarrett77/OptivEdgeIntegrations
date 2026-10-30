@@ -129,6 +129,16 @@ class SecurityProfile(ScopedPolicyObject):
         "permitted_custom_category_count",
         "permitted_custom_categories",
         "weakest_permitted_custom_category_action",
+        # VULNERABILITY PROTECTION, added for PAN-VLN-004. A classification over three unrelated
+        # subtrees and over whether a CHILD of an exception entry exists, so no payload key
+        # carries it and it can never hold a provenance row.
+        #
+        # `inline_cloud_analysis_enabled` IS DELIBERATELY NOT HERE. It reads the entry's own
+        # `cloud-inline-analysis` key and writes a `FieldProvenance` row, and on a vulnerability
+        # profile that row is the only thing separating the value the device holds from the one
+        # this project INFERS for an absent key - stage4-vulnerability-protection.json declined
+        # to call that implicit measured.
+        "widest_exemption_surface",
     )
     KIND_SPYWARE = "spyware"
     KIND_VULNERABILITY = "vulnerability"
@@ -313,6 +323,40 @@ class SecurityProfile(ScopedPolicyObject):
     #: predefined profiles - so every estate binding `default` or `strict` reads false here.
     cloud_inline_analysis = models.BooleanField(default=False)
 
+    #: VULNERABILITY ONLY, and the SAME DEVICE KEY `cloud-inline-analysis` the column directly
+    #: above reads. Two columns over one node is a hazard and is recorded as one: OEP stage 7,
+    #: vulnerability-protection, 2026-10-30. Read this before clausing on either.
+    #:
+    #:   `cloud_inline_analysis`           written for `kind=spyware` ONLY and HARDCODED False
+    #:                                     on every other kind, by the normalizer's own `kind`
+    #:                                     gate. On a vulnerability profile it is NOT a reading.
+    #:   `inline_cloud_analysis_enabled`   written for `kind=vulnerability` ONLY and hardcoded
+    #:                                     False on every other kind, the mirror image.
+    #:
+    #: So a vulnerability profile whose key is `yes` carries True here and False above, and the
+    #: two say opposite things about one device key on ONE ROW. Nothing merges them because
+    #: merging means widening a column another domain measured and tested for its own kind -
+    #: `tests_security_profiles.py` asserts the vulnerability case stores False above - and
+    #: because stage5-vulnerability-protection.json declares this column by name. WHICH OF THE
+    #: TWO SURVIVES IS A PRODUCT DECISION and is in that run's handback, not taken here.
+    #:
+    #: POSITIVE polarity: yes means the real-time analysis runs, so the per-detector actions
+    #: underneath it are in effect rather than merely stored. FALSE is the firing side and the
+    #: default, and a profile with every detector at reset-both and this switch off inspects
+    #: nothing in real time - which is the gap PAN-VLN-003's first half asserts and which the
+    #: detector rows alone cannot see.
+    #:
+    #: ITS IMPLICIT IS AN INFERENCE AND NOT A MEASUREMENT, which is why it is absent from
+    #: DERIVED_FIELDS and writes `assumed_default` rather than `pan_os_default`.
+    #: stage4-vulnerability-protection.json records `unmeasured` with `consumer_disposition:
+    #: assumed`: three readings agree that an absent key renders the `Enable cloud inline
+    #: analysis` box unticked - the DOM, the screenshot, and all nine pre-existing lab profiles
+    #: omitting the key while two of them carry detector entries at reset-both - and the POSITIVE
+    #: CONTROL WAS NOT PAID on this kind, so "renders the implicit value" cannot be told from
+    #: "renders an unticked box whatever the config says". The spyware measurement above is of a
+    #: different kind's entry and is not borrowed.
+    inline_cloud_analysis_enabled = models.BooleanField(default=False)
+
     #: {surface: count} for every exception surface that holds any. The COUNT is in
     #: `threat_exception_count`; this says WHERE, which is what a hygiene finding names and
     #: what an engineer needs to find them. Detail only - a control rests on the count.
@@ -320,6 +364,44 @@ class SecurityProfile(ScopedPolicyObject):
     #: Four surfaces exist on an anti-spyware profile and controls.json names one. See
     #: `exception_surfaces` in the normalizer.
     exception_surfaces = models.JSONField(default=dict, blank=True)
+
+    #: THE WIDEST EXEMPTION THIS PROFILE CARRIES, AS A SHAPE RATHER THAN A COUNT. PAN-VLN-004's
+    #: grading axis, and VULNERABILITY ONLY: the three shapes below are the three surfaces that
+    #: kind has, and an anti-spyware profile has five - two of them in the botnet tree, which no
+    #: member here could describe. Blank on every other kind, so the `kind` clause every query
+    #: over this model carries is what keeps the reading off the wrong rows.
+    #:
+    #: One exemption nobody can justify is the finding and twenty documented ones
+    #: are not worse in any way the configuration can show, so the severity turns on HOW WIDE the
+    #: widest one is and not on how many there are - `threat_exception_count` is the count and
+    #: `exception_surfaces` is the map, and a finding may never rest on the map.
+    #:
+    #: THE THREE SHAPES ARE THIS ASSESSMENT'S VOCABULARY AND NOT THE DEVICE'S. No key of any
+    #: object holds a value set these are members of; they are read off the PRESENCE of
+    #: `exempt-ip` on an exception entry and off which surface holds the entry.
+    #:
+    #: EMPTY means no exemption on any surface, which is the PASSING state on this axis - so
+    #: nothing may rest an assertion here. What raises PAN-VLN-004 is the rule-grain verdict
+    #: `vulnerability_exceptions_minimal`, and what catches a rule nobody assessed is
+    #: `SecurityRule.vulnerability_verdict_written`. This column can only ever soften the
+    #: severity of a finding another column has already raised.
+    EXEMPTION_NONE = ""
+    #: A per-signature exception narrowed to named addresses - the narrowest real exemption.
+    EXEMPTION_SIGNATURE_SCOPED = "signature-scoped"
+    #: A per-signature exception with NO address scope, so it applies to everything the profile
+    #: inspects. Measured: an exemption is WIDEST WHEN ITS `exempt-ip` IS ABSENT, and zero
+    #: entries is the same state as no node - see `widest_exempt_ip_count`, whose name carries
+    #: the same inverted polarity for the same reason.
+    EXEMPTION_SIGNATURE_UNSCOPED = "signature-unscoped"
+    #: An entry on either real-time-analysis exclusion list, which lifts EVERY detector on the
+    #: profile for the whole population the list resolves to. The surfaces take a REFERENCE to an
+    #: external dynamic list or an address group and refuse a literal, so one entry can be any
+    #: number of hosts and the configuration never says how many.
+    EXEMPTION_INLINE_POPULATION = "inline-analysis-population"
+    #: WIDEST LAST, so `[-1]` is the answer and the order reads the way the grading reads.
+    EXEMPTION_WIDTH_ORDER = (EXEMPTION_NONE, EXEMPTION_SIGNATURE_SCOPED,
+                             EXEMPTION_SIGNATURE_UNSCOPED, EXEMPTION_INLINE_POPULATION)
+    widest_exemption_surface = models.CharField(max_length=64, blank=True)
 
     #: Whether this profile carries any rule at all. FALSE means it matches nothing and takes no
     #: action, whatever its name suggests - legal, committable and measured on two of the lab's
@@ -1071,6 +1153,31 @@ class SecurityProfile(ScopedPolicyObject):
             if self.verdict(severity)[0] is False:
                 return severity
         return ""
+
+    @property
+    def weakest_assessed_severity_action(self) -> str:
+        """The weakest action any rule of this profile takes on a CRITICAL or HIGH exploit.
+
+        PAN-VLN-001's grading axis, and the sibling of `worst_unstopped_severity` rather than a
+        replacement for it: that one says WHICH BAND fails and this says WHAT THE PROFILE DOES,
+        and stage 3 grades the vulnerability control on the second. Read off the per-band verdict
+        rows' own `weakest_action`, so the summary and the detail cannot disagree.
+
+        MEDIUM IS NOT READ. The control asserts critical and high; medium has verdict rows for
+        the tab and counting it here would grade a profile by a band nothing asserts.
+
+        THE EMPTY STRING IS NOT AN ACTION VALUE and it is the answer whenever either band has no
+        covering rule at all - stage 3 is explicit that this is a different failure. It is also
+        what a profile with no verdict rows reads, which is why this column carries no assertion
+        of its own: the firing is the rule-grain verdict's, whose NULL fires.
+        """
+        bands = [SecurityProfileSeverityVerdict.CRITICAL, SecurityProfileSeverityVerdict.HIGH]
+        rows = {row.severity: row for row in self.severity_verdicts.all()}
+        # A BAND WITH NO ROW CONTRIBUTES THE EMPTY STRING rather than being skipped. A kind that
+        # answers in these terms gets a row per band, so a missing one is an unrecomputed profile
+        # and must not read as the strongest action of the band that survived.
+        return SecurityProfileSeverityVerdict.weakest_of(
+            [getattr(rows.get(band), "weakest_action", "") or "" for band in bands])
 
     @property
     def non_blocking_decoders(self) -> list[str]:
@@ -1840,6 +1947,22 @@ class SecurityProfileSeverityVerdict(models.Model):
     HIGH = "high"
     MEDIUM = "medium"
     SEVERITY_CHOICES = [(CRITICAL, "Critical"), (HIGH, "High"), (MEDIUM, "Medium")]
+    #: WEAKEST FIRST, and the eight the device holds at a profile rule's `action` - measured by
+    #: completion on both lab platforms, with the Help's own action table agreeing on the eight
+    #: rows applicable to a threat-rule profile when the section is read whole.
+    #:
+    #: THE ORDER IS STAGE 3'S GRADING ORDER AND NOT INVENTED: `allow`, then the POINTER `default`,
+    #: then `alert` are the three that deliver the session, and `drop` is the weakest of the
+    #: stopping ones - the same rank `SecurityProfileInlineDetector.ACTION_STRENGTH_WEAKEST_FIRST`
+    #: uses on the engine node, so a profile weak in one place reads weak the same way in both.
+    #:
+    #: `default` SITS WITH THE FAILING VALUES ON PURPOSE. A signature's default action is
+    #: "typically either Alert or Reset Both" (Help p.272), so it cannot be relied on to block -
+    #: which is why `BLOCKING_ACTIONS` in the normalizer excludes it, and the shipped `default`
+    #: profile is exactly that case.
+    ACTION_STRENGTH_WEAKEST_FIRST = (
+        "allow", "default", "alert", "drop",
+        "reset-client", "reset-server", "reset-both", "block-ip")
 
     security_profile = models.ForeignKey(
         SecurityProfile, on_delete=models.CASCADE, related_name="severity_verdicts")
@@ -1848,6 +1971,36 @@ class SecurityProfileSeverityVerdict(models.Model):
     #: WHY it is not blocked - the tab has to say so, because two profiles failing one severity
     #: can fail it for different reasons (an alert rule, or no catch-all rule at all).
     detail = models.CharField(max_length=255, blank=True)
+    #: THE WEAKEST ACTION ANY RULE COVERING THIS BAND TAKES, on either host side, as a VALUE
+    #: rather than inside a 255-character sentence. PAN-VLN-001's grading needs the value;
+    #: `detail` is prose and the only operator reachable on it is `contains`. The sibling
+    #: CATEGORY verdict has stored exactly this column for its own axis since it was built, which
+    #: is the precedent this follows rather than a new idea.
+    #:
+    #: EMPTY MEANS NO RULE COVERS THE BAND AT ALL, which is not an action value and is a
+    #: different failure - stage 3 says so in terms. It is the weakest member of the order above
+    #: for grading purposes and `weakest_of` returns it over any action.
+    #:
+    #: WRITTEN FOR BOTH THREAT-RULE KINDS, not only for vulnerability. The computation is
+    #: kind-generic - `severity_verdict` already walks the two host sides for vulnerability and
+    #: one for spyware - and leaving it blank on spyware rows would state "no rule covers the
+    #: band" about rows where one does. Only the vulnerability domain asserts it today.
+    weakest_action = models.CharField(max_length=32, blank=True)
+
+    @classmethod
+    def weakest_of(cls, actions) -> str:
+        """The weakest of `actions` by the order above, or "" where there are none.
+
+        AN ACTION THE ORDER DOES NOT PLACE SORTS WEAKEST, and so does a BLANK one - the same rule
+        `SecurityProfileInlineDetector.weakest_action` follows, and for the same reason: a value
+        nobody has measured must not be read as protection. A content release adding a ninth
+        action lands there rather than being silently dropped.
+        """
+        resolved = list(actions)
+        if not resolved:
+            return ""
+        order = cls.ACTION_STRENGTH_WEAKEST_FIRST
+        return min(resolved, key=lambda a: order.index(a) if a in order else -1)
 
     class Meta:
         ordering = ["security_profile", "severity"]

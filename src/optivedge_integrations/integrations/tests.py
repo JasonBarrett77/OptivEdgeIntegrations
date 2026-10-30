@@ -18,7 +18,14 @@ from django.urls import reverse
 from django.utils import timezone
 
 from optivedge_integrations.integrations.models import (
+    AuthenticationProfile,
+    CertificateProfile,
+    ContentDeploymentSchedule,
+    ContentUpdateSchedule,
     GlobalProtectEnforcementPoint,
+    GlobalProtectGateway,
+    GlobalProtectGatewayAgentConfig,
+    GlobalProtectGatewayClientAuth,
     GlobalProtectPortal,
     GlobalProtectPortalClientAuthRow,
     WildfireSettings,
@@ -89,6 +96,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.globalpr
     gp_app_setting_dictionary,
     latest_gp_app_config_dictionary_snapshot,
     normalize_globalprotect,
+    normalize_globalprotect_gateways,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.addresses import (
     build_normalized_addresses,
@@ -208,6 +216,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.certific
     decode_certificate,
     key_strength_band,
     min_version_rank,
+    normalize_certificate_objects,
     signature_hash_is_weak,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.security_rules import (
@@ -9501,6 +9510,102 @@ class ManagementSshNormalizationTests(TestCase):
         self.appliance.save()
         self.assertTrue(self._normalize().defaults_measured)
 
+    # ----------------------------------------------------------------- PAN-MCR-005's own column
+    # Added by the stage 7 run on `mgmt-crypto`, 2026-10-30. The three tests below are the ones
+    # the contract's floor asks for and this model did not have: a measured absence with nothing
+    # asserting what it stores, on the column a shipped control rests on.
+
+    def test_the_rekey_sentinel_stores_nothing_and_the_row_says_somebody_wrote_it(self):
+        """`default` IS A SETTABLE LITERAL INSIDE A NUMERIC LEAF, and it is the permissive end of
+        it: Help p.905 gives it as no time-based rekeying at all. Measured on 691665AC334B458 at
+        2026-10-30, read-only - `oep-mcr6-02` holds `session-rekey/interval: default` in BOTH the
+        merged and the running view - and replayed through this normalizer from the device's own
+        bytes.
+
+        `parse_integer_field` reaches `int("default")`, raises, and returns the implicit's value,
+        which REKEY_UNMEASURED declines to supply. So the column holds nothing, exactly as an
+        absent key does.
+
+        THE ROW IS WHAT TELLS THEM APART, and nothing asserted it until now. An absent key
+        carries REKEY_UNMEASURED and records `not_configured`; the literal carries the KEY's own
+        provenance and records `local`, because the device does hold something here. Stage 5's
+        artifact says of `rekey_interval_seconds` that "the two states this control is about are
+        one value here" - true of the COLUMN and not of the row, and the difference is the only
+        thing in the store that can say an administrator turned rekeying off on purpose.
+        """
+        row = self._normalize(self._bound("p", **{
+            "session-rekey": {"interval": "default", "data": "default", "packets": "default"}}))
+        rows = {r.field_name: r for r in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
+            object_id=row.pk)}
+        for field in ("rekey_interval_seconds", "rekey_data_mb", "rekey_packets_exponent"):
+            with self.subTest(field):
+                self.assertIsNone(getattr(row, field),
+                                  "the sentinel is not a number and nothing is stored for it")
+                self.assertEqual(
+                    rows[field].provenance_type, "local",
+                    "present and unparseable is the KEY's provenance, not a default's - which is "
+                    "the one reading that separates `default` from an absent key")
+
+    def test_rekey_interval_known_answers_both_states_pan_mcr_005_rests_on(self):
+        """THE COLUMN THE SHIPPED CONTROL CLAUSES ON, and it had no test in this repo at all.
+
+        `rekey_interval_seconds` is nullable since migration 0089 and the query layer has no
+        is-null operator, so OptivEdgeAssessments registers `rekey_interval_known` over
+        `rekey_interval_seconds__isnull` inverted and PAN-MCR-005's baseline is an OR:
+        `rekey_interval_seconds eq 0` OR `rekey_interval_known eq false`. Between 2026-10-20 and
+        2026-10-29 the baseline was the first clause alone, which matched nothing on any
+        appliance with no `session-rekey` key - the state the control exists to report.
+
+        THE `0` ARM IS WHY THE BASELINE IS AN OR AND NOT ONE CLAUSE. A configured 0 is a number,
+        so this property is TRUE for it; 0's own meaning is no time limit (Help p.905), so the
+        control has to fire on it through the other arm. A single is-null reading would pass it.
+        """
+        for label, profile, expected in (
+            ("no session-rekey key at all", {"ciphers": {"member": ["aes256-gcm"]}}, False),
+            ("the literal sentinel", {"session-rekey": {"interval": "default"}}, False),
+            ("a number inside the device's range", {"session-rekey": {"interval": "3600"}}, True),
+            ("a deliberate zero", {"session-rekey": {"interval": "0"}}, True),
+        ):
+            with self.subTest(label):
+                row = self._normalize(self._bound("p", **profile))
+                self.assertIs(row.rekey_interval_known, expected)
+        # And with nothing bound at all, which is the commonest state in the estate: measured
+        # absent in both views on 6A9C0A9904E7D6E, 2026-10-30.
+        self.assertIs(self._normalize().rekey_interval_known, False)
+
+    def test_an_absent_binding_is_stored_as_a_vendor_default_and_stage_4_measured_nothing(self):
+        """A DISAGREEMENT PINNED RATHER THAN RESOLVED, by the stage 7 run on `mgmt-crypto`.
+
+        Measured on 6A9C0A9904E7D6E, 2026-10-30, read-only: `deviceconfig/system/ssh` is absent
+        in both views, and this normalizer then stores `profile_name: ""` with a FieldProvenance
+        row typed `pan_os_default` - a positive claim that the vendor documents a default here.
+        Stage 4 measured this key's implicit as `unmeasured` with `consumer_disposition:
+        not_assumed` and `may_materialise: false`, and stage 5's artifact declares
+        `default.rests_on: not_assumed` on that measurement, naming the divergence in its own
+        note. The cause is in this module: the absent binding is declared
+        `Implicit.measured(None, <citation>)`, and `Implicit.provenance_type` answers
+        `pan_os_default` whenever a citation is present.
+
+        Its two siblings on this same model were corrected to `Implicit.not_assumed` on exactly
+        this reasoning - `_host_key` on 2026-10-06 and the three rekey triggers on 2026-10-20 -
+        so this is the third instance of one shape and the only one still outstanding.
+
+        LEFT AS IT IS ON PURPOSE. It changes no column, no verdict and no firing set: the empty
+        string fires all five controls either way. What it changes is a provenance type on the
+        commonest state in the estate, which a findings page reads when it tells an engineer
+        where to go, so the call is a person's. This test exists so that changing it is a
+        deliberate act with a failing test to notice, instead of a sentence in a handback.
+        """
+        row = self._normalize()
+        written = FieldProvenance.objects.get(
+            content_type=ContentType.objects.get_for_model(_ManagementSshSettings),
+            object_id=row.pk, field_name="profile_name")
+        self.assertEqual(row.profile_name, "")
+        self.assertEqual(written.provenance_type, "pan_os_default")
+        self.assertFalse(row.profile_found,
+                         "nothing is bound, so the appliance serves its built-in offer")
+
 
 
 class ImplicitDeclarationTests(TestCase):
@@ -9609,6 +9714,15 @@ class ImplicitDeclarationTests(TestCase):
         # So this entry is a queue item that cannot be cleared without a subscription, which is
         # a different state from the rest of this list and worth knowing before anyone tries.
         "saas_security.py": 1,
+        # The VULNERABILITY profile's `cloud-inline-analysis`, PAN-VLN-003's first half. A CHEAP
+        # QUEUE ITEM and the write is named: three readings agree that an absent key renders the
+        # Inline Cloud Analysis tab's enable UNTICKED on this kind, and the POSITIVE CONTROL WAS
+        # NOT PAID - nothing was written to `yes` on a vulnerability profile and re-read, so
+        # "renders the implicit value" cannot be told from "renders an unticked box whatever the
+        # config says". One `yes` on a vulnerability profile, committed, then a read of that
+        # tab clears it. The ANTI-SPYWARE reading of the SAME KEY is measured and is not here:
+        # it is a different kind's entry and `CLOUD_INLINE_ANALYSIS_ABSENT` holds it separately.
+        "security_profiles.py": 1,
         "security_rules.py": 1,       # rule-type absent -> universal; see RULE_TYPE_IMPLICIT
         "server_profiles.py": 1,      # admin-use-only
         # The `url-filtering` profile's `log-http-hdr-referer` and `log-http-hdr-xff`, the two
@@ -13079,7 +13193,9 @@ class LogSettingsNormalizationTests(TestCase):
         self.assertEqual(set(rows), {"s-plain", "s-tls"})
         self.assertEqual(rows["s-plain"].transport, "UDP",
                          "the absent key is the MEASURED implicit, on the firing side")
-        self.assertIsNone(rows["s-plain"].port, "514 is not stored - no oracle supports it")
+        self.assertEqual(rows["s-plain"].port, 514,
+                         "the absent port materialises the CLEARTEXT port, which is stage 5's "
+                         "decision and the firing side; it stored null until 2026-10-30")
         self.assertEqual(rows["s-tls"].transport, "SSL")
         self.assertEqual(rows["s-tls"].port, 6514)
         self.assertEqual(rows["s-plain"].profile_name, "p1")
@@ -13096,8 +13212,10 @@ class LogSettingsNormalizationTests(TestCase):
                 content_type=ContentType.objects.get_for_model(LogServerTarget),
                 object_id=row.pk)}
         self.assertEqual(provenance["transport"], ("pan_os_default", "UDP"))
-        self.assertEqual(provenance["port"][0], "not_configured",
-                         "nothing is assumed, and the row says which kind of absence it is")
+        self.assertEqual(provenance["port"][0], "pan_os_default",
+                         "the port implicit is MEASURED now, so the row says the device's own "
+                         "default rather than `not_configured`; it read the other way until "
+                         "2026-10-30 and the normalizer's implicit block holds both readings")
 
     def test_the_email_kind_reads_gateway_and_not_server(self):
         """TWO KEY NAMES, ONE COLUMN. A normalizer reading one loses the other kind silently -
@@ -13111,6 +13229,22 @@ class LogSettingsNormalizationTests(TestCase):
         self.assertEqual((row.kind, row.server_address), ("email", "10.0.0.9"))
         self.assertTrue(row.meets_authenticated_tls)
         self.assertEqual(row.transport_grade, LogServerTarget.GRADE_TLS_12)
+
+    def test_the_absent_port_materialises_a_different_number_on_each_kind(self):
+        """ONE KEY, TWO IMPLICITS. A single shared implicit would put the mail port on a syslog
+        collector or the other way round, and both are stored numbers a finding prints as the
+        device's own. The values are stage 5's decision, which this stage implements rather than
+        revisits: its own note says both readings are recorded and a person should settle it, and
+        this test is where that disagreement is held so a later change cannot resolve it
+        quietly."""
+        from optivedge_integrations.integrations.models import LogServerTarget
+        self._normalize(self._config(shared_log_settings={
+            "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                {"@name": "s1", "server": "10.0.0.1"}]}}]},
+            "email": {"entry": [{"@name": "m1", "server": {"entry": [
+                {"@name": "r1", "gateway": "10.0.0.9", "protocol": "SMTP"}]}}]}}))
+        ports = {r.kind: r.port for r in LogServerTarget.objects.all()}
+        self.assertEqual(ports, {"syslog": 514, "email": 25})
 
     def test_a_vsys_profile_and_a_shared_one_of_the_same_name_are_two_rows(self):
         """The collision was written on a device deliberately and both were accepted at commit.
@@ -13157,6 +13291,98 @@ class LogSettingsNormalizationTests(TestCase):
         self.assertEqual(row.system_log_severity_gaps, ALL_SYSTEM_SEVERITIES_MISSING,
                          "no off-box destination means every severity is uncovered")
 
+    # --- PAN-LOG-001's count half ------------------------------------------------------
+    # `offbox_destination_count` is the one column stage 5 commissioned for this domain, and
+    # the tests below are the floor stage 7's contract sets for a measured absence: the value
+    # is asserted rather than the shape, and the zero case is reached by RECOUNTING a row that
+    # already held one - a test that asserts the field's own default would pass unchanged if
+    # the normalizer stopped writing the column at all.
+
+    def test_the_destination_count_is_distinct_addresses_across_both_scopes(self):
+        """BOTH SCOPES AND DISTINCT BY HOST. Every appliance in this lab holds a vsys-scoped
+        syslog profile, so a count taken at the shared scope alone reports `no destination` on
+        all four - and two profiles naming one collector are one place the trail goes."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(
+            shared_log_settings={"syslog": {"entry": [
+                {"@name": "p-shared", "server": {"entry": [
+                    {"@name": "s1", "server": "10.0.0.1"},
+                    {"@name": "s2", "server": "10.0.0.2"}]}}]}},
+            vsys_log_settings={"syslog": {"entry": [
+                {"@name": "p-vsys", "server": {"entry": [
+                    {"@name": "s1", "server": "10.0.0.2"},
+                    {"@name": "s3", "server": "10.0.0.3"}]}}]}}))
+        self.assertEqual(
+            LoggingSettings.objects.get(appliance=self.appliance).offbox_destination_count, 3,
+            "four server entries at two scopes, three distinct collector addresses")
+
+    def test_an_email_relay_and_an_addressless_server_are_not_destinations(self):
+        """Email NOTIFIES rather than retains, and an entry with no address key has no host to
+        send to - so one syslog collector beside both of them is a count of one."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(shared_log_settings={
+            "email": {"entry": [{"@name": "m1", "server": {"entry": [
+                {"@name": "r1", "gateway": "10.0.0.9", "protocol": "SMTP"}]}}]},
+            "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                {"@name": "s-ok", "server": "10.0.0.1"},
+                {"@name": "s-no-address"}]}}]}}))
+        self.assertEqual(
+            LoggingSettings.objects.get(appliance=self.appliance).offbox_destination_count, 1)
+
+    def test_the_panorama_path_is_one_destination_however_many_log_types_reach_it(self):
+        """It is one place the trail goes. The per-log-type question is
+        `panorama_log_type_gaps`, a different column with a different shape."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(shared_log_settings={
+            "system": {"match-list": {"entry": [{
+                "@name": "a", "filter": "All Logs", "send-to-panorama": "yes"}]}},
+            "config": {"match-list": {"entry": [{
+                "@name": "b", "filter": "All Logs", "send-to-panorama": "yes"}]}}}))
+        self.assertEqual(
+            LoggingSettings.objects.get(appliance=self.appliance).offbox_destination_count, 1)
+
+    def test_an_http_collector_counts_only_where_the_named_profile_exists(self):
+        """An HTTP collector retains, so it counts - but a `send-http` member naming nothing
+        delivers nothing, the same reason the referrer verdicts resolve their members."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(shared_log_settings={
+            "http": {"entry": [{"@name": "h1", "server": {"entry": [
+                {"@name": "c1", "address": "10.0.0.7"}]}}]},
+            "system": {"match-list": {"entry": [{
+                "@name": "a", "filter": "All Logs",
+                "send-http": {"member": ["h1", "h-does-not-exist"]}}]}}}))
+        self.assertEqual(
+            LoggingSettings.objects.get(appliance=self.appliance).offbox_destination_count, 1)
+
+    def test_a_row_that_loses_its_destinations_is_recounted_to_the_firing_zero(self):
+        """ZERO IS BOTH THE DEFAULT AND THE FIRING SIDE, and this is the test that proves the
+        normalizer writes it rather than the field defaulting to it: the row holds one first."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        self._normalize(self._config(shared_log_settings={
+            "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                {"@name": "s1", "server": "10.0.0.1"}]}}]}}))
+        self.assertEqual(
+            LoggingSettings.objects.get(appliance=self.appliance).offbox_destination_count, 1)
+        self._normalize(self._config())
+        self.assertEqual(
+            LoggingSettings.objects.get(appliance=self.appliance).offbox_destination_count, 0,
+            "an appliance that defines no off-box destination reports rather than passing")
+
+    def test_the_other_normalizer_on_this_row_does_not_reset_the_destination_count(self):
+        """TWO NORMALIZERS WRITE `LoggingSettings` and `write_node_row` passes only its own
+        caller's fields to `update_or_create`, so the Setup > Management pass must leave this
+        count alone. If it ever wrote a full field set instead, whichever ran last would zero
+        the other's columns and PAN-LOG-001 would report every appliance in the estate."""
+        from optivedge_integrations.integrations.models import LoggingSettings
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_appliance_services_settings)
+        self._normalize(self._config(shared_log_settings={
+            "syslog": {"entry": [{"@name": "p1", "server": {"entry": [
+                {"@name": "s1", "server": "10.0.0.1"}]}}]}}))
+        normalize_appliance_services_settings(self.appliance)
+        self.assertEqual(
+            LoggingSettings.objects.get(appliance=self.appliance).offbox_destination_count, 1)
+
     def test_the_two_halves_of_the_configuration_log_verdict_are_stored_separately(self):
         """The failure is a DISJUNCTION - no destination OR a narrowing filter - and the clause
         grammar is a flat conjunction, so the halves are stored beside the verdict."""
@@ -13200,7 +13426,7 @@ class LogSettingsNormalizationTests(TestCase):
 
     def test_the_two_normalizers_on_one_row_do_not_erase_each_others_provenance(self):
         """`LoggingSettings` is written by TWO normalizers - the Setup > Management checkbox
-        PAN-MGT-011 reads, and this domain's thirteen columns. Each deletes only the rows for
+        PAN-MGT-011 reads, and this domain's fourteen columns. Each deletes only the rows for
         the fields it writes, because a missing row means `not tracked` and the erasure would
         read as a deliberate statement."""
         from optivedge_integrations.integrations.models import LoggingSettings
@@ -19561,3 +19787,1464 @@ class IpsecModelShapeTests(SimpleTestCase):
         row = IpsecCryptoProfile(management_station_id=1, appliance=appliance)
         with self.assertRaises(ValidationError):
             row.clean()
+
+
+class ContentUpdateScheduleNormalizationTests(TestCase):
+    """One firewall's dynamic content update schedule, all five content types. PAN-UPD-001 to 005.
+
+    The payload shapes here are the ones stage 4 and stage 6 measured on the four lab appliances,
+    including the three that bite: a cadence expressed as WHICH BRANCH ELEMENT EXISTS rather than
+    as a value, a branch element arriving as `None` where it carries no children (`real-time`,
+    `every-min`), and a leaf arriving as `{"#text": ..., "@dirtyId": ...}` because the merged view
+    follows the candidate.
+    """
+
+    def _appliance(self, serial="SERIAL-UPD", hostname="fw-upd"):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="panorama.upd")
+        return Appliance.objects.create(
+            management_station=station, serial_number=serial, hostname=hostname)
+
+    def _snapshot(self, appliance, device_entry):
+        return Snapshot.objects.create(
+            management_station=appliance.management_station,
+            appliance=appliance,
+            source_type="show_merged_config",
+            collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": device_entry}}},
+        )
+
+    def _normalize(self, device_entry, appliance=None):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_appliance_content_update_schedule)
+        appliance = appliance or self._appliance()
+        self._snapshot(appliance, device_entry)
+        normalize_appliance_content_update_schedule(appliance)
+        return ContentUpdateSchedule.objects.get(appliance=appliance)
+
+    # ------------------------------------------------------------------ the cadences
+
+    def test_the_cadence_is_the_branch_element_name(self):
+        """It is not a key and has no value: the recurrence is WHICH of a measured set of sibling
+        elements exists under `recurring`. Every one of these five is a reading taken off a
+        committed lab appliance by the stage 6 run."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {
+                "anti-virus": {"recurring": {"hourly": {"at": "17", "action": "download-only"}}},
+                "threats": {"recurring": {"daily": {"at": "03:20", "action": "download-only"}}},
+                "wildfire": {"recurring": {"every-15-mins": {
+                    "at": "7", "action": "download-and-install"}}},
+                "global-protect-datafile": {"recurring": {"weekly": {
+                    "day-of-week": "tuesday", "at": "02:15", "action": "download-and-install"}}},
+                "global-protect-clientless-vpn": {"recurring": {"daily": {
+                    "at": "02:45", "action": "download-and-install"}}},
+            },
+        }}})
+        self.assertEqual(row.av_recurrence, "hourly")
+        self.assertEqual(row.av_action, "download-only")
+        self.assertEqual(row.threats_recurrence, "daily")
+        self.assertEqual(row.wildfire_recurrence, "every-15-mins")
+        self.assertEqual(row.wildfire_action, "download-and-install")
+        self.assertEqual(row.gp_datafile_recurrence, "weekly")
+        self.assertEqual(row.gp_clientless_vpn_recurrence, "daily")
+        self.assertTrue(row.update_schedule_collected)
+        self.assertEqual(row.scope, "device-local")
+
+    def test_a_branch_carrying_no_children_is_still_the_cadence(self):
+        """`real-time` and `every-min` parse to a key with a `None` value, because the element is
+        empty. Measured: 013201001475 holds `real-time` for WildFire and 6A9C0A9904E7D6E holds
+        `every-min`. A reader that walks into the value gets nothing and reports `none`, which
+        would say the appliance fetches no WildFire content at all."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"wildfire": {"recurring": {"real-time": None}}},
+        }}})
+        self.assertEqual(row.wildfire_recurrence, "real-time")
+        self.assertEqual(row.wildfire_action, "none",
+                         "an empty branch carries no action key, and the run takes neither action")
+
+    def test_a_leaf_carrying_a_dirty_marker_is_read_through_its_text(self):
+        """The merged view follows the CANDIDATE, so a leaf still carrying an uncommitted edit
+        arrives as a dict rather than a bare string. Code written against one view reads `None`
+        out of the other, which stage 4 measured on this very object."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"anti-virus": {"recurring": {"daily": {
+                "at": {"@admin": "admin", "@dirtyId": "1", "#text": "23:55"},
+                "action": {"@admin": "admin", "@dirtyId": "1",
+                           "#text": "download-and-install"},
+            }}}},
+        }}})
+        self.assertEqual(row.av_recurrence, "daily")
+        self.assertEqual(row.av_action, "download-and-install")
+
+    def test_a_threshold_sibling_is_not_mistaken_for_a_cadence(self):
+        """`threshold`, `new-app-threshold` and `sync-to-peer` sit BESIDE the branch elements
+        under `recurring`, not under one. A reader taking whatever key is there would report
+        `threshold` as the cadence on an appliance whose only setting is a delay."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"threats": {"recurring": {
+                "threshold": "24", "new-app-threshold": "48", "sync-to-peer": "yes",
+            }}},
+        }}})
+        self.assertEqual(row.threats_recurrence, "none")
+        self.assertEqual(row.threats_action, "none")
+        self.assertEqual(row.threats_threshold_hours, 24)
+        self.assertEqual(row.threats_new_app_threshold_hours, 48)
+
+    def test_an_unknown_branch_name_reports_rather_than_resembling_a_known_one(self):
+        """The five branch sets are the device's own, measured identically on two platforms and
+        two major versions. A cadence a later build adds reads as `none`, which FIRES on every
+        clause in this domain, rather than being reported as the member it resembles."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"anti-virus": {"recurring": {
+                "every-5-mins": {"action": "download-and-install"}}}},
+        }}})
+        self.assertEqual(row.av_recurrence, "none")
+
+    # ------------------------------------------- what an absent key stores, measured
+
+    def test_an_absent_branch_element_stores_none_and_fires(self):
+        """An absent content-type child means the appliance runs NO automatic retrieval for that
+        content - nothing checked for, nothing downloaded, nothing installed - measured with a
+        natural experiment that cost no writes: 013201001475 carried no `update-schedule` node at
+        all before stage 6's fixtures and all three config views agreed.
+
+        `none` is the FIRING value of every clause that names these columns, and it is distinct
+        from `""`, which is an appliance nobody read."""
+        row = self._normalize({"deviceconfig": {"system": {"hostname": "fw-upd"}}})
+        self.assertTrue(row.update_schedule_collected,
+                        "the parent node answered, so this appliance WAS read")
+        for column in ("av_recurrence", "av_action", "threats_recurrence", "threats_action",
+                       "wildfire_recurrence", "wildfire_action",
+                       "gp_datafile_recurrence", "gp_datafile_action",
+                       "gp_clientless_vpn_recurrence", "gp_clientless_vpn_action"):
+            self.assertEqual(getattr(row, column), "none", column)
+
+    def test_an_explicit_none_element_stores_the_same_token_as_an_absence(self):
+        """Two spellings for one state, and stage 4 measured them as meaning the same thing."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"anti-virus": {"recurring": {"none": None}}},
+        }}})
+        self.assertEqual(row.av_recurrence, "none")
+        self.assertEqual(row.av_action, "none")
+
+    def test_a_committed_branch_with_no_action_key_stores_none(self):
+        """Measured on a COMMITTED timed branch carrying `at` and no `action` key: `show config
+        running` showed `daily: {at: "23:50"}` and nothing else, the screen rendered `(None, ...)`
+        and the dialog's OK button wrote nothing - which is what rules out "the rendered None is a
+        value the form holds". Commit job 129 returned OK with the key absent while job 127 had
+        refused the same branch for a missing `at` and never mentioned `action`, so the key
+        genuinely CAN lack a value on a committed object.
+
+        Reproduced in the lab by the stage 6 run on two more content types: pan-fw-201 holds a
+        `global-protect-datafile` `daily` branch and a `global-protect-clientless-vpn` `weekly`
+        branch, both with no `action` key."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {
+                "global-protect-datafile": {"recurring": {"daily": {"at": "03:40"}}},
+                "global-protect-clientless-vpn": {"recurring": {"weekly": {
+                    "day-of-week": "thursday", "at": "04:10"}}},
+            },
+        }}})
+        self.assertEqual(row.gp_datafile_recurrence, "daily")
+        self.assertEqual(row.gp_datafile_action, "none")
+        self.assertEqual(row.gp_clientless_vpn_recurrence, "weekly")
+        self.assertEqual(row.gp_clientless_vpn_action, "none")
+
+    def test_an_absent_threshold_stores_null_and_not_a_number(self):
+        """WHAT AN ABSENT THRESHOLD DOES IS UNMEASURED, so nothing is stored. stage4-updates.json
+        records `implicit.status: unmeasured`, `consumer_disposition: not_assumed` and
+        `may_materialise: false` for both keys, because the only control goes blank: with the key
+        deleted the dialog's Threshold field renders ` [1 - 336]` with `is_hint: True`, an
+        emptyText placeholder rather than a value. Four vendor wordings disagree about what the
+        threshold even gates and none of the four says what an absent one does.
+
+        Materialising any number here would assert that a review window exists."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"threats": {"recurring": {"hourly": {
+                "action": "download-and-install"}}}},
+        }}})
+        self.assertIsNone(row.threats_threshold_hours)
+        self.assertIsNone(row.threats_new_app_threshold_hours)
+
+    def test_an_absent_threshold_records_provenance_saying_nothing_was_assumed(self):
+        """The two keys this model reads are the two that carry a `FieldProvenance` row, and an
+        absent key records one too - models/provenance.py:59-68, changed 2026-09-21. A MISSING row
+        would mean only that the field is not tracked, which would make every unconfigured
+        threshold look untracked."""
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"threats": {"recurring": {"hourly": None}}},
+        }}})
+        rows = {entry.field_name: entry for entry in FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(ContentUpdateSchedule),
+            object_id=row.pk)}
+        self.assertEqual(
+            rows["threats_threshold_hours"].provenance_type, "not_configured")
+        self.assertEqual(
+            rows["threats_new_app_threshold_hours"].provenance_type, "not_configured")
+
+    def test_a_present_threshold_records_a_local_provenance_row(self):
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"threats": {"recurring": {
+                "hourly": None, "new-app-threshold": "24"}}},
+        }}})
+        entry = FieldProvenance.objects.get(
+            content_type=ContentType.objects.get_for_model(ContentUpdateSchedule),
+            object_id=row.pk, field_name="threats_new_app_threshold_hours")
+        self.assertEqual(entry.provenance_type, "local")
+        self.assertEqual(row.threats_new_app_threshold_hours, 24)
+
+    # -------------------------------------------------- the unknown, and its companion
+
+    def test_an_appliance_whose_system_node_arrived_empty_holds_the_empty_string(self):
+        """"We never asked" must not look like "we asked and it was fine". The empty string is a
+        DIFFERENT state from `none` and both fire - but the remediation differs completely, and
+        `update_schedule_collected` is the column that tells a reader which one they are looking
+        at. A `none` here would say the appliance was read and has nothing scheduled."""
+        row = self._normalize({"deviceconfig": {}})
+        self.assertFalse(row.update_schedule_collected)
+        for column in ("av_recurrence", "av_action", "threats_recurrence", "threats_action",
+                       "wildfire_recurrence", "wildfire_action",
+                       "gp_datafile_recurrence", "gp_datafile_action",
+                       "gp_clientless_vpn_recurrence", "gp_clientless_vpn_action"):
+            self.assertEqual(getattr(row, column), "", column)
+
+    def test_the_empty_string_satisfies_the_negated_equality_every_clause_uses(self):
+        """The whole reason these ten columns are non-nullable text. Every clause in this domain
+        is a negated equality, so an appliance nobody read REPORTS rather than passing, with no
+        companion column and no second firing group. A nullable column would have been invisible
+        to both polarities, and a boolean would have defaulted false and read as compliant."""
+        row = self._normalize({"deviceconfig": {}})
+        self.assertNotEqual(row.av_recurrence, "daily")
+        self.assertNotEqual(row.av_recurrence, "hourly")
+        self.assertNotEqual(row.av_action, "download-and-install")
+        self.assertNotEqual(row.wildfire_recurrence, "real-time")
+
+    def test_a_verdict_may_not_outlive_the_reading_it_rested_on(self):
+        row = ContentUpdateSchedule(update_schedule_collected=False, av_recurrence="daily")
+        with self.assertRaises(ValidationError):
+            row.clean()
+        ContentUpdateSchedule(update_schedule_collected=False).clean()
+
+    def test_no_row_is_written_without_a_merged_snapshot(self):
+        """The residual case `update_schedule_collected` cannot plug, and it is stage 5's to
+        record rather than this module's to fix: such an appliance is absent from every query
+        rather than present and false."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_appliance_content_update_schedule)
+        appliance = self._appliance()
+        counts = normalize_appliance_content_update_schedule(appliance)
+        self.assertEqual(counts, {"content_update_schedules": 0})
+        self.assertFalse(ContentUpdateSchedule.objects.filter(appliance=appliance).exists())
+
+    # ------------------------------------------------------------------ grain and shape
+
+    def test_each_ha_peer_gets_its_own_row_and_nothing_deduplicates_them(self):
+        """threat p.35 STEP 3 item 5: `the update schedule does not sync across peers; you must
+        manually configure the schedule on both peers`. Measured in this lab: the active PA-5220
+        013201001475 carries four content types and no `threats` node, and its passive peer
+        013201001085 carries a `threats` schedule and nothing else."""
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="panorama.ha-upd")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name="ha-pair-upd")
+        active = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="013201001475", hostname="fw-core-tpa-a")
+        passive = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="013201001085", hostname="fw-core-tpa-b")
+        self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-core-tpa-a",
+            "update-schedule": {"anti-virus": {"recurring": {"daily": {
+                "at": "23:45", "action": "download-and-install"}}}},
+        }}}, appliance=active)
+        self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-core-tpa-b",
+            "update-schedule": {"threats": {"recurring": {"weekly": {
+                "day-of-week": "wednesday", "at": "01:02", "action": "download-only"}}}},
+        }}}, appliance=passive)
+        self.assertEqual(ContentUpdateSchedule.objects.filter(
+            appliance__appliance_group=group).count(), 2)
+        self.assertEqual(
+            ContentUpdateSchedule.objects.get(appliance=active).av_recurrence, "daily")
+        self.assertEqual(
+            ContentUpdateSchedule.objects.get(appliance=active).threats_recurrence, "none")
+        self.assertEqual(
+            ContentUpdateSchedule.objects.get(appliance=passive).threats_recurrence, "weekly")
+        self.assertEqual(
+            ContentUpdateSchedule.objects.get(appliance=passive).av_recurrence, "none")
+
+    def test_renormalizing_updates_the_one_row_rather_than_adding_another(self):
+        appliance = self._appliance()
+        self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"anti-virus": {"recurring": {"weekly": {
+                "day-of-week": "sunday", "action": "download-and-install"}}}},
+        }}}, appliance=appliance)
+        row = self._normalize({"deviceconfig": {"system": {
+            "hostname": "fw-upd",
+            "update-schedule": {"anti-virus": {"recurring": {"hourly": {
+                "action": "download-only"}}}},
+        }}}, appliance=appliance)
+        self.assertEqual(ContentUpdateSchedule.objects.filter(appliance=appliance).count(), 1)
+        self.assertEqual(row.av_recurrence, "hourly")
+        self.assertEqual(row.av_action, "download-only")
+
+    def test_the_derived_fields_are_declared_and_the_two_measured_ones_are_not(self):
+        """A field in neither list reads as untracked; a measured field wrongly declared derived
+        would tell a reader "we computed this" about a value the firewall holds."""
+        for column in ("av_recurrence", "av_action", "update_schedule_collected", "scope",
+                       "wildfire_recurrence", "gp_clientless_vpn_action"):
+            self.assertIn(column, ContentUpdateSchedule.DERIVED_FIELDS, column)
+        self.assertNotIn("threats_threshold_hours", ContentUpdateSchedule.DERIVED_FIELDS)
+        self.assertNotIn(
+            "threats_new_app_threshold_hours", ContentUpdateSchedule.DERIVED_FIELDS)
+
+    def test_the_cadence_columns_are_non_nullable_text_defaulting_to_empty(self):
+        """The declaration the ten clauses in this domain rest on. A nullable column inverts every
+        one of them in silence."""
+        for column in ("av_recurrence", "av_action", "threats_recurrence", "threats_action",
+                       "wildfire_recurrence", "wildfire_action",
+                       "gp_datafile_recurrence", "gp_datafile_action",
+                       "gp_clientless_vpn_recurrence", "gp_clientless_vpn_action"):
+            field = ContentUpdateSchedule._meta.get_field(column)
+            self.assertFalse(field.null, column)
+            self.assertEqual(field.default, "", column)
+
+    def test_the_two_threshold_columns_are_nullable_which_is_the_opposite_choice(self):
+        """Stage 5's, and declared `passes` with the reason in writing: a NULL is unreachable by
+        every operator the query grammar has, so both columns read as compliant when nobody
+        looked, and `update_schedule_collected` is the declared companion that carries it."""
+        for column in ("threats_threshold_hours", "threats_new_app_threshold_hours"):
+            self.assertTrue(ContentUpdateSchedule._meta.get_field(column).null, column)
+
+    def test_one_row_per_appliance_is_enforced_by_the_database(self):
+        appliance = self._appliance()
+        snapshot = self._snapshot(appliance, {"deviceconfig": {}})
+        ContentUpdateSchedule.objects.create(
+            management_station=appliance.management_station, appliance=appliance,
+            source_snapshot=snapshot)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ContentUpdateSchedule.objects.create(
+                management_station=appliance.management_station, appliance=appliance,
+                source_snapshot=snapshot)
+
+
+class ContentDeploymentScheduleNormalizationTests(TestCase):
+    """A verdict over one management station's content deployment schedules. PAN-UPD-006.
+
+    The payload shapes are the ones stage 4 measured on the lab's one Panorama, including the two
+    that bite: `action` is a CONTAINER here where it is a LEAF on the firewall, and within one
+    response some leaves arrive as bare strings and some as `{"#text": ...}` dicts because the
+    dict form is what a leaf still carrying `@dirtyId` looks like.
+    """
+
+    def _station(self, hostname="panorama.dep"):
+        return ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname=hostname)
+
+    def _snapshot(self, station, payload):
+        return Snapshot.objects.create(
+            management_station=station,
+            source_type="config_deployment_update_schedule",
+            collected_at=timezone.now(),
+            payload=payload,
+        )
+
+    def _normalize(self, payload, station=None, snapshot=True):
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_station_content_deployment_schedule)
+        station = station or self._station()
+        if snapshot:
+            self._snapshot(station, payload)
+        normalize_station_content_deployment_schedule(station)
+        return ContentDeploymentSchedule.objects.get(management_station=station)
+
+    @staticmethod
+    def _entry(name, content_type="app-and-threat", recurrence="every-30-mins",
+               action="download-and-install", devices=(), disabled=None):
+        installing = {}
+        if action == "download-and-install":
+            installing = {"devices": {"member": list(devices)}} if devices else None
+        entry = {
+            "@name": name,
+            "download-source": {"update-server": None},
+            content_type: {"recurring": {recurrence: {"action": {action: installing}}}},
+        }
+        if disabled is not None:
+            entry["disabled"] = disabled
+        return entry
+
+    # ---------------------------------------------------------------- the three states
+
+    def test_a_station_nobody_read_holds_the_empty_string_and_fires(self):
+        """A station nobody collected must NOT be absent from every query: then an uncollected
+        estate and a standalone one with no management station at all read identically. The row is
+        written at its firing values instead."""
+        row = self._normalize({}, snapshot=False)
+        self.assertFalse(row.deployment_schedule_read)
+        self.assertEqual(row.central_schedule_state, "")
+        self.assertEqual(row.rollout_staging_shape, "")
+        self.assertEqual(row.enabled_schedule_count, 0)
+        self.assertEqual(row.installing_schedule_count, 0)
+        self.assertEqual(row.schedules, [])
+        self.assertIsNone(row.source_snapshot)
+        self.assertNotEqual(row.central_schedule_state, "enabled")
+
+    def test_a_station_with_no_schedule_at_all_holds_none_and_says_it_was_read(self):
+        """ABSENCE IS THE FINDING for PAN-UPD-006's first half, measured twice: the lab held NO
+        deployment schedule before stage 4's fixtures and holds none after them. `none` is a
+        DIFFERENT state from the empty string above and both fire - but one says the estate has no
+        central governance and the other says nobody looked."""
+        row = self._normalize({})
+        self.assertTrue(row.deployment_schedule_read)
+        self.assertEqual(row.central_schedule_state, "none")
+        self.assertEqual(row.rollout_staging_shape, "none")
+        self.assertEqual(row.schedules, [])
+
+    def test_entries_that_are_all_disabled_read_as_all_disabled_and_not_as_a_count(self):
+        """DISABLED IS A THIRD STATE AND A COUNT PASSES IT. `disabled` is the only way to switch a
+        deployment schedule off - there is no `none` branch on this object's recurrence - and the
+        operational oracle omits everything about a disabled schedule except that it is disabled.
+        An estate whose single schedule is disabled has no central governance whatsoever."""
+        row = self._normalize({"deployment-update-schedule": {"entry": [
+            self._entry("oep-dep-1", disabled="yes"),
+            self._entry("oep-dep-2", disabled={"@dirtyId": "1", "#text": "yes"}),
+        ]}})
+        self.assertEqual(row.central_schedule_state, "all_disabled")
+        self.assertEqual(row.enabled_schedule_count, 0)
+        self.assertEqual(row.installing_schedule_count, 2)
+        self.assertNotEqual(row.central_schedule_state, "enabled")
+
+    def test_one_enabled_entry_is_enough_for_the_state_to_read_enabled(self):
+        row = self._normalize({"deployment-update-schedule": {"entry": [
+            self._entry("oep-dep-1", disabled="yes"),
+            self._entry("oep-dep-2"),
+        ]}})
+        self.assertEqual(row.central_schedule_state, "enabled")
+        self.assertEqual(row.enabled_schedule_count, 1)
+
+    def test_an_absent_disabled_leaf_reads_as_enabled(self):
+        """With the key committed as `yes` the operational oracle answers `Schedule "<n>" is
+        disabled`; with the key deleted and committed it answers the cadence and `is in waiting`.
+        Stage 4 never wrote an explicit `no`, so it declines to promote the implicit - but the
+        behaviour either side of it is measured and both readings count the schedule towards
+        governance."""
+        row = self._normalize({"deployment-update-schedule": {
+            "entry": self._entry("oep-dep-1")}})
+        self.assertEqual(row.enabled_schedule_count, 1)
+        self.assertEqual(row.central_schedule_state, "enabled")
+
+    # --------------------------------------------------- installing, and the staging shape
+
+    def test_a_download_only_schedule_is_not_counted_as_installing(self):
+        """The measured fact that makes `installing_schedule_count` more than bookkeeping: a
+        `download-only` schedule names NO DEVICES AT ALL by construction, because `devices` is a
+        child of `download-and-install` and not of the action container. So an estate could hold
+        two schedules, look staged by count, and have one of them pushing to nobody."""
+        row = self._normalize({"deployment-update-schedule": {"entry": [
+            self._entry("oep-dep-1", action="download-only"),
+            self._entry("oep-dep-2", devices=["691665AC334B458"]),
+        ]}})
+        self.assertEqual(row.enabled_schedule_count, 2)
+        self.assertEqual(row.installing_schedule_count, 1)
+        self.assertEqual(row.rollout_staging_shape, "single")
+        self.assertEqual([record["devices"] for record in row.schedules],
+                         [[], ["691665AC334B458"]])
+
+    def test_two_installing_schedules_over_disjoint_lists_read_as_staged(self):
+        """STAGING PHYSICALLY IS TWO SCHEDULES OVER TWO DISJOINT DEVICE LISTS, because the product
+        has no ring, canary or test-group construct at all. This is the only half a computation
+        can reach; whether the staging was INTENDED is discharged onto an engineer."""
+        row = self._normalize({"deployment-update-schedule": {"entry": [
+            self._entry("oep-dep-ring1", devices=["691665AC334B458"]),
+            self._entry("oep-dep-ring2", devices=["6A9C0A9904E7D6E"]),
+        ]}})
+        self.assertEqual(row.installing_schedule_count, 2)
+        self.assertEqual(row.rollout_staging_shape, "multiple_disjoint")
+
+    def test_two_installing_schedules_sharing_a_firewall_are_not_disjoint(self):
+        row = self._normalize({"deployment-update-schedule": {"entry": [
+            self._entry("oep-dep-ring1", devices=["691665AC334B458", "6A9C0A9904E7D6E"]),
+            self._entry("oep-dep-ring2", devices=["6A9C0A9904E7D6E"]),
+        ]}})
+        self.assertEqual(row.rollout_staging_shape, "multiple_overlapping")
+
+    def test_an_installing_schedule_naming_nobody_is_not_a_disjoint_ring(self):
+        """An absent `devices` list asserts that the schedule installs to NO firewall - measured -
+        so two schedules where one names nobody cannot be shown to stage anything. The answer is
+        the less-staged of the two, which is the direction a reader should be wrong in."""
+        row = self._normalize({"deployment-update-schedule": {"entry": [
+            self._entry("oep-dep-ring1", devices=["691665AC334B458"]),
+            self._entry("oep-dep-ring2"),
+        ]}})
+        self.assertEqual(row.installing_schedule_count, 2)
+        self.assertEqual(row.rollout_staging_shape, "multiple_overlapping")
+
+    def test_a_device_member_carrying_a_dirty_marker_is_read_through_its_text(self):
+        """On a committed read each member is a bare string; on a candidate one it is
+        `{"#text": "<serial>"}`. The declared read is the CANDIDATE, so the dict form is the one
+        to expect, and a reader that stringifies the dict would compare a serial against a dict's
+        repr and find every list disjoint."""
+        row = self._normalize({"deployment-update-schedule": {"entry": [
+            self._entry("oep-dep-ring1", devices=[{"#text": "691665AC334B458"}]),
+            self._entry("oep-dep-ring2", devices=[{"#text": "691665AC334B458"}]),
+        ]}})
+        self.assertEqual(row.schedules[0]["devices"], ["691665AC334B458"])
+        self.assertEqual(row.rollout_staging_shape, "multiple_overlapping")
+
+    def test_a_single_member_list_parses_as_a_list(self):
+        """`<member>` arrives as a scalar when there is one of it and as a list when there are
+        several - `ensure_list` is the shipped answer and six runs wrote their own before it was
+        written down."""
+        row = self._normalize({"deployment-update-schedule": {"entry": self._entry(
+            "oep-dep-1", devices=["691665AC334B458"])}})
+        self.assertEqual(row.schedules[0]["devices"], ["691665AC334B458"])
+
+    # --------------------------------------------------------------- shape and grain
+
+    def test_the_per_entry_detail_survives_as_a_display_column(self):
+        """The price of the verdict grain, paid where a reader can see it: the entry-grained
+        detail is what PAN-UPD-006's second record hands an engineer."""
+        row = self._normalize({"deployment-update-schedule": {"entry": self._entry(
+            "oep-dep-1", content_type="wildfire", recurrence="daily",
+            devices=["6A9C0A9904E7D6E"])}})
+        self.assertEqual(row.schedules, [{
+            "name": "oep-dep-1",
+            "enabled": True,
+            "content_type": "wildfire",
+            "recurrence": "daily",
+            "action": "download-and-install",
+            "devices": ["6A9C0A9904E7D6E"],
+        }])
+
+    def test_one_entry_holds_exactly_one_content_type(self):
+        """Enforced by SILENT REPLACEMENT, measured three times through one entry on committed
+        configuration: writing a second content-type element returned the entry holding ONLY the
+        new one, the whole first subtree gone, with no message."""
+        row = self._normalize({"deployment-update-schedule": {"entry": self._entry(
+            "oep-dep-1", content_type="anti-virus", recurrence="daily")}})
+        self.assertEqual(row.schedules[0]["content_type"], "anti-virus")
+
+    def test_a_verdict_may_not_outlive_the_reading_it_rested_on(self):
+        row = ContentDeploymentSchedule(
+            deployment_schedule_read=False, central_schedule_state="none")
+        with self.assertRaises(ValidationError):
+            row.clean()
+        counted = ContentDeploymentSchedule(
+            deployment_schedule_read=False, enabled_schedule_count=1)
+        with self.assertRaises(ValidationError):
+            counted.clean()
+        ContentDeploymentSchedule(deployment_schedule_read=False).clean()
+
+    def test_renormalizing_updates_the_one_row_rather_than_adding_another(self):
+        station = self._station()
+        self._normalize({"deployment-update-schedule": {
+            "entry": self._entry("oep-dep-1")}}, station=station)
+        row = self._normalize({}, station=station)
+        self.assertEqual(ContentDeploymentSchedule.objects.filter(
+            management_station=station).count(), 1)
+        self.assertEqual(row.central_schedule_state, "none")
+
+    def test_the_snapshot_this_row_was_built_from_is_the_station_s_own(self):
+        """`appliance__isnull=True` is part of the lookup and not decoration: every other config
+        snapshot in the estate is a firewall's, taken through `target=`, and one of those matching
+        on source_type alone would make a firewall's payload the estate's verdict."""
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.content_updates \
+            import latest_deployment_schedule_snapshot
+        station = self._station()
+        appliance = Appliance.objects.create(
+            management_station=station, serial_number="SERIAL-DEP", hostname="fw-dep")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="config_deployment_update_schedule",
+            collected_at=timezone.now(), payload={"deployment-update-schedule": {
+                "entry": self._entry("not-the-estates")}})
+        self.assertIsNone(latest_deployment_schedule_snapshot(station))
+        own = self._snapshot(station, {})
+        self.assertEqual(latest_deployment_schedule_snapshot(station), own)
+
+    def test_every_column_is_declared_derived_because_none_reads_a_key(self):
+        """A row that is a verdict over entries reads no key off any one of them, so no column can
+        carry a `FieldProvenance` row. Without the declaration they would be indistinguishable
+        from fields nothing tracks."""
+        for column in ("scope", "deployment_schedule_read", "central_schedule_state",
+                       "enabled_schedule_count", "installing_schedule_count",
+                       "rollout_staging_shape", "schedules"):
+            self.assertIn(column, ContentDeploymentSchedule.DERIVED_FIELDS, column)
+
+    def test_one_row_per_management_station_is_enforced_by_the_database(self):
+        station = self._station()
+        ContentDeploymentSchedule.objects.create(management_station=station)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ContentDeploymentSchedule.objects.create(management_station=station)
+
+
+class ContentUpdateCollectorTests(SimpleTestCase):
+    """The one read in this estate addressed at the management station's OWN configuration."""
+
+    def test_the_station_read_passes_no_target(self):
+        """THE ABSENCE OF `target=` IS THE WHOLE OF IT. The same xpath through `target=<serial>` is
+        answered `code=6 Invalid sequence` by a firewall, so a collector that reaches every
+        appliance and never addresses the station collects nothing about this object no matter how
+        many firewalls it reads."""
+        from optivedge_integrations.integrations.platforms.pan_os.collectors import (
+            collect_content_deployment_schedule)
+        session = SimpleNamespace(
+            target="691665AC334B458",
+            request_xml_api=lambda params, target=None: self._capture(params, target),
+        )
+        collected = collect_content_deployment_schedule(session)
+        self.assertIsNone(self.captured_target)
+        self.assertEqual(self.captured["action"], "get")
+        self.assertEqual(self.captured["type"], "config")
+        self.assertTrue(self.captured["xpath"].endswith(
+            "/deviceconfig/system/deployment-update-schedule"))
+        self.assertTrue(self.captured["xpath"].startswith("/config/devices/entry["))
+        self.assertEqual(collected.source_type, "config_deployment_update_schedule")
+
+    def _capture(self, params, target):
+        self.captured = params
+        self.captured_target = target
+        return {"response": {"@status": "success", "result": None}}
+
+    def test_an_xpath_matching_nothing_is_a_reading_and_not_a_crash(self):
+        """Stage 4 measured that the CONTAINER read returns a bare absence here rather than the
+        `total-count="0"` envelope an ENTRY read returns. Left as None it would reach persistence
+        as a null payload and trip the snapshot's NOT NULL constraint, turning a legitimate
+        reading - "this estate has no central schedule" - into a crash."""
+        from optivedge_integrations.integrations.platforms.pan_os.collectors import (
+            collect_content_deployment_schedule)
+        session = SimpleNamespace(
+            target=None,
+            request_xml_api=lambda params, target=None: self._capture(params, target),
+        )
+        collected = collect_content_deployment_schedule(session)
+        self.assertEqual(collected.response["response"]["result"], {})
+# ===========================================================================
+# The `globalprotect-gateway` domain. PAN-GPG-001 to PAN-GPG-007.
+# ===========================================================================
+
+
+class _GlobalProtectGatewayBase(TestCase):
+    """Shared fixture for the three gateway models and the posture columns.
+
+    NO GLOBALPROTECT GATEWAY EXISTS ANYWHERE IN THE LAB, and that is the reason these payloads
+    look different from `_GlobalProtectBase`'s. Stage 6 spent ELEVEN LEASE WINDOWS on the one
+    candidate-clean appliance that has interfaces at all and could not commit one: eleven
+    distinct requirements, nine of them in no stage file, from `validate full` inside the
+    window. So the gateway ENTRY shapes below are CONSTRUCTED from the key set and the refusals
+    stage 4 and stage 6 measured, and they are marked as such on each constant.
+
+    WHAT IS NOT CONSTRUCTED, and it is what the readback rests on: every CONTAINER state here
+    was read off the four appliances on 2026-10-30 through Panorama's `target=` proxy with no
+    write of any kind, and cross-read with `action=show` as well as from the merged view -
+    `network/tunnel/global-protect-gateway` present-and-empty on three appliances and absent on
+    the fourth, `global-protect-app-crypto-profiles` absent / present-and-empty / populated with
+    the vendor's `default` across the estate, `shared/log-settings/hipmatch` absent on all four,
+    and one standing HIP object on vsys4 of both PA-5220s. The two views agreed at every node.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.gpg")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-gpg",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-GPG", hostname="fw-gpg", software_version="11.2.5")
+        self.group.active_appliance = self.appliance
+        self.group.save()
+
+    def _merged(self, vsys_entries, *, network=None, shared=None):
+        device_entry = {"@name": "localhost.localdomain", "vsys": {"entry": vsys_entries}}
+        if network is not None:
+            device_entry["network"] = network
+        config = {"devices": {"entry": [device_entry]}}
+        if shared is not None:
+            config["shared"] = shared
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": config})
+
+    def _licence(self, payload):
+        return Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="request_license_info", collected_at=timezone.now(), payload=payload)
+
+    def _vsys(self, gateways, *, name="vsys1", extra=None):
+        entry = {"@name": name,
+                 "global-protect": {"global-protect-gateway": {"entry": gateways}}}
+        entry.update(extra or {})
+        return entry
+
+    #: THE NETWORKING HALF READ OFF pan-fw-111, fw-core-tpa-a AND fw-core-tpa-b verbatim:
+    #: present and EMPTY. `action=show` answers the same shape on all three and RAISES
+    #: `No such node` on 691665AC334B458, where the whole `network/tunnel` node is absent. A
+    #: normalizer must read those two as one state or it reports two different things about one
+    #: estate.
+    LAB_EMPTY_NETWORKING_HALF = {"tunnel": {"global-protect-gateway": None}}
+
+    #: The vendor's shipped GlobalProtect IPSec crypto profile, read off 691665AC334B458
+    #: verbatim under BOTH views. Its single encryption proposal is the one block cipher of the
+    #: three the leaf accepts, and it is the whole of PAN-GPG-006's crypto half on this estate.
+    LAB_VENDOR_APP_CRYPTO = {
+        "ike": {"crypto-profiles": {"global-protect-app-crypto-profiles": {"entry": [
+            {"@name": "default",
+             "encryption": {"member": ["aes-128-cbc"]},
+             "authentication": {"member": ["sha1"]}}]}}},
+        "tunnel": {"global-protect-gateway": None},
+    }
+
+    #: The standing HIP object on vsys4 of both PA-5220s, read under `action=show` so it is
+    #: COMMITTED and not a staged edit. It belongs to the `globalprotect-portal` domain's stage
+    #: 6 run and was read and left exactly as found.
+    LAB_STANDING_HIP_OBJECT = {
+        "@name": "oep-gpp6-hip-a",
+        "host-info": {"criteria": {"client-version": {"contains": "6."}}},
+    }
+
+    #: CONSTRUCTED, and the measurement that licenses it is stage 4's key set plus stage 6's
+    #: eleven refusals: the two keys the device refuses to commit a gateway without are
+    #: `ssl-tls-service-profile` and `tunnel-mode` on the vsys half, and a same-named
+    #: `network/tunnel` entry with `tunnel-interface` and `local-address`. Everything optional is
+    #: left OFF, which is the point of this constant - it is the absent-key fixture.
+    GATEWAY_BARE = {
+        "@name": "oep-gpg-01",
+        "ssl-tls-service-profile": "oep-crt6-32",
+        "tunnel-mode": "yes",
+    }
+
+    #: CONSTRUCTED from the same measurements, with every optional key this domain reads PRESENT
+    #: so the measured branch of each column is exercised beside the absent branch above.
+    GATEWAY_FULL = {
+        "@name": "oep-gpg-02",
+        "ssl-tls-service-profile": "oep-crt6-32",
+        "tunnel-mode": "yes",
+        "certificate-profile": "oep-crt6-10",
+        "block-quarantined-devices": "yes",
+        "client-auth": {"entry": [
+            {"@name": "win", "os": "Windows",
+             "authentication-profile": "oep-aaa6-p14",
+             "user-credential-or-client-cert-required": "no"},
+            {"@name": "any", "os": "Any",
+             "authentication-profile": "oep-aaa6-p12",
+             "user-credential-or-client-cert-required": "no"},
+        ]},
+        "roles": {"entry": [
+            {"@name": "default",
+             "login-lifetime": {"days": "30"},
+             "inactivity-logout": "240"},
+        ]},
+        "remote-user-tunnel-configs": {"entry": [
+            {"@name": "cfg-1",
+             "authentication-override": {
+                 "generate-cookie": "yes",
+                 "cookie-encrypt-decrypt-cert": "pan-fw-111",
+                 "accept-cookie": {"cookie-lifetime": {"lifetime-in-days": "90"}}},
+             "no-direct-access-to-local-network": "yes",
+             "split-tunneling": {
+                 "exclude-access-route": {"member": ["10.9.0.0/16"]},
+                 "include-applications": {"member": ["any"]},
+                 "exclude-domains": {"list": {"entry": [
+                     {"@name": "example.invalid", "ports": {"member": ["443"]}}]}}}},
+        ]},
+    }
+
+    #: The networking half of GATEWAY_FULL, joined on the ENTRY NAME and on nothing else -
+    #: measured, because commit job 260 aborted naming the vsys entry's own name as the thing it
+    #: could not find in the network level.
+    NETWORK_HALF_FULL = {
+        "ike": {"crypto-profiles": {"global-protect-app-crypto-profiles": {"entry": [
+            {"@name": "oep-gpg-crypto",
+             "encryption": {"member": ["aes-256-gcm", "aes-128-gcm"]},
+             "authentication": {"member": ["sha256"]}}]}}},
+        "tunnel": {"global-protect-gateway": {"entry": [
+            {"@name": "oep-gpg-02",
+             "tunnel-interface": "tunnel.68",
+             "local-address": {"interface": "ethernet1/1", "ip": {"ipv4": "10.0.1.4/24"}},
+             "ipsec": {"enable": "yes", "ipsec-crypto-profile": "oep-gpg-crypto"},
+             "client": {"exclude-video-traffic": {"enabled": "yes"}}},
+        ]}},
+    }
+
+    def _profiles(self):
+        """The three bound-object rows a gateway's resolution runs over, as the lab holds them.
+
+        Written directly rather than through `normalize_certificate_objects`, so that a failure
+        in this domain's resolution cannot be mistaken for a failure in another domain's
+        normalizer. Every value here was read off pan-fw-111 on 2026-10-30.
+        """
+        # NOT `show_merged_config`: these rows only need an anchor, and a second merged
+        # snapshot would become the LATEST one and shadow the payload under test.
+        snapshot = Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="stage7_readback_anchor", collected_at=timezone.now(), payload={})
+        common = {"management_station": self.station, "appliance": self.appliance,
+                  "appliance_group": self.group, "source_snapshot": snapshot}
+        SslTlsServiceProfile.objects.create(
+            name="oep-crt6-32", scope=SslTlsServiceProfile.SCOPE_SHARED,
+            min_version="tls1-2", max_version="tls1-3",
+            has_explicit_protocol_settings=True, **common)
+        CertificateProfile.objects.create(
+            name="oep-crt6-10", scope=CertificateProfile.SCOPE_SHARED,
+            block_unauthenticated_cert=False, **common)
+        AuthenticationProfile.objects.create(
+            name="oep-aaa6-p14", scope=AuthenticationProfile.SCOPE_SHARED,
+            method="radius", **common)
+        AuthenticationProfile.objects.create(
+            name="oep-aaa6-p12", scope=AuthenticationProfile.SCOPE_SHARED,
+            method="local-database", **common)
+
+
+class GlobalProtectGatewayAbsentKeyTests(_GlobalProtectGatewayBase):
+    """What the normalizer STORES when a key is absent, column by column.
+
+    THIS IS THE CHEAPEST PLACE IN THE PIPELINE TO LOSE A MEASUREMENT: the device reading sits in
+    a handback, the value sits in the normalizer, and nothing fails when a later edit changes
+    what an absence stores. Every assertion here is a VALUE and not a shape, so none of them
+    would still pass if the normalizer stopped storing the column.
+    """
+
+    def test_every_optional_gateway_key_absent_stores_null_and_not_a_guess(self):
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        counts = normalize_globalprotect_gateways(self.appliance)
+
+        self.assertEqual(counts["globalprotect_gateways"], 1)
+        gateway = GlobalProtectGateway.objects.get()
+        # MANDATORY AT COMMIT, so these two are never absent on a committed gateway and the
+        # value is what a query reads.
+        self.assertEqual(gateway.ssl_tls_service_profile, "oep-crt6-32")
+        self.assertIs(gateway.tunnel_mode, True)
+        # The five stage 4 recorded as UNMEASURED. NULL, not a guess, and the direction matters:
+        # a materialised `no` on any of them would report a weaker estate as hardened.
+        self.assertIsNone(gateway.certificate_profile_name)
+        self.assertIsNone(gateway.block_quarantined_devices)
+        self.assertIsNone(gateway.ipsec_enabled)
+        self.assertIsNone(gateway.ipsec_crypto_profile_name)
+        self.assertIsNone(gateway.video_traffic_excluded)
+        # The two bounds, null because the gateway carries no role entry at all - the state
+        # every appliance in this lab is in. A materialised 30 days or 180 minutes would be the
+        # vendor's documented default expanded into a measurement nobody took.
+        self.assertIsNone(gateway.login_lifetime_hours)
+        self.assertIsNone(gateway.inactivity_logout_minutes)
+        self.assertEqual(gateway.login_lifetime_unit, "")
+        self.assertIsNone(gateway.login_lifetime_as_entered)
+        # The companions are what keep those nulls inside a threshold comparison.
+        self.assertFalse(gateway.login_lifetime_known)
+        self.assertFalse(gateway.inactivity_logout_known)
+        self.assertFalse(gateway.ipsec_enabled_known)
+
+    def test_a_gateway_with_no_networking_half_reports_false_and_not_nothing(self):
+        # The vsys half exists and the device-local collection is PRESENT AND EMPTY, which is
+        # the state three of the four lab appliances are in.
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        self.assertFalse(GlobalProtectGateway.objects.get().networking_half_present)
+
+    def test_an_absent_network_tunnel_node_reads_the_same_as_an_empty_one(self):
+        # 691665AC334B458 has no `network/tunnel` node at all, where the other three carry it
+        # present and empty. Measured under both views. Reading the two differently would report
+        # two different things about one estate.
+        self._merged([self._vsys([self.GATEWAY_BARE])], network={})
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        gateway = GlobalProtectGateway.objects.get()
+        self.assertFalse(gateway.networking_half_present)
+        self.assertIsNone(gateway.ipsec_enabled)
+        self.assertIsNone(gateway.video_traffic_excluded)
+
+    def test_an_agent_row_with_no_keys_at_all_stores_nulls_and_no_cookie(self):
+        # Stage 4 measured that this entry has NO mandatory key, so a row carrying nothing but
+        # its name is legal and `validate full` accepts it.
+        bare_row = dict(self.GATEWAY_BARE)
+        bare_row["remote-user-tunnel-configs"] = {"entry": [{"@name": "cfg-bare"}]}
+        self._merged([self._vsys([bare_row])], network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        row = GlobalProtectGatewayAgentConfig.objects.get()
+        self.assertEqual(row.entry_name, "cfg-bare")
+        self.assertEqual(row.gateway_name, "oep-gpg-01")
+        self.assertIsNone(row.generate_cookie)
+        self.assertIsNone(row.no_direct_access_to_local_network)
+        # THE ONE MEASURED IMPLICIT IN THIS DOMAIN: an absent cookie certificate asserts that
+        # NOTHING is bound, and a consumer must not render this null as "not collected".
+        self.assertIsNone(row.cookie_encrypt_decrypt_cert)
+        # Container presence, not truthiness.
+        self.assertFalse(row.accept_cookie_configured)
+        self.assertFalse(row.authentication_override_configured)
+        self.assertIsNone(row.cookie_lifetime_hours)
+        self.assertFalse(row.cookie_lifetime_known)
+        # AN ABSENT MEMBER LIST IS NOT AN EMPTY ONE and the two are kept apart.
+        self.assertIsNone(row.split_tunnel_exclude_access_routes)
+        self.assertIsNone(row.split_tunnel_include_access_routes)
+        self.assertIsNone(row.split_tunnel_exclude_applications)
+        self.assertIsNone(row.split_tunnel_include_applications)
+        self.assertIsNone(row.split_tunnel_exclude_domains)
+        self.assertIsNone(row.split_tunnel_include_domains)
+        # ONE axis still counts: the local-network switch is NULL, which most likely leaves
+        # direct access allowed, and counting the null as open is the firing direction.
+        self.assertEqual(row.uninspected_egress_path_count, 1)
+        self.assertTrue(row.egress_inventory_computed)
+
+    def test_a_client_auth_row_with_the_switch_absent_stores_null_and_counts_permissive(self):
+        row = dict(self.GATEWAY_BARE)
+        row["client-auth"] = {"entry": [
+            {"@name": "any", "os": "Any", "authentication-profile": "oep-aaa6-p14"}]}
+        self._merged([self._vsys([row])], network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        auth_row = GlobalProtectGatewayClientAuth.objects.get()
+        # NULL, declined: the schema's @default='yes' sits on the HARDENED value `no`, so
+        # materialising it would report every unset row as requiring both factors.
+        self.assertIsNone(auth_row.user_credential_or_client_cert_required)
+        self.assertEqual(auth_row.client_os, "Any")
+        # AN UNMEASURED ABSENCE COUNTS AS PERMISSIVE on the gateway's aggregate, which is the
+        # claim that has to be disproved rather than assumed.
+        self.assertTrue(GlobalProtectGateway.objects.get().any_client_auth_row_permits_either_or)
+
+
+class GlobalProtectGatewayResolutionTests(_GlobalProtectGatewayBase):
+    """The five columns resolved through a NAME onto another model's row, and the verdicts."""
+
+    def test_a_fully_configured_gateway_resolves_every_binding_it_names(self):
+        self._merged([self._vsys([self.GATEWAY_FULL])], network=self.NETWORK_HALF_FULL)
+        self._profiles()
+        counts = normalize_globalprotect_gateways(self.appliance)
+
+        self.assertEqual(counts["globalprotect_gateways"], 1)
+        self.assertEqual(counts["globalprotect_gateway_client_auth_rows"], 2)
+        self.assertEqual(counts["globalprotect_gateway_agent_configs"], 1)
+        gateway = GlobalProtectGateway.objects.get()
+        self.assertEqual(gateway.entry_name, "oep-gpg-02")
+        self.assertTrue(gateway.networking_half_present)
+        # PAN-GPG-001: the floor is copied off the bound profile's row, not off the gateway.
+        self.assertEqual(gateway.bound_tls_min_version, "tls1-2")
+        self.assertTrue(gateway.tls_profile_resolves_to_an_explicit_floor)
+        # PAN-GPG-006: the HEAD of the bound profile's proposal list, which is the order the
+        # firewall applies.
+        self.assertIs(gateway.ipsec_enabled, True)
+        self.assertTrue(gateway.ipsec_enabled_known)
+        self.assertEqual(gateway.ipsec_crypto_profile_name, "oep-gpg-crypto")
+        self.assertEqual(gateway.bound_app_crypto_first_encryption, "aes-256-gcm")
+        self.assertTrue(gateway.app_crypto_offers_gcm_first)
+        # PAN-GPG-002: the bound certificate profile does NOT refuse an unauthenticated
+        # certificate, so the certificate is not a second factor even though both rows demand
+        # credentials AND a certificate.
+        self.assertEqual(gateway.certificate_profile_name, "oep-crt6-10")
+        self.assertFalse(gateway.bound_certificate_profile_blocks_unauthenticated_cert)
+        self.assertFalse(gateway.any_client_auth_row_permits_either_or)
+        self.assertFalse(gateway.client_certificate_is_a_second_factor)
+        # PAN-GPG-007: 30 days is the ceiling of the leaf's range and converts to 720 hours.
+        self.assertEqual(gateway.login_lifetime_unit, "days")
+        self.assertEqual(gateway.login_lifetime_as_entered, 30)
+        self.assertEqual(gateway.login_lifetime_hours, 720)
+        self.assertTrue(gateway.login_lifetime_known)
+        self.assertEqual(gateway.inactivity_logout_minutes, 240)
+        self.assertTrue(gateway.inactivity_logout_known)
+        self.assertIs(gateway.video_traffic_excluded, True)
+
+    def test_the_vendor_default_app_crypto_profile_does_not_offer_gcm_first(self):
+        # The only GlobalProtect app crypto profile in the estate, read off 691665AC334B458
+        # under both views: one proposal, and it is the single block cipher of the three the
+        # leaf accepts. False is the firing side and the measured state.
+        gateway = dict(self.GATEWAY_FULL)
+        network = {
+            "ike": self.LAB_VENDOR_APP_CRYPTO["ike"],
+            "tunnel": {"global-protect-gateway": {"entry": [
+                {"@name": "oep-gpg-02",
+                 "ipsec": {"enable": "yes", "ipsec-crypto-profile": "default"}}]}},
+        }
+        self._merged([self._vsys([gateway])], network=network)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        row = GlobalProtectGateway.objects.get()
+        self.assertEqual(row.bound_app_crypto_first_encryption, "aes-128-cbc")
+        self.assertFalse(row.app_crypto_offers_gcm_first)
+
+    def test_a_binding_that_resolves_to_nothing_fires_rather_than_passing(self):
+        # The commonest cause measured is that the name resolves into /config/predefined, which
+        # no merge view carries - so the most plausible correctly-configured gateway is the one
+        # whose profile a collector cannot find. It must report itself, not pass.
+        gateway = dict(self.GATEWAY_BARE)
+        gateway["ssl-tls-service-profile"] = "TLSv1.3_Default"
+        self._merged([self._vsys([gateway])], network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        row = GlobalProtectGateway.objects.get()
+        self.assertEqual(row.ssl_tls_service_profile, "TLSv1.3_Default")
+        self.assertEqual(row.bound_tls_min_version, "")
+        self.assertFalse(row.tls_profile_resolves_to_an_explicit_floor)
+
+    def test_a_row_naming_a_sequence_resolves_to_no_back_end_and_fires(self):
+        # The leaf accepts an authentication PROFILE or an authentication SEQUENCE and the
+        # stored string does not say which, so a sequence-backed row resolves to nothing - the
+        # state a check resolving only among profiles reports as "no identity service at all".
+        gateway = dict(self.GATEWAY_BARE)
+        gateway["client-auth"] = {"entry": [
+            {"@name": "seq", "os": "Any", "authentication-profile": "oep-aaa6-seq",
+             "user-credential-or-client-cert-required": "no"}]}
+        self._merged([self._vsys([gateway])], network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        row = GlobalProtectGatewayClientAuth.objects.get()
+        self.assertEqual(row.authentication_profile_name, "oep-aaa6-seq")
+        self.assertEqual(row.authentication_backend_method, "")
+        self.assertFalse(row.backend_can_deliver_a_second_factor)
+
+    def test_only_the_two_vendor_named_back_ends_can_deliver_a_second_factor(self):
+        self._merged([self._vsys([self.GATEWAY_FULL])], network=self.NETWORK_HALF_FULL)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        by_name = {r.entry_name: r for r in GlobalProtectGatewayClientAuth.objects.all()}
+        self.assertEqual(by_name["win"].authentication_backend_method, "radius")
+        self.assertTrue(by_name["win"].backend_can_deliver_a_second_factor)
+        # `local-database` is the firewall's OWN user store. A gateway whose `Any` row points at
+        # it is the per-platform defect this grain exists to name.
+        self.assertEqual(by_name["any"].authentication_backend_method, "local-database")
+        self.assertFalse(by_name["any"].backend_can_deliver_a_second_factor)
+
+    def test_a_gateway_naming_no_certificate_profile_is_not_failed_for_it(self):
+        # "No client certificates in use" is read as "names no certificate profile", because no
+        # key says a per-platform row ASKS for one. The error direction is suppression and it is
+        # recorded rather than hidden.
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        self.assertTrue(GlobalProtectGateway.objects.get().client_certificate_is_a_second_factor)
+
+
+class GlobalProtectGatewayLifetimeTests(_GlobalProtectGatewayBase):
+    """One value in three keys, and exactly one key ever exists."""
+
+    def _agent_row(self, branch, value):
+        gateway = dict(self.GATEWAY_BARE)
+        gateway["remote-user-tunnel-configs"] = {"entry": [
+            {"@name": "cfg", "authentication-override": {
+                "accept-cookie": {"cookie-lifetime": {branch: value}}}}]}
+        self._merged([self._vsys([gateway])], network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        return GlobalProtectGatewayAgentConfig.objects.get()
+
+    def test_a_cookie_lifetime_in_days_converts_to_hours(self):
+        # 90 days was WRITTEN and read back by stage 4, and it grades at the worst band only
+        # once converted: the asserted hours leaf caps at 72.
+        row = self._agent_row("lifetime-in-days", "90")
+        self.assertEqual(row.cookie_lifetime_unit, "lifetime-in-days")
+        self.assertEqual(row.cookie_lifetime_as_entered, 90)
+        self.assertEqual(row.cookie_lifetime_hours, 2160)
+        self.assertTrue(row.cookie_lifetime_known)
+        self.assertTrue(row.accept_cookie_configured)
+        self.assertTrue(row.authentication_override_configured)
+
+    def test_a_cookie_lifetime_in_minutes_rounds_up_and_never_down(self):
+        # The minutes branch is the one the vendor documents nowhere and it holds the most
+        # compliant value the field can take. Rounding DOWN would move a boundary in the
+        # reassuring direction, so 90 minutes is 2 hours and not 1.
+        row = self._agent_row("lifetime-in-minutes", "90")
+        self.assertEqual(row.cookie_lifetime_unit, "lifetime-in-minutes")
+        self.assertEqual(row.cookie_lifetime_as_entered, 90)
+        self.assertEqual(row.cookie_lifetime_hours, 2)
+
+    def test_a_cookie_lifetime_in_hours_is_carried_through_unconverted(self):
+        row = self._agent_row("lifetime-in-hours", "72")
+        self.assertEqual(row.cookie_lifetime_unit, "lifetime-in-hours")
+        self.assertEqual(row.cookie_lifetime_hours, 72)
+
+    def test_a_committed_empty_accept_cookie_container_still_accepts_a_cookie(self):
+        """THE BRANCH A MUTATION OF THIS MODULE SURVIVED, and the lab cannot produce the row.
+
+        Added after mutation-testing this domain's own harness: replacing the key test
+        `"accept-cookie" in override` with `bool(override.get("accept-cookie"))` left all 36
+        tests GREEN, because every payload above either omits the container or gives it a
+        populated child. The two readings differ on exactly one shape - a COMMITTED EMPTY
+        container, which xmltodict parses to `None` - and that shape decides whether PAN-GPG-003
+        applies to the row at all.
+
+        CONSTRUCTED, because no gateway exists anywhere in this lab to carry it. The shape is not
+        invented: `models/globalprotect.py::GlobalProtectEnforcementPoint`'s own docstring
+        records it measured on the sibling node - *"deleting the last entry leaves the container
+        present and empty... a committed empty one parses to None"* - and an appliance in this
+        estate carries exactly that residue at `global-protect -> global-protect-portal -> null`.
+
+        The direction of the error is why it matters: truthiness reads this row as accepting NO
+        cookie, which SUPPRESSES the control on a row that accepts one and bounds nothing.
+        """
+        gateway = dict(self.GATEWAY_BARE)
+        gateway["remote-user-tunnel-configs"] = {"entry": [
+            {"@name": "cfg", "authentication-override": {"accept-cookie": None}}]}
+        self._merged([self._vsys([gateway])], network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        row = GlobalProtectGatewayAgentConfig.objects.get()
+        self.assertTrue(row.accept_cookie_configured)
+        self.assertTrue(row.authentication_override_configured)
+        # It accepts a cookie and bounds nothing, which is the state the companion exists for.
+        self.assertIsNone(row.cookie_lifetime_hours)
+        self.assertEqual(row.cookie_lifetime_unit, "")
+        self.assertFalse(row.cookie_lifetime_known)
+
+    def test_a_committed_empty_authentication_override_container_still_counts(self):
+        """The same shape one level up, and the same suppression if it is read by truthiness."""
+        gateway = dict(self.GATEWAY_BARE)
+        gateway["remote-user-tunnel-configs"] = {"entry": [
+            {"@name": "cfg", "authentication-override": None}]}
+        self._merged([self._vsys([gateway])], network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        row = GlobalProtectGatewayAgentConfig.objects.get()
+        self.assertTrue(row.authentication_override_configured)
+        self.assertFalse(row.accept_cookie_configured)
+        self.assertIsNone(row.generate_cookie)
+        self.assertIsNone(row.cookie_encrypt_decrypt_cert)
+
+    def test_the_weakest_login_lifetime_across_the_roles_is_the_one_stored(self):
+        # CONSTRUCTED: the `roles` entry name is constrained to `default`, measured, so a real
+        # gateway carries ONE role. The aggregate is written for the estate where that is not
+        # true, and a check taking the first or the strictest role would report a gateway
+        # leaving a session up for a month as bounded at an hour.
+        gateway = dict(self.GATEWAY_BARE)
+        gateway["roles"] = {"entry": [
+            {"@name": "r-strict", "login-lifetime": {"hours": "2"}, "inactivity-logout": "5"},
+            {"@name": "r-weak", "login-lifetime": {"days": "30"}, "inactivity-logout": "240"},
+        ]}
+        self._merged([self._vsys([gateway])], network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+
+        row = GlobalProtectGateway.objects.get()
+        self.assertEqual(row.login_lifetime_hours, 720)
+        self.assertEqual(row.login_lifetime_unit, "days")
+        self.assertEqual(row.login_lifetime_as_entered, 30)
+        self.assertEqual(row.inactivity_logout_minutes, 240)
+
+
+class GlobalProtectGatewayEgressCountTests(_GlobalProtectGatewayBase):
+    """Eight axes, one of them on another model, and what each one counts."""
+
+    def _count(self, split=None, *, local=None, video=None, override=None):
+        row = {"@name": "cfg"}
+        if split is not None:
+            row["split-tunneling"] = split
+        if local is not None:
+            row["no-direct-access-to-local-network"] = local
+        if override is not None:
+            row["authentication-override"] = override
+        gateway = dict(self.GATEWAY_BARE)
+        gateway["@name"] = "oep-gpg-02"
+        gateway["remote-user-tunnel-configs"] = {"entry": [row]}
+        network = {"tunnel": {"global-protect-gateway": {"entry": [
+            {"@name": "oep-gpg-02",
+             "client": ({"exclude-video-traffic": {"enabled": video}} if video else {})}]}}}
+        self._merged([self._vsys([gateway])], network=network)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        return GlobalProtectGatewayAgentConfig.objects.get()
+
+    def test_a_full_tunnel_with_the_local_network_closed_counts_nothing(self):
+        row = self._count(split={}, local="yes")
+        self.assertEqual(row.uninspected_egress_path_count, 0)
+        self.assertTrue(row.egress_inventory_computed)
+
+    def test_an_open_local_network_is_a_path_the_split_tunnel_container_cannot_see(self):
+        # It is a SIBLING of `split-tunneling` rather than a child, and the vendor puts the
+        # local subnet inside the split-tunnel decision itself while the control does not.
+        self.assertEqual(self._count(split={}, local="no").uninspected_egress_path_count, 1)
+
+    def test_an_include_list_of_only_any_is_not_narrower_than_everything(self):
+        # The literal `any` is an accepted member, measured at the write and stored verbatim. A
+        # list holding only it routes everything into the tunnel, so it is not a split tunnel.
+        row = self._count(split={"include-applications": {"member": ["any"]}}, local="yes")
+        self.assertEqual(row.split_tunnel_include_applications, ["any"])
+        self.assertEqual(row.uninspected_egress_path_count, 0)
+
+    def test_a_narrow_include_list_is_a_split_tunnel_even_with_no_exclusions(self):
+        # A gateway with zero exclusions and a narrow include list is a split tunnel an
+        # exclusion-only read calls full, which is why the assertion is about every path.
+        row = self._count(split={"access-route": {"member": ["10.0.0.0/8"]}}, local="yes")
+        self.assertEqual(row.uninspected_egress_path_count, 1)
+
+    def test_the_video_exclusion_on_the_gateway_reaches_this_rows_count(self):
+        # PAN-GPG-004's fourth axis and the only one outside the split-tunnel container: it sits
+        # on the device-local networking half, so an inventory built on this collection alone
+        # returns zero on a gateway excluding all video streaming.
+        row = self._count(split={}, local="yes", video="yes")
+        self.assertEqual(row.uninspected_egress_path_count, 1)
+
+    def test_a_domain_exclusion_keeps_its_ports_rather_than_flattening_to_a_name(self):
+        # The shape is list/entry[@name] with a `ports` key, so a reader written for a member
+        # list loses every port restriction.
+        row = self._count(
+            split={"exclude-domains": {"list": {"entry": [
+                {"@name": "example.invalid", "ports": {"member": ["443", "8443"]}}]}}},
+            local="yes")
+        self.assertEqual(row.split_tunnel_exclude_domains,
+                         [{"domain": "example.invalid", "ports": ["443", "8443"]}])
+        self.assertEqual(row.uninspected_egress_path_count, 1)
+
+    def test_every_axis_at_once_counts_them_all(self):
+        row = self._count(
+            split={"exclude-access-route": {"member": ["10.9.0.0/16"]},
+                   "access-route": {"member": ["10.0.0.0/8"]},
+                   "exclude-applications": {"member": ["C:\\\\bin\\\\x.exe"]},
+                   "include-applications": {"member": ["chrome"]},
+                   "exclude-domains": {"list": {"entry": [{"@name": "a.invalid"}]}},
+                   "include-domains": {"list": {"entry": [{"@name": "b.invalid"}]}}},
+            local="no", video="yes")
+        self.assertEqual(row.uninspected_egress_path_count, 8)
+
+
+class GlobalProtectPostureTests(_GlobalProtectGatewayBase):
+    """PAN-GPG-005, on `GlobalProtectEnforcementPoint` by ruling P374a."""
+
+    def test_the_standing_hip_object_is_counted_and_decides_nothing(self):
+        # vsys4 of both PA-5220s, read under `action=show` so it is COMMITTED. One HIP object,
+        # no HIP profile, no rule - the pipeline is defined and enforces nothing, which is the
+        # state the verdict exists to report.
+        self._merged([self._vsys([], name="vsys4", extra={
+            "profiles": {"hip-objects": {"entry": [self.LAB_STANDING_HIP_OBJECT]}}})])
+        self._profiles()
+        counts = normalize_globalprotect_gateways(self.appliance)
+
+        self.assertEqual(counts["globalprotect_posture_points"], 1)
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.hip_object_count, 1)
+        self.assertEqual(point.hip_profile_count, 0)
+        self.assertEqual(point.rules_referencing_a_hip_profile_count, 0)
+        self.assertFalse(point.posture_referenced_in_policy)
+
+    def test_a_vsys_with_no_posture_at_all_still_gets_a_row(self):
+        # The commonest failing state is that NONE of the four things exists, and at the entry
+        # grain there would be no row to report it with.
+        self._merged([self._vsys([])])
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.hip_object_count, 0)
+        self.assertFalse(point.posture_referenced_in_policy)
+
+    def test_the_three_bare_keywords_are_not_a_posture_match(self):
+        # `any`, `no-hip` and `quarantine` are keywords measured at the write path, never
+        # references, and `any` is the commonest member in this estate. Counting a populated
+        # member list would report the whole lab as matching on posture.
+        self._merged([self._vsys([], extra={
+            "profiles": {"hip-objects": {"entry": [self.LAB_STANDING_HIP_OBJECT]},
+                         "hip-profiles": {"entry": [{"@name": "hp-1", "match": "'oep-gpp6-hip-a'"}]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r-any", "source-hip": {"member": ["any"]}},
+                {"@name": "r-nohip", "source-hip": {"member": ["no-hip"]}},
+                {"@name": "r-quarantine", "destination-hip": {"member": ["quarantine"]}},
+            ]}}}})])
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.hip_profile_count, 1)
+        self.assertEqual(point.rules_referencing_a_hip_profile_count, 0)
+        self.assertFalse(point.posture_referenced_in_policy)
+
+    def test_a_rule_naming_a_real_hip_profile_completes_the_pipeline(self):
+        self._merged([self._vsys([], extra={
+            "profiles": {"hip-objects": {"entry": [self.LAB_STANDING_HIP_OBJECT]},
+                         "hip-profiles": {"entry": [{"@name": "hp-1", "match": "'oep-gpp6-hip-a'"}]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                {"@name": "r-posture", "source-hip": {"member": ["any", "hp-1"]}},
+            ]}}}})])
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        point = GlobalProtectEnforcementPoint.objects.get()
+        self.assertEqual(point.rules_referencing_a_hip_profile_count, 1)
+        self.assertTrue(point.posture_referenced_in_policy)
+
+    def test_an_absent_hipmatch_container_reports_no_automatic_quarantine(self):
+        # Measured absent on all four appliances under BOTH views - the merged payload carries
+        # no `hipmatch` key and `action=show` raises `No such node`. False is the firing side
+        # and the real state of the estate.
+        self._merged([self._vsys([])], shared={"log-settings": {"syslog": None}})
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        self.assertFalse(
+            GlobalProtectEnforcementPoint.objects.get().automatic_quarantine_action_present)
+
+    def test_a_hipmatch_match_list_carrying_quarantine_is_the_automatic_route(self):
+        # CONSTRUCTED: no appliance in this estate holds a hipmatch match list at all, so the
+        # true branch has no device instance here. The shape is the CLI grammar's.
+        self._merged([self._vsys([])], shared={"log-settings": {"hipmatch": {"match-list": {
+            "entry": [{"@name": "ml-1", "filter": "All Logs",
+                       "actions": {"quarantine": None}}]}}}})
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        self.assertTrue(
+            GlobalProtectEnforcementPoint.objects.get().automatic_quarantine_action_present)
+        # And it reaches the gateway's own copy of the reading, which is where PAN-GPG-005's
+        # second clause group reads it.
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     shared={"log-settings": {"hipmatch": {"match-list": {"entry": [
+                         {"@name": "ml-1", "actions": {"quarantine": None}}]}}}},
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        normalize_globalprotect_gateways(self.appliance)
+        self.assertTrue(GlobalProtectGateway.objects.get().automatic_quarantine_path_exists)
+
+
+class GlobalProtectGatewayLicenceTests(_GlobalProtectGatewayBase):
+    """Three licence shapes from one command, measured on four appliances."""
+
+    def test_an_appliance_naming_the_gateway_feature_unexpired_is_licensed(self):
+        # 691665AC334B458's reply verbatim, trimmed to the two GlobalProtect features: the
+        # GATEWAY and the PORTAL are SEPARATE features, so a control asserting "a GlobalProtect
+        # licence" has to say which.
+        self._licence({"licenses": {"entry": [
+            {"feature": "GlobalProtect Gateway", "expires": "Never", "expired": "no"},
+            {"feature": "GlobalProtect Portal", "expires": "Never", "expired": "no"},
+        ]}})
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        gateway = GlobalProtectGateway.objects.get()
+        self.assertTrue(gateway.globalprotect_gateway_licensed)
+        self.assertTrue(gateway.licence_state_known)
+
+    def test_a_populated_reply_with_no_gateway_feature_is_known_and_unlicensed(self):
+        # 6A9C0A9904E7D6E's reply verbatim: three features and none of them GlobalProtect.
+        self._licence({"licenses": {"entry": [
+            {"feature": "Adv Threat Prevention", "expired": "no"},
+            {"feature": "PA-VM", "expired": "no"},
+            {"feature": "Threat Prevention", "expired": "no"},
+        ]}})
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        gateway = GlobalProtectGateway.objects.get()
+        self.assertFalse(gateway.globalprotect_gateway_licensed)
+        # THE READ ANSWERED. That is a different fact from "it answered nothing", and the two
+        # must not be conflated: conflating them suppresses a control on a read that said
+        # nothing.
+        self.assertTrue(gateway.licence_state_known)
+
+    def test_the_empty_envelope_both_pa_5220s_answer_is_not_a_no(self):
+        # `{'licenses': None}` arrives with status=success on both PA-5220s. It is TRUTHY at the
+        # outer dict and falsy one level in, so a consumer testing the reply's truthiness
+        # concludes licences are present on an appliance that reported none.
+        self._licence({"licenses": None})
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        gateway = GlobalProtectGateway.objects.get()
+        self.assertFalse(gateway.globalprotect_gateway_licensed)
+        self.assertFalse(gateway.licence_state_known)
+
+    def test_a_licence_read_nobody_took_is_not_a_no_either(self):
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        gateway = GlobalProtectGateway.objects.get()
+        self.assertFalse(gateway.globalprotect_gateway_licensed)
+        self.assertFalse(gateway.licence_state_known)
+
+    def test_an_expired_gateway_entitlement_does_not_count_as_licensed(self):
+        # CONSTRUCTED: every licence in this estate carries `expired: no` beside
+        # `expires: Never`, so nothing here exercises the difference. The stage 5 declaration
+        # asks for `expired = no` in as many words, and this column is never claused on - it
+        # goes into the finding's wording - so reading `expired` costs nothing.
+        self._licence({"licenses": {"entry": [
+            {"feature": "GlobalProtect Gateway", "expires": "January 01, 2020",
+             "expired": "yes"}]}})
+        self._merged([self._vsys([self.GATEWAY_BARE])],
+                     network=self.LAB_EMPTY_NETWORKING_HALF)
+        self._profiles()
+        normalize_globalprotect_gateways(self.appliance)
+        gateway = GlobalProtectGateway.objects.get()
+        self.assertFalse(gateway.globalprotect_gateway_licensed)
+        self.assertTrue(gateway.licence_state_known)
+
+
+class SslTlsExplicitProtocolSettingsTests(TestCase):
+    """`has_explicit_protocol_settings`, and the bug the stage 7 readback caught in it."""
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano.eps")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="g-eps",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            serial_number="S-EPS", hostname="fw-eps", software_version="11.2.5")
+        self.group.active_appliance = self.appliance
+        self.group.save()
+
+    def _shared_profiles(self, entries):
+        Snapshot.objects.create(
+            management_station=self.station, appliance=self.appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {
+                "shared": {"ssl-tls-service-profile": {"entry": entries}},
+                "devices": {"entry": [{"@name": "localhost.localdomain"}]}}})
+
+    def test_a_profile_stating_only_a_ceiling_still_states_a_range(self):
+        # oep-crt6-34 verbatim, vsys1 of 6A9C0A9904E7D6E, read 2026-10-30: `protocol-settings`
+        # carries `max-version` and NO `min-version`. Stage 6 recorded it as "a ceiling and no
+        # floor" and the store was reporting it with both, because `min_version` is
+        # materialised - which is how this column's first implementation was caught.
+        self._shared_profiles([{"@name": "oep-crt6-34", "certificate": "c",
+                                "protocol-settings": {"max-version": "tls1-3"}}])
+        normalize_certificate_objects(self.appliance)
+        profile = SslTlsServiceProfile.objects.get(name="oep-crt6-34")
+        # The MATERIALISED floor is still stored - that reading is another domain's and is not
+        # changed here.
+        self.assertEqual(profile.min_version, "tls1-2")
+        self.assertEqual(profile.max_version, "tls1-3")
+        self.assertTrue(profile.has_explicit_protocol_settings)
+
+    def test_a_profile_stating_neither_bound_states_no_range_at_all(self):
+        # CONSTRUCTED, and the measurement that licenses it is that NO profile in this lab omits
+        # both bounds - twelve profiles across four appliances, every one carrying at least one.
+        # So this branch has no device instance here, which is exactly why it needs a test: the
+        # first implementation read the PARSED values, both of which are materialised, so this
+        # profile reported that somebody had chosen a range. That is the reassuring side, and a
+        # gateway verdict resting on it would have passed.
+        self._shared_profiles([{"@name": "oep-no-range", "certificate": "c",
+                                "protocol-settings": None}])
+        normalize_certificate_objects(self.appliance)
+        profile = SslTlsServiceProfile.objects.get(name="oep-no-range")
+        self.assertEqual(profile.min_version, "tls1-2")
+        self.assertEqual(profile.max_version, "tls1-3")
+        self.assertFalse(profile.has_explicit_protocol_settings)
+
+    def test_a_profile_stating_both_bounds_states_a_range(self):
+        # The estate's `default` profile on 6A9C0A9904E7D6E, trimmed to the two bounds.
+        self._shared_profiles([{"@name": "default", "certificate": "c",
+                                "protocol-settings": {"min-version": "tls1-2",
+                                                      "max-version": "tls1-3"}}])
+        normalize_certificate_objects(self.appliance)
+        self.assertTrue(
+            SslTlsServiceProfile.objects.get(name="default").has_explicit_protocol_settings)

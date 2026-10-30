@@ -29,6 +29,7 @@ from optivedge_integrations.integrations.models import (
     PolicyObjectNamespace,
     SecurityProfile,
     SecurityProfileInlineDetector,
+    SecurityProfileSeverityVerdict,
     SecurityProfileThreatException,
     SecurityRule,
     SecurityRuleProfileVerdict,
@@ -67,7 +68,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.security
     dns_security_categories,
     dns_signature_sources,
     dns_sinkhole_address,
+    exception_surfaces,
     severity_verdict,
+    severity_weakest_action,
+    widest_exemption_surface,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_group_security_profiles,
@@ -3280,3 +3284,490 @@ class UrlFilteringNormalizationTests(TestCase):
             management_station=station, appliance_group=group, name="c",
             namespace_type=PolicyObjectNamespace.LOCAL_SHARED, namespace_value="shared",
             precedence_rank=20, match_entry_count=None, match_entries=None).clean()
+
+
+# --------------------------------------------------------------------------------------------
+# VULNERABILITY PROTECTION - PAN-VLN-001 to -004 at the rule grain. OEP stage 7, 2026-10-30.
+#
+# EVERY VALUE ASSERTED BELOW WAS READ OFF A DEVICE, not reconstructed from documentation: the
+# seventeen standing `oep-vln6-*` profiles and both predefined profiles on serial
+# 691665AC334B458 (PA-VM 11.2.5, labelled pan-fw-201 in the probe inventory), read 2026-10-30
+# with `type=config&action=get` AND `action=show` - which agreed entry for entry on this node,
+# so no staged edit is in any of these readings. The comment on each case names the subject.
+#
+# TWO CASES HERE ARE NOT FROM THE DEVICE AND SAY SO. A mutation run over every standing subject
+# found two branches of `severity_weakest_action` that this lab CANNOT discriminate, because no
+# standing profile has a narrow rule beside a broad one on one band, and none covers a single
+# host side. Those two live here as fixtures and are labelled LAB-BLIND.
+VLN_DETECTORS = SecurityProfileInlineDetector.VULNERABILITY_DETECTORS
+
+
+def vln_engine(name, action):
+    return {"@name": name, "inline-policy-action": action}
+
+
+def vln_normalize(entry, kind=VLN):
+    return normalize_security_profile(
+        kind=kind, source_snapshot=None, config_source="local",
+        namespace_type=PolicyObjectNamespace.LOCAL_VSYS, namespace_value="vsys1", entry=entry)
+
+
+class VulnerabilityInlineCloudAnalysisSwitchTests(SimpleTestCase):
+    """`inline_cloud_analysis_enabled` - PAN-VLN-003's FIRST half, and the absent-key reading.
+
+    The column reads the same device key as `cloud_inline_analysis`, which is gated to the
+    spyware kind. The last two cases pin that hazard so a later merge cannot happen in silence.
+    """
+
+    def test_an_absent_key_is_false_and_the_provenance_is_an_INFERENCE(self):
+        # SEVEN OF THE NINETEEN standing subjects are in this state - oep-vln6-01, -03, -04,
+        # -05, -06 and BOTH predefined profiles - so every estate binding `default` or `strict`
+        # reads false here. The provenance row is what separates it from a measured default:
+        # the positive control was never paid on this kind.
+        normalized = vln_normalize({"@name": "p"})
+        self.assertFalse(normalized.inline_cloud_analysis_enabled)
+        recorded = dict((name, rk) for name, rk, _ in normalized.field_provenance_data)
+        self.assertEqual(recorded["inline_cloud_analysis_enabled"].value, False)
+        self.assertIsNone(recorded["inline_cloud_analysis_enabled"].citation,
+                          "a citation here would present an inference as a vendor fact")
+        self.assertEqual(recorded["inline_cloud_analysis_enabled"].provenance_type,
+                         "assumed_default")
+
+    def test_yes_and_no_are_both_read_and_both_carry_the_key_s_own_provenance(self):
+        # `yes` on eleven standing subjects, `no` on oep-vln6-07 and oep-vln6-11 - and -11 is
+        # the subject that matters: its switch is off while both detectors end the connection.
+        for wire, expected in (("yes", True), ("no", False)):
+            normalized = vln_normalize({"@name": "p", "cloud-inline-analysis": wire})
+            self.assertIs(normalized.inline_cloud_analysis_enabled, expected, wire)
+            recorded = dict((name, rk) for name, rk, _ in normalized.field_provenance_data)
+            self.assertEqual(classify_prov_type(recorded["inline_cloud_analysis_enabled"]),
+                             "local", wire)
+
+    def test_the_spyware_kind_stores_NOTHING_in_this_column(self):
+        # TWO COLUMNS OVER ONE DEVICE KEY, and this is the half that keeps them apart. A merge
+        # of the two would make this assertion fail rather than pass quietly.
+        normalized = vln_normalize({"@name": "p", "cloud-inline-analysis": "yes"}, kind=SPY)
+        self.assertFalse(normalized.inline_cloud_analysis_enabled)
+        self.assertTrue(normalized.cloud_inline_analysis)
+        recorded = [name for name, _rk, _rv in normalized.field_provenance_data]
+        self.assertNotIn("inline_cloud_analysis_enabled", recorded)
+
+    def test_the_vulnerability_kind_stores_NOTHING_in_the_spyware_column(self):
+        normalized = vln_normalize({"@name": "p", "cloud-inline-analysis": "yes"})
+        self.assertTrue(normalized.inline_cloud_analysis_enabled)
+        self.assertFalse(normalized.cloud_inline_analysis,
+                         "the spyware column is hardcoded False on this kind and is not a "
+                         "reading of the device - see both columns' comments")
+
+
+class WidestExemptionSurfaceTests(SimpleTestCase):
+    """`widest_exemption_surface` - PAN-VLN-004's grading axis. All three members measured."""
+
+    @staticmethod
+    def _shape(entry):
+        return widest_exemption_surface(exception_surfaces(entry),
+                                       profile_threat_exceptions(entry))
+
+    def test_no_exemption_on_any_surface_is_the_empty_string(self):
+        # Fourteen of the nineteen standing subjects, including both predefined profiles.
+        self.assertEqual(self._shape({"@name": "p"}), "")
+
+    def test_a_signature_exemption_scoped_to_addresses_is_the_narrowest(self):
+        # oep-vln6-16: threat 30001 with one `exempt-ip` entry.
+        self.assertEqual(self._shape({"@name": "p", "threat-exception": {"entry": [
+            {"@name": "30001", "exempt-ip": {"entry": [{"@name": "10.1.1.1"}]}}]}}),
+            "signature-scoped")
+
+    def test_a_signature_exemption_with_NO_address_scope_is_wider(self):
+        # oep-vln6-17: the same threat with no `exempt-ip` at all. THE POLARITY IS INVERTED and
+        # it is this column's whole hazard - an exemption is widest when its scope is ABSENT.
+        self.assertEqual(self._shape({"@name": "p", "threat-exception": {"entry": [
+            {"@name": "30001"}]}}), "signature-unscoped")
+
+    def test_an_EMPTY_exempt_ip_node_is_the_unscoped_form_and_not_the_scoped_one(self):
+        # Zero entries under the node is the same state as no node, which is what makes the
+        # count the right reading and a presence test the wrong one.
+        self.assertEqual(self._shape({"@name": "p", "threat-exception": {"entry": [
+            {"@name": "30001", "exempt-ip": {}}]}}), "signature-unscoped")
+
+    def test_either_inline_analysis_exclusion_list_is_the_widest_of_all(self):
+        # oep-vln6-18 holds the ip-address list naming `oep-vln6-edl-ip`. The surface takes a
+        # REFERENCE and refuses a literal, so one entry is any number of hosts.
+        for key in ("inline-exception-ip-address", "inline-exception-edl-url"):
+            self.assertEqual(
+                self._shape({"@name": "p", key: {"member": ["oep-vln6-edl-ip"]}}),
+                "inline-analysis-population", key)
+
+    def test_an_inline_exclusion_outranks_an_unscoped_signature_exemption(self):
+        self.assertEqual(self._shape({
+            "@name": "p",
+            "threat-exception": {"entry": [{"@name": "30001"}]},
+            "inline-exception-ip-address": {"member": ["oep-vln6-edl-ip"]}}),
+            "inline-analysis-population")
+
+    def test_the_column_is_written_for_the_vulnerability_kind_and_no_other(self):
+        # The three shapes are that kind's three surfaces; an anti-spyware profile has five,
+        # two of them in the botnet tree, and no member here describes those.
+        entry = {"@name": "p", "threat-exception": {"entry": [{"@name": "30001"}]}}
+        self.assertEqual(vln_normalize(entry).widest_exemption_surface, "signature-unscoped")
+        self.assertEqual(vln_normalize(entry, kind=SPY).widest_exemption_surface, "")
+        self.assertEqual(vln_normalize(entry, kind=SecurityProfile.KIND_VIRUS)
+                         .widest_exemption_surface, "")
+
+
+class SeverityWeakestActionTests(SimpleTestCase):
+    """`SecurityProfileSeverityVerdict.weakest_action` - PAN-VLN-001's grading axis as a value.
+
+    THE DEVICE SUPPLIED EIGHT OF THE NINE READINGS BELOW, one per standing subject, and the
+    ninth - the empty string - comes off oep-vln6-07, which carries no rules collection at all.
+    """
+
+    @staticmethod
+    def _weakest(rules, severity="critical"):
+        return severity_weakest_action(VLN, rules, severity)
+
+    def test_each_action_the_lab_stands_a_profile_for_reads_back_as_itself(self):
+        # oep-vln6-01 allow, -15 alert, -03 drop, -04 reset-client, -05 reset-server,
+        # -10 reset-both, -06 block-ip, and the predefined `default` profile's own `default`.
+        for action in ("allow", "default", "alert", "drop", "reset-client", "reset-server",
+                       "reset-both", "block-ip"):
+            self.assertEqual(
+                self._weakest([vln_rule("r-sev-ch", ["critical", "high"], action)]), action,
+                action)
+
+    def test_no_covering_rule_is_the_empty_string_and_not_an_action(self):
+        # oep-vln6-07, which carries no `rules` node at all - stage 3 is explicit that this is
+        # a different failure from a weak action.
+        self.assertEqual(self._weakest([]), "")
+        # And a rule that matches the band but narrows to particular signatures covers nothing.
+        narrow = dict(vln_rule("r-narrow", ["critical"], "reset-both"), **{"cve": {"member": ["CVE-2024-1"]}})
+        self.assertEqual(self._weakest([narrow]), "")
+
+    def test_the_empty_string_sorts_WEAKEST_over_any_action(self):
+        self.assertEqual(SecurityProfileSeverityVerdict.weakest_of(["reset-both", ""]), "")
+        self.assertEqual(SecurityProfileSeverityVerdict.weakest_of([]), "")
+
+    def test_an_action_the_order_does_not_place_sorts_weakest(self):
+        # A content release adding a ninth action must not be read as protection.
+        self.assertEqual(
+            SecurityProfileSeverityVerdict.weakest_of(["reset-both", "a-ninth-action"]),
+            "a-ninth-action")
+
+    def test_LAB_BLIND_a_narrow_weak_rule_beside_a_broad_blocking_one_decides(self):
+        # NOT A DEVICE READING. No standing profile has two rules on one band, so the mutation
+        # that reads only the catch-all rule produced the same answer as the real code on every
+        # one of the nineteen subjects. What would settle it on the lab: one profile with a
+        # `threat-name`-narrowed `alert` rule beside a broad `reset-both` rule on critical.
+        rules = [vln_rule("broad", ["critical"], "reset-both"),
+                 dict(vln_rule("narrow", ["critical"], "alert"), **{"threat-name": "30001"})]
+        self.assertEqual(self._weakest(rules), "alert",
+                         "a narrow rule can only open a hole, so it decides the axis")
+
+    def test_LAB_BLIND_a_rule_covering_one_host_side_leaves_the_other_uncovered(self):
+        # NOT A DEVICE READING, for the same reason: every standing profile's severity rule is
+        # `host any` or covers both sides. What would settle it: one profile whose only
+        # critical rule names `host client`.
+        self.assertEqual(
+            self._weakest([vln_rule("client-only", ["critical"], "reset-both", host="client")]),
+            "", "the server side has no covering rule, which the axis reports as uncovered")
+        # And the anti-spyware kind has no host dimension at all, so one side is the whole test.
+        self.assertEqual(
+            severity_weakest_action(SPY, [spy_rule("broad", ["critical"], "reset-both")],
+                                    "critical"), "reset-both")
+
+    def test_the_verdict_and_the_axis_read_the_same_rules(self):
+        # They were one loop and a copy until this domain needed the second; `_severity_matching`
+        # is the one reader, so a profile failing on the server side cannot be graded by the
+        # client side's action.
+        rules = [vln_rule("client-only", ["critical"], "reset-both", host="client")]
+        blocked, _detail = severity_verdict(VLN, rules, "critical")
+        self.assertFalse(blocked)
+        self.assertEqual(self._weakest(rules), "")
+
+    def test_the_axis_is_written_for_both_threat_rule_kinds(self):
+        # A blank would state "no rule covers the band", which is false of a spyware row where
+        # one does. Only the vulnerability domain asserts the column.
+        rules = [spy_rule("broad", ["critical", "high"], "alert")]
+        normalized = vln_normalize({"@name": "p", "rules": {"entry": rules}}, kind=SPY)
+        self.assertEqual(normalized.severity_weakest_actions["critical"], "alert")
+        self.assertEqual(
+            vln_normalize({"@name": "p"}, kind=SecurityProfile.KIND_VIRUS)
+            .severity_weakest_actions, {},
+            "a kind with no severity rules writes no verdict rows and so no axis")
+
+
+class VulnerabilityPerRuleTests(TestCase):
+    """The rule grain, end to end over the shapes serial 691665AC334B458 holds.
+
+    NO RULE AND NO PROFILE GROUP ANYWHERE IN THIS LAB BINDS A VULNERABILITY PROFILE - measured
+    across all four serials and six vsys on 2026-10-30, where 141 rules on one appliance name a
+    profile GROUP called `default` that names no profile of any kind. Stage 6 chose not to leave
+    one and this stage may not build one, so the RESOLVED half of every column below is proved
+    here against the profile shapes the device really holds rather than on the appliance.
+    """
+
+    def _point(self, *, vsys, shared=None, predefined=None):
+        station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA, hostname="pano-vln")
+        group = ApplianceGroup.objects.create(
+            management_station=station, name="grp-vln",
+            group_type=ApplianceGroup.TYPE_STANDALONE)
+        appliance = Appliance.objects.create(
+            management_station=station, appliance_group=group,
+            serial_number="691665AC334B458", hostname="PA-VM")
+        group.active_appliance = appliance
+        group.save()
+        point = EnforcementPoint.objects.create(
+            management_station=station, appliance_group=group, vsys_name="vsys1", in_scope=True)
+        EnforcementNode.objects.create(
+            management_station=station, enforcement_point=point, appliance=appliance)
+        now = timezone.now()
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=now,
+            payload={"config": {
+                "shared": shared or {},
+                "devices": {"entry": [{"@name": "localhost.localdomain", "vsys": {"entry": [
+                    dict({"@name": "vsys1"}, **vsys)]}}]}}})
+        if predefined is not None:
+            Snapshot.objects.create(
+                management_station=station, appliance=appliance,
+                source_type="config_predefined_security_profiles", collected_at=now,
+                payload={"profiles": predefined})
+        Snapshot.objects.create(management_station=station, appliance_group=group,
+                                source_type="show_pushed_shared_policy", collected_at=now,
+                                payload={"policy": {"panorama": {}}})
+        Snapshot.objects.create(management_station=station, enforcement_point=point,
+                                source_type="show_pushed_shared_policy_vsys", scope_name="vsys1",
+                                collected_at=now, payload={"policy": {"panorama": {}}})
+        Snapshot.objects.create(management_station=station, enforcement_point=point,
+                                source_type="config_pushed_vsys_profiles", scope_name="vsys1",
+                                collected_at=now, payload={})
+        normalize_security_rules(point)
+        normalize_appliance_group_security_profiles(group)
+        normalize_security_profiles(point)
+        return point, normalize_security_rule_profile_coverage(point)
+
+    @staticmethod
+    def _rule(name, *, octet, vulnerability=None, group=None):
+        entry = {"@name": name,
+                 "from": {"member": ["any"]}, "to": {"member": ["any"]},
+                 "source": {"member": ["198.18.251.1/32"]},
+                 "destination": {"member": [f"198.18.251.{octet}/32"]},
+                 "application": {"member": ["any"]}, "service": {"member": ["any"]},
+                 "action": "allow"}
+        if vulnerability is not None:
+            entry["profile-setting"] = {
+                "profiles": {"vulnerability": {"member": [vulnerability]}}}
+        if group is not None:
+            entry["profile-setting"] = {"group": {"member": [group]}}
+        return entry
+
+    @staticmethod
+    def _baseline(name, **overrides):
+        # oep-vln6-10, the fully compliant subject: one catch-all rule blocking critical and
+        # high on both host sides, a brute-force rule holding the source off for 3600 seconds,
+        # the real-time analysis switched on with both engines ending the connection, and no
+        # exemption on any surface.
+        entry = {
+            "@name": name,
+            "rules": {"entry": [
+                vln_rule("r-sev-ch", ["critical", "high"], "reset-both"),
+                {"@name": "r-bf", "threat-name": "any", "category": "brute-force",
+                 "host": "any", "cve": {"member": ["any"]}, "vendor-id": {"member": ["any"]},
+                 "severity": {"member": ["critical", "high", "medium"]},
+                 "action": {"block-ip": {"track-by": "source", "duration": "3600"}}}]},
+            "mica-engine-vulnerability-enabled": {"entry": [
+                vln_engine(n, "reset-both") for n in VLN_DETECTORS]},
+            "cloud-inline-analysis": "yes",
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_a_rule_reaching_no_profile_gets_a_row_for_every_assertion_with_a_NULL(self):
+        # All twenty rules on this appliance are in this state, measured: not one binds a
+        # vulnerability profile. The row has to exist, because a query cannot ask for one
+        # that is not there.
+        point, counts = self._point(vsys={
+            "rulebase": {"security": {"rules": {"entry": [self._rule("r1", octet=2)]}}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertFalse(rule.has_vulnerability_profile)
+        self.assertFalse(rule.vulnerability_profile_resolved)
+        self.assertTrue(rule.vulnerability_verdict_written)
+        self.assertEqual(rule.vulnerability_profile_name, "")
+        for value in (rule.vulnerability_blocks_critical_high,
+                      rule.vulnerability_blocks_brute_force,
+                      rule.vulnerability_inline_analysis_blocks,
+                      rule.vulnerability_inline_analysis_enabled,
+                      rule.vulnerability_exceptions_minimal):
+            self.assertIsNone(value)
+        for axis in (rule.vulnerability_severity_weakest_action,
+                     rule.vulnerability_inline_weakest_action,
+                     rule.vulnerability_widest_exemption_surface):
+            self.assertEqual(axis, "")
+        self.assertEqual(
+            rule.vulnerability_inline_analysis_enabled_detail,
+            "no vulnerability profile is in force on this rule")
+        self.assertEqual(SecurityRuleProfileVerdict.objects.filter(
+            security_rule=rule,
+            assertion=SecurityRuleProfileVerdict.VULNERABILITY_INLINE_ENABLED).count(), 1)
+        self.assertEqual(counts["vulnerability_profile_unresolved"], 1)
+
+    def test_verdict_written_is_FALSE_until_the_pass_runs_and_TRUE_after(self):
+        # The undetermined group of all four controls. Every shipped verdict compiler filters
+        # the assertion first, so a rule whose rows were never written is silent in all four.
+        point, _counts = self._point(vsys={
+            "rulebase": {"security": {"rules": {"entry": [self._rule("r1", octet=2)]}}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertTrue(rule.vulnerability_verdict_written)
+        SecurityRule.objects.filter(pk=rule.pk).update(vulnerability_verdict_written=False)
+        self.assertFalse(SecurityRule.objects.get(pk=rule.pk).vulnerability_verdict_written)
+        normalize_security_rule_profile_coverage(point)
+        self.assertTrue(SecurityRule.objects.get(pk=rule.pk).vulnerability_verdict_written)
+
+    def test_a_name_that_resolves_to_nothing_is_the_THIRD_attachment_state(self):
+        # `has_vulnerability_profile` True and resolved False - a name is bound and resolves to
+        # nothing, which is "repair the profile" rather than "attach one". The lab's own rules
+        # cannot show it: the only group they name holds no vulnerability member at all.
+        point, _counts = self._point(vsys={
+            "profiles": {"vulnerability": {"entry": [self._baseline("oep-vln6-10")]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="oep-vln6-nothing")]}}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertTrue(rule.has_vulnerability_profile)
+        self.assertFalse(rule.vulnerability_profile_resolved)
+        self.assertEqual(rule.vulnerability_profile_name, "oep-vln6-nothing",
+                         "the name the rule ASKED for, which is what a finding has to print")
+        self.assertIsNone(rule.vulnerability_blocks_critical_high)
+        self.assertEqual(
+            rule.vulnerability_blocks_critical_high_detail,
+            "names vulnerability profile 'oep-vln6-nothing', which resolves to nothing")
+
+    def test_the_fully_compliant_profile_satisfies_all_five_assertions(self):
+        point, _counts = self._point(vsys={
+            "profiles": {"vulnerability": {"entry": [self._baseline("oep-vln6-10")]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="oep-vln6-10")]}}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertTrue(rule.vulnerability_profile_resolved)
+        self.assertEqual(rule.vulnerability_profile_name, "oep-vln6-10")
+        self.assertTrue(rule.vulnerability_blocks_critical_high)
+        self.assertTrue(rule.vulnerability_blocks_brute_force)
+        self.assertTrue(rule.vulnerability_inline_analysis_blocks)
+        self.assertTrue(rule.vulnerability_inline_analysis_enabled)
+        self.assertTrue(rule.vulnerability_exceptions_minimal)
+        self.assertEqual(rule.vulnerability_severity_weakest_action, "reset-both")
+        self.assertEqual(rule.vulnerability_inline_weakest_action, "reset-both")
+        self.assertEqual(rule.vulnerability_widest_exemption_surface, "")
+
+    def test_THE_GAP_THIS_DOMAIN_ADDS_a_switched_off_profile_whose_engines_block(self):
+        # oep-vln6-11, and the one place the shipped implementation answered a different
+        # question from stage 3: both engines end the connection, so the DETECTOR assertion is
+        # satisfied, while the profile-wide switch is `no` and nothing in real time runs.
+        point, _counts = self._point(vsys={
+            "profiles": {"vulnerability": {"entry": [
+                self._baseline("oep-vln6-11", **{"cloud-inline-analysis": "no"})]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="oep-vln6-11")]}}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertTrue(rule.vulnerability_inline_analysis_blocks)
+        self.assertFalse(rule.vulnerability_inline_analysis_enabled)
+        self.assertEqual(
+            rule.vulnerability_inline_analysis_enabled_detail,
+            "the profile-wide real-time cloud analysis switch is off, so the per-detector "
+            "actions are stored and not in effect")
+
+    def test_the_three_graded_axes_surface_the_profile_s_own_readings(self):
+        # oep-vln6-15 alert on both graded bands, -12 a detector at `allow`, -17 an unscoped
+        # signature exemption. Each axis reads its OWN assertion's grading value.
+        weak = self._baseline("oep-vln6-weak", **{
+            "rules": {"entry": [vln_rule("r-sev-ch", ["critical", "high"], "alert")]},
+            "mica-engine-vulnerability-enabled": {"entry": [
+                vln_engine(VLN_DETECTORS[0], "allow"),
+                vln_engine(VLN_DETECTORS[1], "alert")]},
+            "threat-exception": {"entry": [{"@name": "30001"}]}})
+        point, _counts = self._point(vsys={
+            "profiles": {"vulnerability": {"entry": [weak]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="oep-vln6-weak")]}}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertEqual(rule.vulnerability_severity_weakest_action, "alert")
+        self.assertEqual(rule.vulnerability_inline_weakest_action, "allow")
+        self.assertEqual(rule.vulnerability_widest_exemption_surface, "signature-unscoped")
+        self.assertFalse(rule.vulnerability_blocks_critical_high)
+        self.assertFalse(rule.vulnerability_exceptions_minimal)
+
+    def test_a_detector_the_profile_never_mentions_grades_as_the_empty_string(self):
+        # oep-vln6-14: the analysis is on and neither engine has an entry, so the engines the
+        # dialog still offers are left at whatever an unmentioned engine does - which nothing
+        # in this project has measured for this kind, and a blank is the safe direction.
+        point, _counts = self._point(vsys={
+            "profiles": {"vulnerability": {"entry": [self._baseline(
+                "oep-vln6-14", **{"mica-engine-vulnerability-enabled": {}})]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="oep-vln6-14")]}}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertTrue(rule.vulnerability_inline_analysis_enabled)
+        self.assertFalse(rule.vulnerability_inline_analysis_blocks)
+        self.assertEqual(rule.vulnerability_inline_weakest_action, "")
+
+    def test_the_predefined_default_profile_is_the_commonest_weak_configuration(self):
+        # Read off this appliance's own predefined tree: six rules, one per graded band per host
+        # side, every one of them storing `action: default` explicitly - a POINTER whose
+        # resolution no read a collector issues carries.
+        predefined_default = {"@name": "default", "rules": {"entry": [
+            vln_rule(f"simple-{side}-{band}", [band], "default", host=side)
+            for side in ("client", "server") for band in ("critical", "high", "medium")]}}
+        point, _counts = self._point(
+            vsys={"rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="default")]}}}},
+            predefined={"vulnerability": {"entry": [predefined_default]}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertTrue(rule.vulnerability_profile_resolved)
+        self.assertFalse(rule.vulnerability_blocks_critical_high)
+        self.assertEqual(rule.vulnerability_severity_weakest_action, "default")
+        self.assertFalse(rule.vulnerability_inline_analysis_enabled,
+                         "the key is absent on BOTH predefined profiles, measured")
+
+    def test_the_shared_scope_profile_resolves_the_same_way_the_vsys_one_does(self):
+        # oep-vln6-sh1, the same compliant profile built at the firewall's own shared scope.
+        point, _counts = self._point(
+            vsys={"rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="oep-vln6-sh1")]}}}},
+            shared={"profiles": {"vulnerability": {"entry": [
+                self._baseline("oep-vln6-sh1")]}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertTrue(rule.vulnerability_profile_resolved)
+        self.assertTrue(rule.vulnerability_blocks_critical_high)
+        row = SecurityProfile.objects.get(name="oep-vln6-sh1")
+        self.assertEqual(row.namespace_type, PolicyObjectNamespace.LOCAL_SHARED)
+        self.assertTrue(row.inline_cloud_analysis_enabled)
+
+    def test_the_severity_axis_reads_critical_and_high_and_NOT_medium(self):
+        # The control asserts two bands; medium has verdict rows for the tab, and counting it
+        # here would grade a profile by a band nothing asserts.
+        entry = self._baseline("p", **{"rules": {"entry": [
+            vln_rule("r-ch", ["critical", "high"], "reset-both"),
+            vln_rule("r-med", ["medium"], "alert")]}})
+        point, _counts = self._point(vsys={
+            "profiles": {"vulnerability": {"entry": [entry]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="p")]}}}})
+        rule = SecurityRule.objects.get(enforcement_point=point, name="r1")
+        self.assertEqual(rule.vulnerability_severity_weakest_action, "reset-both")
+        profile = SecurityProfile.objects.get(name="p")
+        self.assertEqual(profile.severity_verdicts.get(severity="medium").weakest_action,
+                         "alert", "the band is still stored for the tab")
+
+    def test_a_profile_with_no_verdict_row_for_a_band_grades_as_uncovered(self):
+        # The axis over a row that was never recomputed must not be graded by the band that
+        # survived - which is why a missing row contributes the empty string.
+        point, _counts = self._point(vsys={
+            "profiles": {"vulnerability": {"entry": [self._baseline("p")]}},
+            "rulebase": {"security": {"rules": {"entry": [
+                self._rule("r1", octet=2, vulnerability="p")]}}}})
+        profile = SecurityProfile.objects.get(name="p")
+        self.assertEqual(profile.weakest_assessed_severity_action, "reset-both")
+        profile.severity_verdicts.filter(severity="high").delete()
+        self.assertEqual(SecurityProfile.objects.get(pk=profile.pk)
+                         .weakest_assessed_severity_action, "")

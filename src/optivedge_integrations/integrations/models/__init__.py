@@ -30,6 +30,12 @@ from .interface_management_profile import InterfaceManagementProfile
 from .ike import IkeCryptoProfile, IkeGateway
 from .ipsec import IpsecCryptoProfile, IpsecTunnel, MonitorProfile
 from .interfaces import Interface
+from .content_updates import (
+    CENTRAL_SCHEDULE_STATES,
+    ContentDeploymentSchedule,
+    ContentUpdateSchedule,
+    ROLLOUT_STAGING_SHAPES,
+)
 from .platform_lifecycle import (
     ALARM_MECHANISM_STATES,
     CONTENT_CURRENCY_STATES,
@@ -114,6 +120,9 @@ from .decryption import (
 )
 from .globalprotect import (
     GlobalProtectEnforcementPoint,
+    GlobalProtectGateway,
+    GlobalProtectGatewayAgentConfig,
+    GlobalProtectGatewayClientAuth,
     GlobalProtectPortal,
     GlobalProtectPortalClientAuthRow,
 )
@@ -184,6 +193,10 @@ from .policy import (
 )
 
 __all__ = [
+    "CENTRAL_SCHEDULE_STATES",
+    "ContentDeploymentSchedule",
+    "ContentUpdateSchedule",
+    "ROLLOUT_STAGING_SHAPES",
     "DecryptionPolicyRule",
     "DecryptionPolicyRuleCategory",
     "DecryptionPolicyRuleDestination",
@@ -240,6 +253,9 @@ __all__ = [
     "LoginBanner",
     "ManagementTlsBinding",
     "GlobalProtectEnforcementPoint",
+    "GlobalProtectGateway",
+    "GlobalProtectGatewayAgentConfig",
+    "GlobalProtectGatewayClientAuth",
     "GlobalProtectPortal",
     "GlobalProtectPortalClientAuthRow",
     "ManagementPlaneAddressing",

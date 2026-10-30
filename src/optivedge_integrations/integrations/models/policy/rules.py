@@ -47,6 +47,13 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
         "busy_rule_placed_late",
         "schedule_kind",
         "schedule_window_expired",
+        # --- vulnerability-protection domain (PAN-VLN). Both are worked out by the
+        # profile-coverage pass from other stored rows - the rule's profile-setting, the one
+        # profile group it may name, and the resolved profile - so neither has a payload key and
+        # neither can carry a provenance row. They are the vulnerability siblings of
+        # `spyware_profile_resolved` and of `shadow_relation_computed`.
+        "vulnerability_profile_resolved",
+        "vulnerability_verdict_written",
     )
     #: The three site-inspection states PAN-POL-020 grades, and the reason a boolean is not
     #: enough: `exception_unrecorded` is the middle state - a URL filtering profile IS in force
@@ -135,6 +142,47 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     #: indistinguishable from the real middle state until the recompute runs, which is why it is a
     #: separate column rather than folded into `has_spyware_profile`.
     spyware_profile_resolved = models.BooleanField(default=False)
+
+    #: THE SAME THIRD ATTACHMENT STATE FOR VULNERABILITY PROTECTION, read the same way and for the
+    #: same three repairs - see `spyware_profile_resolved` directly above, whose comment is the
+    #: argument and is not repeated. True only where a vulnerability profile row was found by name
+    #: AND scope, taken vsys first, then shared, then predefined.
+    #:
+    #: ITS ONE CONTROL CLAUSES IT AS AN APPLICABILITY TEST, which is the opposite polarity to the
+    #: spyware column's use and is worth stating here because the suppressing form reads as
+    #: careful: PAN-VLN-004 asks whether exemptions are minimal and applies only where a profile
+    #: is in force, so `equals true` is the clause and a rule nobody could resolve holds FALSE and
+    #: is excluded rather than reported.
+    #:
+    #: WHAT MAKES THAT SAFE is that the exclusion cannot hide an unassessed rule. The gap on a
+    #: rule reaching no profile is asserted by the other three controls in this domain, none of
+    #: which carries an applicability clause, and a rule the coverage pass never ran over is
+    #: reported by `vulnerability_verdict_written` below.
+    #:
+    #: FALSE IS THE DEFAULT, and on this column that is the SILENT side rather than the firing
+    #: one. Deliberate, and the reason the column beside it exists.
+    vulnerability_profile_resolved = models.BooleanField(default=False)
+
+    #: WHETHER THE PROFILE-COVERAGE PASS HAS WRITTEN THIS RULE'S VERDICT ROWS AT ALL. False means
+    #: NOBODY HAS LOOKED, as against a reading that found nothing, and it is the undetermined
+    #: group of all four PAN-VLN controls.
+    #:
+    #: THERE IS NO IS-NULL OPERATOR AND NO QUANTIFIER OVER ROWS, and the absence this answers is
+    #: of a ROW and not of a value. Every shipped verdict compiler filters
+    #: `profile_verdicts__assertion = <assertion>` before it looks at the verdict, so a rule whose
+    #: rows were never written matches no clause of any of those controls and is SILENT in all of
+    #: them while looking compliant. A query cannot ask for a row that is not there; this column
+    #: is that question moved somewhere a clause can see it.
+    #:
+    #: FALSE IS THE FIRING SIDE AND THE DEFAULT, so the window between a migration and the next
+    #: pass announces itself instead of reporting a clean estate. The sibling of
+    #: `shadow_relation_computed` and `duplicate_comparison_computed`, which answer the same
+    #: question for the security-policy domain's own computed pairs.
+    #:
+    #: IT IS WRITTEN FOR EVERY RULE THE PASS TOUCHES, not only for rules a vulnerability profile
+    #: reaches: the pass writes a row for every assertion including the no-profile case, so "this
+    #: rule makes no claim" is a stored fact and "nobody computed this rule" is this column.
+    vulnerability_verdict_written = models.BooleanField(default=False)
 
     #: Does the WildFire analysis profile in force on this rule send EVERY file type for
     #: sandbox analysis? PAN-AVW-003 asks this per RULE rather than per profile, because a
@@ -301,6 +349,53 @@ class SecurityRule(ProvenancedMixin, SyncTrackedModel):
     @property
     def vulnerability_exceptions_minimal_detail(self):
         return self._verdict_detail("vulnerability_exceptions_minimal")
+
+    @property
+    def vulnerability_inline_analysis_enabled(self):
+        """PAN-VLN-003's FIRST HALF: is the profile-wide real-time analysis switch on at all?
+
+        A fifth vulnerability assertion rather than a column, so NULL - no vulnerability profile
+        reaches this rule - is carried by the same satellite mechanism the other four use. The
+        detector verdict beside it grades what each engine DOES; this says whether any of it runs.
+        """
+        return self._verdict_value("vulnerability_inline_analysis_enabled")
+
+    @property
+    def vulnerability_inline_analysis_enabled_detail(self):
+        return self._verdict_detail("vulnerability_inline_analysis_enabled")
+
+    #: THE PROFILE A FINDING IN THIS DOMAIN TELLS AN ENGINEER TO OPEN, and what makes one profile
+    #: behind forty rules recognisable as one object. Read off the satellite's own `profile_name`,
+    #: which has been stored per assertion since the per-rule migration - so this is the shipped
+    #: value surfaced flat, not a new column. The four vulnerability assertions resolve from one
+    #: per-kind resolution and so always agree; the severity assertion is read as the canonical
+    #: one rather than any of them in turn.
+    #:
+    #: BLANK where no profile reaches the rule AND where the name it asks for resolves to
+    #: nothing - the two are told apart by `vulnerability_profile_resolved` and by the detail
+    #: columns, never by this one, which is why it is carried for the sentence and claused by
+    #: nothing.
+    @property
+    def vulnerability_profile_name(self):
+        row = self.profile_verdict("vulnerability_blocks_critical_high")
+        return row.profile_name if row else ""
+
+    #: THE THREE GRADED VALUES PAN-VLN-001, -003 and -004 CALIBRATE THEIR SEVERITY WITH, each the
+    #: WHICH beside one assertion's WHETHER, read exactly as the three spyware gradings above are.
+    #: None may be claused on alone: an empty string matches no placement, so a rule nobody
+    #: recomputed loses the ESCALATION and keeps the finding, which the boolean verdict beside it
+    #: raises because its `false` clause also matches a NULL row.
+    @property
+    def vulnerability_severity_weakest_action(self):
+        return self._verdict_grading("vulnerability_blocks_critical_high")
+
+    @property
+    def vulnerability_inline_weakest_action(self):
+        return self._verdict_grading("vulnerability_inline_analysis_blocks")
+
+    @property
+    def vulnerability_widest_exemption_surface(self):
+        return self._verdict_grading("vulnerability_exceptions_minimal")
 
     @property
     def threat_profile_in_force(self) -> dict:
@@ -603,6 +698,16 @@ class SecurityRuleProfileVerdict(models.Model):
     VULNERABILITY_BRUTE_FORCE = "vulnerability_blocks_brute_force"   # PAN-VLN-002
     VULNERABILITY_INLINE = "vulnerability_inline_analysis_blocks"    # PAN-VLN-003
     VULNERABILITY_EXCEPTIONS = "vulnerability_exceptions_minimal"    # PAN-VLN-004
+    #: PAN-VLN-003's FIRST HALF, and a twelfth assertion rather than a column on the rule, so it
+    #: inherits the three-state NULL this satellite already has: NULL where no vulnerability
+    #: profile reaches the rule, which the shipped compiler matches on `equals false`.
+    #:
+    #: Stage 3 splits that control in two - the analysis is SWITCHED ON, and each detector ENDS
+    #: what it catches - and `VULNERABILITY_INLINE` above answers only the second: it reads
+    #: `mica-engine-vulnerability-enabled` and not `cloud-inline-analysis`. So a profile with
+    #: every detector at reset-both and the profile-wide switch off satisfied that assertion and
+    #: inspected nothing in real time.
+    VULNERABILITY_INLINE_ENABLED = "vulnerability_inline_analysis_enabled"  # PAN-VLN-003
 
     ASSERTION_CHOICES = [
         (ANTIVIRUS_BLOCKS_MALWARE, "Antivirus blocks malware on every decoder"),
@@ -616,6 +721,8 @@ class SecurityRuleProfileVerdict(models.Model):
         (VULNERABILITY_BRUTE_FORCE, "Vulnerability protection blocks brute-force sources"),
         (VULNERABILITY_INLINE, "Vulnerability protection inline cloud analysis blocks"),
         (VULNERABILITY_EXCEPTIONS, "Vulnerability protection exceptions minimal"),
+        (VULNERABILITY_INLINE_ENABLED,
+         "Vulnerability protection inline cloud analysis switched on"),
     ]
 
     #: Which profile kind each assertion reads, so the normalizer resolves once per kind.
@@ -623,7 +730,8 @@ class SecurityRuleProfileVerdict(models.Model):
     SPYWARE_ASSERTIONS = (SPYWARE_SEVERITIES, SPYWARE_DNS_SINKHOLE, SPYWARE_DNS_CATEGORIES,
                           SPYWARE_INLINE, SPYWARE_EXCEPTIONS)
     VULNERABILITY_ASSERTIONS = (VULNERABILITY_SEVERITIES, VULNERABILITY_BRUTE_FORCE,
-                                VULNERABILITY_INLINE, VULNERABILITY_EXCEPTIONS)
+                                VULNERABILITY_INLINE, VULNERABILITY_EXCEPTIONS,
+                                VULNERABILITY_INLINE_ENABLED)
 
     security_rule = models.ForeignKey(
         SecurityRule, on_delete=models.CASCADE, related_name="profile_verdicts")

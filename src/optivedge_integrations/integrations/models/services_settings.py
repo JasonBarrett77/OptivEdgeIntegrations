@@ -91,6 +91,7 @@ class LoggingSettings(ProvenancedMixin, SyncTrackedModel):
     DERIVED_FIELDS = (
         "is_missing",
         "log_retention_configured",
+        "offbox_destination_count",
         "syslog_destination_in_use",
         "log_settings_match_lists",
         "system_log_severity_gaps",
@@ -148,6 +149,32 @@ class LoggingSettings(ProvenancedMixin, SyncTrackedModel):
     log_retention_configured = models.BooleanField(default=False)
 
     # --- PAN-LOG-001 ---------------------------------------------------------------------
+    #: HOW MANY DISTINCT OFF-BOX LOG DESTINATIONS THIS APPLIANCE *DEFINES*, which is the half of
+    #: PAN-LOG-001 the boolean below cannot carry. The two are deliberately separate columns:
+    #: `a destination nothing forwards to` and `no destination at all` have the same outcome and
+    #: DIFFERENT REMEDIATIONS, and stage 3's grading over this control has three rungs that are a
+    #: COUNT - none at all, one path, two or more - which no boolean can hold.
+    #:
+    #: Counted over three sources, which are stage 5's own `derived_from` for this column:
+    #: the distinct addresses of every syslog server entry at BOTH scopes, the Panorama /
+    #: log-collector path where a Device > Log Settings match list sends to it, and each HTTP
+    #: collector profile such a match list names. Distinct by ADDRESS and not by entry, because
+    #: two profiles naming one host are one destination; email and SNMP-trap are not counted at
+    #: all, on the settlement that they notify rather than retain.
+    #:
+    #: BOTH SCOPES, AND THAT IS MEASURED RATHER THAN TIDY: every appliance in this lab holds a
+    #: vsys-scoped syslog profile and two of them hold a collector address the shared scope does
+    #: not carry, so a count taken at the shared scope alone reports `no destination` on all four.
+    #:
+    #: A TEMPLATE-SUPPLIED PROFILE COUNTS. The assertion is about whether the audit trail leaves
+    #: the box; that it cannot be remediated on the firewall is a different finding, and the only
+    #: thing that records it is the per-field provenance row - which this column, being derived,
+    #: does not have.
+    #:
+    #: ZERO IS BOTH THE DEFAULT AND THE FIRING SIDE, which is the whole reason it is safe: the
+    #: clause is `fewer than two`, so a row nobody has recomputed reports rather than passing.
+    offbox_destination_count = models.PositiveIntegerField(default=0)
+
     #: Whether at least one syslog server profile on this appliance is named by a forwarding
     #: rule that is actually in place. Existence is NOT enough and that is the measured point:
     #: the profile is only an address book, and nothing is sent until a Device > Log Settings
@@ -251,6 +278,9 @@ class LoggingSettings(ProvenancedMixin, SyncTrackedModel):
             models.Index(fields=["appliance"]),
             models.Index(fields=["syslog_destination_in_use"]),
             models.Index(fields=["central_store_status_collected"]),
+            # PAN-LOG-001 clauses on this column twice - a threshold at two and an equality on
+            # one - which is the same reason `LogServerTarget.profile_referrer_count` carries one.
+            models.Index(fields=["offbox_destination_count"]),
         ]
 
     def __str__(self) -> str:

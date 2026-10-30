@@ -46,6 +46,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.login_ba
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.globalprotect import (
     normalize_globalprotect,
+    normalize_globalprotect_gateways,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.high_availability import (
     normalize_high_availability,
@@ -86,6 +87,10 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.wildfire
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.services_settings import (
     normalize_services_settings,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.content_updates import (
+    normalize_content_deployment_schedule,
+    normalize_content_update_schedule,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_plane import (
     normalize_management_plane,
@@ -444,6 +449,41 @@ def normalize_appliance_services_settings(appliance: Appliance) -> dict:
     return normalize_services_settings(appliance)
 
 
+def normalize_appliance_content_update_schedule(appliance: Appliance) -> dict:
+    """Device > Dynamic Updates, all five content types on one row. PAN-UPD-001 to PAN-UPD-005.
+
+    Reads the same merged device entry as its neighbours and depends on nothing else in the
+    appliance tuple. ON AN HA PAIR THIS WRITES A ROW PER PEER and nothing deduplicates them: the
+    update schedule does not sync across peers, so the two genuinely hold two independent values
+    and in this lab they differ - the active PA-5220 carries four content types and no `threats`
+    node, its passive peer carries a `threats` schedule and nothing else.
+
+    AN APPLIANCE WHOSE `deviceconfig/system` NODE ARRIVED EMPTY GETS A ROW AT ITS FIRING VALUES -
+    the empty string on all ten cadence and action columns, `update_schedule_collected` false -
+    rather than no row and rather than `none`, which would say "we looked and nothing is
+    scheduled". An appliance with no merged snapshot at all still gets none, which is the one
+    residual case that column cannot plug.
+    """
+    return normalize_content_update_schedule(appliance)
+
+
+def normalize_station_content_deployment_schedule(
+        management_station: ManagementStation) -> dict:
+    """A verdict over the station's own content deployment schedules. PAN-UPD-006.
+
+    THE ONLY STATION-ANCHORED OBJECT NORMALIZER IN THIS PACKAGE, and it takes a
+    `ManagementStation` rather than an `Appliance` for that reason - so it does NOT belong in
+    `flows.py`'s appliance tuple and is called once per station instead. The object exists only on
+    the management station: `config_complete` at its path answers `code=6 Invalid sequence` on
+    both lab firewalls, and a firewall carries no value for it at all.
+
+    IT WRITES ITS ROW WHETHER OR NOT ANYTHING WAS COLLECTED. A station nobody read must not be
+    absent from every query, because then an uncollected estate and a standalone one with no
+    station at all read identically. Depends on nothing else.
+    """
+    return normalize_content_deployment_schedule(management_station)
+
+
 def normalize_appliance_management_plane(appliance: Appliance) -> dict:
     """The management plane's own addressing, and the appliance's operational mode.
 
@@ -565,6 +605,22 @@ def normalize_appliance_globalprotect(appliance: Appliance) -> dict:
     it. Returns counts, which is what `APPLIANCE_OBJECT_NORMALIZERS` requires.
     """
     return normalize_globalprotect(appliance)
+
+
+def normalize_appliance_globalprotect_gateways(appliance: Appliance) -> dict:
+    """Every GlobalProtect gateway, its two child tables, and the posture verdict per vsys.
+
+    MUST RUN AFTER `certificate objects` AND `authentication profiles` in
+    `flows.py::APPLIANCE_OBJECT_NORMALIZERS`: five of the gateway's columns are a property of
+    the object a NAME reaches - an SSL/TLS service profile's protocol floor, a certificate
+    profile's device-binding refusal, an authentication profile's back end - and the resolution
+    runs over those rows. Run first, it would resolve against the previous collection's rows or
+    against none, and a gateway bound to a hardened profile would report as unresolved.
+
+    Reads the SAME merged payload as its neighbours plus the licence snapshot another domain's
+    collector already takes, so it adds no read. Returns counts, as the tuple requires.
+    """
+    return normalize_globalprotect_gateways(appliance)
 
 
 def normalize_appliance_certificate_settings(appliance: Appliance) -> dict:
@@ -725,6 +781,7 @@ __all__ = [
     "normalize_appliance_certificate_objects",
     "normalize_appliance_certificate_settings",
     "normalize_appliance_globalprotect",
+    "normalize_appliance_globalprotect_gateways",
     "normalize_appliance_interface_management_profiles",
     "normalize_appliance_interfaces",
     "normalize_appliance_session_settings",
@@ -751,6 +808,7 @@ __all__ = [
     "normalize_appliance_platform_content_streams",
     "normalize_configuration_backup_evidence",
     "normalize_dataplane_utilisation",
+    "normalize_globalprotect_gateways",
     "normalize_globalprotect_portal_presence",
     "normalize_licence_inventory",
     "normalize_log_alarm_settings",
@@ -776,4 +834,8 @@ __all__ = [
     "normalize_ipsec_tunnels",
     "normalize_monitor_profiles",
     "normalize_zones",
+    "normalize_appliance_content_update_schedule",
+    "normalize_station_content_deployment_schedule",
+    "normalize_content_deployment_schedule",
+    "normalize_content_update_schedule",
 ]

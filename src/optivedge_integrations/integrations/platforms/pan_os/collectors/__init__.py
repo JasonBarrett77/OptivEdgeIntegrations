@@ -34,6 +34,11 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors.managed_dev
     SHOW_MANAGED_DEVICES_COMMAND,
     collect_show_managed_devices,
 )
+from optivedge_integrations.integrations.platforms.pan_os.collectors.content_updates import (
+    DEPLOYMENT_UPDATE_SCHEDULE_SOURCE_TYPE,
+    DEPLOYMENT_UPDATE_SCHEDULE_XPATH,
+    collect_content_deployment_schedule,
+)
 from optivedge_integrations.integrations.platforms.pan_os.collectors.pushed_shared_policy import (
     SHOW_PUSHED_SHARED_POLICY_COMMAND,
     build_show_pushed_shared_policy_vsys_command,
@@ -169,6 +174,9 @@ __all__ = [
     "collect_show_merged_config",
     "collect_show_system_info",
     "collect_show_managed_devices",
+    "DEPLOYMENT_UPDATE_SCHEDULE_SOURCE_TYPE",
+    "DEPLOYMENT_UPDATE_SCHEDULE_XPATH",
+    "collect_content_deployment_schedule",
     "collect_predefined_certificates",
     "collect_predefined_gp_app_config_dictionary",
     "collect_predefined_log_forwarding_profiles",

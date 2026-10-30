@@ -5,7 +5,7 @@ The logging domain - PAN-LOG-001 to 010 - across three models:
     LogServerTarget      one server entry inside one syslog or email profile, in one scope
     VsysLogForwarding    one row per vsys: which log types no available profile sends off-box
     LoggingSettings      one row per appliance, the device-wide posture (the model already
-                         existed for PAN-MGT-011; this adds thirteen columns to that row)
+                         existed for PAN-MGT-011; this adds fourteen columns to that row)
 
 FOUR SHAPES HERE WOULD BITE A NORMALIZER WRITTEN FROM ONE OF THEM:
 
@@ -154,12 +154,41 @@ LOG_SETTINGS_IMPLICITS = {
         "change committed with no audit comment, and with it set to yes the same commit was "
         "refused at submission with code=13 naming the rule's xpath; deleting the key let the "
         "rule commit again (job 438)"),
-    "port": Implicit.not_assumed(
-        "stage 4 read 514 off the UI grid with the key absent and DECLINED to licence it: the "
-        "grid renders 514 under transport SSL where the vendor's own completion help names 6514, "
-        "so nothing there tells a real implicit from a renderer constant. The email side is the "
-        "same shape - 25 was read off the grid, and every wire test wrote 2525 because 25 is "
-        "privileged on the test host, so absence was never observed on the wire"),
+    # TWO IMPLICITS FOR ONE KEY BECAUSE THE VALUE IS PER KIND, and this pair REPLACES an
+    # `Implicit.not_assumed` that stored nothing. THE SUPERSEDED READING, KEPT because the
+    # disagreement is the evidence: an earlier pass read 514 off the UI grid with the key absent
+    # and DECLINED to licence it, on the ground that the grid renders 514 under transport SSL
+    # where the vendor's own completion help names 6514, so nothing there told a real implicit
+    # from a renderer constant - and on the email side every wire test wrote a high port because
+    # 25 is privileged on the test host, so the absence was never observed on the wire.
+    #
+    # WHAT CHANGED IS A MEASUREMENT AND NOT AN OPINION. The 2026-10-26 stage 4 re-run named the
+    # discriminator that pass lacked - the WRITE PATH, which refuses 0 and 70000 with "should be
+    # equal to or between 1 and 65535", so 514 is inside the range and is not a sentinel - and
+    # measured the cell rendering 514 on a server entry whose transport is the secure value, so
+    # the reading is a CONSTANT rather than a function of the transport. Stage 5 declared both
+    # defaults `materialised` on that basis and its decision about which SIDE a default sits on
+    # is authoritative for this stage; `when_unknown` for both is `fires`, because 514 and 25 are
+    # the cleartext ports and a destination nobody could read then reports as talking to one.
+    #
+    # STILL OPEN, AND IT IS WHY THIS IS CALLED OUT AT LENGTH: no oracle has observed an
+    # absent-port entry's datagrams on the wire. The transport measurement watched the wire and
+    # recorded the TRANSPORT; it did not record the port. Nothing in this domain CLAUSES on this
+    # column - stage 3 excludes it, since a secure session on another agreed port still satisfies
+    # the assertion - so the blast radius is what a finding PRINTS. A person should settle it.
+    "port-syslog": Implicit.measured(
+        514,
+        "stage 4, 2026-10-26 on pan-fw-111 and pan-fw-201: the PORT cell renders 514 on every "
+        "server entry holding no port key, INCLUDING one whose transport is set to the secure "
+        "value - so the reading is a CONSTANT and not a function of the transport - and the write "
+        "path independently bounds the range 1 to 65535, so 514 is inside it and is not a "
+        "sentinel"),
+    "port-email": Implicit.measured(
+        25,
+        "stage 4, 2026-10-26 on pan-fw-111: the PORT cell renders 25 on all four committed "
+        "relays, none of which holds a port key, and two of those four run the secure protocol - "
+        "so the reading does not follow the protocol, which matters because the secure protocol "
+        "conventionally uses a different port"),
     "server-address": Implicit.not_assumed(
         "stage 4 recorded the syslog address's absence as NOT REACHED - every subject wrote the "
         "address, so its absence was never committed or read. On the email kind `gateway` is "
@@ -426,8 +455,13 @@ def _target_fields(server: dict[str, Any], kind: str,
     values["server_address"] = address[:255]
     provenance.append(("server_address", address_rk, address_rv))
 
+    # PER KIND, because the two implicits are different numbers. One shared implicit would put
+    # the mail port on a syslog collector or the other way round, and both are stored values a
+    # finding prints as the device's own.
     port, port_rk, port_rv = parse_integer_field(
-        server.get("port"), implicit=LOG_SETTINGS_IMPLICITS["port"])
+        server.get("port"),
+        implicit=LOG_SETTINGS_IMPLICITS[
+            "port-syslog" if kind == LogServerTarget.Kind.SYSLOG else "port-email"])
     values["port"] = port
     provenance.append(("port", port_rk, port_rv))
 
@@ -863,9 +897,89 @@ def _match_list_display(shared: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _syslog_destination_addresses(rows: list[tuple[ScopedEntry, dict, list]]) -> set[str]:
+    """The distinct collector addresses the syslog server entries name, across every scope.
+
+    TAKEN FROM THE ROWS THE TARGET PASS ALREADY BUILT rather than from a second walk of the
+    payload. Stage 5 derives the count from `syslog-server-target.server_address at both
+    scopes`, so counting anything the row model would not store would let the count and the
+    rows it is a count of disagree - which is exactly the state nobody would notice.
+
+    DISTINCT BY ADDRESS, stripped and case-folded, because a destination is a HOST and not an
+    entry: two profiles naming one collector are one place the trail goes, and the control is
+    about how many places that is. The email kind is not counted at all - it notifies rather
+    than retains - and an entry whose address key was absent contributes nothing, because
+    `server_address` is empty for it and there is no host to send to.
+    """
+    return {
+        address
+        for _, values, _ in rows
+        if values.get("kind") == LogServerTarget.Kind.SYSLOG
+        and (address := str(values.get("server_address") or "").strip().lower())
+    }
+
+
+def _http_profile_names(snapshot: Snapshot) -> set[str]:
+    """The HTTP collector profiles this appliance's SHARED scope defines, by name.
+
+    `http` is a sibling of the two kinds `LogServerTarget` models and is deliberately not a row
+    of its own: no logging control asserts an HTTP collector's own fields. What it is needed for
+    here is EXISTENCE - a `send-http` member naming nothing delivers nothing, the same reason
+    `_ProfileIndex` exists for the two modelled kinds, and counting it would make an appliance
+    with a typo in a member list look like one with a working collector.
+
+    SHARED ONLY, matching where the members come from: the Device > Log Settings match lists are
+    shared-scope on a firewall, measured, and the referrer verdicts resolve their members with no
+    vsys for that reason.
+    """
+    for scope, _, node in _log_settings_nodes(snapshot):
+        if scope != "shared":
+            continue
+        container = node.get("http")
+        if isinstance(container, dict):
+            return {str(entry["@name"]) for entry in ensure_list(container.get("entry"))
+                    if isinstance(entry, dict) and entry.get("@name")}
+    return set()
+
+
+def offbox_destination_count(syslog_addresses: set[str], shared: dict[str, Any],
+                             http_profiles: set[str]) -> int:
+    """How many distinct off-box log destinations the appliance DEFINES. PAN-LOG-001.
+
+    THREE SOURCES, AND THEY ARE STAGE 5's OWN `derived_from` RATHER THAN A WIDER READING OF
+    `off-box`: the syslog server entries at both scopes, `send-to-panorama` on a Device > Log
+    Settings match list, and `send-http` on one. A Log Forwarding PROFILE's own
+    `send-to-panorama` is NOT counted here even though the Panorama gap column counts it -
+    stage 5 names only the Device > Log Settings family for this column, and the difference is
+    recorded in the stage 7 artifact rather than decided here. Under-counting is the firing
+    direction, so the disagreement cannot make a device look safe.
+
+    THE PANORAMA PATH IS ONE DESTINATION HOWEVER MANY LOG TYPES REACH IT, because it is one
+    place the trail goes; the per-log-type question is `panorama_log_type_gaps`, which is a
+    different column with a different shape.
+
+    Email and SNMP-trap contribute nothing, on the settlement that they notify rather than
+    retain - the same rule `OFFBOX_MEMBER_KEYS` states for the coverage verdicts.
+    """
+    count = len(syslog_addresses)
+    # `correlation` is skipped for the reason the Panorama gap set skips it: the kind has no
+    # `send-to-panorama` key at all, measured, and the vendor says correlation logs cannot be
+    # forwarded from a firewall.
+    if any(_sends_to_panorama(entry)
+           for kind in LOG_SETTINGS_KINDS if kind != "correlation"
+           for entry in _match_lists(shared, kind)):
+        count += 1
+    named_http = {name
+                  for kind in LOG_SETTINGS_KINDS
+                  for entry in _match_lists(shared, kind)
+                  for name in _members(entry.get("send-http"))}
+    return count + len(named_http & http_profiles)
+
+
 def _appliance_values(appliance: Appliance, snapshot: Snapshot, index: _ProfileIndex,
                       forwarding_by_vsys: dict[str, list[tuple[str, dict[str, Any]]]],
-                      status: Snapshot | None) -> tuple[dict[str, Any], list[tuple]]:
+                      status: Snapshot | None,
+                      syslog_addresses: set[str]) -> tuple[dict[str, Any], list[tuple]]:
     shared = _shared_log_settings(snapshot)
     device_entry = device_entry_from_snapshot(snapshot)
     deviceconfig = device_entry.get("deviceconfig")
@@ -946,6 +1060,8 @@ def _appliance_values(appliance: Appliance, snapshot: Snapshot, index: _ProfileI
     values = {
         "require_audit_comment": bool(audit),
         "log_retention_configured": _quota_configured(management),
+        "offbox_destination_count": offbox_destination_count(
+            syslog_addresses, shared, _http_profile_names(snapshot)),
         "syslog_destination_in_use": syslog_in_use,
         "log_settings_match_lists": _match_list_display(shared),
         "system_log_severity_gaps": ",".join(severity_gaps),
@@ -958,7 +1074,7 @@ def _appliance_values(appliance: Appliance, snapshot: Snapshot, index: _ProfileI
         "central_store_delivery_healthy": healthy,
         "central_store_status_collected": collected,
     }
-    # ONE PROVENANCE ROW, FOR THE ONE COLUMN THAT READS A KEY. The other twelve are declared in
+    # ONE PROVENANCE ROW, FOR THE ONE COLUMN THAT READS A KEY. The other thirteen are declared in
     # `LoggingSettings.DERIVED_FIELDS`, and a declared derived field that turned out to have a
     # stored row is what the gate in OEI's own tests fails on.
     return values, [("require_audit_comment", audit_rk, audit_rv)]
@@ -1066,7 +1182,8 @@ def normalize_log_settings(appliance: Appliance) -> dict[str, int]:
 
         values, provenance = _appliance_values(
             appliance, snapshot, index, forwarding_by_vsys,
-            latest_logging_status_snapshot(appliance))
+            latest_logging_status_snapshot(appliance),
+            _syslog_destination_addresses(rows))
         write_node_row(LoggingSettings, appliance, snapshot, values, provenance)
 
     return {"log_server_targets": written_targets,

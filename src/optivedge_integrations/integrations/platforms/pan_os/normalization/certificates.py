@@ -48,6 +48,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     parse_text_field,
     parse_yes_no_field,
     scalar_value,
+    was_absent,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot,
@@ -791,6 +792,29 @@ def normalize_certificate_objects(appliance: Appliance) -> dict[str, int]:
             # only to resolve an ABSENT key: see `_permits_sha1`.
             "allows_sha1": _permits_sha1(
                 settings, min_version_rank(min_version), min_version_rank(max_version)),
+            # PAN-GPG-001's input, added by the `globalprotect-gateway` domain. It asks whether
+            # this profile STATES a version bound of its own, which is a question neither stored
+            # version column can answer.
+            #
+            # IT READS THE RAW KEYS AND NOT THE PARSED VALUES, and the first version of this
+            # line read the values - `bool(min_version or max_version)` - which is ALWAYS TRUE.
+            # Both bounds above are `Implicit.measured`, so an absent key stores `tls1-2` /
+            # `tls1-3` as though the device had set it: a profile stating NO range would have
+            # reported that somebody chose one, on the reassuring side, and the gateway verdict
+            # resting on it would have passed. Caught by the stage 7 readback on
+            # `globalprotect-gateway`, through a stage 6 subject recorded as "a ceiling and no
+            # floor" that the store was reporting with both. `was_absent` is the absence test -
+            # a materialised value is indistinguishable from a configured one by value alone.
+            #
+            # NO PROFILE IN THIS LAB OMITS BOTH KEYS, so the false branch has no device instance
+            # here and the stored values did not change when this was corrected. The bug was
+            # inert on this estate and wrong on the first estate that holds such a profile.
+            #
+            # The two BOUNDS are read rather than the node's presence because the NODE is
+            # mandatory on a committed profile, measured independently by two domains - so the
+            # node existing says nothing about anybody's choice and its children do.
+            "has_explicit_protocol_settings": (
+                not was_absent(min_rk) or not was_absent(max_rk)),
         }, [
             ("certificate_name", cert_rk, cert_rv),
             ("min_version", min_rk, min_rv),

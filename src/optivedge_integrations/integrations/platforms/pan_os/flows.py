@@ -31,6 +31,7 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     LIST_TYPE_CUSTOM,
     LIST_TYPE_PREDEFINED,
     collect_show_external_list,
+    collect_content_deployment_schedule,
     collect_show_managed_devices,
     collect_show_merged_config,
     collect_predefined_certificates,
@@ -91,6 +92,7 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_authentication_sequences,
     normalize_appliance_certificate_objects,
     normalize_appliance_globalprotect,
+    normalize_appliance_globalprotect_gateways,
     normalize_appliance_certificate_settings,
     normalize_appliance_interface_management_profiles,
     normalize_appliance_authentication_settings,
@@ -110,6 +112,8 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_panorama_registration,
     normalize_appliance_management_plane,
     normalize_appliance_services_settings,
+    normalize_appliance_content_update_schedule,
+    normalize_station_content_deployment_schedule,
     normalize_appliance_wildfire_settings,
     normalize_appliance_device_services,
     normalize_appliance_password_complexity,
@@ -424,6 +428,14 @@ class PANOSInScopeConfigCollection:
         default_factory=list)
     device_services_failures: list[PANOSApplianceCollectionFailure] = field(
         default_factory=list)
+    #: The MANAGEMENT STATION's own content deployment schedules - the one read in this estate
+    #: addressed at the station's own configuration rather than at an appliance's, so ONE call for
+    #: the estate rather than one per appliance. A single value rather than a list for that
+    #: reason. PAN-UPD-006. A failure here leaves `deployment_schedule_read` false and both
+    #: verdict columns EMPTY, which is "nobody asked" and is a different thing for a reader to act
+    #: on from an estate that was read and holds no schedule.
+    content_deployment_schedule_collection: PANOSPersistedCollection | None = None
+    content_deployment_schedule_failure: str = ""
     management_interface_normalizations: list[PANOSManagementInterfaceNormalizedAppliance] = field(
         default_factory=list)
     management_interface_failures: list[PANOSManagementInterfaceNormalizationFailure] = field(
@@ -482,6 +494,12 @@ class PANOSInScopeRenormalizationResult:
         PANOSApplianceObjectNormalizationFailure] = field(default_factory=list)
     policy_object_normalizations: list[PANOSPolicyObjectNormalized] = field(default_factory=list)
     policy_object_failures: list[PANOSPolicyObjectNormalizationFailure] = field(default_factory=list)
+    #: The station-anchored verdict over its own content deployment schedules. PAN-UPD-006. Its
+    #: own pair because it is the only normalization here that is not per appliance and not per
+    #: enforcement point: it runs once for the station, and a failure leaves the estate-level row
+    #: untouched rather than removing an appliance's.
+    content_deployment_schedule_counts: dict[str, int] = field(default_factory=dict)
+    content_deployment_schedule_failure: str = ""
 
 
 def get_in_scope_appliances(management_station: ManagementStation) -> list[Appliance]:
@@ -1116,6 +1134,33 @@ def collect_enforcement_point_pushed_profiles(
     return persist_enforcement_point_collected_response(enforcement_point, collected)
 
 
+def collect_management_station_content_deployment_schedule(
+    management_station: ManagementStation,
+    *,
+    credentials_provider: Callable[[], tuple[str, str]] | None = None,
+    timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> PANOSPersistedCollection:
+    """The station's own content deployment schedules. PAN-UPD-006.
+
+    THE ONLY CONFIG READ IN THIS PACKAGE ADDRESSED AT THE MANAGEMENT STATION, which is why it goes
+    through `collect_and_persist` with NO `target=` rather than through
+    `collect_appliance_and_persist`. `deviceconfig/system/deployment-update-schedule` exists only
+    on the station - `config_complete` at its path answers `code=6 Invalid sequence` on both lab
+    firewalls - so a collector that reaches every appliance and never addresses the station
+    collects nothing about it no matter how many firewalls it reads.
+
+    One call per station per snapshot, so the cost is one call for the estate.
+    """
+    return collect_and_persist(
+        management_station,
+        collector=collect_content_deployment_schedule,
+        credentials_provider=credentials_provider,
+        timeout=timeout,
+        user_agent=user_agent,
+    )
+
+
 #: Appliance-anchored object normalizers that return a plain count dict. Each one reads the
 #: same merged snapshot and owns a different subtree, so they share one loop and one failure
 #: type instead of a dataclass pair each.
@@ -1148,6 +1193,11 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # snapshots and one merged leaf; depends on nothing else in this tuple.
     ("device identification", normalize_appliance_device_identification),
     ("services settings", normalize_appliance_services_settings),
+    # Device > Dynamic Updates, all five content types on one row. PAN-UPD-001 to PAN-UPD-005.
+    # Reads the same merged device entry as its neighbours and depends on nothing else in this
+    # tuple. A ROW PER HA PEER and not per pair: the update schedule does not sync across peers,
+    # and the two lab PA-5220s hold different content types to prove it.
+    ("content update schedule", normalize_appliance_content_update_schedule),
     # PLATFORM LIFECYCLE - PAN-PLT-001 to PAN-PLT-006. Seven members rather than one, so that a
     # failure in any of them costs only its own model: they read four different payloads between
     # them and none depends on another, so the order within this block carries no meaning.
@@ -1195,6 +1245,17 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # for them nearby, NOT because anything here resolves over those rows: this domain stores
     # the binding as a name, deliberately, and the resolution is another control's.
     ("globalprotect portals", normalize_appliance_globalprotect),
+    # Network > GlobalProtect > Gateways, both halves of it - the vsys entry and the same-named
+    # device-local entry under network/tunnel - plus the vsys's host-posture verdict.
+    # MUST STAY AFTER "certificate objects" AND "authentication profiles" ABOVE, and that is a
+    # real ordering obligation rather than tidiness: unlike the portal beside it, this domain
+    # RESOLVES its bindings rather than storing the names alone. PAN-GPG-001 asserts the
+    # protocol floor the bound SSL/TLS profile states, PAN-GPG-002 the device-binding refusal of
+    # the bound certificate profile and the back end of the bound authentication profile, and
+    # each is a property of the far row. Run before them it would resolve against the previous
+    # collection's rows or against none, and report a correctly hardened gateway as unresolved -
+    # the same obligation "management TLS" and "decryption settings" carry below.
+    ("globalprotect gateways", normalize_appliance_globalprotect_gateways),
     # Device > Setup > Management > General Settings, one leaf. Reads the same merged device
     # entry as its neighbours and depends on nothing else in this tuple - placed beside the
     # certificate objects because they are one domain's controls and not because of an order.
@@ -1272,6 +1333,18 @@ def renormalize_in_scope_configuration(
     appliance_object_failures: list[PANOSApplianceObjectNormalizationFailure] = []
     policy_object_normalizations: list[PANOSPolicyObjectNormalized] = []
     policy_object_failures: list[PANOSPolicyObjectNormalizationFailure] = []
+
+    # THE ONE STATION-ANCHORED NORMALIZATION, run once rather than per appliance and OUTSIDE the
+    # appliance loop for that reason. Its own try/except on the same grounds as its neighbours:
+    # the estate-level row failing must not take an appliance's rows away, and an appliance's
+    # failing must not leave the estate-level row stale.
+    content_deployment_schedule_counts: dict[str, int] = {}
+    content_deployment_schedule_failure = ""
+    try:
+        content_deployment_schedule_counts = dict(
+            normalize_station_content_deployment_schedule(management_station) or {})
+    except Exception as exc:
+        content_deployment_schedule_failure = str(exc)
 
     for appliance in appliances:
         # Management surfaces read the same merged snapshot but are a separate model and a
@@ -1578,6 +1651,8 @@ def renormalize_in_scope_configuration(
         appliance_object_failures=appliance_object_failures,
         policy_object_normalizations=policy_object_normalizations,
         policy_object_failures=policy_object_failures,
+        content_deployment_schedule_counts=content_deployment_schedule_counts,
+        content_deployment_schedule_failure=content_deployment_schedule_failure,
     )
 
 
@@ -1848,6 +1923,24 @@ def collect_in_scope_configuration_snapshots(
                 )
             )
 
+    # THE STATION'S OWN CONFIGURATION, collected once for the estate and not per appliance. Placed
+    # before the renormalization below because that is what normalizes it; its own try/except so
+    # that a station that refuses this one read still yields every appliance's snapshots, and so
+    # that the failure reads as "nobody asked" rather than as an estate with no central schedule.
+    content_deployment_schedule_collection = None
+    content_deployment_schedule_failure = ""
+    try:
+        content_deployment_schedule_collection = (
+            collect_management_station_content_deployment_schedule(
+                management_station,
+                credentials_provider=credentials_provider,
+                timeout=timeout,
+                user_agent=user_agent,
+            )
+        )
+    except Exception as exc:
+        content_deployment_schedule_failure = str(exc)
+
     renormalized = renormalize_in_scope_configuration(management_station)
 
     return PANOSInScopeConfigCollection(
@@ -1887,6 +1980,10 @@ def collect_in_scope_configuration_snapshots(
         appliance_object_failures=renormalized.appliance_object_failures,
         policy_object_normalizations=renormalized.policy_object_normalizations,
         policy_object_failures=renormalized.policy_object_failures,
+        content_deployment_schedule_collection=content_deployment_schedule_collection,
+        content_deployment_schedule_failure=(
+            content_deployment_schedule_failure
+            or renormalized.content_deployment_schedule_failure),
     )
 
 
