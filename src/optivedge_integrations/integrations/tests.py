@@ -16706,6 +16706,77 @@ class PlatformLifecycleContentCurrencyTests(SimpleTestCase):
 # `DeviceServicesTelemetryUsesTheConfigurationThatWasCollected` below.
 
 
+class LogAlarmSettingsUsesTheConfigurationThatWasCollected(TestCase):
+    """`standing-rulings.md` section 5, applied to PAN-PLT-006's first half on 2026-10-30.
+
+    THIS NORMALIZER CHANGED SOURCE AND NOT ONE TEST NOTICED, which is why this class exists.
+    `PlatformLifecycleAlarmTests` below drives `build_log_alarm_settings` directly, so it proves
+    what the builder does with a node and says nothing about where the node came from. The source
+    moved from a dedicated `type=config&action=show` of this one xpath to the merged configuration
+    the pass already collects, and the suite stayed green. A column's SOURCE needs a test of its
+    own or it is free to drift.
+
+    WHY THE DEDICATED READ WENT. Its justification was that the merged view might not carry this
+    node: measured absent on all four lab appliances when it was written, so untestable. Measured
+    read-only on 2026-10-30 it is PRESENT in running on two appliances, with different values on
+    each, and `show config merged` carries it field-for-field identically on both. A config-mode
+    `show` that SUCCEEDS is reading the running configuration, so whatever it returned is in the
+    merged configuration too - which means a successful `action=show` can never justify its own
+    collection.
+    """
+
+    def _row(self, management=None, *, also_a_dedicated_snapshot=None):
+        station, appliance, _point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-PLT-ALARM", appliance_hostname="plt-alarm")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"deviceconfig": {
+                "setting": {"management": dict(management if management is not None else {})}}}}}})
+        if also_a_dedicated_snapshot is not None:
+            Snapshot.objects.create(
+                management_station=station, appliance=appliance,
+                source_type="config_log_alarm_settings", collected_at=timezone.now(),
+                payload={"common-criteria-alarm-generation": also_a_dedicated_snapshot})
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_appliance_log_alarm_settings)
+        normalize_appliance_log_alarm_settings(appliance)
+        return _PltAlarm.objects.get(appliance=appliance)
+
+    def test_the_row_comes_from_the_merged_configuration(self):
+        row = self._row({"common-criteria-alarm-generation": {
+            "enable-alarm-generation": "yes",
+            "enable-cli-alarm-notification": "yes",
+            "enable-web-alarm-notification": "yes",
+            "log-databases-alarm-threshold": {"system": "85", "config": "80"}}})
+        self.assertTrue(row.alarm_generation_enabled)
+        self.assertTrue(row.cli_alarm_notification_enabled)
+        self.assertTrue(row.alarm_settings_node_present)
+
+    def test_no_dedicated_read_is_consulted(self):
+        """The mechanical half. A `config_log_alarm_settings` snapshot saying the OPPOSITE may
+        exist and must change nothing, because nothing looks at it. Without this, reinstating that
+        read would leave every other test green - which is exactly what happened when the source
+        moved the other way."""
+        row = self._row(
+            {"common-criteria-alarm-generation": {"enable-alarm-generation": "no"}},
+            also_a_dedicated_snapshot={"enable-alarm-generation": "yes"})
+        self.assertFalse(
+            row.alarm_generation_enabled,
+            "the dedicated config_log_alarm_settings snapshot was consulted; section 5 is that a "
+            "control rests on the configuration that was collected")
+
+    def test_an_absent_node_is_the_absence_and_not_an_unread(self):
+        """`deviceconfig/setting/management` is shared furniture: it carries other domains' leaves,
+        so it can be present without this node. A merged snapshot exists, so the read happened -
+        what varies is whether the node is in it."""
+        row = self._row({"hostname-type-in-syslog": "hostname"})
+        self.assertFalse(row.alarm_settings_node_present)
+
+    def test_a_management_node_missing_entirely_does_not_raise(self):
+        self.assertFalse(self._row({}).alarm_settings_node_present)
+
+
 class PlatformLifecycleAlarmTests(SimpleTestCase):
     """The alarm mechanism, where the unknown is the normal state rather than the edge case."""
 

@@ -154,11 +154,23 @@ def collect_device_telemetry(session: PANSession) -> PANOSCollectedResponse:
 def collect_log_alarm_settings(session: PANSession) -> PANOSCollectedResponse:
     """One appliance's log-database alarm node, as COMMITTED.
 
-    THIS IS THE ONLY READ IN THIS DOMAIN THAT SAYS ABSENT OUT LOUD, and the absence is the
-    reading: the node was absent on all four lab appliances before any fixture was built, at the
-    container and at all twenty-one leaves, and the 1.2 MB merged body contains no
-    `common-criteria-alarm-generation` string at all - so the claim that the merged view carries
-    this node is UNTESTED and could not be tested on this estate.
+    **NOT CALLED BY ANY FLOW SINCE 2026-10-30, AND THE SENTENCE BELOW IS WHY IT IS STILL HERE.**
+    `standing-rulings.md` section 5 - a control uses the configuration that was collected - and
+    the measurement that this node IS in the merged view. Left defined because the ruling governs
+    what a control rests on and not this package's collection surface; `normalize_log_alarm_settings`
+    reads the merged configuration now.
+
+    THE JUSTIFICATION BELOW WAS TRUE WHEN WRITTEN AND WAS STALE WHEN IT WAS ACTED ON, which is the
+    most useful thing about this collector. It read: "the node was absent on all four lab
+    appliances before any fixture was built, at the container and at all twenty-one leaves, and the
+    1.2 MB merged body contains no `common-criteria-alarm-generation` string at all - so the claim
+    that the merged view carries this node is UNTESTED and could not be tested on this estate."
+    Measured read-only on 2026-10-30, both halves are false: the node is present in RUNNING on two
+    appliances with different values on each, and `show config merged` carries it field-for-field
+    identically on both. Fixtures were built after that sentence and nobody re-read it. The general
+    rule it should have been: a config-mode `show` that SUCCEEDS is reading the running
+    configuration, so whatever it returns is in the merged configuration too, and a successful
+    `action=show` can never justify its own collection.
 
     THE PARENT IS SHARED FURNITURE. `deviceconfig/setting/management` carries
     `hostname-type-in-syslog`, `quota-settings`, `rule-require-audit-comment` and another

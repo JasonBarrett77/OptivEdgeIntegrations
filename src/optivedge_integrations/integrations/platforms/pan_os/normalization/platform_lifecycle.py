@@ -932,12 +932,43 @@ def build_log_alarm_settings(
 
 
 def normalize_log_alarm_settings(appliance: Appliance) -> dict[str, int]:
-    """One appliance's log-database alarm mechanism. PAN-PLT-006's first half."""
+    """One appliance's log-database alarm mechanism. PAN-PLT-006's first half.
+
+    FROM THE MERGED CONFIGURATION THIS PASS ALREADY COLLECTED, per `standing-rulings.md` section
+    5 - a control uses the configuration that was collected. It read a dedicated
+    `type=config&action=show` of this one node until 2026-10-30.
+
+    THE JUSTIFICATION FOR THAT READ WAS TRUE WHEN WRITTEN AND STALE WHEN APPLIED, and that is the
+    part worth keeping. `collect_log_alarm_settings` says the node "was absent on all four lab
+    appliances, at the container and at all twenty-one leaves, and the 1.2 MB merged body
+    contains no `common-criteria-alarm-generation` string at all - so the claim that the merged
+    view carries this node is UNTESTED and could not be tested on this estate." Both halves are
+    now false. Measured read-only on 2026-10-30: the node is PRESENT in running on two appliances,
+    with different values on each, and `show config merged` carries it byte-for-byte identically
+    on both - `action=show` and the merged node compared field by field, equal. Somebody built
+    those fixtures after that sentence was written and nothing re-read it.
+
+    AND THE GENERAL RULE THAT FOLLOWS, which is why no other domain should repeat this: a
+    config-mode `show` that SUCCEEDS is reading the running configuration, so whatever it returned
+    is in the merged configuration too. A successful `action=show` can therefore never justify its
+    own collection. The only thing a dedicated read tells you that the merged view cannot is the
+    candidate-versus-running difference, and section 5 is the ruling that closes that question.
+    """
     merged = latest_merged_snapshot(appliance)
     if merged is None:
         return {"log_alarm_settings": 0}
-    answered, node = node_from_committed_read(
-        latest_log_alarm_snapshot(appliance), "common-criteria-alarm-generation")
+    node = device_entry_from_snapshot(merged)
+    # THE PARENT IS SHARED FURNITURE and a walk must not raise on a missing step:
+    # `deviceconfig/setting/management` also carries `hostname-type-in-syslog`, `quota-settings`
+    # and another domain's `enable-certificate-expiration-check`, so any of these may be absent
+    # on an appliance that holds the others.
+    for step in ("deviceconfig", "setting", "management", "common-criteria-alarm-generation"):
+        node = node.get(step) if isinstance(node, dict) else None
+    # `answered` IS NOW ALWAYS TRUE where a row is written at all: the merged snapshot exists -
+    # the early return above is what handles its absence - so the read did happen. What varies is
+    # whether the NODE is in it, which is `node is None`, and `build_log_alarm_settings` already
+    # separates those two for the reason its own docstring gives.
+    answered, node = True, (node if isinstance(node, dict) else None)
     values, provenance = build_log_alarm_settings(answered, node)
     with transaction.atomic():
         write_node_row(LogAlarmSettings, appliance, merged, values, provenance)
