@@ -1,20 +1,23 @@
 """Platform lifecycle normalization - PAN-PLT-001 to PAN-PLT-006.
 
-SEVEN ENTRY POINTS, ONE PER CONCERN, and they are separate so that one failure does not cost
-the other six: `flows.APPLIANCE_OBJECT_NORMALIZERS` catches per member, and these seven read
+SIX ENTRY POINTS, ONE PER CONCERN, and they are separate so that one failure does not cost
+the other five: `flows.APPLIANCE_OBJECT_NORMALIZERS` catches per member, and these six read
 four different payloads between them. None depends on another and they may be reordered.
 
     normalize_platform_content_streams          FirewallContentStreams + Appliance's one column
-    normalize_device_telemetry_settings         DeviceTelemetrySettings
     normalize_globalprotect_portal_presence     GlobalProtectPortalPresence
     normalize_licence_inventory                 LicenceInventory + LicenceEntitlement
     normalize_log_alarm_settings                LogAlarmSettings
     normalize_configuration_backup_evidence     ConfigurationBackupEvidence
     normalize_dataplane_utilisation             DataplaneUtilisation
 
+THERE WAS A SEVENTH, `normalize_device_telemetry_settings`, and ruling P374a deleted it on
+2026-10-29: `device_services.py` covers that node with one model for both domains. Two of this
+module's helpers survived it and are used from there - `latest_device_telemetry_snapshot` and
+`node_from_committed_read`, which is public for that reason.
+
 EVERY ROW IS ANCHORED TO THE MERGED SNAPSHOT, not to the read that fills it. An appliance that
-was collected and never asked for its licence table, its telemetry node or its dataplane load
-still gets a row, with the companion column saying so - and the companion is the only thing in
+was collected and never asked for its licence table or its dataplane load still gets a row, with the companion column saying so - and the companion is the only thing in
 any of these models that can separate "we never asked" from "we asked and it was fine". That
 follows `MasterKey` and `DeviceIdentificationState`; no merged snapshot means no row, because
 there is nothing to anchor to.
@@ -56,7 +59,6 @@ from optivedge_integrations.integrations.models import (
     Appliance,
     ConfigurationBackupEvidence,
     DataplaneUtilisation,
-    DeviceTelemetrySettings,
     FirewallContentStreams,
     GlobalProtectPortalPresence,
     LicenceEntitlement,
@@ -122,12 +124,6 @@ RELEASE_DATE_IMPLICIT = Implicit.measured(
 #: against one reported as sharing when nobody knows. The lab now holds both states - the node
 #: absent on one PA-VM, present with every switch `yes` on the other, present with every switch
 #: `no` on both PA-5220s - and none of the three settles what ABSENCE asserts.
-TELEMETRY_SWITCH_IMPLICIT = Implicit.not_assumed(
-    "stage4-platform-lifecycle.json objects['device-telemetry'] records every switch at "
-    "implicit.status=unmeasured / consumer_disposition=not_assumed / may_materialise=false: no "
-    "appliance measured had the node or any of its four keys absent, so there was no absent "
-    "instance to read and no write was permitted to create one")
-
 #: Every leaf of the alarm node. THE STRONGEST NEGATIVE STATEMENT IN THIS DOMAIN: the node is
 #: absent in running on the appliances that have no fixture, so the keys genuinely lack a value
 #: by construction - and the five-point bar still fails, because THERE IS NO ORACLE TO MOVE. A
@@ -237,7 +233,7 @@ def _system_info_node(snapshot: Snapshot | None) -> dict[str, Any] | None:
     return system if isinstance(system, dict) else payload
 
 
-def _node_from_committed_read(
+def node_from_committed_read(
         snapshot: Snapshot | None, tag: str) -> tuple[bool, dict[str, Any] | None]:
     """(did the read answer, the node) for one committed-local read. FOUR STATES, ALL DIFFERENT.
 
@@ -463,61 +459,11 @@ def normalize_platform_content_streams(appliance: Appliance) -> dict[str, int]:
     return {"firewall_content_streams": 1, "appliance_certificate_status": 1}
 
 
-# ---------------------------------------------------------------------------
-# DeviceTelemetrySettings
-# ---------------------------------------------------------------------------
-
-TELEMETRY_SWITCH_KEYS = (
-    ("device_health_performance", "device-health-performance"),
-    ("product_usage", "product-usage"),
-    ("threat_prevention", "threat-prevention"),
-)
-
-
-def build_device_telemetry(answered: bool, node: dict[str, Any] | None) -> dict[str, Any]:
-    """The three switches, the region, and whether all three were actually read.
-
-    KEYED BY NAME AND NEVER BY POSITION: one appliance returns `region` first where the other
-    three return it last, measured, so a reader walking the node in order gets a different field
-    on different platforms.
-    """
-    values: dict[str, Any] = {}
-    present = 0
-    for column, key in TELEMETRY_SWITCH_KEYS:
-        switch, _raw_key, _raw_prov = parse_yes_no_field(
-            (node or {}).get(key), implicit=TELEMETRY_SWITCH_IMPLICIT)
-        values[column] = switch
-        if isinstance(node, dict) and key in node:
-            present += 1
-    values["region"] = str((node or {}).get("region") or "").strip()
-    # KNOWN MEANS THE READ ANSWERED AND CARRIED ALL THREE, not merely that a row exists. A node
-    # holding one switch and not its siblings would otherwise leave a true flag beside two nulls,
-    # and an appliance whose node is ABSENT - one PA-VM in this lab - is a read that answered
-    # about a configuration that says nothing, which is exactly the state this flag must deny.
-    values["telemetry_switches_known"] = (
-        answered and present == len(TELEMETRY_SWITCH_KEYS))
-    return values
-
-
-def normalize_device_telemetry_settings(appliance: Appliance) -> dict[str, int]:
-    """One appliance's telemetry sharing switches. An INPUT to PAN-PLT-003, not a claim.
-
-    NO PROVENANCE ROW IS WRITTEN. Stage 5 declares `provenance.stored: false` for this subject
-    because no column of it carries a default resting on a measurement - there is no vendor fact
-    for a row to record - and the columns are declared in `DERIVED_FIELDS` instead. The cost is
-    named rather than hidden: a switch supplied by a PANORAMA TEMPLATE would be indistinguishable
-    from one set locally, and a remediation would tell an engineer to edit a node the firewall
-    may not own.
-    """
-    merged = latest_merged_snapshot(appliance)
-    if merged is None:
-        return {"device_telemetry_settings": 0}
-    answered, node = _node_from_committed_read(
-        latest_device_telemetry_snapshot(appliance), "device-telemetry")
-    with transaction.atomic():
-        write_node_row(DeviceTelemetrySettings, appliance, merged,
-                       build_device_telemetry(answered, node))
-    return {"device_telemetry_settings": 1}
+# DEVICE TELEMETRY IS NORMALIZED IN `device_services.py` AND NOT HERE, by ruling P374a,
+# 2026-10-29. `normalize_device_telemetry_settings`, `build_device_telemetry` and
+# `TELEMETRY_SWITCH_IMPLICIT` were deleted with the model they filled; `latest_device_telemetry_snapshot`
+# and `node_from_committed_read` stayed, because the surviving normalizer reads this domain's
+# committed snapshot through both of them.
 
 
 # ---------------------------------------------------------------------------
@@ -990,7 +936,7 @@ def normalize_log_alarm_settings(appliance: Appliance) -> dict[str, int]:
     merged = latest_merged_snapshot(appliance)
     if merged is None:
         return {"log_alarm_settings": 0}
-    answered, node = _node_from_committed_read(
+    answered, node = node_from_committed_read(
         latest_log_alarm_snapshot(appliance), "common-criteria-alarm-generation")
     values, provenance = build_log_alarm_settings(answered, node)
     with transaction.atomic():
@@ -1140,17 +1086,16 @@ __all__ = [
     "alarm_mechanism_state",
     "build_content_streams",
     "build_dataplane_utilisation",
-    "build_device_telemetry",
     "build_licence_inventory",
     "build_log_alarm_settings",
     "build_portal_presence",
     "content_currency_state",
     "latest_device_telemetry_snapshot",
+    "node_from_committed_read",
     "latest_log_alarm_snapshot",
     "latest_resource_monitor_snapshot",
     "normalize_configuration_backup_evidence",
     "normalize_dataplane_utilisation",
-    "normalize_device_telemetry_settings",
     "normalize_globalprotect_portal_presence",
     "normalize_licence_inventory",
     "normalize_log_alarm_settings",

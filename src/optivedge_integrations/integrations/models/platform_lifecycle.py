@@ -258,74 +258,14 @@ class FirewallContentStreams(ProvenancedMixin, SyncTrackedModel):
                 "a token here would be a verdict over a reply nobody received.")
 
 
-class DeviceTelemetrySettings(ProvenancedMixin, SyncTrackedModel):
-    """One appliance's device-telemetry sharing switches. An INPUT to PAN-PLT-003, not a claim.
-
-    Stage 3 is explicit that PAN-SVC-008 owns the telemetry POSTURE - whether the decision was
-    taken and documented - and that PAN-PLT-003 owns only whether advisories were matched
-    against the state that decision produces. So no clause rests on this model; it carries the
-    feature-state input and nothing else.
-
-    THE THREE SWITCHES ARE NULLABLE AND NULL IS NOT `no`. Stage 4 could not establish what an
-    absent key asserts - the node is present with all four keys on the appliances it measured,
-    so there was no absent instance to read - and the lab now holds one (the node is absent on
-    691665AC334B458). A null here means "nobody knows", a false means "an administrator opted
-    out", and conflating them fires for the right reason by accident. The query layer cannot
-    reach a null at all, which is why `telemetry_switches_known` exists.
-
-    KEY ORDER DIFFERS BETWEEN APPLIANCES - one returns `region` first where the others return it
-    last - so this is read by name and never by position.
-    """
-
-    #: Every column: the three switches come off a configuration leaf but no provenance row is
-    #: written for them, because stage 5 declares `provenance.stored: false` for this subject -
-    #: no column carries a default resting on a measurement, so a row would have nothing to
-    #: record. The cost is named in the model docstring of the stage 5 artifact: a switch
-    #: supplied by a TEMPLATE would be indistinguishable from one set locally.
-    #: See ProvenancedMixin.DERIVED_FIELDS.
-    DERIVED_FIELDS = (
-        "is_missing",
-        "device_health_performance",
-        "product_usage",
-        "threat_prevention",
-        "telemetry_switches_known",
-    )
-
-    management_station = models.ForeignKey(
-        "integrations.ManagementStation", on_delete=models.CASCADE,
-        related_name="device_telemetry_settings")
-    appliance = models.ForeignKey(
-        "integrations.Appliance", on_delete=models.CASCADE,
-        related_name="device_telemetry_settings")
-    appliance_group = models.ForeignKey(
-        "integrations.ApplianceGroup", on_delete=models.CASCADE,
-        related_name="device_telemetry_settings", null=True, blank=True)
-    source_snapshot = models.ForeignKey(
-        "integrations.Snapshot", on_delete=models.CASCADE,
-        related_name="device_telemetry_settings")
-
-    #: `device-health-performance`, the vendor's key with the vendor's polarity, un-inverted.
-    device_health_performance = models.BooleanField(null=True, blank=True)
-    #: `product-usage`, un-inverted.
-    product_usage = models.BooleanField(null=True, blank=True)
-    #: `threat-prevention`, un-inverted.
-    threat_prevention = models.BooleanField(null=True, blank=True)
-    #: `region`, kept beside the switches because it is the fourth key of the node and a reader
-    #: of a telemetry row will ask where the data goes. Nothing asserts it.
-    region = models.CharField(max_length=64, blank=True)
-    #: Whether the telemetry node was read AND carried all three category switches. The
-    #: unknown-detector; false until the pass runs, which FIRES.
-    telemetry_switches_known = models.BooleanField(default=False)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(
-                fields=["appliance"], name="unique_device_telemetry_per_appliance"),
-        ]
-        indexes = [models.Index(fields=["appliance"])]
-
-    def __str__(self) -> str:
-        return f"{self.appliance} device telemetry"
+# DeviceTelemetrySettings LIVED HERE AND WAS DELETED BY RULING P374a, 2026-10-29. It held this
+# appliance's three telemetry sharing switches as NULLABLE, because its own stage 4 run found no
+# appliance with the node or any key absent and would not guess. `device_services.py::
+# DeviceTelemetry` covers the same node, measured the absent-key behaviour by creating the absent
+# instance, and now carries PAN-PLT-003's input as well as PAN-SVC-008's finding - including the
+# committed-read source and the `telemetry_switches_known` companion, both of which were invented
+# here. Deleted in migration `0115_one_telemetry_model`; the collector `collect_device_telemetry`
+# in this domain's collectors module is kept and is now called by the device-services collection.
 
 
 class GlobalProtectPortalPresence(ProvenancedMixin, SyncTrackedModel):

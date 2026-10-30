@@ -57,6 +57,11 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.common i
     ABSENT, choice_child, classify_prov_type, first_text, merged_shared, provenance_raw_key, provenance_value, ensure_list, entry_provenance, parse_text_field, parse_yes_no_field, scalar_value)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot, latest_merged_snapshot)
+# THE TELEMETRY NODE IS READ THROUGH THE OTHER DOMAIN'S TWO HELPERS, by ruling P374a: one model
+# covers that node now and this module owns it, but the committed-local read and its four-state
+# reader were built in platform lifecycle and are left where they were written.
+from optivedge_integrations.integrations.platforms.pan_os.normalization.platform_lifecycle import (
+    latest_device_telemetry_snapshot, node_from_committed_read)
 
 #: The community strings the corpus names, and Help p.740 warns about by name. Compared
 #: case-insensitively: PAN-OS accepts all characters and is case-sensitive itself, but `Public`
@@ -888,17 +893,42 @@ def telemetry_delivery_state(settings_read: bool, settings: dict[str, Any]) -> s
     return str(settings.get("status") or "").strip()[:64]
 
 
-def _telemetry(appliance, snapshot, system) -> None:
-    node = system.get("device-telemetry")
-    node = node if isinstance(node, dict) else {}
+def _telemetry(appliance, snapshot) -> None:
+    """One row per appliance, from the COMMITTED read and never from the merged view.
+
+    THE MERGED VIEW FOLLOWS THE CANDIDATE, so a staged opt-in would read as enforced - and this
+    lab has that exact state: an uncommitted telemetry edit was sitting on 691665AC334B458 on
+    2026-10-29, re-staged after the stage 7 runs read it. This normalizer read the merged
+    `deviceconfig/system/device-telemetry` until ruling P374a, which merged this model with
+    `platform_lifecycle.py::DeviceTelemetrySettings` and kept that model's source.
+
+    THREE STATES, AND THE THIRD IS WHY `telemetry_switches_known` EXISTS. Nobody asked
+    (no snapshot); the read answered and the node is absent, which `is_missing` carries; the read
+    answered and the node is there. The three switches store True in the first two states as well
+    as when an absent key was measured, so the companion is the only thing that separates them.
+    """
+    answered, read_node = node_from_committed_read(
+        latest_device_telemetry_snapshot(appliance), "device-telemetry")
+    node = read_node if isinstance(read_node, dict) else {}
 
     values: dict[str, Any] = {}
     provenance_rows: list[tuple[str, Any, str | None]] = []
+    present = 0
     for column, key in TELEMETRY_SHARING_KEYS:
         shares, raw_key, raw_value = parse_yes_no_field(
             node.get(key), implicit=TELEMETRY_SHARING_IMPLICIT)
         values[column] = shares
         provenance_rows.append((column, raw_key, raw_value))
+        if key in node:
+            present += 1
+    # KNOWN MEANS THE READ ANSWERED AND CARRIED ALL THREE, not merely that a row exists. Carried
+    # across from the deleted model with its reasoning: a node holding one switch and not its
+    # siblings would leave one measured value beside two materialised ones, with nothing saying
+    # which was which.
+    values["telemetry_switches_known"] = answered and present == len(TELEMETRY_SHARING_KEYS)
+    # ABSENT IS NOT EMPTY. `(True, None)` is the read answering that the node is not in the
+    # committed configuration; `(True, {})` is the node existing and holding nothing.
+    values["is_missing"] = answered and read_node is None
 
     region, region_rk, region_rv = parse_text_field(
         node.get("region"), implicit=TELEMETRY_REGION_IMPLICIT)
@@ -1279,7 +1309,7 @@ def normalize_device_services(appliance: Appliance) -> dict[str, int]:
         # BEFORE `_dns`, which reads the row this writes. See the module docstring.
         _identity(appliance, snapshot, system)
         _dns(appliance, snapshot, system)
-        _telemetry(appliance, snapshot, system)
+        _telemetry(appliance, snapshot)
         routes = _service_routes(appliance, snapshot, entry, shared)
     return {"ntp_settings": 1, "snmp_settings": 1, "system_identities": 1,
             "dns_settings": 1, "device_services_telemetry": 1, "service_routes": routes}

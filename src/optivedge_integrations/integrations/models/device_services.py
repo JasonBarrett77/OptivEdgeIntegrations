@@ -712,14 +712,34 @@ class DeviceTelemetry(ProvenancedMixin, SyncTrackedModel):
     each other against it. Already recorded in OptivEdgeProbe
     `reference/known-vendor-contradictions.md` under `Device telemetry's default`.
 
-    A SECOND MODEL OVER THIS SAME NODE ALREADY EXISTS and is deliberately not reused:
-    `platform_lifecycle.py::DeviceTelemetrySettings` stores the same three switches and the
-    region for PAN-PLT-003, NULLABLE, from a COMMITTED-local read, with its own stage 4 run
-    recording every switch's implicit as unmeasured. This model's stage 4 run measured them and
-    they materialise `yes`. The two readings of one node disagree and neither side is this run's
-    to overrule, so this model is additive and the overlap is reported rather than reconciled.
-    The constraint name says `device_services_telemetry` because the other model already holds
-    `unique_device_telemetry_per_appliance`.
+    ONE MODEL COVERS THIS NODE AND THIS IS IT, by Jason's ruling P374a on 2026-10-29. A second
+    model shipped over the same node at the same grain - `platform_lifecycle.py::
+    DeviceTelemetrySettings`, PAN-PLT-003's input, three NULLABLE switches from the same
+    committed read - and the two read an absent key the opposite way. THE DISAGREEMENT WAS NOT
+    BETWEEN TWO MEASUREMENTS. That model's stage 4 run recorded every switch at
+    `implicit.status=unmeasured / consumer_disposition=not_assumed`, in its own words because
+    "no appliance measured had the node or any of its four keys absent, so there was no absent
+    instance to read": an honest unknown, not a rival reading. This domain's stage 4 run then
+    CREATED the absent instance - deleted the keys, committed, read it back - so the measurement
+    above supersedes the unknown rather than contradicting it. The other model and its
+    normalizer were deleted in migration `0115_one_telemetry_model`; nothing clauses on PAN-PLT-003
+    through them, and this row is the input it reads now.
+
+    WHAT THAT MERGE CARRIED ACROSS, and it is the half this model did not start with: the node
+    is read from the COMMITTED-local snapshot `config_device_telemetry` and never from the
+    merged view, because merged follows the candidate and a STAGED opt-in would read as
+    enforced. The lab has that exact hazard live - an uncommitted telemetry edit was sitting on
+    691665AC334B458 on 2026-10-29 and was re-staged after the runs read it - so this is not a
+    theoretical preference. `telemetry_switches_known` came across with it.
+
+    THE VALUE COLUMNS MUST NEVER BE READ WITHOUT THAT COMPANION. All three switches are
+    non-nullable and default True, so an appliance nobody asked about and an appliance measured
+    as sharing store the same three values. `telemetry_switches_known` is the only thing that
+    tells them apart, and it is false until a read answers AND carries all three keys.
+
+    The constraint is named `unique_device_services_telemetry_per_appliance` for the related
+    name on this model. It was first named that to dodge the other model's constraint; the other
+    model is gone and the name is kept because renaming a constraint is churn, not clarity.
     """
 
     #: Computed here: the delivery state and the reconciliation. The four category columns are
@@ -729,6 +749,7 @@ class DeviceTelemetry(ProvenancedMixin, SyncTrackedModel):
     DERIVED_FIELDS = (
         "telemetry_delivery_state",
         "recorded_decision_reconciliation",
+        "telemetry_switches_known",
     )
 
     management_station = models.ForeignKey(
@@ -757,6 +778,14 @@ class DeviceTelemetry(ProvenancedMixin, SyncTrackedModel):
     #: where the completion set is lowercase (`americas`), so a normaliser comparing the stored
     #: value against the vocabulary must fold case - and this column holds the folded form.
     telemetry_region = models.CharField(max_length=16, default="americas", blank=True)
+
+    #: Whether the committed read ANSWERED and carried all three category switches. CARRIED
+    #: ACROSS FROM THE DELETED MODEL BY P374a, and the only column that separates "nobody asked"
+    #: from "measured as sharing" - the three switches above store True in both states. False
+    #: until the pass runs, which FIRES. A node holding one switch and not its siblings is not
+    #: known either: that would leave one measured value beside two materialised ones with
+    #: nothing saying which was which.
+    telemetry_switches_known = models.BooleanField(default=False)
 
     #: The runtime `status` the device reports, which is not configuration at all. Empty means
     #: the delivery state was never established; nothing clauses on it, and PAN-SVC-008's

@@ -102,7 +102,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_device_identification,
     normalize_appliance_configuration_backup_evidence,
     normalize_appliance_dataplane_utilisation,
-    normalize_appliance_device_telemetry,
     normalize_appliance_globalprotect_portal_presence,
     normalize_appliance_licence_inventory,
     normalize_appliance_log_alarm_settings,
@@ -913,17 +912,22 @@ def collect_appliance_platform_lifecycle(
 ) -> tuple[list[PANOSPersistedCollection], list[str]]:
     """PAN-PLT-003's and PAN-PLT-006's own sources. No configuration read carries any of them.
 
-    THREE READS ON ONE SESSION, COLLECTED INDEPENDENTLY, for the same reason
+    TWO READS ON ONE SESSION, COLLECTED INDEPENDENTLY, for the same reason
     `collect_appliance_device_identification` gives: they answer unrelated questions and letting
-    one exception abandon the others is expensive here in particular, because each of the three
-    is the ONLY thing that can tell its own unknown from its own zero. Losing the telemetry read
-    to a failure in the resource monitor would move an appliance from "the node is absent" to
-    "nobody measured it", and those are different findings.
+    one exception abandon the other is expensive here in particular, because each is the ONLY
+    thing that can tell its own unknown from its own zero. Losing the alarm read to a failure in
+    the resource monitor would move an appliance from "the node is absent" to "nobody measured
+    it", and those are different findings.
 
-    TWO OF THE THREE ARE COMMITTED-LOCAL CONFIGURATION READS, the first in this package. An
-    absence at either xpath is the READING rather than a failure, and the collector records it as
-    an empty result; anything else propagates into `failures` below, which is what keeps an
-    unreachable appliance from reading as a configured-nothing one.
+    IT WAS THREE UNTIL RULING P374a, 2026-10-29. `collect_device_telemetry` moved to
+    `collect_appliance_device_services`, because one model covers that node now and it is written
+    by that domain's normalizer. The collector itself did not move and is still defined in this
+    domain's collectors module, where it was built.
+
+    ONE OF THE TWO IS A COMMITTED-LOCAL CONFIGURATION READ, the first in this package. An absence
+    at its xpath is the READING rather than a failure, and the collector records it as an empty
+    result; anything else propagates into `failures` below, which is what keeps an unreachable
+    appliance from reading as a configured-nothing one.
 
     THE FOURTH AND FIFTH READS THIS DOMAIN NEEDS ARE NOT HERE AND BOTH ABSENCES ARE DELIBERATE.
     `show system info` and `request license info` are taken by
@@ -944,7 +948,6 @@ def collect_appliance_platform_lifecycle(
     persisted: list[PANOSPersistedCollection] = []
     failures: list[str] = []
     for collect in (
-        collect_device_telemetry,
         collect_log_alarm_settings,
         collect_show_running_resource_monitor,
     ):
@@ -962,9 +965,14 @@ def collect_appliance_device_services(
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
     user_agent: str = DEFAULT_USER_AGENT,
 ) -> tuple[list[PANOSPersistedCollection], list[str]]:
-    """PAN-SVC-001's, 003's and 008's runtime halves. No configuration read carries any of them.
+    """PAN-SVC-001's, 003's and 008's runtime halves, and 008's configuration half.
 
-    THREE OP CALLS ON ONE SESSION, COLLECTED INDEPENDENTLY, for the reason
+    THREE OP CALLS AND ONE COMMITTED CONFIGURATION READ ON ONE SESSION, COLLECTED
+    INDEPENDENTLY. The fourth arrived with ruling P374a, 2026-10-29: one model covers the
+    telemetry node, this domain's normalizer writes it, so this is where its committed read is
+    taken. The op call `show device-telemetry settings` beside it answers a DIFFERENT question -
+    whether the device can deliver - and neither replaces the other. They are collected one per
+    try for the reason
     `collect_appliance_device_identification` gives: they answer unrelated questions and letting
     one exception abandon the others is expensive here in particular, because each is the ONLY
     thing that can tell its own unknown from its own zero. Losing the lease read to a failure in
@@ -996,6 +1004,12 @@ def collect_appliance_device_services(
         collect_show_ntp,
         collect_show_device_telemetry_settings,
         collect_show_dhcp_client_mgmt_interface_state,
+        # THE COMMITTED TELEMETRY NODE, moved here from the platform lifecycle collection by
+        # ruling P374a: one model covers it and this domain's normalizer writes it, so the
+        # domain that reads the snapshot is the one that takes it. The op read two lines above
+        # answers a different question - what the device says about DELIVERY - and both are
+        # needed, which is why they sit together rather than one replacing the other.
+        collect_device_telemetry,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))
@@ -1143,7 +1157,6 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # on this domain that separation is what stops an unlicensed appliance, an opted-out one, an
     # idle dataplane and an unread one from all reading the same way.
     ("platform content streams", normalize_appliance_platform_content_streams),
-    ("device telemetry", normalize_appliance_device_telemetry),
     ("GlobalProtect portal presence", normalize_appliance_globalprotect_portal_presence),
     ("licence inventory", normalize_appliance_licence_inventory),
     ("log alarm settings", normalize_appliance_log_alarm_settings),

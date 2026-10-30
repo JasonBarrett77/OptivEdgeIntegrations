@@ -66,7 +66,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.device_i
 from optivedge_integrations.integrations.platforms.pan_os.normalization.platform_lifecycle import (
     normalize_configuration_backup_evidence,
     normalize_dataplane_utilisation,
-    normalize_device_telemetry_settings,
     normalize_globalprotect_portal_presence,
     normalize_licence_inventory,
     normalize_log_alarm_settings,
@@ -381,14 +380,9 @@ def normalize_appliance_platform_content_streams(appliance: Appliance) -> dict:
     return normalize_platform_content_streams(appliance)
 
 
-def normalize_appliance_device_telemetry(appliance: Appliance) -> dict:
-    """The three telemetry sharing switches, as COMMITTED. An input to PAN-PLT-003.
-
-    Its own committed-local snapshot, which no other normalizer reads. A missing one leaves all
-    three switches NULL and `telemetry_switches_known` false - not `no`, which is a different
-    claim about the appliance. Depends on nothing else in the tuple.
-    """
-    return normalize_device_telemetry_settings(appliance)
+# THE TELEMETRY ENTRY POINT WAS DELETED BY RULING P374a, 2026-10-29. One model covers that node
+# and `normalize_appliance_device_services` writes it, from the same committed-local snapshot this
+# one used. PAN-PLT-003 reads that row for its input.
 
 
 def normalize_appliance_globalprotect_portal_presence(appliance: Appliance) -> dict:
@@ -751,14 +745,12 @@ __all__ = [
     "normalize_device_identification_state",
     "normalize_appliance_configuration_backup_evidence",
     "normalize_appliance_dataplane_utilisation",
-    "normalize_appliance_device_telemetry",
     "normalize_appliance_globalprotect_portal_presence",
     "normalize_appliance_licence_inventory",
     "normalize_appliance_log_alarm_settings",
     "normalize_appliance_platform_content_streams",
     "normalize_configuration_backup_evidence",
     "normalize_dataplane_utilisation",
-    "normalize_device_telemetry_settings",
     "normalize_globalprotect_portal_presence",
     "normalize_licence_inventory",
     "normalize_log_alarm_settings",
