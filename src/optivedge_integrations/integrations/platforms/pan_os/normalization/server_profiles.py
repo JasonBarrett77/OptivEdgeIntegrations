@@ -204,17 +204,41 @@ def _fields(entry: dict[str, Any], kind: str, raw_kind: str,
     digests = [_equality_group(form, secret_key) for form in forms]
     # Text keys whose ABSENCE a reader has to be able to see: an unbound certificate profile on
     # an MFA server profile is what PAN-AUTH-020's prerequisite turned on.
-    unbound = Implicit.measured(
-        None,
-        "aaa-server-profile: an absent reference key binds nothing - the same reading the "
-        "contract records for ssl-tls-service-profile.certificate")
-    bind_dn, bind_rk, bind_rv = parse_text_field(entry.get("bind-dn"), implicit=unbound)
-    ldap_type, type_rk, type_rv = parse_text_field(entry.get("ldap-type"), implicit=unbound)
+    #
+    # ALL FIVE SHARED ONE `Implicit.measured(None, ...)` UNTIL 2026-10-30, citing the reading the
+    # contract records for ssl-tls-service-profile.certificate - A DIFFERENT OBJECT'S KEY. Stage
+    # 4's record for THIS object says `may_materialise: false` with `consumer_disposition:
+    # not_assumed` for every one of the five, so every absent key wrote a provenance row saying
+    # `pan_os_default`: "this blank is the vendor's default, measured", about five keys nobody
+    # licensed. Same correction as `management_ssh.py::_host_key` and for the reason given there -
+    # `pan_os_default` would be the false vendor fact. THE STORED VALUE DOES NOT MOVE:
+    # `parse_text_field` writes "" wherever `implicit.value` is None, and these columns are
+    # non-nullable, so what changes is only what the row CLAIMS about the blank.
+    #
+    # Three declarations rather than one, because the five are unlicensed for three different
+    # reasons and the provenance row is where an assessor reads which.
+    held_back = Implicit.not_assumed(
+        "stage4-auth-servers objects.aaa-server-profile: the field renders EMPTY with the "
+        "reader's is_hint flag TRUE on both appliances, and stage 4 HELD THE READING BACK on "
+        "the positive control - may_materialise false, consumer_disposition not_assumed. An "
+        "absent bind-dn probably does assert an anonymous bind; it is not a vendor fact")
+    no_instance = Implicit.not_assumed(
+        "stage4-auth-servers objects.aaa-server-profile: status `not_reached` - the "
+        "mfa-server-profile kind has NO COMMITTABLE INSTANCE on any of the four lab appliances "
+        "(`validate full` refuses a bare entry with `Invalid MFA vendor config.`, a message "
+        "class that names no key), so no absent state of these keys was read anywhere")
+    mandatory_at_the_write = Implicit.not_assumed(
+        "stage4-auth-servers objects.aaa-server-profile: status `not_applicable` - mandatory at "
+        "the WRITE, so no saml-idp profile exists without it and there is nothing for an absence "
+        "to assert. Reached only through a profile of another kind, which has no such key")
+    bind_dn, bind_rk, bind_rv = parse_text_field(entry.get("bind-dn"), implicit=held_back)
+    ldap_type, type_rk, type_rv = parse_text_field(entry.get("ldap-type"), implicit=held_back)
     vendor, vendor_rk, vendor_rv = parse_text_field(
-        entry.get("mfa-vendor-type"), implicit=unbound)
-    saml_cert, saml_rk, saml_rv = parse_text_field(entry.get("certificate"), implicit=unbound)
+        entry.get("mfa-vendor-type"), implicit=no_instance)
+    saml_cert, saml_rk, saml_rv = parse_text_field(
+        entry.get("certificate"), implicit=mandatory_at_the_write)
     mfa_cert, mfa_rk, mfa_rv = parse_text_field(
-        entry.get("mfa-cert-profile"), implicit=unbound)
+        entry.get("mfa-cert-profile"), implicit=no_instance)
     admin_only, admin_rk, admin_rv = parse_yes_no_field(
             entry.get("admin-use-only"),
             implicit=Implicit.assumed(

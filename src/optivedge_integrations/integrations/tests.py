@@ -9012,6 +9012,41 @@ class ServerProfileNormalizationTests(TestCase):
         self.assertTrue(rows[("saml-idp", "bare")].saml_validate_idp_certificate)
         self.assertTrue(rows[("saml-idp", "bare")].saml_want_auth_requests_signed)
 
+    def test_an_absent_text_key_stores_nothing_and_the_row_says_NOT_CONFIGURED(self):
+        """Five text keys shared one `Implicit.measured(None, ...)` until 2026-10-30, citing the
+        reading the contract records for `ssl-tls-service-profile.certificate` - A DIFFERENT
+        OBJECT'S KEY. Stage 4's record for the aaa-server-profile says `may_materialise: false`
+        with `consumer_disposition: not_assumed` for every one of the five, so every absent key
+        wrote a row claiming `pan_os_default`: the vendor's default, measured. Nobody measured
+        them.
+
+        What it cost is the EVIDENCE and not a finding - no `*_findings.py` reads
+        `FieldProvenance`. An empty `ldap_bind_dn` is indistinguishable from an uncollected one,
+        and the row is the only thing that can tell an assessor "nothing is configured here"
+        from "the vendor does this by default". It said the second about all five.
+
+        THE STORED VALUE IS UNCHANGED, which is the half this test pins: these columns are
+        non-nullable and `parse_text_field` writes "" wherever `implicit.value` is None, so
+        `is_empty` - the only operator a text clause has, and it compiles to `filter(field="")` -
+        still fires exactly as before."""
+        rows = self._normalize(shared={
+            "ldap": {"entry": [{"@name": "bare"}]},
+            "mfa-server-profile": {"entry": [{"@name": "bare-mfa"}]},
+        })
+        ldap, mfa = rows[("ldap", "bare")], rows[("mfa-server-profile", "bare-mfa")]
+        self.assertEqual(ldap.ldap_bind_dn, "")
+        self.assertEqual(ldap.ldap_type, "")
+        self.assertEqual(ldap.certificate_reference, "")
+        self.assertEqual(mfa.mfa_vendor_type, "")
+
+        ct = ContentType.objects.get_for_model(ServerProfile)
+        prov = {(r.object_id, r.field_name): r
+                for r in FieldProvenance.objects.filter(content_type=ct)}
+        for row, field in ((ldap, "ldap_bind_dn"), (ldap, "ldap_type"),
+                           (ldap, "certificate_reference"), (mfa, "mfa_vendor_type")):
+            with self.subTest(field=field):
+                self.assertEqual(prov[(row.pk, field)].provenance_type, "not_configured")
+
     def test_an_explicit_no_overrides_each_implicit_yes(self):
         rows = self._normalize(shared={
             "ldap": {"entry": [{"@name": "off", "ssl": "no"}]},
