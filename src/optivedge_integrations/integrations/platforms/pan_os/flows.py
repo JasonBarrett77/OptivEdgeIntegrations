@@ -45,7 +45,6 @@ from optivedge_integrations.integrations.platforms.pan_os.collectors import (
     collect_show_cloud_appid_connection,
     collect_show_logging_status,
     collect_show_system_info,
-    collect_device_telemetry,
     collect_show_ntp,
     collect_show_device_telemetry_settings,
     collect_show_dhcp_client_mgmt_interface_state,
@@ -937,10 +936,14 @@ def collect_appliance_platform_lifecycle(
     the resource monitor would move an appliance from "the node is absent" to "nobody measured
     it", and those are different findings.
 
-    IT WAS THREE UNTIL RULING P374a, 2026-10-29. `collect_device_telemetry` moved to
-    `collect_appliance_device_services`, because one model covers that node now and it is written
-    by that domain's normalizer. The collector itself did not move and is still defined in this
-    domain's collectors module, where it was built.
+    IT WAS THREE UNTIL 2026-10-29 AND IS TWO FOR A DIFFERENT REASON NOW.
+    `collect_device_telemetry` moved to `collect_appliance_device_services` under ruling P374a,
+    and was then removed from the collection altogether under USE THE CONFIGURATION THAT WAS
+    COLLECTED - the telemetry row is normalised from the merged configuration. The collector is
+    still DEFINED in this domain's collectors module and is now called by nothing; it is left
+    rather than deleted because `collect_log_alarm_settings` beside it is the same mechanism and
+    its own node may genuinely be absent from the merged view, which is unmeasured on this
+    estate. See the board.
 
     ONE OF THE TWO IS A COMMITTED-LOCAL CONFIGURATION READ, the first in this package. An absence
     at its xpath is the READING rather than a failure, and the collector records it as an empty
@@ -983,9 +986,17 @@ def collect_appliance_device_services(
     timeout: float | tuple[float, float] = DEFAULT_TIMEOUT,
     user_agent: str = DEFAULT_USER_AGENT,
 ) -> tuple[list[PANOSPersistedCollection], list[str]]:
-    """PAN-SVC-001's, 003's and 008's runtime halves, and 008's configuration half.
+    """PAN-SVC-001's, 003's and 008's runtime halves. No configuration read carries any of them.
 
-    THREE OP CALLS AND ONE COMMITTED CONFIGURATION READ ON ONE SESSION, COLLECTED
+    A FOURTH READ WAS ADDED HERE ON 2026-10-30 AND REMOVED THE SAME DAY. It was
+    `collect_device_telemetry`, a `type=config&action=show` of one node, added so the telemetry
+    row would come from the running view rather than from the merged configuration this pass
+    already collects. Jason's ruling the same day - USE THE CONFIGURATION THAT WAS COLLECTED -
+    closed the question that read existed to answer, and closed it for every control rather than
+    for this one. The op call `show device-telemetry settings` below stays, because it answers a
+    question no configuration read answers: whether the device can DELIVER.
+
+    THREE OP CALLS ON ONE SESSION, COLLECTED
     INDEPENDENTLY. The fourth arrived with ruling P374a, 2026-10-29: one model covers the
     telemetry node, this domain's normalizer writes it, so this is where its committed read is
     taken. The op call `show device-telemetry settings` beside it answers a DIFFERENT question -
@@ -1022,12 +1033,6 @@ def collect_appliance_device_services(
         collect_show_ntp,
         collect_show_device_telemetry_settings,
         collect_show_dhcp_client_mgmt_interface_state,
-        # THE COMMITTED TELEMETRY NODE, moved here from the platform lifecycle collection by
-        # ruling P374a: one model covers it and this domain's normalizer writes it, so the
-        # domain that reads the snapshot is the one that takes it. The op read two lines above
-        # answers a different question - what the device says about DELIVERY - and both are
-        # needed, which is why they sit together rather than one replacing the other.
-        collect_device_telemetry,
     ):
         try:
             persisted.append(persist_appliance_collected_response(appliance, collect(session)))

@@ -16703,7 +16703,7 @@ class PlatformLifecycleContentCurrencyTests(SimpleTestCase):
 # PlatformLifecycleTelemetryTests WAS HERE AND WENT WITH THE MODEL, ruling P374a 2026-10-29. Its
 # five shapes were not thrown away: every one of them is asserted against the surviving model, end
 # to end through the normalizer rather than against a builder, in
-# `DeviceServicesTelemetryIsReadFromTheCommittedView` below.
+# `DeviceServicesTelemetryUsesTheConfigurationThatWasCollected` below.
 
 
 class PlatformLifecycleAlarmTests(SimpleTestCase):
@@ -17110,9 +17110,11 @@ class PlatformLifecycleCollectorTests(SimpleTestCase):
         source = inspect.getsource(flows.collect_appliance_platform_lifecycle)
         for name in ("collect_log_alarm_settings", "collect_show_running_resource_monitor"):
             self.assertIn(name, source, name)
-        # MOVED TO THE DEVICE SERVICES COLLECTION BY RULING P374a, and asserted to be there by
-        # `test_the_collectors_and_normalizers_are_wired_into_the_flow` on that side. A collector
-        # in both tuples would read the same node twice per pass.
+        # NOT CALLED FROM ANYWHERE NOW. It moved to the device-services collection under ruling
+        # P374a and was removed from the collection altogether under USE THE CONFIGURATION THAT
+        # WAS COLLECTED. The collector is still DEFINED in this domain's collectors module, which
+        # the ruling permits - it governs what a CONTROL rests on, not OptivEdgeIntegrations'
+        # collection surface at large.
         self.assertNotIn(
             "collect_device_telemetry,", source)
         for label, function in (
@@ -18654,11 +18656,13 @@ class DeviceServicesCollectorTests(SimpleTestCase):
 
         source = inspect.getsource(flows.collect_appliance_device_services)
         for name in ("collect_show_ntp", "collect_show_device_telemetry_settings",
-                     "collect_show_dhcp_client_mgmt_interface_state",
-                     # MOVED HERE BY RULING P374a: this domain's normalizer writes the telemetry
-                     # row, so this is the collection that must take its committed read.
-                     "collect_device_telemetry"):
+                     "collect_show_dhcp_client_mgmt_interface_state"):
             self.assertIn(name, source, name)
+        # AND NOT THE DEDICATED CONFIG READ OF ONE NODE. It was added here on 2026-10-30 and
+        # removed the same day under USE THE CONFIGURATION THAT WAS COLLECTED: a control rests on
+        # the merged configuration this pass already takes, and does not re-open whether a value
+        # is enforced or staged. Asserted so reinstating it fails rather than passing quietly.
+        self.assertNotIn("collect_device_telemetry,", source)
         orchestrator = inspect.getsource(flows.collect_in_scope_configuration_snapshots)
         self.assertIn("collect_appliance_device_services", orchestrator)
         self.assertIn(("device services", flows.normalize_appliance_device_services),
@@ -18754,24 +18758,33 @@ class DeviceServicesSchemaTests(SimpleTestCase):
 _UNSET = object()
 
 
-class DeviceServicesTelemetryIsReadFromTheCommittedView(TestCase):
-    """RULING P374a, 2026-10-29: one model over the telemetry node, reading the COMMITTED view.
+class DeviceServicesTelemetryUsesTheConfigurationThatWasCollected(TestCase):
+    """USE THE CONFIGURATION THAT WAS COLLECTED. Jason's ruling, 2026-10-30, about CONTROLS.
 
-    TWO MODELS COVERED THIS NODE and read an absent key the opposite way. This one measured the
-    absent-key behaviour by creating the absent instance - deleted the keys, committed, read it
-    back - and `platform_lifecycle.py::DeviceTelemetrySettings` stored NULL because its own stage
-    4 run had no absent instance to read and would not guess. An unknown does not contradict a
-    measurement, so the measured reading stands and the other model is gone.
+    Which config files are collected, and why, was decided once. A control reads them and does not
+    re-open the question of whether a value is enforced now or staged to be enforced, and no
+    separate collection may be planned to answer that question differently. The exception is about
+    MISSING DATA - something no collected config carries, as EDL and FQDN membership is - not
+    about the enforced-versus-staged distinction.
 
-    WHAT CAME ACROSS WITH THE MERGE IS WHAT THIS CLASS IS MOSTLY ABOUT. That model read the
-    committed-local snapshot and this one read the merged view, and merged follows the CANDIDATE:
-    a staged opt-in reads as enforced. The lab has that state live - an uncommitted telemetry
-    edit was sitting on 691665AC334B458 on 2026-10-29 and had been re-staged after the stage 7
-    runs read it - so `test_a_staged_edit_in_the_merged_view_is_not_the_configuration` is about
-    an appliance in this estate rather than a hypothetical.
+    THIS CLASS EXISTS BECAUSE ITS PREVIOUS VERSION ASSERTED THE OPPOSITE, and the reason it did is
+    worth keeping. `0115_one_telemetry_model` pointed this normalizer at a dedicated
+    `type=config&action=show` of this one node, so the row would report the RUNNING view, and the
+    test here asserted that a staged edit in the merged view must be ignored. The ground was true
+    and measured - on 691665AC334B458, read-only on 2026-10-30, `action=show` answers
+    `No such node`, `action=get` returns all four children marked `@dirtyId=1`, and
+    `show config merged` carries all three switches as `yes` with no dirty marker anywhere in
+    1,259,801 bytes. It is ALSO true of every other node in that reply and of every control in the
+    assessment: `deviceconfig/system` alone carries nine more nodes that controls read. A per-node
+    workaround for a condition that applies to the whole assessment is one domain paying for a
+    question the project has already answered.
 
-    The five shapes of the deleted model's own tests are all here, asserted end to end through
-    the normalizer instead of against a builder function.
+    SO THE STAGED-EDIT TEST IS KEPT AND INVERTED. It now asserts that the row reports what the
+    collected configuration says, and its name says that is the ruling rather than an oversight.
+
+    TWO STATES, NOT THREE. No merged snapshot means NO ROW - the caller returns before the
+    telemetry pass, as 37 normalizers in this package do - so the states are: the node is in the
+    collected `deviceconfig/system` subtree, or it is not.
     """
 
     MERGED_SAYS_OPTED_OUT = {
@@ -18783,103 +18796,109 @@ class DeviceServicesTelemetryIsReadFromTheCommittedView(TestCase):
         },
     }
 
-    def _row(self, committed=_UNSET, *, merged=None):
-        """One appliance, a merged snapshot, and optionally a committed telemetry read.
-
-        `committed` left unset means NOBODY ASKED - no snapshot of that source type at all,
-        which is the third state and the one `telemetry_switches_known` exists for. `None` means
-        the read ANSWERED and the node is not in the committed configuration.
-        """
+    def _row(self, system=None):
+        """One appliance and one merged snapshot, which is the only read this row has."""
         station, appliance, _point = _create_panorama_enforcement_point(
             serial_number="SERIAL-SVC-TELEMETRY", appliance_hostname="svc-telemetry")
         Snapshot.objects.create(
             management_station=station, appliance=appliance,
             source_type="show_merged_config", collected_at=timezone.now(),
             payload={"config": {"devices": {"entry": {"deviceconfig": {
-                "system": dict(merged if merged is not None else {})}}}}})
-        if committed is not _UNSET:
-            Snapshot.objects.create(
-                management_station=station, appliance=appliance,
-                source_type="config_device_telemetry", collected_at=timezone.now(),
-                payload={} if committed is None else {"device-telemetry": committed})
+                "system": dict(system if system is not None else {})}}}}})
         from optivedge_integrations.integrations.platforms.pan_os.normalization import (
             normalize_device_services)
         normalize_device_services(appliance)
         return _SvcTelemetry.objects.get(appliance=appliance)
 
-    def test_a_staged_edit_in_the_merged_view_is_not_the_configuration(self):
-        """THE WHOLE REASON THE SOURCE CHANGED. The merged view says all three switches are off;
-        the committed configuration says they are on. The device is sharing until somebody
-        commits, so the row must say sharing - and a finding built on the merged view would
-        report an estate as opted out on the strength of an edit nobody has applied."""
-        row = self._row({"device-health-performance": "yes", "product-usage": "yes",
-                         "threat-prevention": "yes", "region": "Americas"},
-                        merged=self.MERGED_SAYS_OPTED_OUT)
-        self.assertTrue(row.shares_device_health_performance)
-        self.assertTrue(row.shares_product_usage)
-        self.assertTrue(row.shares_threat_prevention)
-        self.assertEqual(row.telemetry_region, "americas")
-        self.assertTrue(row.telemetry_switches_known)
-
-    def test_a_read_that_never_happened_is_not_a_measurement(self):
-        """Carried from the deleted model. The three switches store their materialised default
-        here as they do everywhere, so this row and a measured-as-sharing row hold the same three
-        values: the companion is the only thing that separates them, and it must be false."""
-        row = self._row()
-        self.assertFalse(row.telemetry_switches_known)
-        self.assertFalse(row.is_missing)
-        self.assertTrue(row.shares_device_health_performance)
-
-    def test_an_absent_node_is_the_read_answering_and_is_not_an_unasked_one(self):
-        """Carried from the deleted model, with the reading it could not make: the node is absent
-        on 691665AC334B458, and an absent key materialises `yes` - measured on that appliance by
-        deleting two keys and setting the third to `no` in one commit, job 178 FIN OK."""
-        row = self._row(None)
-        self.assertTrue(row.is_missing)
-        self.assertFalse(row.telemetry_switches_known)
-        self.assertTrue(row.shares_product_usage)
-        self.assertTrue(row.shares_threat_prevention)
-
-    def test_the_opted_out_reading_stores_false_and_is_known(self):
-        """Carried from the deleted model. Both PA-5220s are in this state."""
-        row = self._row({"device-health-performance": "no", "product-usage": "no",
-                         "threat-prevention": "no", "region": "Americas"})
+    def test_the_row_reports_the_collected_configuration_staged_or_not(self):
+        """THE RULING, AND THIS TEST USED TO ASSERT THE REVERSE. The collected merged view is what
+        the control rests on. Where that view carries a value an administrator has staged and not
+        committed, the row reports it - and that is the answered question, not a defect to work
+        around with a second read of this one node."""
+        row = self._row(self.MERGED_SAYS_OPTED_OUT)
         self.assertFalse(row.shares_device_health_performance)
         self.assertFalse(row.shares_product_usage)
         self.assertFalse(row.shares_threat_prevention)
+        self.assertEqual(row.telemetry_region, "europe")
+        self.assertTrue(row.telemetry_switches_known)
+
+    def test_no_separate_read_is_issued_for_this_node(self):
+        """The mechanical half of the ruling: a snapshot of the dedicated source type may exist
+        and must change nothing, because nothing looks at it. Without this, the next run to
+        reinstate that read would find every other test still green."""
+        station, appliance, _point = _create_panorama_enforcement_point(
+            serial_number="SERIAL-SVC-TELEMETRY-2", appliance_hostname="svc-telemetry-2")
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="show_merged_config", collected_at=timezone.now(),
+            payload={"config": {"devices": {"entry": {"deviceconfig": {
+                "system": {"device-telemetry": {"device-health-performance": "no",
+                                                "product-usage": "no",
+                                                "threat-prevention": "no"}}}}}}})
+        # a dedicated read saying the OPPOSITE. If anything consulted it, the row would flip.
+        Snapshot.objects.create(
+            management_station=station, appliance=appliance,
+            source_type="config_device_telemetry", collected_at=timezone.now(),
+            payload={"device-telemetry": {"device-health-performance": "yes",
+                                          "product-usage": "yes",
+                                          "threat-prevention": "yes"}})
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_device_services)
+        normalize_device_services(appliance)
+        row = _SvcTelemetry.objects.get(appliance=appliance)
+        self.assertFalse(row.shares_product_usage,
+                         "the dedicated config_device_telemetry snapshot was consulted; the "
+                         "ruling is that the collected merged configuration is what a control "
+                         "rests on")
+
+    def test_an_absent_node_materialises_the_measured_default(self):
+        """Carried from the model this one absorbed. An absent key asserts the firewall IS
+        sharing - measured on 691665AC334B458 by deleting two keys and setting the third to `no`
+        in one commit, job 178 FIN OK."""
+        row = self._row({})
+        self.assertTrue(row.is_missing)
+        self.assertFalse(row.telemetry_switches_known)
+        self.assertTrue(row.shares_device_health_performance)
+        self.assertTrue(row.shares_product_usage)
+
+    def test_the_opted_out_reading_stores_false_and_is_known(self):
+        """Carried from the model this one absorbed. Both PA-5220s are in this state."""
+        row = self._row({"device-telemetry": {"device-health-performance": "no",
+                                              "product-usage": "no",
+                                              "threat-prevention": "no",
+                                              "region": "Americas"}})
+        self.assertFalse(row.shares_device_health_performance)
         self.assertTrue(row.telemetry_switches_known)
 
     def test_the_region_first_key_order_reads_the_same(self):
-        """Carried from the deleted model. ONE APPLIANCE RETURNS `region` FIRST where the other
-        three return it last, so a reader walking the node in order gets a different field on
-        different platforms."""
-        row = self._row({"region": "Americas", "threat-prevention": "yes",
-                         "product-usage": "yes", "device-health-performance": "yes"})
+        """Carried from the model this one absorbed. ONE APPLIANCE RETURNS `region` FIRST where
+        the other three return it last."""
+        row = self._row({"device-telemetry": {"region": "Americas", "threat-prevention": "yes",
+                                              "product-usage": "yes",
+                                              "device-health-performance": "yes"}})
         self.assertTrue(row.shares_device_health_performance)
         self.assertTrue(row.telemetry_switches_known)
 
     def test_a_node_missing_one_switch_is_not_known(self):
-        """Carried from the deleted model. One measured value beside two materialised ones, with
-        nothing on the row saying which was which, is the shape the companion exists to deny."""
-        row = self._row({"device-health-performance": "no"})
+        """Carried from the model this one absorbed. One read value beside two materialised ones,
+        with nothing on the row saying which was which, is what the companion denies."""
+        row = self._row({"device-telemetry": {"device-health-performance": "no"}})
         self.assertFalse(row.shares_device_health_performance)
         self.assertTrue(row.shares_product_usage)
         self.assertFalse(row.telemetry_switches_known)
 
     def test_the_region_is_stored_case_folded(self):
-        """The device stores and renders `Americas` where the completion set offers `americas`,
-        so a control comparing the stored value against the vocabulary must not turn on
-        capitalisation."""
         self.assertEqual(
-            self._row({"region": "Americas", "device-health-performance": "yes",
-                       "product-usage": "yes", "threat-prevention": "yes"}).telemetry_region,
+            self._row({"device-telemetry": {"region": "Americas",
+                                            "device-health-performance": "yes",
+                                            "product-usage": "yes",
+                                            "threat-prevention": "yes"}}).telemetry_region,
             "americas")
 
     def test_every_switch_gets_a_provenance_row_in_both_states(self):
-        """THE ONLY PLACE "this value is the vendor's default and not a choice" IS RECORDED, and
-        it is why these columns are measured rather than derived. A row where one switch was
-        written locally and two materialised must carry three rows with different types."""
-        row = self._row({"device-health-performance": "no"})
+        """THE ONLY PLACE "this value is the vendor's default and not a choice" IS RECORDED, which
+        is why these columns are measured rather than derived."""
+        row = self._row({"device-telemetry": {"device-health-performance": "no"}})
         content_type = ContentType.objects.get_for_model(_SvcTelemetry)
         by_field = {
             p.field_name: p.provenance_type
@@ -18891,6 +18910,7 @@ class DeviceServicesTelemetryIsReadFromTheCommittedView(TestCase):
             self.assertIn(column, by_field, column)
         self.assertNotEqual(by_field["shares_device_health_performance"],
                             by_field["shares_product_usage"])
+
 
 
 class DeviceServicesAbsentHostnameTests(TestCase):

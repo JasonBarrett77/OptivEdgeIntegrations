@@ -24,11 +24,20 @@ WHAT CAME ACROSS FROM THE DELETED MODEL, because the surviving one was poorer in
   True, so an appliance nobody asked about stores exactly what one measured as sharing stores.
   This column is the only thing that separates them, and it is false until a read answers AND
   carries all three keys.
-- **The committed-local source.** The surviving normalizer read the MERGED view, which follows
-  the candidate, so a staged opt-in would have read as enforced. That is not hypothetical here:
-  an uncommitted telemetry edit was sitting on 691665AC334B458 on 2026-10-29 and had been
-  re-staged after the stage 7 runs read it. The normalizer now reads `config_device_telemetry`,
-  and the collector that produces it moved into the device-services collection with the model.
+- **The committed-local source - AND THIS HALF WAS REVERSED THE NEXT DAY.** This migration
+  pointed the surviving normalizer at a dedicated `type=config&action=show` of the telemetry
+  node, on the ground that the merged view follows the candidate so a staged opt-in would read as
+  enforced. The ground is true and measured: on 691665AC334B458, read-only on 2026-10-30,
+  `action=show` answers `No such node`, `action=get` returns all four children marked
+  `@dirtyId=1`, and `show config merged` carries all three switches as `yes` with no dirty marker
+  anywhere in 1,259,801 bytes. **It is equally true of every other node in that reply and of
+  every control in the assessment** - `deviceconfig/system` alone carries nine more that controls
+  read - so a per-node second read was one domain paying for a question that belongs to the whole
+  pipeline. Jason ruled on 2026-10-30: USE THE CONFIGURATION THAT WAS COLLECTED, for controls. The
+  normalizer reads the merged configuration this pass already collects, the dedicated read is out
+  of the collection, and a test asserts that reinstating it fails rather than passing quietly. No
+  schema change: `telemetry_switches_known` is the same column and now means the node is present
+  and carries all three keys.
 
 NOTHING CLAUSED ON THE DELETED MODEL. PAN-PLT-003 took it as a feature-state input and no clause
 rested on it; stage 3 gives the telemetry POSTURE to PAN-SVC-008, which is the surviving model's
