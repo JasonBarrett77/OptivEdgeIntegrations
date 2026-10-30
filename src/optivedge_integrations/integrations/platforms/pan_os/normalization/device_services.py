@@ -907,13 +907,15 @@ def _telemetry(appliance, snapshot, system) -> None:
     `device-telemetry: {device-health-performance: yes, product-usage: yes, threat-prevention:
     yes, region: Americas}` with no dirty marker anywhere in 1,259,801 bytes. **It is also true of
     every other node in that reply**, and of every control in the assessment: `deviceconfig/system`
-    alone carries nine more nodes read by controls. A per-node workaround for a condition that
-    applies to the whole assessment is not a fix, it is one domain paying for a question the
-    project has already answered.
+    alone carries other nodes that controls read, with the same exposure. A per-node workaround
+    for a condition that applies to the whole assessment is not a fix; it is one domain paying for
+    a question the project has already answered. `reference/standing-rulings.md` section 5.
 
     TWO STATES, NOT THREE. A merged snapshot that does not exist means NO ROW - the caller returns
-    before reaching here, as 37 normalizers in this package do. So the states are: the node is in
-    the collected `deviceconfig/system` subtree, or it is not, which `is_missing` carries.
+    before reaching here, which is the shape every device-wide normalizer in this package uses
+    (`grep -c 'if snapshot is None' normalization/*.py` rather than a number here, because a stage
+    that adds one invalidates it). So the states are: the node is in the collected
+    `deviceconfig/system` subtree, or it is not, which `is_missing` carries.
     `telemetry_switches_known` means the node is there AND carries all three category keys: a node
     holding one switch and not its siblings would leave one read value beside two materialised
     ones with nothing saying which was which.

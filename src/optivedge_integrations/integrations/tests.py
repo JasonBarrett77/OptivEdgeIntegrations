@@ -18775,16 +18775,16 @@ class DeviceServicesTelemetryUsesTheConfigurationThatWasCollected(TestCase):
     `No such node`, `action=get` returns all four children marked `@dirtyId=1`, and
     `show config merged` carries all three switches as `yes` with no dirty marker anywhere in
     1,259,801 bytes. It is ALSO true of every other node in that reply and of every control in the
-    assessment: `deviceconfig/system` alone carries nine more nodes that controls read. A per-node
-    workaround for a condition that applies to the whole assessment is one domain paying for a
-    question the project has already answered.
+    assessment: `deviceconfig/system` carries other nodes that controls read, with the same
+    exposure. A per-node workaround for a condition that applies to the whole assessment is one
+    domain paying for a question the project has already answered.
 
     SO THE STAGED-EDIT TEST IS KEPT AND INVERTED. It now asserts that the row reports what the
     collected configuration says, and its name says that is the ruling rather than an oversight.
 
     TWO STATES, NOT THREE. No merged snapshot means NO ROW - the caller returns before the
-    telemetry pass, as 37 normalizers in this package do - so the states are: the node is in the
-    collected `deviceconfig/system` subtree, or it is not.
+    telemetry pass, which is the shape every device-wide normalizer in this package uses - so the
+    states are: the node is in the collected `deviceconfig/system` subtree, or it is not.
     """
 
     MERGED_SAYS_OPTED_OUT = {
