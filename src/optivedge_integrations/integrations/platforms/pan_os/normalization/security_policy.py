@@ -106,22 +106,37 @@ def _management_node(snapshot: Snapshot) -> dict[str, Any]:
     return management if isinstance(management, dict) else {}
 
 
-#: NEITHER KEY'S ABSENCE HAS BEEN MEASURED, so neither gets a value. `Implicit.not_assumed`
-#: stores NULL and records a `not_configured` provenance row, which is the difference between
-#: "the device does this and nobody wrote it down" and "we have no idea". Both controls are
-#: written so that NULL MATCHES and the finding is raised.
+#: ONE OF THESE TWO KEYS IS NOW MEASURED AND THE OTHER IS NOT, and the difference is worth
+#: reading before changing either. `Implicit.not_assumed` stores NULL and records a
+#: `not_configured` provenance row, which is the difference between "the device does this and
+#: nobody wrote it down" and "we have no idea"; the control resting on such a column is written
+#: so that NULL MATCHES and the finding is raised.
 #:
 #: For `disable-shadow-rule-check` the guess would be worse than absent: the leaf is a NEGATIVE,
 #: so assuming `no` from the name would put the reassuring answer on a control whose evidence
 #: this key suppresses. What would settle it is named rather than done: two rules where one
 #: shadows the other, staged in one vsys, and one `validate full` - a COMMIT GATE, which no
 #: collector may issue.
-RULE_HIT_COUNT_UNMEASURED = Implicit.not_assumed(
-    "stage 4 left `rule-hit-count`'s implicit UNMEASURED and declined the positive control on "
-    "purpose: the write lands at deviceconfig/setting/management, is device-wide, and "
-    "disabling hit counting on an appliance other runs are reading would change what THEIR "
-    "operational reads return. Null, with the control written as `is not true`, so the "
-    "assertion asks for the setting to be READ as on rather than assumed on")
+#: `rule-hit-count`. MEASURED 2026-10-31 AND IT IS ON, after reading `unmeasured` until then.
+#: BOTH ARMS ARE READ ON THE ORACLE THAT IS THE SETTING - the Policy Rule Hit Count checkbox -
+#: on two appliances in opposite key states, on committed configuration, with no write taken:
+#: pan-fw-111 has NO `rule-hit-count` key and its box renders ENABLED, pan-fw-201 has
+#: `rule-hit-count: no` and its box renders UNCHECKED. The rendering moves with the key.
+#:
+#: WHY ONE APPLIANCE'S CHECKBOX COULD NOT SETTLE IT, recorded because it nearly settled it the
+#: wrong way: pan-fw-201's unchecked box is its CONFIGURED value. Check the key's presence on
+#: the appliance you are looking at before reading its UI. pan-fw-111's management node carries
+#: seven other keys and not this one, which is what makes its box a reading of the ABSENT state.
+RULE_HIT_COUNT_ABSENT = Implicit.measured(
+    True,
+    "stage4-security-policy.json objects['mgmt-rule-settings'].fields['rule-hit-count'].implicit: "
+    "an absent key asserts that hit counting is ON. Measured 2026-10-31 on the Policy Rule Hit "
+    "Count checkbox in both directions, on committed configuration, without a write - pan-fw-111 "
+    "carries seven other keys under deviceconfig/setting/management and NOT this one, and its box "
+    "renders ENABLED; pan-fw-201 carries `rule-hit-count: no` and its box renders UNCHECKED. "
+    "Corroborated by the counters as an independent consequence (fw-core-tpa-a, no key, allow_icmp "
+    "at hit-count 16758) and by the vendor Help - 'Policy Rule Hit Count (enabled by default)', "
+    "ngfw/help/11-2 defining-policies-on-panorama")
 SHADOW_CHECK_UNMEASURED = Implicit.not_assumed(
     "stage 4 left `disable-shadow-rule-check`'s implicit UNMEASURED and named exactly what "
     "would settle it - two rules where one shadows the other, staged in one vsys, and one "
@@ -152,7 +167,7 @@ def normalize_policy_rule_settings(appliance: Appliance) -> dict[str, int]:
     management = _management_node(snapshot)
 
     hit_count, hit_rk, hit_rv = parse_yes_no_field(
-        management.get("rule-hit-count"), implicit=RULE_HIT_COUNT_UNMEASURED)
+        management.get("rule-hit-count"), implicit=RULE_HIT_COUNT_ABSENT)
     shadow, shadow_rk, shadow_rv = parse_yes_no_field(
         management.get("disable-shadow-rule-check"), implicit=SHADOW_CHECK_UNMEASURED)
 
@@ -1022,7 +1037,7 @@ __all__ = [
     "ALLOW_ACTION",
     "BLOCKING_ACTIONS",
     "MIN_RULES_FOR_PLACEMENT_RANKING",
-    "RULE_HIT_COUNT_UNMEASURED",
+    "RULE_HIT_COUNT_ABSENT",
     "SHADOW_CHECK_UNMEASURED",
     "appliance_merged_snapshot",
     "expand_port_leaf",

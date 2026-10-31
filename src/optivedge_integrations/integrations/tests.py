@@ -15644,6 +15644,62 @@ class _NetworkHardeningBase(TestCase):
             }]}}})
 
 
+class PolicyRuleSettingsNormalizationTests(_NetworkHardeningBase):
+    """PAN-POL-011 and PAN-POL-013's two device-wide switches - and `normalize_policy_rule_settings`
+    had NO test at all until 2026-10-31, which is how one of its two implicits went from NULL to a
+    measured value with nothing to catch it either way.
+
+    THE TWO KEYS SIT ON ONE NODE AND HAVE OPPOSITE STANDING, which is the whole point of testing
+    them together: `rule-hit-count`'s absence is measured and asserts ON, while
+    `disable-shadow-rule-check`'s absence is still unmeasured and stores NOTHING. A change that
+    gave the second one a value from its name would be the exact defect the second test guards.
+    """
+
+    def _settings(self, **keys):
+        from optivedge_integrations.integrations.models import PolicyRuleSettings
+        from optivedge_integrations.integrations.platforms.pan_os.normalization import (
+            normalize_policy_rule_settings)
+        self._merged(deviceconfig={"setting": {"management": keys}})
+        normalize_policy_rule_settings(self.appliance)
+        return PolicyRuleSettings.objects.get()
+
+    def test_an_absent_hit_count_key_asserts_ON(self):
+        """Measured 2026-10-31 ON THE CHECKBOX ITSELF, in both directions, on committed
+        configuration, with no write taken: pan-fw-111 carries seven other keys under
+        `deviceconfig/setting/management` and NOT this one, and its Policy Rule Hit Count box
+        renders ENABLED; pan-fw-201 carries `rule-hit-count: no` and its box renders UNCHECKED.
+        Corroborated by the counters as an independent consequence and by the vendor Help.
+
+        It stored NULL until that day. The direction matters because PAN-POL-013's restatement
+        clauses this column `is not true`: with NULL, every appliance in the estate matched and the
+        control reported on all of them; with the measured ON, an appliance at the default does not
+        match and one configured OFF still does."""
+        row = self._settings()
+        self.assertIs(row.rule_hit_count_enabled, True)
+        self.assertEqual(
+            row.provenance_for("rule_hit_count_enabled").provenance_type, "pan_os_default")
+
+    def test_an_explicit_no_is_read_as_written_and_still_fires(self):
+        """pan-fw-201's shape. This is the appliance whose unchecked checkbox nearly settled the
+        implicit the wrong way - the box was showing this CONFIGURED value."""
+        row = self._settings(**{"rule-hit-count": "no"})
+        self.assertIs(row.rule_hit_count_enabled, False)
+        self.assertEqual(
+            row.provenance_for("rule_hit_count_enabled").provenance_type, "local")
+
+    def test_an_absent_shadow_check_key_STILL_stores_nothing(self):
+        """UNCHANGED and deliberately so. The leaf is a NEGATIVE, so inferring `no` from its name
+        would hand the reassuring answer to a control whose whole evidence this key suppresses -
+        and `disable-http` is the precedent that bites: documented implicit `no`, measures `yes`.
+        What would settle it is named rather than done: two rules where one shadows the other,
+        staged in one vsys, and one `validate full`, which is a commit gate no collector may
+        issue."""
+        row = self._settings()
+        self.assertIsNone(row.disable_shadow_rule_check)
+        self.assertEqual(
+            row.provenance_for("disable_shadow_rule_check").provenance_type, "not_configured")
+
+
 class SessionSettingsNormalizationTests(_NetworkHardeningBase):
     """PAN-NET-002 and PAN-NET-005 - two sibling leaves, one row, opposite provenance."""
 
