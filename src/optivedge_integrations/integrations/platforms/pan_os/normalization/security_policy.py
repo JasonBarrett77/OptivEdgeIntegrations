@@ -119,9 +119,10 @@ def _management_node(snapshot: Snapshot) -> dict[str, Any]:
 #: collector may issue.
 #: `rule-hit-count`. MEASURED 2026-10-31 AND IT IS ON, after reading `unmeasured` until then.
 #: BOTH ARMS ARE READ ON THE ORACLE THAT IS THE SETTING - the Policy Rule Hit Count checkbox -
-#: on two appliances in opposite key states, on committed configuration, with no write taken:
-#: pan-fw-111 has NO `rule-hit-count` key and its box renders ENABLED, pan-fw-201 has
-#: `rule-hit-count: no` and its box renders UNCHECKED. The rendering moves with the key.
+#: on two appliances in opposite key states, with no write taken: pan-fw-111's CANDIDATE does
+#: not carry `rule-hit-count` and its box renders ENABLED, pan-fw-201 carries
+#: `rule-hit-count: no` and its box renders UNCHECKED. The rendering moves with the key, and the
+#: absence was read in the SAME SESSION as the rendering rather than off a stale collection.
 #:
 #: WHY ONE APPLIANCE'S CHECKBOX COULD NOT SETTLE IT, recorded because it nearly settled it the
 #: wrong way: pan-fw-201's unchecked box is its CONFIGURED value. Check the key's presence on
@@ -131,9 +132,10 @@ RULE_HIT_COUNT_ABSENT = Implicit.measured(
     True,
     "stage4-security-policy.json objects['mgmt-rule-settings'].fields['rule-hit-count'].implicit: "
     "an absent key asserts that hit counting is ON. Measured 2026-10-31 on the Policy Rule Hit "
-    "Count checkbox in both directions, on committed configuration, without a write - pan-fw-111 "
-    "carries seven other keys under deviceconfig/setting/management and NOT this one, and its box "
-    "renders ENABLED; pan-fw-201 carries `rule-hit-count: no` and its box renders UNCHECKED. "
+    "Count checkbox in both directions, without a write - pan-fw-111's CANDIDATE configuration "
+    "does not carry `rule-hit-count` and its box renders ENABLED, which was verified live rather "
+    "than off the 2026-09-14 merged snapshot that first showed the leaf absent beside seven "
+    "sibling keys; pan-fw-201 carries `rule-hit-count: no` and its box renders UNCHECKED. "
     "Corroborated by the counters as an independent consequence (fw-core-tpa-a, no key, allow_icmp "
     "at hit-count 16758) and by the vendor Help - 'Policy Rule Hit Count (enabled by default)', "
     "ngfw/help/11-2 defining-policies-on-panorama")
