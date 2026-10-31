@@ -15732,7 +15732,8 @@ class LldpGlobalSettingsNormalizationTests(_NetworkHardeningBase):
         for payload, expected in (
             ({"lldp": {"enable": "yes"}}, True),       # 013201001475
             ({"lldp": {"enable": "no"}}, False),       # 691665AC334B458
-            ({}, None),                                # 6A9C0A9904E7D6E - node absent
+            # CHANGED 2026-10-31: the absence stored NULL until Jason settled its meaning.
+            ({}, False),                               # 6A9C0A9904E7D6E - node absent
         ):
             with self.subTest(network=payload):
                 _NhLldpGlobal.objects.all().delete()
@@ -15743,15 +15744,23 @@ class LldpGlobalSettingsNormalizationTests(_NetworkHardeningBase):
                 self.assertEqual(
                     _NhLldpGlobal.objects.get().lldp_global_enable, expected)
 
-    def test_an_absent_node_is_not_configured_rather_than_untracked(self):
-        """A missing provenance row would say "nothing tracks this field" about a leaf nobody
-        configured, which is the reverse of the truth."""
+    def test_an_absent_node_stores_OFF_as_a_measured_vendor_fact(self):
+        """It stored NULL with a `not_configured` row until 2026-10-31, when Jason settled what
+        the absence means: LLDP is off firewall-wide. So the row now says `pan_os_default` - the
+        vendor's own default - and the column holds False rather than nothing.
+
+        WHY THE VALUE MATTERS MORE THAN THE ROW HERE. NULL was unreachable by every clause the
+        assessment can write: a boolean field's only operator is `eq` with a real boolean, so
+        `lldp_enabled_globally equals false` matched no appliance in an estate where the node is
+        absent on all four - which is the commonest state and the one PAN-NET-003's preferred
+        value is about."""
         self._merged()
         _nh_lldp_global(self.appliance)
 
+        row = _NhLldpGlobal.objects.get()
+        self.assertIs(row.lldp_global_enable, False)
         self.assertEqual(
-            _NhLldpGlobal.objects.get().provenance_for(
-                "lldp_global_enable").provenance_type, "not_configured")
+            row.provenance_for("lldp_global_enable").provenance_type, "pan_os_default")
 
 
 class DhcpInterfaceConfigNormalizationTests(_NetworkHardeningBase):

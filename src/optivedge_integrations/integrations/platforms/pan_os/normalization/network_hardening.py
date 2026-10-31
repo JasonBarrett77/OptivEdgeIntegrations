@@ -130,16 +130,29 @@ TCP_REJECT_NON_SYN_ABSENT = Implicit.measured(
     "filter *non-syn*` answers NO_MATCHES, so the dataplane read is the only oracle and the "
     "CLI command index is the only thing that finds it.")
 
-#: `network/lldp/enable`. Stage 4 left the meaning of the absence unsettled IN BOTH
-#: DIRECTIONS and the write that would have settled it failed with ConnectTimeout when
-#: Panorama became unreachable.
-LLDP_GLOBAL_ABSENT = Implicit.not_assumed(
-    "the absence could mean LLDP is globally enabled by default, in which case "
-    "PAN-NET-003's preferred value is unmet everywhere, or globally disabled, in which "
-    "case the per-interface keys are moot. The one piece of evidence is indirect and "
-    "consistent with either reading - zero frames transmitted on three interfaces that "
-    "also store `enable: no` individually, so the counters are explained without the "
-    "global key. One write and one commit on one appliance settles it.")
+#: `network/lldp/enable`. SETTLED 2026-10-31 and it was `Implicit.not_assumed` until then,
+#: because stage 4 had left the meaning of the absence unsettled in both directions - the
+#: write that would have settled it failed with ConnectTimeout when Panorama became
+#: unreachable. The absence itself was never in doubt: `action=get` (None), `action=show`
+#: (`No such node`) and `show config running` (`No such node`) at network/lldp and at
+#: network/lldp/enable, on all four appliances.
+#:
+#: THE DEVICE'S RULE IS AN AND AND THE REPORT'S IS AN OR, and the two are not in conflict.
+#: PAN-OS enables LLDP on an interface only where this switch AND the interface's own
+#: `lldp/enable` enable it, so a port configured to announce on a firewall whose global
+#: switch is off is NOT announcing. PAN-NET-003 reports it anyway, because it is one
+#: checkbox away - standing-rulings section 6, A CONTROL WITH TWO HALVES FIRES IF EITHER
+#: HALF FIRES. Nothing here resolves one half against the other: this column keeps storing
+#: what the configuration holds, and the clause carries both halves.
+LLDP_GLOBAL_ABSENT = Implicit.measured(
+    False,
+    "stage4-network-hardening.json objects['lldp-global'].fields.enable.implicit: an absent "
+    "network/lldp asserts that LLDP is OFF firewall-wide. Settled 2026-10-31 by Jason's "
+    "ruling - 'The global LLDP enable setting's implicit value is off' - and the artifact "
+    "records the provenance split so it can be argued with: the ABSENCE is measured on all "
+    "four appliances by three instruments, the MEANING is the ruling rather than a read "
+    "taken on this estate, and `settled_by.positive_control` says NOT PAID because the "
+    "write that would pay it was lost to the 20:15:49 Panorama outage")
 
 #: `network/dhcp/interface/entry/server/mode`. No state B was ever reached: the experiment
 #: that would have shown whether `mode` is MANDATORY on a bare server branch was scripted
