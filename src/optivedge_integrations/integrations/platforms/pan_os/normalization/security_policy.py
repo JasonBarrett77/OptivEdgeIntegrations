@@ -467,8 +467,15 @@ def _match_tuple(rule: SecurityRule) -> tuple:
         tuple(sorted(m.lower() for m in _members(rule, "securityruletozones"))),
         tuple(sorted(m.lower() for m in _members(rule, "securityruleapplications"))),
         tuple(sorted(m.lower() for m in _members(rule, "securityruleservices"))),
-        tuple(sorted(r.raw_value.lower() for r in rule.source_address_refs.all())),
-        tuple(sorted(r.raw_value.lower() for r in rule.destination_address_refs.all())),
+        # DISTINCT NAMES. A static address group is stored one ref row per resolved member,
+        # all carrying the group's name, so counting the rows put that name into the key once
+        # per member - and two rules naming one group were still equal only because both were
+        # inflated by the same amount. They are not, once the group resolves to a different
+        # number of objects in two places: the same group is 3 members in one device group and
+        # 4 in another, and two genuinely duplicate rules then fail to be detected as such.
+        # The key is a question about which names a rule matches, and a name is in it once.
+        tuple(sorted({r.raw_value.lower() for r in rule.source_address_refs.all()})),
+        tuple(sorted({r.raw_value.lower() for r in rule.destination_address_refs.all()})),
         str(rule.action or "").lower(),
         bool(rule.negate_source),
         bool(rule.negate_destination),

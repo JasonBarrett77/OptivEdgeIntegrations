@@ -72,6 +72,47 @@ def listed_address_ref_values(
     return values
 
 
+def listed_address_ref_members(
+    security_rule: SecurityRule,
+    related_name: str,
+) -> list[str]:
+    """What the rule NAMES, a static group counted rather than repeated.
+
+    `resolve_static_group_members` flattens group membership onto the ref rows - one row per
+    resolved target, each carrying the GROUP's name in `raw_value` - which is what lets an
+    object reached only through a nested group be found without walking groups. A reader that
+    prints `raw_value` per row therefore prints a three-member group's name three times.
+    Measured on the lab 2026-11-05: eight rules, and the same cell wrong on the findings tab,
+    in the workbook and on the remediation page. Jason, on a production estate: *"application
+    groups appear to be duplicated in the source field ... individual address objects are not
+    duplicated, which is interesting"* - and that is the tell, because an address object is one
+    row and a static group is one row per member.
+
+    THE COUNT IS KEPT rather than dropped. A group is one name on the rule and N addresses in
+    effect, and the breadth line under this cell is the second half of that sentence; the count
+    is what ties the two together. A row for a nested DYNAMIC group counts as one member, which
+    is what it is - one entry of the group - and the breadth line already reads `(Unknown
+    addresses)` when one is present.
+
+    `listed_address_ref_values` is the same read without the counts, and is what the
+    configuration explorer's rule rows use.
+    """
+    counted: dict[tuple[int, str], int] = {}
+    kinds: dict[tuple[int, str], str] = {}
+    for ref in getattr(security_rule, related_name).all():
+        key = (ref.position, ref.raw_value)
+        counted[key] = counted.get(key, 0) + 1
+        kinds.setdefault(key, ref.ref_type)
+    lines = []
+    for (_position, raw_value), count in counted.items():
+        if kinds[(_position, raw_value)] == (
+                SecurityRuleAddressRef.RefType.STATIC_ADDRESS_GROUP):
+            lines.append(f"{raw_value} ({count} member{'' if count == 1 else 's'})")
+        else:
+            lines.append(raw_value)
+    return lines
+
+
 def joined_address_ref_values(
     security_rule: SecurityRule,
     related_name: str,

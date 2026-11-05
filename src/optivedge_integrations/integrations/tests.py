@@ -82,6 +82,10 @@ from optivedge_integrations.integrations.models import (
     Zone,
     ZoneInterface,
 )
+from optivedge_integrations.integrations.presentation import (
+    listed_address_ref_members,
+    listed_address_ref_values,
+)
 from optivedge_integrations.integrations.platforms.pan_os import (
     PANOSInScopeConfigCollection,
     PANOSInScopeRefreshCollection,
@@ -697,6 +701,39 @@ class AddressNormalizationTests(TestCase):
         )
         self.assertIsNone(dynamic_source_refs[0].address_object)
         self.assertEqual(dynamic_source_refs[0].address_group.name, "dag-src")
+
+        # A READER PRINTS THE GROUP ONCE, COUNTED. The static group is two ref rows, both
+        # carrying the group's name, and a reader that printed `raw_value` per row printed
+        # `static-src` twice. Jason saw it on a production estate as duplicated group names in
+        # the Source column, with individual address objects unaffected - which is the tell:
+        # an object is one row and a static group is one row per resolved member.
+        self.assertEqual(
+            listed_address_ref_members(static_rule, "source_address_refs"),
+            ["static-src (2 members)"],
+        )
+        self.assertEqual(
+            listed_address_ref_members(direct_rule, "source_address_refs"),
+            ["host-a"],
+        )
+        # A dynamic group is one row and names no members we can resolve, so it is not counted.
+        self.assertEqual(
+            listed_address_ref_members(dynamic_rule, "source_address_refs"),
+            ["dag-src"],
+        )
+        # The uncounted read is unchanged - it is what the configuration explorer uses.
+        self.assertEqual(
+            listed_address_ref_values(static_rule, "source_address_refs"),
+            ["static-src"],
+        )
+
+        # AND THE DUPLICATE TEST'S KEY HOLDS THE NAME ONCE. It counted the ref rows, so a
+        # group went into the key once per member; two rules naming it were equal only because
+        # both were inflated by the same amount, which stops being true the moment the same
+        # group resolves to a different number of objects in two places.
+        from optivedge_integrations.integrations.platforms.pan_os.normalization.security_policy \
+            import _match_tuple
+
+        self.assertIn(("static-src",), _match_tuple(static_rule))
 
     def test_normalize_enforcement_point_security_rules_defaults_missing_source_and_destination_to_any(self):
         """PAN-OS omits <source>/<destination> entirely (rather than an explicit "any" member)
