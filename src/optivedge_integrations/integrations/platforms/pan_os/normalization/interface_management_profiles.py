@@ -29,7 +29,11 @@ from optivedge_integrations.integrations.models import (
     Interface,
     InterfaceManagementProfile,
 )
-from optivedge_integrations.integrations.platforms.pan_os.normalization.common import ensure_list
+from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ENTRY_PROVENANCE_ATTRIBUTES,
+    ensure_list,
+    entry_provenance_record,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
     device_entry_from_snapshot,
     latest_merged_snapshot,
@@ -92,6 +96,7 @@ def classify_unbound_exposure(profile_entry: dict) -> str:
     # hygiene claim is identical and the row's severity is already the lowest that fires.
     return InterfaceManagementProfile.EXPOSURE_MONITORING
 
+
 #: Attributes that state where an entry came from. Measured 2026-08-31: a template-pushed
 #: profile carries `@ptpl` on the entry AND on each service leaf; a locally-created one carries
 #: none.
@@ -105,18 +110,8 @@ def classify_unbound_exposure(profile_entry: dict) -> str:
 #: An override also leaves an entry unmarked, and local is the right answer there too: the
 #: override replaced the object, so the device-side copy is what is in force and is where a
 #: change has to be made. What is lost is the history, not the destination.
-PROVENANCE_ATTRIBUTES = {
-    "@ptpl": FieldProvenance.ProvenanceType.TEMPLATE,
-    "@src": FieldProvenance.ProvenanceType.PANORAMA,
-}
-
-
 def _entry_provenance(entry: dict) -> tuple[str, str, str]:
-    for attribute, provenance_type in PROVENANCE_ATTRIBUTES.items():
-        value = entry.get(attribute)
-        if value:
-            return provenance_type, attribute, str(value)
-    return FieldProvenance.ProvenanceType.LOCAL, "", ""
+    return entry_provenance_record(entry)
 
 
 def _profile_entries(device_entry: dict) -> list[dict]:

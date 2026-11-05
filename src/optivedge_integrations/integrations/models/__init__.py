@@ -29,6 +29,7 @@ from .certificate_settings import CertificateSettings
 from .interface_management_profile import InterfaceManagementProfile
 from .ike import IkeCryptoProfile, IkeGateway
 from .ipsec import IpsecCryptoProfile, IpsecTunnel, MonitorProfile
+from .ipsec_path import IpsecTunnelPath
 from .interfaces import Interface
 from .content_updates import (
     CENTRAL_SCHEDULE_STATES,
@@ -288,6 +289,7 @@ __all__ = [
     "IkeGateway",
     "IpsecCryptoProfile",
     "IpsecTunnel",
+    "IpsecTunnelPath",
     "MonitorProfile",
     "SslTlsServiceProfile",
     "ManagementInterface",

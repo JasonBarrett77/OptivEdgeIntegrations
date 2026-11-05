@@ -4321,6 +4321,10 @@ ZONE_MERGED_CONFIG_PAYLOAD = {
                                 },
                                 {
                                     "@name": "dmz",
+                                    # PUSHED FROM A TEMPLATE, and the only zone here that is:
+                                    # the entry-level marker is what tells an engineer the
+                                    # device-side copy is not where a change is made.
+                                    "@ptpl": "ptpl-zone-base",
                                     "network": {"layer3": {"member": "loopback.1"}},
                                 },
                                 {
@@ -4546,6 +4550,53 @@ class ZoneNormalizationTests(TestCase):
         names = list(Zone.objects.filter(enforcement_point=self.enforcement_point).values_list("name", flat=True))
         self.assertNotIn("stale-zone", names)
         self.assertEqual(ZoneInterface.objects.filter(zone__name="stale-zone").count(), 0)
+
+    def test_normalize_zones_records_entry_provenance_for_pushed_and_local_zones(self):
+        """A zone gets a row saying where it was authored, and an unmarked zone says `local`.
+
+        `Zone` wrote NO provenance at all until 2026-11-04 - measured on the lab, 50 zones and
+        zero rows - so a consumer could not tell a zone it may edit on the firewall from one a
+        template overwrites at the next push, and the remediation surface showed `not recorded`
+        for every zone in the estate. Both answers are pinned here because the local one is the
+        absence of a marker, and an absence is exactly what a future refactor drops silently.
+        """
+        zones = {zone.name: zone for zone in normalize_enforcement_point_zones(self.enforcement_point)}
+        content_type = ContentType.objects.get_for_model(Zone)
+
+        pushed = FieldProvenance.objects.get(
+            content_type=content_type, object_id=zones["dmz"].pk, field_name=ENTRY_FIELD)
+        self.assertEqual(pushed.provenance_type, FieldProvenance.ProvenanceType.TEMPLATE)
+        self.assertEqual(pushed.raw_key, "@ptpl")
+        self.assertEqual(pushed.raw_value, "ptpl-zone-base")
+
+        local = FieldProvenance.objects.get(
+            content_type=content_type, object_id=zones["trust"].pk, field_name=ENTRY_FIELD)
+        self.assertEqual(local.provenance_type, FieldProvenance.ProvenanceType.LOCAL)
+        self.assertEqual((local.raw_key, local.raw_value), ("", ""))
+
+        # One row per zone, no more: a second row for the same entry would make the surface
+        # choose between two answers about one object.
+        self.assertEqual(
+            FieldProvenance.objects.filter(content_type=content_type,
+                                           field_name=ENTRY_FIELD).count(), len(zones))
+
+    def test_renormalizing_zones_leaves_no_orphaned_provenance(self):
+        """The rows are deleted with the zones they describe.
+
+        A `FieldProvenance` row reaches its subject through a GENERIC foreign key, so deleting a
+        zone does not cascade to it: without the explicit delete, every renormalization would
+        leave rows claiming the old primary keys, and a later zone reusing a pk would inherit a
+        stranger's provenance.
+        """
+        normalize_enforcement_point_zones(self.enforcement_point)
+        normalize_enforcement_point_zones(self.enforcement_point)
+
+        content_type = ContentType.objects.get_for_model(Zone)
+        live = set(Zone.objects.filter(enforcement_point=self.enforcement_point)
+                   .values_list("pk", flat=True))
+        held = set(FieldProvenance.objects.filter(content_type=content_type)
+                   .values_list("object_id", flat=True))
+        self.assertEqual(held, live)
 
     def test_normalize_zones_without_a_merged_snapshot_returns_nothing(self):
         self.snapshot.delete()
@@ -7976,8 +8027,13 @@ class InterfaceManagementProfileNormalizationTests(TestCase):
         normalize_interfaces(appliance)
         profiles = normalize_interface_management_profiles(appliance)
 
+        # SCOPED TO THIS CONTENT TYPE. The count was global, which held only while profiles
+        # were the one model in the fixture writing entry rows; `normalize_interfaces` runs
+        # first here and has written one per interface since 2026-11-04.
         self.assertEqual(
-            FieldProvenance.objects.filter(field_name="__entry__").count(), len(profiles))
+            FieldProvenance.objects.filter(
+                content_type=ContentType.objects.get_for_model(InterfaceManagementProfile),
+                field_name="__entry__").count(), len(profiles))
 
     def test_the_binding_is_read_from_the_interface_row_not_a_second_walk(self):
         appliance = self._appliance()
@@ -16391,10 +16447,11 @@ class InterfaceNetworkHardeningColumnTests(_NetworkHardeningBase):
         {"@name": "oep-mgt6-p02", "https": "yes", "permitted-ip": None},
     ]
 
-    def _lab(self, *, vsys=None):
+    def _lab(self, *, vsys=None, interfaces=None):
         return self._merged(
             network={
-                "interface": {"ethernet": {"entry": self.LAB_ETHERNET}},
+                "interface": {"ethernet": {
+                    "entry": self.LAB_ETHERNET if interfaces is None else interfaces}},
                 "virtual-router": {"entry": [{
                     "@name": "oep-nhd6-vr1",
                     "interface": {"member": ["ethernet1/22"]}}]},
@@ -16634,17 +16691,39 @@ class InterfaceNetworkHardeningColumnTests(_NetworkHardeningBase):
         self.assertEqual(rows["ethernet1/2"].out_of_service_residue,
                          "unrestricted_management_binding")
 
-    def test_this_model_records_NO_provenance_for_any_of_the_eight(self):
-        """`Interface` carries no `ProvenancedMixin`, so a missing row here means the model is
-        not tracked and nothing more - which is the REVERSE of the reading a normalizer author
-        finds written down elsewhere. The eight derived columns cannot be declared either."""
+    def test_no_field_of_this_model_is_tracked_but_every_entry_is(self):
+        """`Interface` carries no `ProvenancedMixin`, so no FIELD of it is tracked and the eight
+        derived columns cannot be declared either - a missing per-field row here means the model
+        is not tracked and nothing more.
+
+        THE ENTRY IS A DIFFERENT FACT, and recorded since 2026-11-04: where the interface was
+        authored. An unmarked entry is `local`, a template-pushed one names its template, and
+        the remediation surface reads it to say whether an edit on the box survives the next
+        push. Measured before it: 92 interfaces on the lab, zero rows, and two `@ptpl`-marked
+        ethernet entries sitting unread in the same payload.
+        """
         self._lab()
-        normalize_interfaces(self.appliance)
+        interfaces = normalize_interfaces(self.appliance).interfaces
 
         self.assertFalse(hasattr(Interface, "DERIVED_FIELDS"))
+        rows = FieldProvenance.objects.filter(
+            content_type=ContentType.objects.get_for_model(Interface))
+        self.assertEqual(rows.exclude(field_name="__entry__").count(), 0)
+        self.assertEqual(rows.filter(field_name="__entry__").count(), len(interfaces))
         self.assertEqual(
-            FieldProvenance.objects.filter(
-                content_type=ContentType.objects.get_for_model(Interface)).count(), 0)
+            sorted(set(rows.values_list("provenance_type", flat=True))),
+            [FieldProvenance.ProvenanceType.LOCAL])
+
+    def test_a_template_pushed_interface_names_its_template(self):
+        """The marker is `@ptpl` on the entry, and the row carries the template's name."""
+        self._lab(interfaces=[{"@name": "ethernet1/9", "@ptpl": "ptpl-edge", "layer3": {}}])
+        normalize_interfaces(self.appliance)
+
+        row = FieldProvenance.objects.get(
+            content_type=ContentType.objects.get_for_model(Interface),
+            object_id=Interface.objects.get(name="ethernet1/9").pk, field_name="__entry__")
+        self.assertEqual(row.provenance_type, FieldProvenance.ProvenanceType.TEMPLATE)
+        self.assertEqual((row.raw_key, row.raw_value), ("@ptpl", "ptpl-edge"))
 
 
 # ---------------------------------------------------------------------------
@@ -19204,7 +19283,11 @@ class DeviceServicesAbsentHostnameTests(TestCase):
 # rather than at the top of this file, which is the shape `user_id`'s block above uses.
 # ---------------------------------------------------------------------------
 from optivedge_integrations.integrations.models import (  # noqa: E402
-    IpsecCryptoProfile, IpsecTunnel, MonitorProfile,
+    IkeCryptoProfile, IkeGateway, IpsecCryptoProfile, IpsecTunnel, IpsecTunnelPath,
+    MonitorProfile,
+)
+from optivedge_integrations.integrations.platforms.pan_os.normalization.ipsec_path import (  # noqa: E402,E501
+    normalize_ipsec_tunnel_paths,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization import (  # noqa: E402
     ipsec as ipsec_norm,
@@ -19983,6 +20066,286 @@ class IpsecModelShapeTests(SimpleTestCase):
         row = IpsecCryptoProfile(management_station_id=1, appliance=appliance)
         with self.assertRaises(ValidationError):
             row.clean()
+
+
+class IpsecTunnelPathTests(TestCase):
+    """The composite: one row per tunnel-and-gateway, assembled from stored rows only.
+
+    THE INPUT IS ROWS AND NOT A PAYLOAD, so these build the four collections' rows directly
+    rather than through a merged snapshot - which is also the only way to exercise the IKE side
+    here: `normalization/ike.py` has no tests in this repository, and a path test standing on a
+    gateway fixture would be standing on nothing.
+    """
+
+    def setUp(self):
+        self.station = ManagementStation.objects.create(
+            station_type=ManagementStation.StationType.PAN_PANORAMA,
+            name="probe", hostname="panorama.test")
+        self.group = ApplianceGroup.objects.create(
+            management_station=self.station, name="probe-group")
+        self.appliance = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            hostname="pan-fw-111", serial_number="6A9C0A9904E7D6E")
+        self.snapshot = Snapshot.objects.create(
+            appliance=self.appliance, source_type="show_merged_config",
+            payload={"config": {"devices": {"entry": [{"@name": "localhost.localdomain"}]}}},
+            collected_at=timezone.now())
+
+    def _anchors(self):
+        return {"management_station": self.station, "appliance": self.appliance,
+                "appliance_group": self.group, "source_snapshot": self.snapshot}
+
+    def tunnel(self, name, *, gateways=None, crypto="", inferred=False, **extra):
+        row = IpsecTunnel.objects.create(
+            **self._anchors(), tunnel_name=name, ike_gateway_names=gateways,
+            crypto_profile_name=crypto, **extra)
+        if inferred:
+            FieldProvenance.objects.create(
+                content_type=ContentType.objects.get_for_model(IpsecTunnel),
+                object_id=row.pk, field_name="crypto_profile_name",
+                provenance_type=FieldProvenance.ProvenanceType.ASSUMED_DEFAULT,
+                raw_value="default")
+        return row
+
+    def gateway(self, name, **extra):
+        values = {"ike_version": IkeGateway.IkeVersion.IKEV2}
+        values.update(extra)
+        return IkeGateway.objects.create(**self._anchors(), entry_name=name, **values)
+
+    def ike_profile(self, name, **extra):
+        return IkeCryptoProfile.objects.create(**self._anchors(), entry_name=name, **extra)
+
+    def ipsec_profile(self, name, **extra):
+        values = {"dh_group": "group14", "lifetime_hours": 1}
+        values.update(extra)
+        return IpsecCryptoProfile.objects.create(
+            **self._anchors(), profile_name=name, **values)
+
+    # ---- the row set ----
+
+    def test_a_tunnel_naming_no_gateway_is_still_one_path(self):
+        """Three of pan-fw-111's four tunnels are stored exactly this way, so this is the lab's
+        commonest shape and not an edge case. The row carries the tunnel and a blank gateway."""
+        self.tunnel("oep-ips6-t02", crypto="default", inferred=True)
+        paths = normalize_ipsec_tunnel_paths(self.appliance)
+        self.assertEqual([(p.tunnel_name, p.gateway_name) for p in paths],
+                         [("oep-ips6-t02", "")])
+        self.assertEqual(paths[0].path_origin, IpsecTunnelPath.PathOrigin.TUNNEL)
+        self.assertEqual(paths[0].gateway_resolution, IpsecTunnelPath.Resolution.NOT_NAMED)
+
+    def test_a_gateway_no_tunnel_names_is_a_path_with_a_blank_tunnel(self):
+        """Jason's keying: "We key off IPSec Tunnel first. If there are any IKE Gateway objects
+        present on a firewall that are not named by an IPSec Tunnel object on that firewall, then
+        we add that to the list with a blank IPSec Tunnel value." """
+        self.tunnel("oep-ips6-t04", gateways=["oep-ike6-g01"], crypto="oep-ips6-p10")
+        self.gateway("oep-ike6-g01")
+        self.gateway("oep-ike6-g09")
+        paths = normalize_ipsec_tunnel_paths(self.appliance)
+        self.assertEqual(sorted((p.tunnel_name, p.gateway_name) for p in paths),
+                         [("", "oep-ike6-g09"), ("oep-ips6-t04", "oep-ike6-g01")])
+        orphan = next(p for p in paths if not p.tunnel_name)
+        self.assertEqual(orphan.path_origin, IpsecTunnelPath.PathOrigin.ORPHAN_GATEWAY)
+        self.assertIsNone(orphan.tunnel_id)
+        self.assertEqual(orphan.gateway_resolution, IpsecTunnelPath.Resolution.RESOLVED)
+
+    def test_a_tunnel_naming_a_gateway_this_appliance_does_not_hold_is_a_dangling_path(self):
+        self.tunnel("oep-ips6-t04", gateways=["gone"], crypto="oep-ips6-p10")
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertEqual(path.gateway_name, "gone")
+        self.assertEqual(path.gateway_resolution, IpsecTunnelPath.Resolution.MISSING)
+        self.assertIsNone(path.ike_gateway_id)
+        self.assertIs(path.ike_crypto_unresolved, True)
+        self.assertEqual(path.ike_crypto_resolution, IpsecTunnelPath.Resolution.NO_GATEWAY)
+
+    def test_a_tunnel_naming_two_gateways_yields_two_paths(self):
+        """`ike_gateway_names` is a LIST because the payload holds entry members, while Jason's
+        11.2 dialog offers a dropdown. Keying on the pair agrees with both: one row per tunnel
+        for every tunnel this estate holds, and two rather than one silently dropped."""
+        self.tunnel("oep-ips6-t04", gateways=["a", "b"], crypto="oep-ips6-p10")
+        self.gateway("a")
+        self.gateway("b")
+        paths = normalize_ipsec_tunnel_paths(self.appliance)
+        self.assertEqual([p.gateway_name for p in paths], ["a", "b"])
+        self.assertEqual({p.tunnel_name for p in paths}, {"oep-ips6-t04"})
+
+    def test_a_second_pass_replaces_rather_than_duplicates(self):
+        self.tunnel("oep-ips6-t02", crypto="default", inferred=True)
+        self.gateway("oep-ike6-g09")
+        normalize_ipsec_tunnel_paths(self.appliance)
+        normalize_ipsec_tunnel_paths(self.appliance)
+        self.assertEqual(IpsecTunnelPath.objects.count(), 2)
+
+    def test_an_appliance_with_neither_tunnel_nor_gateway_writes_no_row(self):
+        """Both PA-5220s: four IKE crypto profiles and three IPSec crypto profiles with nothing
+        that uses them. A profile with no path is PAN-COV-001's business and not a row here."""
+        self.ike_profile("oep-ike6-p01")
+        self.ipsec_profile("oep-ips6-p01")
+        self.assertEqual(normalize_ipsec_tunnel_paths(self.appliance), [])
+
+    def test_no_payload_is_read_and_no_provenance_row_is_written(self):
+        """Every column is declared derived, so the authority lives on the component row this
+        path points at. The snapshot in setUp holds no IPSec configuration at all."""
+        self.tunnel("oep-ips6-t02", crypto="default", inferred=True)
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        content_type = ContentType.objects.get_for_model(IpsecTunnelPath)
+        self.assertEqual(
+            FieldProvenance.objects.filter(content_type=content_type).count(), 0)
+        self.assertEqual(path.provenance_for("weakest_dh_group").provenance_type, "derived")
+
+    # ---- which profile stands behind a path ----
+
+    def test_the_ike_version_decides_which_of_the_gateways_two_profile_names_applies(self):
+        self.ike_profile("v1-profile", weakest_dh_group="group2")
+        self.ike_profile("v2-profile", weakest_dh_group="group14", dh_group_floor_met=True)
+        self.tunnel("t-v1", gateways=["g-v1"], crypto="p")
+        self.tunnel("t-v2", gateways=["g-v2"], crypto="p")
+        self.gateway("g-v1", ike_version=IkeGateway.IkeVersion.IKEV1,
+                     ikev1_crypto_profile_name="v1-profile",
+                     ikev2_crypto_profile_name="v2-profile")
+        self.gateway("g-v2", ike_version=IkeGateway.IkeVersion.IKEV2,
+                     ikev1_crypto_profile_name="v1-profile",
+                     ikev2_crypto_profile_name="v2-profile")
+        paths = {p.tunnel_name: p for p in normalize_ipsec_tunnel_paths(self.appliance)}
+        self.assertEqual(paths["t-v1"].ike_crypto_profile_name, "v1-profile")
+        self.assertEqual(paths["t-v1"].weakest_dh_group, "group2")
+        self.assertIs(paths["t-v1"].dh_group_floor_met, False)
+        self.assertEqual(paths["t-v2"].ike_crypto_profile_name, "v2-profile")
+        self.assertEqual(paths["t-v2"].weakest_dh_group, "group14")
+        self.assertIs(paths["t-v2"].dh_group_floor_met, True)
+
+    def test_an_ikev2_preferred_gateway_takes_the_v2_profile(self):
+        """The branch it negotiates first, with `ike_version` on the row beside it saying the v1
+        branch is still reachable."""
+        self.ike_profile("v2-profile")
+        self.tunnel("t", gateways=["g"], crypto="p")
+        self.gateway("g", ike_version=IkeGateway.IkeVersion.IKEV2_PREFERRED,
+                     ikev1_crypto_profile_name="v1-profile",
+                     ikev2_crypto_profile_name="v2-profile")
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertEqual(path.ike_crypto_profile_name, "v2-profile")
+        self.assertEqual(path.ike_version, "ikev2-preferred")
+
+    def test_a_gateway_naming_no_ike_crypto_profile_leaves_every_verdict_false(self):
+        """Jason: "IKE Crypto is a required field on IPSec Tunnel. If the value is missing, that
+        is an invalid configuration." The nine controls' own clauses fire on exactly this state,
+        which is why no column is materialised to carry it."""
+        self.tunnel("t", gateways=["g"], crypto="p")
+        self.gateway("g")
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertEqual(path.ike_crypto_resolution, IpsecTunnelPath.Resolution.NOT_NAMED)
+        self.assertIs(path.ike_crypto_unresolved, True)
+        self.assertIs(path.dh_group_floor_met, False)
+        self.assertIs(path.encryption_floor_met, False)
+        self.assertIs(path.hash_floor_met, False)
+        self.assertIs(path.key_lifetime_known, False)
+        self.assertIs(path.reauth_interval_bounded, False)
+        self.assertIsNone(path.weakest_dh_group)
+
+    def test_an_inferred_default_ipsec_profile_is_kept_apart_from_a_stored_name(self):
+        """Both fail, and the remedy differs: name a hardened profile, rather than name
+        anything. Jason: "We can't know what the 'default' value means, so we should assume that
+        it fails if it is default, unspecified, or otherwise unknown." """
+        self.tunnel("inferred", crypto="default", inferred=True)
+        self.tunnel("stored", crypto="default")
+        self.ipsec_profile("default", weakest_encryption_offered="3des")
+        paths = {p.tunnel_name: p for p in normalize_ipsec_tunnel_paths(self.appliance)}
+        self.assertEqual(paths["inferred"].ipsec_crypto_resolution,
+                         IpsecTunnelPath.Resolution.DEFAULT_ASSUMED)
+        self.assertEqual(paths["stored"].ipsec_crypto_resolution,
+                         IpsecTunnelPath.Resolution.RESOLVED)
+        self.assertIs(paths["inferred"].ipsec_crypto_unresolved, True)
+        self.assertIs(paths["stored"].ipsec_crypto_unresolved, True)
+
+    def test_a_profile_named_default_that_resolves_still_shows_what_it_offers(self):
+        """Unresolved is a statement about the NAME, not a refusal to read the entry: the
+        columns are copied so the reader sees the algorithm set the tunnel is running on."""
+        self.tunnel("stored", crypto="default")
+        self.ipsec_profile("default", weakest_encryption_offered="3des",
+                           protocol_branch=IpsecCryptoProfile.ProtocolBranch.ESP)
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertEqual(path.weakest_encryption_offered, "3des")
+        self.assertEqual(path.protocol_branch, "esp")
+        self.assertIsNotNone(path.ipsec_crypto_profile_id)
+
+    def test_a_hardened_named_ipsec_profile_resolves_and_is_not_unresolved(self):
+        self.tunnel("t", crypto="oep-ips6-p10")
+        self.ipsec_profile("oep-ips6-p10", weakest_encryption_offered="aes-256-gcm",
+                           protocol_branch=IpsecCryptoProfile.ProtocolBranch.ESP,
+                           dh_group_meets_target=True, lifetime_within_target=True,
+                           integrity_meets_sha2_floor=True)
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertEqual(path.ipsec_crypto_resolution, IpsecTunnelPath.Resolution.RESOLVED)
+        self.assertIs(path.ipsec_crypto_unresolved, False)
+        self.assertIs(path.dh_group_meets_target, True)
+
+    def test_an_ipsec_profile_name_that_resolves_to_nothing_is_unresolved(self):
+        self.tunnel("t", crypto="gone")
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertEqual(path.ipsec_crypto_resolution, IpsecTunnelPath.Resolution.MISSING)
+        self.assertIs(path.ipsec_crypto_unresolved, True)
+        self.assertEqual(path.protocol_branch, "")
+        self.assertEqual(path.weakest_encryption_offered, "")
+
+    def test_an_orphan_gateway_row_carries_no_ipsec_crypto_at_all(self):
+        """There is no tunnel on the path to name one, so the IPSec payload columns stay blank -
+        and the five IPSec payload controls scope themselves to `path_origin eq tunnel` rather
+        than reading these blanks as a weak proposal."""
+        self.gateway("g09")
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertEqual(path.ipsec_crypto_profile_name, "")
+        self.assertEqual(path.ipsec_crypto_resolution, IpsecTunnelPath.Resolution.NOT_NAMED)
+        self.assertEqual(path.protocol_branch, "")
+
+    # ---- what is carried for the reader ----
+
+    def test_the_disabled_flag_filters_nothing(self):
+        """Jason: "The 'disabled' value is ignored. So give a tunnel/gateway the same treatment
+        regardless of the disabled state." All four of pan-fw-111's tunnels are `disabled=yes`,
+        so a filter on it would empty this model on the one appliance that has anything to say."""
+        self.tunnel("off", crypto="p", is_disabled=True)
+        self.gateway("g-off", disabled=True, gateway_is_active=False)
+        paths = normalize_ipsec_tunnel_paths(self.appliance)
+        self.assertEqual(len(paths), 2)
+        tunnel_path = next(p for p in paths if p.tunnel_name)
+        orphan = next(p for p in paths if not p.tunnel_name)
+        self.assertIs(tunnel_path.is_disabled, True)
+        self.assertIs(orphan.gateway_is_active, False)
+
+    def test_the_tunnels_own_settings_are_carried_so_one_row_answers_the_whole_path(self):
+        self.tunnel("t", crypto="p", anti_replay=False, anti_replay_determined=True,
+                    tunnel_monitor_enable=True, tunnel_monitor_enable_determined=True,
+                    monitor_action_effective=IpsecTunnel.MonitorAction.FAIL_OVER)
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertIs(path.anti_replay, False)
+        self.assertIs(path.anti_replay_determined, True)
+        self.assertIs(path.tunnel_monitor_enable, True)
+        self.assertEqual(path.monitor_action_effective, "fail-over")
+
+    def test_the_uniqueness_key_is_the_appliance_and_both_names(self):
+        constraint = next(
+            c for c in IpsecTunnelPath._meta.constraints
+            if c.name == "integrations_unique_ipsec_path_per_appliance")
+        self.assertEqual(list(constraint.fields),
+                         ["appliance", "tunnel_name", "gateway_name"])
+
+    def test_one_appliances_paths_do_not_read_anothers_rows(self):
+        other = Appliance.objects.create(
+            management_station=self.station, appliance_group=self.group,
+            hostname="pan-fw-201", serial_number="691665AC334B458")
+        Snapshot.objects.create(
+            appliance=other, source_type="show_merged_config",
+            payload={"config": {"devices": {"entry": [{"@name": "localhost.localdomain"}]}}},
+            collected_at=timezone.now())
+        self.tunnel("t", gateways=["g"], crypto="p")
+        IkeGateway.objects.create(
+            management_station=self.station, appliance=other, appliance_group=self.group,
+            source_snapshot=Snapshot.objects.filter(appliance=other).first(),
+            entry_name="g", ike_version=IkeGateway.IkeVersion.IKEV2)
+        path = normalize_ipsec_tunnel_paths(self.appliance)[0]
+        self.assertEqual(path.gateway_resolution, IpsecTunnelPath.Resolution.MISSING)
+        self.assertEqual(
+            [(p.tunnel_name, p.gateway_name) for p in normalize_ipsec_tunnel_paths(other)],
+            [("", "g")])
 
 
 class ContentUpdateScheduleNormalizationTests(TestCase):

@@ -65,6 +65,8 @@ from optivedge_integrations.integrations.models import (
     ZoneProtectionProfile,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ENTRY_PROVENANCE_ATTRIBUTES,
+    entry_provenance_record,
     ABSENT,
     Implicit,
     choice_child,
@@ -107,20 +109,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.zones im
 #: PAN-OS entry rather than on one of its fields.
 ENTRY_FIELD = "__entry__"
 
-#: Attributes that state where an entry came from - the same pair
-#: `interface_management_profiles.py` reads, and for the same reason: an unmarked entry is a
-#: LOCALLY DEFINED object, and writing nothing for it would make absence mean both "defined on
-#: the device" and "nothing tracks this".
-#:
-#: ON THIS OBJECT THE BASIS IS LOAD-BEARING AND NOT A STYLE RULE. Stage 4 measured
-#: `network/profiles` itself carrying `@ptpl='shared-single-vsys'` while the profile collection
-#: beneath it carried no attribute at all, so a normalizer inheriting the PARENT's mark would
-#: label every locally-created profile on that appliance template-supplied AND name the wrong
-#: template. The value's own marker, never an ancestor's.
-PROVENANCE_ATTRIBUTES = {
-    "@ptpl": FieldProvenance.ProvenanceType.TEMPLATE,
-    "@src": FieldProvenance.ProvenanceType.PANORAMA,
-}
 
 #: The five flood types the ZONE protection profile meters, as the config spells them, paired
 #: with the column each one fills. SIX CHILDREN EXIST AND `sctp-init` GETS NO COLUMN: no control
@@ -359,12 +347,18 @@ def _text(node: Any) -> str:
     return value.strip()
 
 
+#: Attributes that state where an entry came from - the same pair
+#: `interface_management_profiles.py` reads, and for the same reason: an unmarked entry is a
+#: LOCALLY DEFINED object, and writing nothing for it would make absence mean both "defined on
+#: the device" and "nothing tracks this".
+#:
+#: ON THIS OBJECT THE BASIS IS LOAD-BEARING AND NOT A STYLE RULE. Stage 4 measured
+#: `network/profiles` itself carrying `@ptpl='shared-single-vsys'` while the profile collection
+#: beneath it carried no attribute at all, so a normalizer inheriting the PARENT's mark would
+#: label every locally-created profile on that appliance template-supplied AND name the wrong
+#: template. The value's own marker, never an ancestor's.
 def _entry_provenance(entry: dict) -> tuple[str, str, str]:
-    for attribute, provenance_type in PROVENANCE_ATTRIBUTES.items():
-        value = entry.get(attribute)
-        if value:
-            return provenance_type, attribute, str(value)
-    return FieldProvenance.ProvenanceType.LOCAL, "", ""
+    return entry_provenance_record(entry)
 
 
 # ---------------------------------------------------------------------------

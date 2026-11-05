@@ -119,6 +119,14 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization import (
     normalize_appliance_server_profiles,
     normalize_appliance_interfaces,
     normalize_appliance_session_settings,
+    normalize_appliance_ike_crypto_profiles,
+    normalize_appliance_ike_gateways,
+    normalize_appliance_ipsec_crypto_profiles,
+    normalize_appliance_monitor_profiles,
+    normalize_appliance_ipsec_tunnels,
+    normalize_appliance_ipsec_tunnel_paths,
+    normalize_appliance_zone_protection_counts,
+    normalize_enforcement_point_dos_policy_rules,
     normalize_appliance_lldp_global_settings,
     normalize_appliance_dhcp_interface_configs,
     normalize_appliance_tunnel_inspection_coverage,
@@ -1181,6 +1189,19 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # snapshots and one merged leaf; depends on nothing else in this tuple.
     ("device identification", normalize_appliance_device_identification),
     ("services settings", normalize_appliance_services_settings),
+    # SITE-TO-SITE VPN - PAN-IKE-001 to -009 and PAN-IPS-001 to -009. Eighteen controls that
+    # reported nothing until 2026-11-04 because these five normalizers, written and tested,
+    # were never called from this flow: the lab's merged snapshots carry 9 IKE gateways, 14 IKE
+    # crypto profiles, 13 IPSec crypto profiles and 4 tunnels, and every one of those tables
+    # was empty. Separate entries rather than one, so a failure in any costs only its own
+    # model; the sixth joins the five.
+    ("ike crypto profiles", normalize_appliance_ike_crypto_profiles),
+    ("ike gateways", normalize_appliance_ike_gateways),
+    ("ipsec crypto profiles", normalize_appliance_ipsec_crypto_profiles),
+    ("monitor profiles", normalize_appliance_monitor_profiles),
+    ("ipsec tunnels", normalize_appliance_ipsec_tunnels),
+    # LAST, and it joins what the five above wrote rather than reading a payload of its own.
+    ("ipsec tunnel paths", normalize_appliance_ipsec_tunnel_paths),
     # Device > Dynamic Updates, all five content types on one row. PAN-UPD-001 to PAN-UPD-005.
     # Reads the same merged device entry as its neighbours and depends on nothing else in this
     # tuple. A ROW PER HA PEER and not per pair: the update schedule does not sync across peers,
@@ -1542,6 +1563,29 @@ def renormalize_in_scope_configuration(
             )
         )
 
+    # ZONE PROTECTION PROFILES, AFTER EVERY VSYS'S ZONES - PAN-ZON-002 to -006, and the zone
+    # side of PAN-ZON-001. Its wrapper states the order: this pass resolves
+    # `Zone.zone_protection_unresolved` in place, and run before the zones it would leave every
+    # zone row at the firing default it was written with. Never called from this flow until
+    # 2026-11-04, so the lab's 13 profiles produced no rows and every traffic-bearing zone
+    # reported its protection unresolved. Appliance-scoped, like the registry above, and
+    # recorded through the same pair of lists.
+    for appliance in appliances:
+        try:
+            counts = normalize_appliance_zone_protection_counts(appliance)
+        except Exception as exc:
+            appliance_object_failures.append(
+                PANOSApplianceObjectNormalizationFailure(
+                    appliance=appliance, kind="zone protection profiles",
+                    error_text=str(exc))
+            )
+        else:
+            appliance_object_normalizations.append(
+                PANOSApplianceObjectNormalizedAppliance(
+                    appliance=appliance, kind="zone protection profiles",
+                    counts=dict(counts or {}))
+            )
+
     # Security profiles and profile groups (Objects > Security Profiles). Shared scope is the
     # group's and is unioned across its points, as the address pass is; nothing FKs to these
     # rows, so the order against rules does not matter, but group-then-point keeps the two
@@ -1588,6 +1632,22 @@ def renormalize_in_scope_configuration(
     # eight verdicts over what it wrote. Run either early and it reads the previous run's rows,
     # or none on a first collection - which for a verdict about an absent rule is the direction
     # that manufactures a finding.
+    # THE DoS RULEBASE - PAN-ZON-007. Point-scoped, reads the merged and pushed rules
+    # directly, and depends on nothing else here; the profile a rule names is resolved by the
+    # security-profile pass's referrer walk. Never called from this flow until 2026-11-04, so
+    # the lab's four DoS rules produced no rows and the control reported nothing.
+    for enforcement_point in enforcement_points:
+        try:
+            counts = normalize_enforcement_point_dos_policy_rules(enforcement_point)
+        except Exception as exc:
+            policy_object_failures.append(PANOSPolicyObjectNormalizationFailure(
+                kind="DoS policy rules", enforcement_point=enforcement_point,
+                error_text=str(exc)))
+        else:
+            policy_object_normalizations.append(PANOSPolicyObjectNormalized(
+                kind="DoS policy rules", enforcement_point=enforcement_point,
+                counts={"dos policy rules": len(counts or [])}))
+
     for kind, normalize_point in (
             ("security rule posture", normalize_enforcement_point_security_rule_posture),
             ("vsys rule posture", normalize_enforcement_point_vsys_rule_posture)):

@@ -50,6 +50,8 @@ from optivedge_integrations.integrations.models import (
     IkeGateway,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ENTRY_PROVENANCE_ATTRIBUTES,
+    entry_provenance_record,
     ABSENT,
     Implicit,
     classify_prov_type,
@@ -70,14 +72,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.device_c
 #: The entry-level provenance record - the entry's own marker rather than one of its fields.
 ENTRY_FIELD = "__entry__"
 
-#: Attributes that say an ENTRY came from somewhere other than this device. Measured as ZERO at
-#: both IKE paths on all four lab appliances, by stage 4 and again by stage 7's readback - so
-#: every row collected here is `local`, and the template mapping is for an estate that pushes
-#: these paths rather than for anything that has been seen.
-ENTRY_PROVENANCE_ATTRIBUTES = {
-    "@ptpl": FieldProvenance.ProvenanceType.TEMPLATE,
-    "@src": FieldProvenance.ProvenanceType.PANORAMA,
-}
 
 #: The three entries PAN-OS ships under this node's name. They are ORDINARY WRITABLE, DELETABLE
 #: config at the same xpath as a custom entry - there is no predefined IKE crypto profile at all
@@ -289,6 +283,10 @@ def _ike_container(device_entry: dict, *path: str) -> tuple[str, list[dict]]:
     return ("populated" if entries else "empty"), entries
 
 
+#: Attributes that say an ENTRY came from somewhere other than this device. Measured as ZERO at
+#: both IKE paths on all four lab appliances, by stage 4 and again by stage 7's readback - so
+#: every row collected here is `local`, and the template mapping is for an estate that pushes
+#: these paths rather than for anything that has been seen.
 def _entry_provenance(entry: dict) -> tuple[str, str, str]:
     """(type, raw key, raw value) for the entry's OWN provenance.
 
@@ -297,11 +295,7 @@ def _entry_provenance(entry: dict) -> tuple[str, str, str]:
     entry at both IKE paths in this lab - including pan-fw-201's three factory-named profiles,
     which are local writable config and NOT predefined.
     """
-    for attribute, provenance_type in ENTRY_PROVENANCE_ATTRIBUTES.items():
-        value = entry.get(attribute)
-        if value:
-            return provenance_type, attribute, str(value)
-    return FieldProvenance.ProvenanceType.LOCAL, "", ""
+    return entry_provenance_record(entry)
 
 
 def _member_list(node: Any, *, implicit: Implicit) -> tuple[list[str], Any, str | None]:

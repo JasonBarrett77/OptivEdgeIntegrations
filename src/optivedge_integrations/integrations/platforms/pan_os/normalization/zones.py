@@ -31,17 +31,21 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
 from optivedge_integrations.integrations.models import (
     EnforcementPoint,
+    FieldProvenance,
     Snapshot,
     Zone,
     ZoneInterface,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ENTRY_FIELD,
     Implicit,
     ensure_list,
+    entry_provenance_record,
     merged_vsys_entry,
     parse_yes_no_field,
     scalar_value,
@@ -491,6 +495,16 @@ def normalize_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
     normalized_zones = build_normalized_zones(snapshot.payload, enforcement_point.vsys_name)
 
     with transaction.atomic():
+        # THE PROVENANCE ROWS GO FIRST, and by object id rather than by cascade: a
+        # `FieldProvenance` row points at its subject through a generic foreign key, so deleting
+        # the zones does not take their rows with it and a renormalization would leave orphans
+        # claiming the old pks - the state migration 0065 exists to clean up after.
+        content_type = ContentType.objects.get_for_model(Zone)
+        FieldProvenance.objects.filter(
+            content_type=content_type,
+            object_id__in=list(Zone.objects.filter(enforcement_point=enforcement_point)
+                               .values_list("pk", flat=True)),
+        ).delete()
         Zone.objects.filter(enforcement_point=enforcement_point).delete()
 
         persisted = []
@@ -521,6 +535,22 @@ def normalize_zones(enforcement_point: EnforcementPoint) -> list[Zone]:
                 prenat_source_policy_lookup=normalized.prenat_source_policy_lookup,
                 prenat_source_ip_downstream=normalized.prenat_source_ip_downstream,
                 raw_entry=normalized.raw_entry,
+            )
+            # WHERE THIS ZONE WAS AUTHORED, recorded for every zone including the unmarked
+            # ones. An unmarked entry is `local` - a positive statement that the firewall's own
+            # configuration defines it, and the one thing a consumer cannot infer from a missing
+            # row, which means only "nothing tracks this". Before this, `Zone` had NO provenance
+            # at all: 50 zones on the lab, zero rows, and the remediation surface could not tell
+            # a zone it may edit on the box from one a template will overwrite at the next push.
+            #
+            # READ OFF THE ENTRY'S OWN `@ptpl`/`@src`, which the merged-config payload carries on
+            # each zone entry and `raw_entry` keeps - the same pair the interface-management,
+            # zone-protection, IKE and IPSec normalizers read, through the same helper.
+            provenance_type, raw_key, raw_value = entry_provenance_record(normalized.raw_entry)
+            FieldProvenance.objects.create(
+                content_type=content_type, object_id=zone.pk,
+                field_name=ENTRY_FIELD, provenance_type=provenance_type,
+                raw_key=raw_key, raw_value=raw_value[:128],
             )
             ZoneInterface.objects.bulk_create(
                 [

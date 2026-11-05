@@ -6,6 +6,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from optivedge_integrations.integrations.models.provenance import FieldProvenance
+
 
 # ---------------------------------------------------------------------------
 # Provenance helpers — used across all PAN-OS normalizers
@@ -25,6 +27,57 @@ ABSENT = object()
 PREDEFINED = object()
 
 _PROVENANCE_KEYS = ("@ptpl", "@loc", "@panorama")
+
+#: The field name an ENTRY's own provenance row is stored under, as `FieldProvenance` documents
+#: it: the marker on a named PAN-OS entry rather than on one of its fields.
+ENTRY_FIELD = "__entry__"
+
+#: Attributes that say an ENTRY came from somewhere other than this device, and what each one
+#: means. NOT `_PROVENANCE_KEYS` above, which is the FIELD-level set: a field carries `@loc` and
+#: `@panorama`, an entry carries `@ptpl` and `@src`, and reading one set for the other finds
+#: nothing and silently reports every object local.
+#:
+#: ONE DEFINITION, four callers. This map and `entry_provenance_record` were copied verbatim into
+#: `interface_management_profiles`, `zone_dos_protection`, `ike` and `ipsec` - four identical
+#: pairs, which is four places for a fifth attribute to be added in three of them. The domain
+#: notes each of those modules carries about what it measured stay where they are; only the
+#: lookup moved.
+ENTRY_PROVENANCE_ATTRIBUTES = {
+    "@ptpl": FieldProvenance.ProvenanceType.TEMPLATE,
+    "@src": FieldProvenance.ProvenanceType.PANORAMA,
+}
+
+
+def entry_provenance_record(entry: dict) -> tuple[str, str, str]:
+    """(provenance type, raw key, raw value) for a named entry's OWN provenance.
+
+    NOT `entry_provenance` BELOW, which answers a different question and is kept: that one
+    returns (raw key, raw value) over `@ptpl` and `@loc` for the callers that classify a pushed
+    POLICY entry, where `@loc` names the device group. This one returns what a `FieldProvenance`
+    row needs - the TYPE as well - over `@ptpl` and `@src`, which is the pair the four device
+    and network normalizers measured on real entries. The two sets are not interchangeable and
+    reading one for the other finds nothing.
+
+    AN UNMARKED ENTRY IS `local`, WHICH IS A POSITIVE STATEMENT. Writing no row at all would
+    make absence mean two things - "defined on this device" and "nothing tracks this" - and a
+    consumer cannot tell those apart; measured consequence, before the normalizers that use this
+    started recording it: a locally defined object was presented as unrecorded. The same
+    correction normalization made for FIELDS on 2026-09-21.
+
+    THE ENTRY'S OWN MARKER, NEVER AN ANCESTOR'S. Stage 4 measured `network/profiles` carrying
+    `@ptpl='shared-single-vsys'` while the collection beneath it carried no attribute at all, so
+    a normalizer that inherited the parent's mark would call every locally created object
+    template-supplied AND name the wrong template.
+
+    An OVERRIDE also leaves an entry unmarked, and `local` is the right answer there too: the
+    override replaced the object, so the device-side copy is what is in force and is where a
+    change has to be made. What is lost is the history, not the destination.
+    """
+    for attribute, provenance_type in ENTRY_PROVENANCE_ATTRIBUTES.items():
+        value = entry.get(attribute)
+        if value:
+            return provenance_type, attribute, str(value)
+    return FieldProvenance.ProvenanceType.LOCAL, "", ""
 
 
 @dataclass(frozen=True)

@@ -17,16 +17,20 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
 from optivedge_integrations.integrations.models import (
     Appliance,
+    FieldProvenance,
     Interface,
     NormalizationIssue,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
     ABSENT,
+    ENTRY_FIELD,
     ensure_list,
+    entry_provenance_record,
     scalar_value,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.device_configuration import (
@@ -461,6 +465,11 @@ def normalize_interfaces(appliance: Appliance) -> NormalizedInterfaces:
         restricted = restricts_sources(profile_name, management_profiles)
         zone_name = zones.get(name, "")
         rows.append({
+            #: NOT A COLUMN - popped at the write and turned into the entry's provenance row.
+            #: `Interface` carries no `ProvenancedMixin`, so no FIELD of it is tracked, but the
+            #: ENTRY's own marker is a different fact and the one the remediation surface needs:
+            #: an interface pushed from a template is edited in the template.
+            "__entry": entry,
             "name": name, "container": item["container"], "interface_type": interface_type,
             "parent_name": item["parent"], "aggregate_group": aggregate,
             "management_profile_name": profile_name,
@@ -494,12 +503,22 @@ def normalize_interfaces(appliance: Appliance) -> NormalizedInterfaces:
 
     written: list[Interface] = []
     with transaction.atomic():
+        # THE PROVENANCE ROWS FIRST, by object id: a `FieldProvenance` row reaches its subject
+        # through a generic foreign key and does not cascade, so deleting the interfaces would
+        # strand rows claiming the old primary keys.
+        content_type = ContentType.objects.get_for_model(Interface)
+        FieldProvenance.objects.filter(
+            content_type=content_type,
+            object_id__in=list(Interface.objects.filter(appliance=appliance)
+                               .values_list("pk", flat=True)),
+        ).delete()
         Interface.objects.filter(appliance=appliance).delete()
         by_name: dict[str, Interface] = {}
         # Parents before units, so a unit's FK has something to point at.
         for row in sorted(rows, key=lambda r: (bool(r["parent_name"]), r["name"])):
             parent = by_name.get(row.pop("parent_name")) if row["parent_name"] else None
             row.pop("parent_name", None)
+            entry = row.pop("__entry")
             interface = Interface.objects.create(
                 management_station=appliance.management_station,
                 appliance=appliance,
@@ -509,6 +528,17 @@ def normalize_interfaces(appliance: Appliance) -> NormalizedInterfaces:
                 **row,
             )
             by_name[interface.name] = interface
+            # WHERE THIS INTERFACE WAS AUTHORED, for every entry including the unmarked ones -
+            # an unmarked entry is `local`, which is a positive statement and the one thing a
+            # missing row cannot make. Measured on the lab before this: 92 interfaces, zero
+            # rows, and the remediation page read `Not recorded` on all 49 of its rows while two
+            # ethernet entries in the same payload carried `@ptpl`.
+            provenance_type, raw_key, raw_value = entry_provenance_record(entry)
+            FieldProvenance.objects.create(
+                content_type=content_type, object_id=interface.pk,
+                field_name=ENTRY_FIELD, provenance_type=provenance_type,
+                raw_key=raw_key, raw_value=raw_value[:128],
+            )
             written.append(interface)
 
         _replace_issues(appliance, issues)

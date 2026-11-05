@@ -55,6 +55,8 @@ from optivedge_integrations.integrations.models import (
     MonitorProfile,
 )
 from optivedge_integrations.integrations.platforms.pan_os.normalization.common import (
+    ENTRY_PROVENANCE_ATTRIBUTES,
+    entry_provenance_record,
     ABSENT,
     Implicit,
     classify_prov_type,
@@ -94,24 +96,6 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.ike impo
 #: The entry-level provenance record - the entry's own marker rather than one of its fields.
 ENTRY_FIELD = "__entry__"
 
-#: Attributes that say an ENTRY came from somewhere other than this device.
-#:
-#: MEASURED AS ZERO AT ALL THREE PATHS ON ALL FOUR APPLIANCES, by stage 4 and again by this
-#: stage's readback on 2026-10-29: no entry of any of the three collections carries any attribute
-#: but `@name`. Five Panorama templates hold zero entries at these paths and `show config
-#: pushed-template` holds each collection's name zero times, so every row collected on this estate
-#: is `local` and the template mapping is for an estate that pushes these paths.
-#:
-#: `@src` IS MAPPED THOUGH STAGE 5's `provenance.types` HAS NO `panorama` MEMBER. Stage 5 lists
-#: local, template, pan_os_default, assumed_default, not_configured and derived for all three
-#: subjects, on the strength of the zero measurement above. An `@src`-marked entry would therefore
-#: be a state no artifact in this domain accounts for - and recording it as `local`, which is what
-#: leaving it out of this map would do, asserts "defined on this device" about an entry the device
-#: did not define. Recorded truthfully instead.
-ENTRY_PROVENANCE_ATTRIBUTES = {
-    "@ptpl": FieldProvenance.ProvenanceType.TEMPLATE,
-    "@src": FieldProvenance.ProvenanceType.PANORAMA,
-}
 
 # ---------------------------------------------------------------------------
 # The paths. All three collections and BOTH referring leaves, as the merged payload spells them.
@@ -428,6 +412,20 @@ def _member_list(node: Any, *, implicit: Implicit) -> tuple[list[str] | None, An
     return [value for value, _ in iter_member_values(node) if value], raw_key, raw_prov
 
 
+#: Attributes that say an ENTRY came from somewhere other than this device.
+#:
+#: MEASURED AS ZERO AT ALL THREE PATHS ON ALL FOUR APPLIANCES, by stage 4 and again by this
+#: stage's readback on 2026-10-29: no entry of any of the three collections carries any attribute
+#: but `@name`. Five Panorama templates hold zero entries at these paths and `show config
+#: pushed-template` holds each collection's name zero times, so every row collected on this estate
+#: is `local` and the template mapping is for an estate that pushes these paths.
+#:
+#: `@src` IS MAPPED THOUGH STAGE 5's `provenance.types` HAS NO `panorama` MEMBER. Stage 5 lists
+#: local, template, pan_os_default, assumed_default, not_configured and derived for all three
+#: subjects, on the strength of the zero measurement above. An `@src`-marked entry would therefore
+#: be a state no artifact in this domain accounts for - and recording it as `local`, which is what
+#: leaving it out of this map would do, asserts "defined on this device" about an entry the device
+#: did not define. Recorded truthfully instead.
 def _entry_provenance(entry: dict) -> tuple[str, str, str]:
     """(type, raw key, raw value) for the entry's OWN provenance.
 
@@ -437,11 +435,7 @@ def _entry_provenance(entry: dict) -> tuple[str, str, str]:
     are local writable config and NOT predefined, so they must never be given the PREDEFINED
     sentinel.
     """
-    for attribute, provenance_type in ENTRY_PROVENANCE_ATTRIBUTES.items():
-        value = entry.get(attribute)
-        if value:
-            return provenance_type, attribute, str(value)
-    return FieldProvenance.ProvenanceType.LOCAL, "", ""
+    return entry_provenance_record(entry)
 
 
 # ---------------------------------------------------------------------------

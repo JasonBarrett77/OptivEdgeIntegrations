@@ -151,6 +151,9 @@ from optivedge_integrations.integrations.platforms.pan_os.normalization.ipsec im
     normalize_ipsec_tunnels,
     normalize_monitor_profiles,
 )
+from optivedge_integrations.integrations.platforms.pan_os.normalization.ipsec_path import (
+    normalize_ipsec_tunnel_paths,
+)
 from optivedge_integrations.integrations.platforms.pan_os.normalization.management_interfaces import (
     normalize_management_interfaces,
 )
@@ -671,6 +674,67 @@ def normalize_appliance_zone_protection_profiles(appliance: Appliance) -> list:
     return normalize_zone_protection_profiles(appliance)
 
 
+def normalize_appliance_ike_crypto_profiles(appliance: Appliance) -> dict:
+    """Network > Network Profiles > IKE Crypto. PAN-IKE-002 to -005.
+
+    Depends on nothing else: the profiles come out of the merged device entry directly. The
+    GATEWAY pass below resolves the profile a gateway names, and PAN-IKE-009 asks whether that
+    profile is a factory one, so running this first is what lets the gateway answer it.
+    """
+    return {"ike crypto profiles": len(normalize_ike_crypto_profiles(appliance))}
+
+
+def normalize_appliance_ike_gateways(appliance: Appliance) -> dict:
+    """Network > Network Profiles > IKE Gateways. PAN-IKE-001, -006, -007, -008, -009.
+
+    AFTER the crypto profiles, which PAN-IKE-009 resolves against.
+    """
+    return {"ike gateways": len(normalize_ike_gateways(appliance))}
+
+
+def normalize_appliance_ipsec_crypto_profiles(appliance: Appliance) -> dict:
+    """Network > Network Profiles > IPSec Crypto. PAN-IPS-001 to -005, and -009's referrers."""
+    return {"ipsec crypto profiles": len(normalize_ipsec_crypto_profiles(appliance))}
+
+
+def normalize_appliance_monitor_profiles(appliance: Appliance) -> dict:
+    """Network > Network Profiles > Monitor. The action half of PAN-IPS-007.
+
+    BEFORE the tunnels for readability only: the tunnel pass reads the monitor actions out of
+    the same merged entry rather than out of these rows.
+    """
+    return {"monitor profiles": len(normalize_monitor_profiles(appliance))}
+
+
+def normalize_appliance_ipsec_tunnels(appliance: Appliance) -> dict:
+    """Network > IPSec Tunnels. PAN-IPS-006, -007, -008, and -009's referrer count.
+
+    AFTER the IPSec crypto profiles: a tunnel's row carries the profile it names and what that
+    profile is worth.
+    """
+    return {"ipsec tunnels": len(normalize_ipsec_tunnels(appliance))}
+
+
+def normalize_appliance_ipsec_tunnel_paths(appliance: Appliance) -> dict:
+    """Network > IPSec Tunnels, joined to the network profiles each tunnel runs on.
+
+    LAST OF THE IPSEC PASSES AND IT READS NO PAYLOAD. The path rows are assembled from the four
+    collections' own rows - tunnels, IKE gateways, IKE crypto profiles, IPSec crypto profiles -
+    so every one of those passes must have run for this appliance first.
+    """
+    return {"ipsec tunnel paths": len(normalize_ipsec_tunnel_paths(appliance))}
+
+
+def normalize_appliance_zone_protection_counts(appliance: Appliance) -> dict:
+    """`normalize_appliance_zone_protection_profiles`, counted for the flow's record.
+
+    SEPARATE FROM THE LIST-RETURNING WRAPPER because the flow's appliance-object registry
+    records a count per kind; the list is what a caller normalizing one appliance wants.
+    """
+    return {"zone protection profiles": len(
+        normalize_appliance_zone_protection_profiles(appliance))}
+
+
 def normalize_appliance_session_settings(appliance: Appliance) -> dict:
     """Device > Setup > Session - policy rematch and IPv6 firewalling. PAN-NET-002 and 005.
 
@@ -861,9 +925,17 @@ __all__ = [
     "normalize_user_id",
     "normalize_security_rules",
     "normalize_show_managed_devices",
+    "normalize_appliance_ike_crypto_profiles",
+    "normalize_appliance_ike_gateways",
+    "normalize_appliance_ipsec_crypto_profiles",
+    "normalize_appliance_monitor_profiles",
+    "normalize_appliance_ipsec_tunnel_paths",
+    "normalize_appliance_ipsec_tunnels",
+    "normalize_appliance_zone_protection_counts",
     "normalize_ike_crypto_profiles",
     "normalize_ike_gateways",
     "normalize_ipsec_crypto_profiles",
+    "normalize_ipsec_tunnel_paths",
     "normalize_ipsec_tunnels",
     "normalize_monitor_profiles",
     "normalize_zones",
