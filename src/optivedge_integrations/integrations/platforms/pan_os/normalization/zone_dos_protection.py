@@ -36,7 +36,7 @@ had to check for and raise on. The price is that the zone walk runs twice per ap
 payload is already in memory and the walk is a dict traversal.
 
 THE JOIN IS CASE-SENSITIVE IN BOTH DIRECTIONS. Profile names are case-sensitive and not
-normalised (help p.663), so a case-folded comparison would call a profile in force that the
+normalized (help p.663), so a case-folded comparison would call a profile in force that the
 dataplane does not resolve - and the two verdicts fail in opposite directions, so there is no
 single safe way to be wrong about it.
 
@@ -186,7 +186,7 @@ def _flood_absent(flood_type: str, dataplane_name: str) -> Implicit:
         f"measured 2026-10-25 on 691665AC334B458 (PA-VM 11.2.5) on a profile created carrying "
         f"only `description`, COMMITTED, and read back from `show config running` still carrying "
         f"only `description` - so the absence is a state a running device holds and not a "
-        f"candidate artefact. Confirmed on a second and non-UI oracle, "
+        f"candidate artifact. Confirmed on a second and non-UI oracle, "
         f"`show zone-protection zone`, which reports `{dataplane_name}: False` by name. "
         f"`action=complete` answers code=2 on all six flood types, so there is no candidate "
         f"list to read instead.")
@@ -300,7 +300,7 @@ AGGREGATE_PROFILE_ABSENT = Implicit.measured(
 CLASSIFIED_PROFILE_ABSENT = Implicit.not_assumed(
     "NOT MEASURED. Stage 4 did not write the classified arm at all and said so in terms - it is "
     "the half of PAN-ZON-007 that run did not exercise - and the one surface that renders an "
-    "answer is a dialog measured to prefill. By the aggregate arm's measured behaviour this "
+    "answer is a dialog measured to prefill. By the aggregate arm's measured behavior this "
     "should mean 'no per-device thresholds in force', and that symmetry is DERIVED. A text "
     "column with a not_assumed implicit lands the empty string rather than a null, so the row "
     "is reachable and says nothing, and this provenance row is what says why.")
@@ -678,7 +678,7 @@ def _zone_attachments(device_entry: dict[str, Any]) -> dict[str, int]:
 def attachment_sweep_is_complete(device_entry: dict[str, Any]) -> bool:
     """Did the reverse lookup have EVERY reference surface available to it?
 
-    TWO SURFACES CAN NAME A ZONE PROTECTION PROFILE and only one is modelled. A vsys zone's
+    TWO SURFACES CAN NAME A ZONE PROTECTION PROFILE and only one is modeled. A vsys zone's
     attachment leaf is measured and is walked above; a SHARED GATEWAY's own zone is derived from
     the grammar and was never exercised, because no appliance in the lab has one - a shared
     gateway needs multi-vsys with external zones. `Zone`'s only owner is an EnforcementPoint, so
@@ -1055,7 +1055,7 @@ def dos_profile_references(root: Any) -> list[tuple[str, str, str | None]]:
     every estate with nothing erroring. This function is the second surface.
 
     BOTH SLOTS, AT EVERY RULEBASE. A COUNT THAT READS ONE SLOT CALLS EVERY CLASSIFIED PROFILE
-    UNREFERENCED, which stage 3 names as the specific error here: the catalogue row for
+    UNREFERENCED, which stage 3 names as the specific error here: the catalog row for
     PAN-ZON-007 asserts the AGGREGATE slot alone, and the two are sibling nodes with no
     exclusivity the grammar expresses. So the walk is two lookups and not one.
 

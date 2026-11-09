@@ -5,7 +5,7 @@ every vsys. Authentication profiles have no predefined namespace, so none is pas
 
 THREE SHAPES ON THIS OBJECT THAT A READER WRITTEN FROM ONE SCREEN GETS WRONG:
 
-    a realm lives on TWO keys     `single-sign-on/realm` has a labelled control on the first
+    a realm lives on TWO keys     `single-sign-on/realm` has a labeled control on the first
                                   tab; `method/kerberos/realm` has no vendor page at all
     an EMPTY allow list is not    an empty list admits NOBODY (Help p.839) and `all` admits
       the same as `all`           everyone, and both are "no named group"

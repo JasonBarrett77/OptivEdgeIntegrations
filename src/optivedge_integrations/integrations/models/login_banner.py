@@ -6,7 +6,7 @@ measured 2026-09-01, so `acknowledgement_required` is uninterpretable without `t
 holding one without the other would invite a control that reads it alone.
 
 NOT the "Banners and Messages" section, which is a different part of the same screen and holds
-the Message of the Day, the header and footer banners and their colours. None of that is
+the Message of the Day, the header and footer banners and their colors. None of that is
 normalized and no control reads it, so it is absent here rather than nulled.
 
 `text` is the banner itself and can be paragraphs. It is stored whole: PAN-MGT-007 asks whether

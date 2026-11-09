@@ -127,7 +127,7 @@ def classify_exposure_posture(*, allocation_mode: str, globally_routable: bool,
     It grades the configuration's CONTRIBUTION to exposure. It is not a statement that the
     plane is reachable - the firewall holds the address, the mask and the fact that a route
     leaves the segment, and nothing at all about whether what those reach is a network the
-    organisation controls. Stage 4's open question in its own words, and no field on any
+    organization controls. Stage 4's open question in its own words, and no field on any
     appliance answers it.
     """
     if allocation_mode == ManagementPlaneAddressing.AllocationMode.DHCP_CLIENT:

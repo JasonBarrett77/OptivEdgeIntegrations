@@ -22,7 +22,7 @@ WHAT THE SETTING DOES IS CONTESTED AND NOTHING HERE SETTLES IT. The vendor's Hel
 WARNING, twice on one page and word for word in a second edition - "create warning messages when
 on-box certificates approach their expiration date" - while the DEVICE's own completion
 help-string for the same leaf reads "Check for expired certificates and stop using them". Those
-are different behaviours and the contradiction is recorded in OptivEdgeProbe's
+are different behaviors and the contradiction is recorded in OptivEdgeProbe's
 `reference/known-vendor-contradictions.md`. The consequence falls on whoever remediates: if the
 device's string is accurate, enabling this can DROP a service whose certificate has lapsed.
 """

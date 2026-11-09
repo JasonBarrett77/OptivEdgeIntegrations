@@ -17,7 +17,7 @@ module's helpers survived that for a day and were removed on 2026-10-30 with the
 they served: `OptivEdgeProbe/reference/standing-rulings.md` section 5.
 
 EVERY ROW IS ANCHORED TO THE MERGED SNAPSHOT, not to the read that fills it. An appliance that
-was collected and never asked for its licence table or its dataplane load still gets a row, with the companion column saying so - and the companion is the only thing in
+was collected and never asked for its license table or its dataplane load still gets a row, with the companion column saying so - and the companion is the only thing in
 any of these models that can separate "we never asked" from "we asked and it was fine". That
 follows `MasterKey` and `DeviceIdentificationState`; no merged snapshot means no row, because
 there is nothing to anchor to.
@@ -36,7 +36,7 @@ WHAT THIS MODULE DOES NOT ASSUME, each because an oracle was looked for and not 
     on that node and still found no oracle, and the vendor's documented default is a LEAD this
     code may not promote: the Help documents one and its own field table on the same page
     states none;
-  - a licence table that answers `{"licenses": null}` is UNKNOWN, not "nothing licensed";
+  - a license table that answers `{"licenses": null}` is UNKNOWN, not "nothing licensed";
   - a dataplane whose cores all read 0 is not an idle dataplane and not an absent one.
 
 THE CONTENT WINDOWS ARE THIS MODULE'S OWN NUMBERS and nothing upstream carries one - see
@@ -156,7 +156,7 @@ BASE_LICENCE_IMPLICIT = Implicit.measured(
 LICENCE_ROW_IMPLICIT = Implicit.not_assumed(
     "stage4-platform-lifecycle.json objects['license-info'] records these keys at "
     "implicit.status=unmeasured / consumer_disposition=not_assumed / may_materialise=false: "
-    "present on every row read, and no write can create a licence row to make one absent")
+    "present on every row read, and no write can create a license row to make one absent")
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +544,7 @@ def _days_until(expires: str, now: datetime | None) -> int | None:
 
     `Never` returns None and so does a string no candidate format reads, and the CALLER keeps
     those two apart from a date it could read - because a null here must never be allowed to
-    pass a horizon test. Every licence in this estate says `Never`.
+    pass a horizon test. Every license in this estate says `Never`.
     """
     text = (expires or "").strip()
     if not text or text.lower() == NEVER_EXPIRES:
@@ -1060,7 +1060,7 @@ def normalize_dataplane_utilisation(appliance: Appliance) -> dict[str, int]:
     """One appliance's dataplane load for the collected window. PAN-PLT-006's second half.
 
     THE ASSERTION STILL CANNOT REST ON THIS and the row says so rather than pretending: there is
-    no configuration node anywhere on the firewall holding a dataplane CPU or session-utilisation
+    no configuration node anywhere on the firewall holding a dataplane CPU or session-utilization
     threshold, so "sustained" has no stored definition, and the vendor's own monitoring procedure
     instructs the reader to configure the SNMP MANAGER to watch these identifiers. The comparison
     is off-box by the vendor's design, which is a fact for stage 8 and not a column.

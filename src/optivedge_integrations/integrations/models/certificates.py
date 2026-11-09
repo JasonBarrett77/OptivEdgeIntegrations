@@ -417,7 +417,7 @@ class ScepProfile(ApplianceScopedObject):
     NOTHING NAMED `scep` EXISTED ANYWHERE IN EITHER CONSUMER REPO before this, and no SCEP
     profile existed anywhere in the lab before stage 6 built one. So every reading behind the
     declarations below is from objects that run created and deleted, and the scope-collision
-    behaviour was never measured on this object type - it is inherited from
+    behavior was never measured on this object type - it is inherited from
     `ApplianceScopedObject` as the shape the store already keys on, which is a decision and not
     a measurement. There is also no predefined SCEP namespace and no template-contributed SCEP
     profile sighted on any of the four appliances, which is an absence of SIGHTINGS and not a

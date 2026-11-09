@@ -62,7 +62,7 @@ class ManagementPlaneAddressing(ProvenancedMixin, SyncTrackedModel):
 
     THE GAP THIS MODEL CANNOT CLOSE, and it is the control's own: the firewall holds the
     address, the mask and whether a route leaves the segment, and NOTHING about whether the
-    network those reach is one the organisation controls. So `exposure_posture` grades the
+    network those reach is one the organization controls. So `exposure_posture` grades the
     configuration's CONTRIBUTION to exposure and is not a statement that the plane is
     reachable.
 
@@ -194,7 +194,7 @@ class ApplianceOperationalMode(ProvenancedMixin, SyncTrackedModel):
     accurate about where the value came from, but it is accurate about the only thing a reader
     must not get wrong, which is that it did not come from the configuration.
 
-    WHAT THIS MODEL DOES NOT LICENCE. OptivEdgeAssessments records, and Jason decided
+    WHAT THIS MODEL DOES NOT LICENSE. OptivEdgeAssessments records, and Jason decided
     2026-09-04, that a half-implemented assessment of this mode "would lie - a device in
     FIPS-CC mode would be judged against normal-mode defaults, and would be reported as
     failing controls it satisfies and passing ones it does not". That runs OUTWARDS: implicit

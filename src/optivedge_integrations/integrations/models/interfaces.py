@@ -42,7 +42,7 @@ than the one a control needs:
                       down - while `link-state` is a configuration key in the subtree this
                       collector already dumps.
 
-Still deliberately NOT modelled:
+Still deliberately NOT modeled:
 
     virtual router and vsys bindings         Same reason as before. `out_of_service_residue`
                                              reads virtual-router membership out of the

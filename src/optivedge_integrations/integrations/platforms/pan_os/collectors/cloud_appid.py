@@ -4,12 +4,12 @@
 is actually running, and PAN-SAS-005's whole second half rests on it. No configuration read can
 answer it: `deviceconfig/setting/cloudapp` says only whether somebody switched the engine off on
 purpose, and on every appliance in this lab that key reads reassuringly while the engine reports
-its licence check failing.
+its license check failing.
 
 WHY NOT `request license info`, which is already collected. Measured 2026-10-29: it lists ten
 features on a lab PA-VM and none of them is a SaaS or AI Access feature, so it can only answer by
 what is ABSENT from its list - and it says nothing at all about the DEVICE CERTIFICATE, which this
-reply reports as a second, independent precondition. A remediation reading only the licence would
+reply reports as a second, independent precondition. A remediation reading only the license would
 buy a subscription and still have no engine.
 
 AN OPERATIONAL read, so it reads RUNNING and cannot report an uncommitted edit - the opposite of

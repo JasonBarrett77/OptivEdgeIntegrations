@@ -1,6 +1,6 @@
 """Device > Setup > Management > Authentication Settings - PAN-AUTH-014 to 017's subject.
 
-The second cluster cut out of `DeviceConfigurationProfile`, which is being retired in favour of
+The second cluster cut out of `DeviceConfigurationProfile`, which is being retired in favor of
 one model per control cluster. See `password_complexity.py` for why the cut follows the control
 line rather than the PAN-OS screen: Device > Setup is ten sub-tabs and Management alone has
 thirteen sections, so a model per screen would be nearly as coarse as the aggregate.

@@ -183,12 +183,12 @@ class ManagementResolverPosture(models.TextChoices):
 
 
 class RecordedDecisionReconciliation(models.TextChoices):
-    """The organisation's own recorded decision about telemetry, against the device.
+    """The organization's own recorded decision about telemetry, against the device.
     PAN-SVC-008's grading.
 
     THE ESTATE HAS NO MECHANISM TO INGEST AN ENGINEER'S ANSWER, so this holds its firing default
     on every row until one exists. The three data categories are DELIBERATELY NOT RANKED against
-    each other: which of them an organisation accepts IS the decision this control asks to see.
+    each other: which of them an organization accepts IS the decision this control asks to see.
     """
 
     NO_RECORDED_DECISION_LOCATED = (
@@ -232,13 +232,13 @@ class PerSystemPathPosture(models.TextChoices):
 
     NEITHER_RECORDED = (
         "neither_inheritance_nor_a_customised_path_recorded",
-        "Neither inheritance nor a customised path recorded")
+        "Neither inheritance nor a customized path recorded")
     SOME_SERVICES_ONLY = (
         "customised_for_only_some_of_the_services_the_system_uses",
-        "Customised for only some of the services the system uses")
+        "Customized for only some of the services the system uses")
     DECIDED_EITHER_WAY = (
         "inheriting_deliberately_or_customised_for_every_service_used",
-        "Inheriting deliberately, or customised for every service used")
+        "Inheriting deliberately, or customized for every service used")
 
 
 
@@ -699,7 +699,7 @@ class DeviceTelemetry(ProvenancedMixin, SyncTrackedModel):
     """What this firewall shares with its vendor, and whether anybody decided to. PAN-SVC-008.
 
     TRUE IS THE STATE OF A FIREWALL NOBODY HAS CONFIGURED, and that is the opposite of what the
-    vendor's own guide says. Stage 4 measured the absent-key behaviour of all three category
+    vendor's own guide says. Stage 4 measured the absent-key behavior of all three category
     switches on pan-fw-201 by deleting them and committing (job 178 FIN OK) and reading
     `show device-telemetry settings`, which reads RUNNING: it answered `yes` for the two deleted
     keys and `no` for `threat-prevention`, which was set to `no` in the same commit - one

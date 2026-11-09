@@ -4,7 +4,7 @@ PAN-DEC-001 to 010. Two grains and two objects:
 
     DecryptionPolicyRule                one ordered entry of one decryption rulebase
     DecryptionRulebaseVerdict           a verdict over ALL of one enforcement point's rules
-    SslDecryptionExclusion              one exclusion the organisation added itself
+    SslDecryptionExclusion              one exclusion the organization added itself
     SslDecryptionVendorExclusionOptOut  which VENDOR exclusions somebody switched off here
 
 WHY THERE ARE TWO RULE MODELS AND NOT ONE. Stage 4 measured the commonest state of this domain
@@ -438,7 +438,7 @@ class DecryptionRulebaseVerdict(ProvenancedMixin, SyncTrackedModel):
 
 
 class SslDecryptionExclusion(ApplianceScopedObject):
-    """One SSL decryption exclusion THE ORGANISATION ADDED ITSELF, in one scope of one appliance.
+    """One SSL decryption exclusion THE ORGANIZATION ADDED ITSELF, in one scope of one appliance.
 
     PAN-DEC-004's first half. `ssl-decrypt/ssl-exclude-cert`, at the vsys scope and at the
     appliance's own shared scope - both LOCAL owners, which is where this differs from the
@@ -448,7 +448,7 @@ class SslDecryptionExclusion(ApplianceScopedObject):
     WHAT THIS MODEL DOES NOT HOLD IS THE VENDOR'S 330 OR 385 ENTRIES. They live at
     /config/predefined/ssl-exclude-cert, are a separate object, and are invisible to the read
     this model normalizes. The web interface renders BOTH collections in ONE grid distinguished
-    only by a Location column, so a consumer reading this path sees only the organisation's own
+    only by a Location column, so a consumer reading this path sees only the organization's own
     exclusions while an operator looking at the screen sees both.
 
     `ApplianceScopedObject` IS THE RIGHT BASE and is inherited rather than reimplemented: shared

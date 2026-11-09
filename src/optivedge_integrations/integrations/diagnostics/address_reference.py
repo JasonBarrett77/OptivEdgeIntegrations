@@ -179,7 +179,7 @@ def _build_outcome(enforcement_point: EnforcementPoint) -> dict[str, Any]:
     to "this point has no objects at all". Running the build settles which.
 
     Several paths that used to return an empty result now raise deliberately - an absent
-    @loc, conflicting pushed definitions, an unrecognised pushed payload root. Each is a
+    @loc, conflicting pushed definitions, an unrecognized pushed payload root. Each is a
     better failure than a silent wrong answer, but each also converts a partial result
     into none at all, so the exception text is the thing worth reading.
     """
@@ -461,7 +461,7 @@ def explain_address_reference(enforcement_point: EnforcementPoint, name: str) ->
             if not ({"shared", "policy"} & set(keys)):
                 findings.append(
                     f"{label} payload roots at {keys} - neither 'shared' nor 'policy'. "
-                    f"pushed_shared() raises on an unrecognised root, which fails the whole build. "
+                    f"pushed_shared() raises on an unrecognized root, which fails the whole build. "
                     f"Before that raise was added it returned {{}} silently, which is why this "
                     f"could have worked previously while losing objects."
                 )

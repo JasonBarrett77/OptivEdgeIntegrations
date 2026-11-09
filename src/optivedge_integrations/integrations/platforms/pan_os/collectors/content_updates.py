@@ -2,7 +2,7 @@
 
 THE FIREWALL SIDE OF THIS DOMAIN NEEDS NO COLLECTOR. `deviceconfig/system/update-schedule` is
 carried whole by `show config merged`, which `collectors/merged_config.py` already issues per
-appliance with no xpath restriction - so every column of `ContentUpdateSchedule` is normalisable
+appliance with no xpath restriction - so every column of `ContentUpdateSchedule` is normalizable
 from a snapshot the estate already holds, at no new per-appliance cost.
 
 THIS MODULE EXISTS FOR THE ONE READ NOTHING ISSUED. `deployment-update-schedule` lives ONLY on the

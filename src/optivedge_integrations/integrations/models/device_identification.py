@@ -3,10 +3,10 @@
 TWO GRAINS, ONE DOMAIN, and they are different on purpose:
 
 `DeviceIdentificationState` is ONE ROW PER APPLIANCE. All three readings behind it are
-device-wide - the licence table, `show system info` and `deviceconfig/setting/iot/edge` -
+device-wide - the license table, `show system info` and `deviceconfig/setting/iot/edge` -
 so nothing here is scoped to an enforcement point. On an HA pair both peers hold their own
-licence table and their own content, so the pair yields TWO rows for what an operator
-thinks of as one firewall and the two can legitimately differ: a licence is per serial.
+license table and their own content, so the pair yields TWO rows for what an operator
+thinks of as one firewall and the two can legitimately differ: a license is per serial.
 
 `RulebaseDeviceMatchVerdict` is ONE ROW PER ENFORCEMENT POINT. It is a conclusion about
 the rule SET rather than about any rule, because "no rule names what a device is" cannot be
@@ -40,7 +40,7 @@ class DeviceIdentificationState(ProvenancedMixin, SyncTrackedModel):
     """One appliance's device-identification service state.
 
     Three unrelated instruments land on this one row, and a reader has to be able to tell
-    which of them answered. The licence table and `show system info` are operational
+    which of them answered. The license table and `show system info` are operational
     commands with no xpath at any scope; the edge-service address is a configuration leaf
     in the merged view.
     """
@@ -190,7 +190,7 @@ class DeviceIdentificationState(ProvenancedMixin, SyncTrackedModel):
             )
         if self.device_id_licensed and not self.licence_read_taken:
             raise ValidationError(
-                "device_id_licensed cannot be true when the licence read was never taken."
+                "device_id_licensed cannot be true when the license read was never taken."
             )
 
 

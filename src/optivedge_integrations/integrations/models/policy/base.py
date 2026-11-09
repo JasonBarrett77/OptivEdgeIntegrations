@@ -59,7 +59,7 @@ class PolicyObjectScope:
                                   settings and certificate alike.
 
     Neither is "the user object shadows the predefined one", which is what VENDOR below user
-    configuration encodes. So name-collision behaviour is PER OBJECT TYPE and cannot be
+    configuration encodes. So name-collision behavior is PER OBJECT TYPE and cannot be
     carried between types in either direction.
 
     The rank is deliberately NOT changed. Both measurements are on objects that do not
@@ -69,7 +69,7 @@ class PolicyObjectScope:
     supported. What is measured for policy objects proper is still nothing.
 
     The technique, which is the reusable part: a name-collision question is answerable only
-    by BEHAVIOUR - configuration reads report every definition as-is and never name a winner -
+    by BEHAVIOR - configuration reads report every definition as-is and never name a winner -
     and it needs a uniquely-named control state alongside the colliding one. Without a state
     that must come back different, "the custom definition was ignored" and "the binding was
     never wired up" are the same reading.

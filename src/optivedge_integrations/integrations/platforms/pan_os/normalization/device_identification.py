@@ -4,7 +4,7 @@ TWO ENTRY POINTS, TWO GRAINS:
 
 `normalize_device_identification_state(appliance)` reads three operational snapshots plus the
 merged configuration and writes ONE ROW PER APPLIANCE. Like `master_key`, the row is anchored
-to the MERGED snapshot so an appliance that was collected but never asked for its licence
+to the MERGED snapshot so an appliance that was collected but never asked for its license
 still gets a row - with `licence_read_taken` false, which FIRES. "We never asked" must not
 look like "we asked and it was fine".
 
@@ -130,7 +130,7 @@ class NormalizedDeviceIdentificationState:
 
 
 def _licence_entries(payload: Any) -> list[dict[str, Any]] | None:
-    """The licence table's entries, or None when no table was reported at all.
+    """The license table's entries, or None when no table was reported at all.
 
     THREE SHAPES FROM ONE COMMAND and the third is the trap. Measured on all four lab
     appliances, 2026-10-29:
@@ -148,7 +148,7 @@ def _licence_entries(payload: Any) -> list[dict[str, Any]] | None:
 
     So an EMPTY ENVELOPE RETURNS AN EMPTY LIST and None is reserved for a payload carrying no
     `licenses` key at all, which is a shape nobody has seen: for that the caller reads "not
-    asked", because an unrecognised shape is not evidence of an empty one.
+    asked", because an unrecognized shape is not evidence of an empty one.
     """
     if not isinstance(payload, dict) or "licenses" not in payload:
         return None
@@ -359,7 +359,7 @@ def normalize_device_identification_state(appliance: Appliance) -> dict[str, int
     """Rebuild one appliance's device-identification row.
 
     Anchored to the MERGED snapshot, so an appliance that has been collected and never asked
-    for its licence still gets a row. No merged snapshot means no row at all - there is nothing
+    for its license still gets a row. No merged snapshot means no row at all - there is nothing
     to anchor to and nothing the edge column could say.
     """
     snapshot = latest_appliance_merged_snapshot(appliance)

@@ -194,10 +194,10 @@ ACE_DISABLE_ABSENT = Implicit.assumed(
     False,
     "the key is spelled as a negation and the vendor's own checkbox polarity (help p.796, "
     "'Deselect this checkbox to enable ACE or select this checkbox to disable ACE') reads the "
-    "absence as the engine not being deliberately switched off. Stage 4 declined to licence this "
-    "as a measurement: the bar needs a rendering or a behaviour separating 'the engine is on' "
+    "absence as the engine not being deliberately switched off. Stage 4 declined to license this "
+    "as a measurement: the bar needs a rendering or a behavior separating 'the engine is on' "
     "from 'the key is not set', and no positive control can move the operational oracle while "
-    "the licence check fails on all four lab appliances",
+    "the license check fails on all four lab appliances",
 )
 
 #: The implicit for `cloudapp-srvr-addr/address`. STORES NOTHING. Stage 4 recorded the implicit as
@@ -233,7 +233,7 @@ def latest_cloud_appid_connection_snapshot(appliance: Appliance) -> Snapshot | N
 def latest_predefined_application_snapshot(appliance: Appliance) -> Snapshot | None:
     """The newest `/config/predefined/application` read for one appliance, or None.
 
-    Per appliance and not per enforcement point: the catalogue is appliance-wide, and the entry
+    Per appliance and not per enforcement point: the catalog is appliance-wide, and the entry
     count differs by appliance in this estate because it arrives with content updates.
     """
     return (
@@ -383,7 +383,7 @@ def profile_group_url_filtering(scopes: list[tuple[str, dict[str, Any]]]) -> dic
     `default_profile_group`, `default` and `OutBound-Block`, each @loc=shared - name only virus,
     data-filtering, file-blocking and vulnerability members. So every rule that carries a profile
     GROUP reaches no url-filtering profile through it, which is the measured reason the direct hop
-    below cannot be dropped in favour of the group one.
+    below cannot be dropped in favor of the group one.
 
     Both local `profiles/profile-group` and the pushed reply's top-level `profile-group` are read,
     because the two spell it at different depths.
@@ -517,7 +517,7 @@ def category_treatment(
 
 
 def function_child_applications(payload: Any) -> set[str]:
-    """Every App-ID the predefined catalogue records as a FUNCTION CHILD of another application.
+    """Every App-ID the predefined catalog records as a FUNCTION CHILD of another application.
 
     MEASURED 2026-10-29 at /config/predefined/application on three appliances, and TWO OBVIOUS
     MARKERS ARE BOTH WRONG - one silently, one by a factor of forty.
@@ -542,7 +542,7 @@ def function_child_applications(payload: Any) -> set[str]:
 
     WHAT SEPARATES THEM IS THE VENDOR'S OWN FUNCTION TAG, which is also how the Objects >
     Applications grid renders a function as an indented child. Measured on one appliance's
-    catalogue: `[Uploading]` 257, `[Downloading]` 153, `[Posting]` 115, `[Deleting]` 109,
+    catalog: `[Uploading]` 257, `[Downloading]` 153, `[Posting]` 115, `[Deleting]` 109,
     `[Editing]` 92, `[Sharing]` 83, against `[Web App]` 3,065 - and `dropbox-base` carries
     `[Web App]` alone. These are CHARACTERISTIC tags the vendor ships and NOT the operator's
     markings, which is the confusion PAN-SAS-001 exists to avoid in the other direction.
@@ -556,14 +556,14 @@ def function_child_applications(payload: Any) -> set[str]:
 
     THE POPULATION MOVES WITH THE CONTENT RELEASE and is not a property of the estate: 765, 649
     and 772 on the three appliances read the same day. So any count over it is a reading of one
-    day's catalogue, and a count of applications whose upload function is refused is a LOWER BOUND
+    day's catalog, and a count of applications whose upload function is refused is a LOWER BOUND
     over a namespace this pipeline has not enumerated.
 
     AN EMPTY SET WHERE THERE IS NO SNAPSHOT, which makes `function_app_rule_count` zero and
     `function_apps_are_refused` false - both the firing side. No column separates that from a
     rulebase naming no function application; stage 5 declared no companion for it and one invented
     here would sit beyond every check stage 5 makes. Recorded in the artifact's `spec_gaps`, and
-    the caller's return value says whether the catalogue was present.
+    the caller's return value says whether the catalog was present.
     """
     if not isinstance(payload, dict):
         return set()
@@ -610,7 +610,7 @@ def filter_selects_cloud_applications(entry: dict[str, Any]) -> bool:
     for one path.
 
     AN ABSENT `is-saas` IS A DON'T-CARE AND NOT A BOOLEAN FALSE. The leaf accepts exactly one
-    value, `yes`, and refuses `no` with code=12 - so a normaliser mapping it to a boolean
+    value, `yes`, and refuses `no` with code=12 - so a normalizer mapping it to a boolean
     defaulting to false would have every filter in an estate deliberately excluding SaaS
     applications. Presence is read, never a parsed boolean.
     """
@@ -623,7 +623,7 @@ def filter_selects_cloud_applications(entry: dict[str, Any]) -> bool:
 
 
 def filter_excludes_approved(entry: dict[str, Any]) -> bool:
-    """Whether one filter carves the organisation's approved applications out of its selection.
+    """Whether one filter carves the organization's approved applications out of its selection.
 
     Either by naming members in `exclude`, or by selecting on the approval marking at all.
 
@@ -640,7 +640,7 @@ def filter_excludes_approved(entry: dict[str, Any]) -> bool:
 def parse_cloud_appid_connection(payload: Any) -> dict[str, Any]:
     """Classify `show cloud-appid connection-to-cloud`'s free text into three conditions.
 
-    Returns {"recognised": bool, "license_ok": bool, "device_cert_ok": bool,
+    Returns {"recognized": bool, "license_ok": bool, "device_cert_ok": bool,
     "cloud_connection_ok": bool}.
 
     THE PAYLOAD IS A BARE STRING for this read - `extract_result_payload` returns the result
@@ -677,7 +677,7 @@ def parse_cloud_appid_connection(payload: Any) -> dict[str, Any]:
             value = stripped.split(":", 1)[1].strip()
             cloud_connection_ok = bool(value) and "fail" not in value and "down" not in value
     return {
-        "recognised": recognised,
+        "recognized": recognised,
         "license_ok": license_ok and recognised,
         "device_cert_ok": device_cert_ok,
         "cloud_connection_ok": cloud_connection_ok,
@@ -689,8 +689,8 @@ def cloud_app_engine_condition(conditions: dict[str, Any], *,
                                ace_disabled: bool | None) -> tuple[bool, str]:
     """(ace_not_operational, ace_failure_reason) from the op reply and the configured key.
 
-    THE ORDER IS THE LICENCE FIRST, because it is the condition every other one fails behind: on
-    all three appliances read, the licence check fails AND the cloud connection fails AND the
+    THE ORDER IS THE LICENSE FIRST, because it is the condition every other one fails behind: on
+    all three appliances read, the license check fails AND the cloud connection fails AND the
     device certificate is missing, and reporting the certificate would send a remediation at the
     symptom. The configured disable is tested LAST because it is the only condition that is not in
     the operational reply.
@@ -704,7 +704,7 @@ def cloud_app_engine_condition(conditions: dict[str, Any], *,
     `ace_not_operational` true, so the choice changes the remediation text and not the finding.
     I decided it; it is recorded in the stage 7 artifact's note.
     """
-    if snapshot_exists and conditions.get("recognised"):
+    if snapshot_exists and conditions.get("recognized"):
         if not conditions.get("license_ok"):
             return True, CloudAppEngineSetting.REASON_LICENSE_CHECK_FAILED
         if not conditions.get("device_cert_ok"):
@@ -728,7 +728,7 @@ def reachable_scopes(
     vsys_name: str,
     pushed_roots: list[dict[str, Any]],
 ) -> list[tuple[str, dict[str, Any]]]:
-    """The scopes whose definitions are in force at one enforcement point, labelled.
+    """The scopes whose definitions are in force at one enforcement point, labeled.
 
     ONE PLACE DECIDES WHAT REACHABLE MEANS, so the four verdict computations cannot disagree about
     it. The firewall's own `/config/shared` is included because a profile or filter defined there

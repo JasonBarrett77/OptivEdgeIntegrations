@@ -267,7 +267,7 @@ def min_version_rank(min_version: str) -> int:
     The sentinel runs the opposite way from the usual trap: the magnitude is not the meaning,
     and the meaning is that every "the floor is too low" comparison FIRES on it. Stage 0
     measured the alternative - a query enumerating the forbidden values reads a token it does
-    not recognise as compliant.
+    not recognize as compliant.
     """
     order = SslTlsServiceProfile.VERSION_ORDER
     token = str(min_version or "")
@@ -368,7 +368,7 @@ def _excluded_by_range(min_rank: int, max_rank: int) -> set[str]:
     the rendered set at the implicit range and at tls1-2..tls1-2 and OUT of it at
     tls1-3..tls1-3.
 
-    ONE INFERENCE, AND IT IS LABELLED AS ONE: the chacha exclusion is applied to every ceiling
+    ONE INFERENCE, AND IT IS LABELED AS ONE: the chacha exclusion is applied to every ceiling
     BELOW tls1-3 and only the tls1-2 ceiling was measured. The step is monotonicity - a
     narrower range cannot render more algorithms than a wider one that contains it - and the
     alternative would claim chacha ENABLED at a tls1-1 ceiling on no reading at all.
@@ -394,7 +394,7 @@ def _permits_sha1(protocol_settings: dict[str, Any], min_rank: int, max_rank: in
     TWO CASES, and only the second looks at the range:
 
       * THE KEY IS WRITTEN -> that value, at every range. `yes` is True even at a tls1-3-only
-        range, where the dialog greys the box out. That combination cannot be made in the web
+        range, where the dialog grays the box out. That combination cannot be made in the web
         interface, which validates it; it CAN be made over the XML API, which does not. So it
         is a vendor validation gap, it should be rare, and WE CANNOT KNOW HOW THE DEVICE
         BEHAVES IN A STATE ITS OWN UI FORBIDS - which is the reason to report it rather than
@@ -662,7 +662,7 @@ SOUND_CSR_DIGESTS = frozenset({"sha256", "sha384", "sha512"})
 def _scep_verdicts(rsa_key_bits: str | None, csr_digest: str) -> tuple[bool, bool]:
     """(the key is below the floor, the digest is weak), computed from the stored LITERALS.
 
-    Neither reads the device's completion set, and both put an UNRECOGNISED literal on the
+    Neither reads the device's completion set, and both put an UNRECOGNIZED literal on the
     FIRING side. That is stage 4's own prescription for these two leaves: the completion set is
     what the device will OFFER and not what it will ACCEPT, measured in both directions on one
     appliance on one day - 512 committed to a key length whose enum has three members, and md5
@@ -705,7 +705,7 @@ def collect_certificate_references(
     of those are the safe side of their own control. Under-counting would do the reverse.
 
     THE HASH CHAIN IS SURFACE-LOCAL. It is not followed from the firewall's own store into the
-    predefined catalogue, because the hashes are only comparable within one surface - and the
+    predefined catalog, because the hashes are only comparable within one surface - and the
     subject and issuer STRINGS cannot be compared instead, because the formats differ between
     scopes: "/CN=x" shared, a bare "x" predefined, "CN = x" in subject-int and from the op
     command.

@@ -776,7 +776,7 @@ def collect_appliance_cloud_appid_connection(
 
     One op call per appliance. No configuration read can answer it: `deviceconfig/setting/cloudapp`
     says only whether somebody switched the engine off on purpose, and on every appliance in this
-    lab that key reads reassuringly while the engine reports its licence check failing. Until this
+    lab that key reads reassuringly while the engine reports its license check failing. Until this
     snapshot exists `CloudAppEngineSetting.ace_failure_reason` is `unread` on every row and
     `ace_not_operational` holds its firing default - which is the deliberate direction, and is NOT
     the same as a measured failure: the reason column is what tells the two apart.
@@ -1217,10 +1217,10 @@ APPLIANCE_OBJECT_NORMALIZERS = (
     # idle dataplane and an unread one from all reading the same way.
     ("platform content streams", normalize_appliance_platform_content_streams),
     ("GlobalProtect portal presence", normalize_appliance_globalprotect_portal_presence),
-    ("licence inventory", normalize_appliance_licence_inventory),
+    ("license inventory", normalize_appliance_licence_inventory),
     ("log alarm settings", normalize_appliance_log_alarm_settings),
     ("configuration backup evidence", normalize_appliance_configuration_backup_evidence),
-    ("dataplane utilisation", normalize_appliance_dataplane_utilisation),
+    ("dataplane utilization", normalize_appliance_dataplane_utilisation),
     # Device > Setup > Management > Policy Rulebase Settings, two leaves of the same merged
     # device entry its neighbours read. Depends on nothing else in this tuple, and the point
     # loops that read the row it writes all run after this loop finishes.

@@ -20,7 +20,7 @@ easy to over-read. It protects the digest everywhere the digest TRAVELS WITHOUT 
 workbook, a report, a log line, a support bundle, a copied table. It does NOT protect against
 somebody holding this whole database, who has both halves and can run the same word list. The
 stronger arrangement is a key the HOST project supplies and this package never stores; that is a
-deployment decision rather than a normalisation one, and this model is where a reference to such a
+deployment decision rather than a normalization one, and this model is where a reference to such a
 key would go.
 """
 
@@ -34,7 +34,7 @@ from django.db import models
 class SecretFingerprintKey(models.Model):
     """One key per management station, generated once and never rotated by this package.
 
-    ROTATION IS A RE-NORMALISATION, not a migration: every equality-group id already stored was
+    ROTATION IS A RE-NORMALIZATION, not a migration: every equality-group id already stored was
     computed with the old key, so a new key makes an old row and a new row compare unequal when
     the secrets are identical. Nothing here rotates it for that reason; a rotation has to be
     followed by a collection pass over every appliance of the station.
@@ -59,7 +59,7 @@ class SecretFingerprintKey(models.Model):
         """The station's key, generated on first use. Same bytes for every appliance it owns.
 
         `get_or_create` rather than a check-then-create, because two appliances of one station
-        are normalised in one pass and a second key would silently split the estate's equality
+        are normalized in one pass and a second key would silently split the estate's equality
         groups in two.
         """
         row, _ = cls.objects.get_or_create(

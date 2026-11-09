@@ -3,7 +3,7 @@
 EIGHT MODELS, SEVEN OF THEM ONE ROW PER APPLIANCE AND ONE A COLLECTION. Every reading behind
 them is device-wide rather than vsys-scoped, so nothing here is anchored to an enforcement
 point, and on an HA pair each peer yields its own row for what an operator thinks of as one
-firewall. That is deliberate and nothing downstream deduplicates it: a licence is per serial,
+firewall. That is deliberate and nothing downstream deduplicates it: a license is per serial,
 content is installed per serial, and the dataplane load of an active member is not its peer's.
 `DataplaneUtilisation` is the one model where the two rows of a pair SHOULD differ.
 
@@ -34,7 +34,7 @@ PROVENANCE IS STORED FOR TWO MODELS AND DECLARED DERIVED FOR THE REST. `LogAlarm
 `LicenceEntitlement` write real `FieldProvenance` rows - the first because `not_configured` is
 the only thing a row there can ever say and saying it is the point, the second because
 `base_license_name`'s absence is a MEASURED discriminator (an absent key means this row IS the
-base licence) and the provenance row is the only place that separates that from nobody looking.
+base license) and the provenance row is the only place that separates that from nobody looking.
 Everything else is either a computation or a key off an operational reply, which carries no
 `@ptpl`, `@loc` or `@src` decoration and never will, so those columns are declared in
 `DERIVED_FIELDS` instead.
@@ -103,7 +103,7 @@ ENTITLEMENT_STATES = [
     ("expiring_within_30_days", "An entitlement expires within 30 days"),
     ("active_inside_90_days", "All active, inside 90 days"),
     ("active_beyond_90_days", "All active, beyond 90 days"),
-    ("no_licence_rows_returned", "No licence rows returned"),
+    ("no_licence_rows_returned", "No license rows returned"),
     ("inventory_not_collected", "Inventory not collected"),
 ]
 
@@ -428,7 +428,7 @@ class LicenceInventory(ProvenancedMixin, SyncTrackedModel):
         indexes = [models.Index(fields=["appliance"])]
 
     def __str__(self) -> str:
-        return f"{self.appliance} licence inventory"
+        return f"{self.appliance} license inventory"
 
     def clean(self) -> None:
         """The count must agree with the list it was gathered beside.
@@ -457,9 +457,9 @@ class LicenceEntitlement(ProvenancedMixin, SyncTrackedModel):
     storing it without knowing stores the opposite of "licensed". Getting it wrong would be a
     wrong finding in both directions at once and in silence.
 
-    `expires` IS TEXT AND NOT A DATE, deliberately. Every licence in this estate reports the
+    `expires` IS TEXT AND NOT A DATE, deliberately. Every license in this estate reports the
     literal `Never`, which no date parser accepts; a date column would have to reject it or
-    coerce it, and either choice loses the only thing these licences actually say. The date
+    coerce it, and either choice loses the only thing these licenses actually say. The date
     arithmetic lives in `LicenceInventory`'s derived counts.
 
     `authcode` IS DELIBERATELY NOT STORED. Stage 4 measured it None on every one of the thirteen
@@ -541,7 +541,7 @@ class LogAlarmSettings(ProvenancedMixin, SyncTrackedModel):
     ESTATE. A plain scalar-boolean compiler emits `filter(field=value)`, which is `NOT col` for
     `eq false` with no IS NULL branch, and SQL evaluates `NOT NULL` as NULL. The answer is
     `alarm_generation_enabled_known`, not a different operator: the polarity is per MODEL, and
-    both behaviours already live on one shipped model.
+    both behaviors already live on one shipped model.
 
     AND `alarm_settings_node_present` IS NOT THE SAME CLAIM AS THE ALARM BEING OFF. Stage 3's
     second rank is "nothing recorded at all, which cannot be told apart from a device sitting at
@@ -723,7 +723,7 @@ class DataplaneUtilisation(ProvenancedMixin, SyncTrackedModel):
     """One appliance's dataplane load, for the collected window. PAN-PLT-006's second half.
 
     THE SUBJECT EXISTS AND THE ASSERTION STILL CANNOT REST ON IT. There is no configuration node
-    anywhere on the firewall holding a dataplane CPU or session-utilisation threshold, so
+    anywhere on the firewall holding a dataplane CPU or session-utilization threshold, so
     "sustained" has no stored definition - and the vendor's own monitoring procedure instructs
     the reader to configure the SNMP MANAGER to watch these identifiers and never uses the word
     threshold. The comparison is off-box by the vendor's design.
@@ -795,4 +795,4 @@ class DataplaneUtilisation(ProvenancedMixin, SyncTrackedModel):
         indexes = [models.Index(fields=["appliance"])]
 
     def __str__(self) -> str:
-        return f"{self.appliance} dataplane utilisation"
+        return f"{self.appliance} dataplane utilization"

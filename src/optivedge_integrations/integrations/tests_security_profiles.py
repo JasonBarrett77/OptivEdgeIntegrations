@@ -1766,7 +1766,7 @@ class DecryptionVersionOrderTests(SimpleTestCase):
         self.assertEqual(decryption_version_rank("TLSv1.2"), -1)
         v = dcp_values(dcp_entry("p", protocol={"min-version": "TLSv1.2"}))
         self.assertTrue(v["ssl_min_version_below_tls12"],
-                        "the catalogue's spelling is not the device's, and it must not pass")
+                        "the catalog's spelling is not the device's, and it must not pass")
 
     def test_the_floor_verdict_fires_on_sslv3_tls10_and_tls11_and_not_on_tls12_or_tls13(self):
         for token, fires in (("sslv3", True), ("tls1-0", True), ("tls1-1", True),

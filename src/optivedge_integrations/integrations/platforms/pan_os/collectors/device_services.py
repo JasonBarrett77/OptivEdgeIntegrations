@@ -11,7 +11,7 @@ domain - so `SystemIdentity.hostname_in_force` and its companion need no new cal
 LISTENING, and stage 5 records that issuing it would turn five of the nine unmeasured
 `disable-*` implicits into readings. But no column of THIS domain reads it: `ManagementService`
 is `existing_unchanged` and `SnmpSettings.is_exposed` is already derived over the rows
-`normalize_appliance_management_interfaces` writes. A collector whose output nothing normalises
+`normalize_appliance_management_interfaces` writes. A collector whose output nothing normalizes
 is a snapshot nobody reads, so the read is named and declined. Measured 2026-10-29 for the
 readback anyway, through Panorama: `[https, icmp, ssh]` on three appliances and
 `[https, icmp, ssh, http]` on 6A9C0A9904E7D6E, whose template stack sets `disable-http: no` -

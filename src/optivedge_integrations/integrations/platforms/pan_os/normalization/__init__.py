@@ -297,7 +297,7 @@ def normalize_enforcement_point_rulebase_device_match(
 
 
 def normalize_appliance_ssl_decryption_exclusions(appliance: Appliance) -> dict:
-    """Every SSL decryption exclusion the ORGANISATION added, in both writable scopes. PAN-DEC-004.
+    """Every SSL decryption exclusion the ORGANIZATION added, in both writable scopes. PAN-DEC-004.
 
     Depends on nothing else in the appliance tuple: it reads the same merged device entry as its
     neighbours. The vendor's own 330 or 385 shipped exclusions are NOT here - they live at
@@ -386,7 +386,7 @@ def normalize_appliance_device_identification(appliance: Appliance) -> dict:
     """The appliance's device-identification service state. PAN-IOT-001 and PAN-IOT-003.
 
     Three operational reads and one configuration leaf, all device-wide, so this produces a row
-    per HA NODE rather than per pair: a licence is per serial and the two peers can legitimately
+    per HA NODE rather than per pair: a license is per serial and the two peers can legitimately
     differ. Depends on nothing else in the appliance tuple.
     """
     return normalize_device_identification_state(appliance)
@@ -529,7 +529,7 @@ def normalize_appliance_log_settings(appliance: Appliance) -> dict:
     MUST RUN AFTER `normalize_appliance_services_settings`, which owns the other column on the
     `LoggingSettings` row. Not for correctness of the values - the two write disjoint column
     sets and each deletes only its own provenance rows - but so that a fresh row is created by
-    the normalizer whose columns PAN-MGT-011 reads, keeping that control's behaviour unchanged
+    the normalizer whose columns PAN-MGT-011 reads, keeping that control's behavior unchanged
     on an appliance where this one fails.
     """
     return normalize_log_settings(appliance)
@@ -619,7 +619,7 @@ def normalize_appliance_certificate_objects(appliance: Appliance) -> dict:
 def normalize_appliance_globalprotect(appliance: Appliance) -> dict:
     """Every GlobalProtect portal, its client-auth rows, and one verdict row per vsys.
 
-    Reads the SAME merged payload as its neighbours and the licence snapshot another domain's
+    Reads the SAME merged payload as its neighbours and the license snapshot another domain's
     collector already takes, so it depends on nothing else in the tuple and may be moved within
     it. Returns counts, which is what `APPLIANCE_OBJECT_NORMALIZERS` requires.
     """
@@ -636,7 +636,7 @@ def normalize_appliance_globalprotect_gateways(appliance: Appliance) -> dict:
     runs over those rows. Run first, it would resolve against the previous collection's rows or
     against none, and a gateway bound to a hardened profile would report as unresolved.
 
-    Reads the SAME merged payload as its neighbours plus the licence snapshot another domain's
+    Reads the SAME merged payload as its neighbours plus the license snapshot another domain's
     collector already takes, so it adds no read. Returns counts, as the tuple requires.
     """
     return normalize_globalprotect_gateways(appliance)

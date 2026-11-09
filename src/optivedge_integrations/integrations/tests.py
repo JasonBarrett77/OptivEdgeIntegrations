@@ -1566,7 +1566,7 @@ class CertificateVerdictColumnTests(TestCase):
     def test_allows_sha1_means_SELECTED_and_a_written_value_always_wins(self):
         """Decided 2026-10-29 from the UI, and it turns on the word "selected".
 
-        The web interface GREYS SHA1 OUT and unticks it once Min Version is TLSv1.3 - it
+        The web interface GRAYS SHA1 OUT and unticks it once Min Version is TLSv1.3 - it
         validates the combination. The XML API does not, so a profile CAN be made carrying
         a tls1-3 floor and `auth-algo-sha1 yes`. That is a vendor validation gap, it should
         be rare, and nobody can say how the device behaves in a state its own UI forbids -
@@ -2423,7 +2423,7 @@ class CoverageContentVerdictPureTests(SimpleTestCase):
                                    reported_total=1)))
 
     def test_a_single_real_member_with_a_count_of_one_is_content(self):
-        """The discrimination is narrow and this is its edge: the placeholder is recognised by
+        """The discrimination is narrow and this is its edge: the placeholder is recognized by
         the member LITERAL together with the count, not by the count alone."""
         self.assertTrue(content_was_fetched_from_result(
             _external_list_payload(name="x", members=["203.0.113.9"], reported_total=1)))
@@ -4960,7 +4960,7 @@ class EnforcementPointDetailViewTests(TestCase):
         self.assertContains(response, "Member")
 
     def test_appliances_tab_falls_back_to_an_appliance_scoped_point(self):
-        """Only tests build this shape, but the template renders it, so pin the behaviour."""
+        """Only tests build this shape, but the template renders it, so pin the behavior."""
         appliance_scoped = EnforcementPoint.objects.create(
             management_station=self.station,
             appliance=self.appliance,
@@ -5505,9 +5505,9 @@ class PushedSharedPayloadShapeTests(TestCase):
         self.assertEqual(by_shared["address"]["entry"], [self.ENTRY])
 
     def test_unrecognised_root_raises_rather_than_reporting_an_empty_subtree(self):
-        """An unrecognised shape is not evidence of an empty one - returning {} here
+        """An unrecognized shape is not evidence of an empty one - returning {} here
         would report "this device has no shared objects" for an unexplained response."""
-        with self.assertRaisesMessage(ValueError, "unrecognised pushed shared payload root"):
+        with self.assertRaisesMessage(ValueError, "unrecognized pushed shared payload root"):
             pushed_shared({"something-else": {}})
 
     def test_non_dict_payload_still_raises_with_its_value(self):
@@ -7805,7 +7805,7 @@ class InterfaceNormalizationTests(TestCase):
         self.assertEqual(container_issues[0].disposition, NormalizationIssue.Disposition.KEPT)
 
     def test_an_unknown_type_is_kept_and_reported_rather_than_assumed_broken(self):
-        """The type set is platform-dependent, so an unrecognised entry is news, not corruption."""
+        """The type set is platform-dependent, so an unrecognized entry is news, not corruption."""
         appliance = self._appliance()
         self._snapshot(appliance, {"interface": {"ethernet": {"entry": {
             "@name": "ethernet1/9", "decrypt-mirror": {"target": "x"}}}}})
@@ -8423,7 +8423,7 @@ class DeviceIdentificationStateNormalizationTests(TestCase):
 
     def test_a_row_exists_with_no_operational_snapshot_and_every_flag_fires(self):
         """"We never asked" must not look like "we asked and it was fine". Unlicensed and
-        unasked produce the same licence payload, so the companion flag is the only separator -
+        unasked produce the same license payload, so the companion flag is the only separator -
         and the control fires on its false."""
         self._merged()
         state = self._normalize()
@@ -9553,7 +9553,7 @@ class ManagementSshNormalizationTests(TestCase):
         self.assertEqual(written.provenance_type, "local")
 
     def test_a_present_negative_value_does_not_reach_the_column(self):
-        """The one behaviour difference in moving to `parse_integer_field`. The old helper
+        """The one behavior difference in moving to `parse_integer_field`. The old helper
         guarded with `str(text).isdigit()`, which is False for "-5"; `int("-5")` parses. All
         three columns are `PositiveIntegerField` and SQLite carries its `>= 0` CHECK, so a
         negative would raise and fail the whole appliance's normalization. A negative is outside
@@ -11085,7 +11085,7 @@ class SupersededEnforcementPointTests(TestCase):
 
     def test_two_appliances_with_the_same_vsys_name_are_not_paired(self):
         """`vsys1` is on nearly every firewall, so matching on the name alone would retire one
-        appliance's point in favour of an unrelated appliance's. The link is the enforcement
+        appliance's point in favor of an unrelated appliance's. The link is the enforcement
         NODE - which appliance actually reaches the point."""
         self._sync([self._entry(self.SERIAL_A), self._entry(self.SERIAL_B)])
         EnforcementPoint.objects.update(in_scope=True)
@@ -11826,7 +11826,7 @@ class InlineCloudDetectorTests(SimpleTestCase):
     def test_the_catalogue_falls_back_to_the_measured_key_space(self):
         """UNLIKE the antivirus ML models, which could rely on the predefined profile
         carrying every one. A predefined spyware profile need not mention this engine at
-        all, and an empty catalogue would write no rows - which reads as "nothing is
+        all, and an empty catalog would write no rows - which reads as "nothing is
         unprotected", the direction these controls must never fail in."""
         self.assertEqual(sorted(inline_detector_catalogue([], self.SPY)),
                          sorted(SecurityProfileInlineDetector.SPYWARE_DETECTORS))
@@ -12133,7 +12133,7 @@ class WildfireAnalysisRuleTests(SimpleTestCase):
 class WildfireCoverageAggregateTests(SimpleTestCase):
     """PAN-AVW-003's three columns on the PROFILE row, which are a UNION over its rules.
 
-    The rows they summarise live on `SecurityProfileWildfireRule`, which is in no search
+    The rows they summarize live on `SecurityProfileWildfireRule`, which is in no search
     registry - so no clause can name a column of theirs and the aggregate is the only way the
     coverage becomes reportable. Every input below is a profile stage 6 left standing on
     pan-fw-111, serial 6A9C0A9904E7D6E.
@@ -12229,7 +12229,7 @@ class AntivirusPostureAggregateTests(SimpleTestCase):
 
     The booleans beside them - `has_non_blocking_decoder` and the rest - carry the assertion;
     these carry the SEVERITY, because a grading places VALUES and a boolean has only two. The
-    rows they summarise are on three models that are in no search registry.
+    rows they summarize are on three models that are in no search registry.
 
     Every input is one of the fifteen antivirus profiles stage 6 left standing on pan-fw-111,
     serial 6A9C0A9904E7D6E.
@@ -12316,9 +12316,9 @@ class AntivirusPostureAggregateTests(SimpleTestCase):
 
     def test_an_UNMENTIONED_ml_model_is_disabled_and_decides_the_token(self):
         """oep-avw6-16 stores no `mlav-engine-filebased-enabled` node at all, so every model
-        in the catalogue is absent and absent means DISABLED - measured 2026-10-07, where such
+        in the catalog is absent and absent means DISABLED - measured 2026-10-07, where such
         a profile renders every model as `disable (for all protocols)`. The aggregate
-        quantifies over the CATALOGUE rather than over what the config names, exactly as the
+        quantifies over the CATALOG rather than over what the config names, exactly as the
         rows beneath it are synthesized."""
         self.assertEqual(
             antivirus_posture_aggregates(
@@ -12454,7 +12454,7 @@ class AntivirusMlModelTests(SimpleTestCase):
     """The WildFire Inline ML models, whose names come from the CONTENT release.
 
     controls.json says so and says to enumerate them on the target version before automating,
-    so nothing here hardcodes them - the catalogue comes from the predefined profile, which
+    so nothing here hardcodes them - the catalog comes from the predefined profile, which
     carries every model the device knows about.
     """
 
@@ -12474,7 +12474,7 @@ class AntivirusMlModelTests(SimpleTestCase):
 
     def test_a_profile_with_no_ml_node_names_nothing(self):
         """And that is the finding, not an absence of one: the UI renders every model as
-        `disable` for such a profile. The catalogue puts the rows back at persist time."""
+        `disable` for such a profile. The catalog puts the rows back at persist time."""
         self.assertEqual(profile_ml_models({"@name": "bare"}), {})
 
     def test_the_catalogue_comes_from_the_profiles_themselves(self):
@@ -13069,7 +13069,7 @@ class UnreadableExternalListTests(TestCase):
         """`value == ""` alone must not be the test - a readable EDL can have an empty url."""
         value, _rk, _rv, list_type = self._edl({"url": {"url": ""}})
         self.assertEqual(value, "")
-        self.assertEqual(list_type, "url", "readable: the type node WAS recognised")
+        self.assertEqual(list_type, "url", "readable: the type node WAS recognized")
 
 
 class LogSettingsFilterParseTests(SimpleTestCase):
@@ -14926,7 +14926,7 @@ class DecryptionRulebaseVerdictNormalizationTests(_DecryptionBase):
 
 
 class SslDecryptionExclusionNormalizationTests(_DecryptionBase):
-    """PAN-DEC-004's first half: what the organisation added itself, in both writable scopes."""
+    """PAN-DEC-004's first half: what the organization added itself, in both writable scopes."""
 
     def test_both_writable_scopes_are_collected_and_kept_apart(self):
         """The web interface renders both collections in ONE grid distinguished only by a
@@ -15438,7 +15438,7 @@ class GlobalProtectClientAuthRowNormalizationTests(_GlobalProtectBase):
 
 
 class GlobalProtectEnforcementPointNormalizationTests(_GlobalProtectBase):
-    """The vsys grain: counts over entries, the feature verdict, and the licence question."""
+    """The vsys grain: counts over entries, the feature verdict, and the license question."""
 
     def test_a_row_exists_for_every_vsys_including_one_with_no_globalprotect_node(self):
         self._merged([
@@ -15654,7 +15654,7 @@ class GlobalProtectAppSettingDictionaryTests(_GlobalProtectBase):
 
     def test_an_absent_dictionary_answers_empty_rather_than_raising(self):
         """It is a DECODING input, not a grading one: without it a stored member list cannot be
-        LABELLED, and no column of this domain changes value."""
+        LABELED, and no column of this domain changes value."""
         self.assertEqual(
             gp_app_setting_dictionary(
                 latest_gp_app_config_dictionary_snapshot(self.appliance)), {})
@@ -17151,7 +17151,7 @@ class PlatformLifecyclePortalPresenceTests(SimpleTestCase):
 
 
 class PlatformLifecycleLicenceTests(SimpleTestCase):
-    """The licence table's three shapes, and the verdicts over them."""
+    """The license table's three shapes, and the verdicts over them."""
 
     @staticmethod
     def _snapshot(payload):
@@ -17173,7 +17173,7 @@ class PlatformLifecycleLicenceTests(SimpleTestCase):
 
     def test_a_null_licenses_element_is_unknown_and_not_nothing_licensed(self):
         """MEASURED ON BOTH PA-5220s. The outer dict is TRUTHY and the inner value is None, so
-        `if result:` reports licences present and `result["licenses"]["entry"]` raises. The token
+        `if result:` reports licenses present and `result["licenses"]["entry"]` raises. The token
         is named for the SHAPE because nothing in the payload separates "none installed" from
         "nothing returned"."""
         built = _plt_build_licences(self._snapshot({"licenses": None}))
@@ -17183,7 +17183,7 @@ class PlatformLifecycleLicenceTests(SimpleTestCase):
 
     def test_a_single_row_arrives_as_a_dict_and_is_not_lost(self):
         """A normalizer written without the project's own list-coercion loses every row but one
-        on an appliance holding a single licence."""
+        on an appliance holding a single license."""
         built = _plt_build_licences(self._snapshot({"licenses": {"entry": self._row()}}))
         self.assertEqual(built.inventory_read, "rows_returned")
         self.assertEqual(built.row_count, 1)
@@ -17408,11 +17408,11 @@ class PlatformLifecycleCollectorTests(SimpleTestCase):
             ("platform content streams", flows.normalize_appliance_platform_content_streams),
             ("GlobalProtect portal presence",
              flows.normalize_appliance_globalprotect_portal_presence),
-            ("licence inventory", flows.normalize_appliance_licence_inventory),
+            ("license inventory", flows.normalize_appliance_licence_inventory),
             ("log alarm settings", flows.normalize_appliance_log_alarm_settings),
             ("configuration backup evidence",
              flows.normalize_appliance_configuration_backup_evidence),
-            ("dataplane utilisation", flows.normalize_appliance_dataplane_utilisation),
+            ("dataplane utilization", flows.normalize_appliance_dataplane_utilisation),
         ):
             self.assertIn((label, function), flows.APPLIANCE_OBJECT_NORMALIZERS, label)
 
@@ -18106,7 +18106,7 @@ class AaaSecretAndSigningTests(TestCase):
         assert rows_a is first
 
     def test_a_server_entry_with_no_secret_contributes_nothing(self):
-        """THE ABSENT-KEY BEHAVIOUR, which stage 5 declared `not_stored` because stage 4 never
+        """THE ABSENT-KEY BEHAVIOR, which stage 5 declared `not_stored` because stage 4 never
         read an absent `secret` - the key was written on both of its subjects.
 
         A "" in the list would make the shortest stored length 0, which is the firing side of a
@@ -18626,7 +18626,7 @@ class DeviceServicesSnmpGradingTests(SimpleTestCase):
         self.assertEqual(_svc_version_in_force(True, False, "v3"), _SvcVersionInForce.V3)
 
     def test_an_unwalked_surface_set_does_not_reduce_the_credential_finding(self):
-        """Only a MEASURED refusal earns the reduction. The per-surface switch's behaviour when
+        """Only a MEASURED refusal earns the reduction. The per-surface switch's behavior when
         absent is not obtainable from any corpus this project can reach, so the unknown must not
         relax the finding."""
         self.assertEqual(
@@ -19458,12 +19458,12 @@ class _IpsecBase(SimpleTestCase):
 class IpsecAbsentKeyTests(_IpsecBase):
     """WHAT EACH ABSENT KEY STORES, asserted on the VALUE and not on the shape.
 
-    Stage 7's contract, as of 2026-10-29: "A column whose absent-key behaviour you measured owes a
+    Stage 7's contract, as of 2026-10-29: "A column whose absent-key behavior you measured owes a
     test asserting it. That is the cheapest place in this pipeline to lose a measurement: the
-    device reading sits in your handback, the value sits in the normaliser, and nothing fails when
+    device reading sits in your handback, the value sits in the normalizer, and nothing fails when
     a later edit changes what an absence stores."
 
-    Nine keys in this domain have a declared absent behaviour - four measured vendor facts, three
+    Nine keys in this domain have a declared absent behavior - four measured vendor facts, three
     storing nothing, and two inferences - and every one of them is below. The two inferences are
     asserted as stage 5 declared them, which is what holds the disagreement in a place a later
     change cannot quietly resolve.
@@ -19688,7 +19688,7 @@ class IpsecComputationTests(_IpsecBase):
     def test_a_sub_hour_lifetime_rounds_up_to_one_and_never_to_zero(self):
         """Forced by stage 5's own declaration - `lifetime_hours` carries `minimum: 1` - so a
         lifetime under an hour lands IN the acceptable band rather than outside every band. The
-        helper that does it is shared with the sibling IKE normaliser, and this assertion is what
+        helper that does it is shared with the sibling IKE normalizer, and this assertion is what
         makes a change there fail here rather than silently re-grade PAN-IPS-005."""
         entry = {"@name": "x", "lifetime": {"seconds": "180"}}
         self.assertEqual(self.profile(entry)["lifetime_hours"], 1)
@@ -19764,9 +19764,9 @@ class IpsecBindingTests(_IpsecBase):
 class IpsecBranchesTheLabCannotShowTests(_IpsecBase):
     """Branches a readback against this estate CANNOT discriminate, each proved by mutation.
 
-    Every case below was found by damaging the real normaliser at one named point and re-running
+    Every case below was found by damaging the real normalizer at one named point and re-running
     the device readback: the mutation changed no stored column on any of the four appliances, so
-    the lab cannot tell the right behaviour from the wrong one and only these assertions can.
+    the lab cannot tell the right behavior from the wrong one and only these assertions can.
     """
 
     def test_the_lsvpn_satellite_reference_is_counted(self):
@@ -20834,7 +20834,7 @@ class ContentDeploymentScheduleNormalizationTests(TestCase):
         """With the key committed as `yes` the operational oracle answers `Schedule "<n>" is
         disabled`; with the key deleted and committed it answers the cadence and `is in waiting`.
         Stage 4 never wrote an explicit `no`, so it declines to promote the implicit - but the
-        behaviour either side of it is measured and both readings count the schedule towards
+        behavior either side of it is measured and both readings count the schedule towards
         governance."""
         row = self._normalize({"deployment-update-schedule": {
             "entry": self._entry("oep-dep-1")}})
@@ -21708,7 +21708,7 @@ class GlobalProtectPostureTests(_GlobalProtectGatewayBase):
 
 
 class GlobalProtectGatewayLicenceTests(_GlobalProtectGatewayBase):
-    """Three licence shapes from one command, measured on four appliances."""
+    """Three license shapes from one command, measured on four appliances."""
 
     def test_an_appliance_naming_the_gateway_feature_unexpired_is_licensed(self):
         # 691665AC334B458's reply verbatim, trimmed to the two GlobalProtect features: the
@@ -21930,7 +21930,7 @@ class _ZoneDosBase(TestCase):
 
         Stage 4 built it, committed it, and read it back from `show config running` still
         carrying only `description` - so every absence this fixture asserts is a state a
-        RUNNING device holds and not a candidate artefact.
+        RUNNING device holds and not a candidate artifact.
         """
         self._merged(profiles=[{"@name": name}])
         _zdp_profiles(self.appliance)
@@ -21983,7 +21983,7 @@ class ZoneProtectionProfileAbsentKeyTests(_ZoneDosBase):
             row.provenance_for("non_syn_reject_configured").provenance_type, "pan_os_default")
 
     def test_an_absent_scan_ENTRY_means_the_type_is_not_detected_AT_ALL(self):
-        """THE WORSE OF THE TWO ABSENCES, and the one a normaliser that collapses them loses:
+        """THE WORSE OF THE TWO ABSENCES, and the one a normalizer that collapses them loses:
         with no entry the outer grid's four scan columns render BLANK and the `scan` node is
         absent from the committed entry. The empty string is the sentinel, not `alert`."""
         row = self._bare_profile()
@@ -22066,7 +22066,7 @@ class ZoneProtectionProfileAbsentKeyTests(_ZoneDosBase):
     def test_an_unmarked_entry_records_LOCAL_and_never_the_parents_marker(self):
         """THE SPECIFIC ERROR STAGE 4 MEASURED ON THIS OBJECT: `network/profiles` is itself
         @ptpl='shared-single-vsys' while the profile collection beneath it carries no mark at
-        all, so a normaliser inheriting the parent's would label every locally-created profile
+        all, so a normalizer inheriting the parent's would label every locally-created profile
         template-supplied AND name the wrong template."""
         Snapshot.objects.create(
             management_station=self.station, appliance=self.appliance,
@@ -22387,7 +22387,7 @@ class DosPolicyRuleTests(_ZoneDosBase):
 
     def test_the_applicability_gate_reads_BOTH_profile_slots(self):
         """A GATE THAT READS ONE SLOT CALLS EVERY CLASSIFIED-ONLY RULE INAPPLICABLE: the
-        catalogue row for this control asserts the AGGREGATE slot alone, and the two are
+        catalog row for this control asserts the AGGREGATE slot alone, and the two are
         sibling nodes with no exclusivity the grammar expresses."""
         self._rules([
             {"@name": "oep-zdp6-r03", "action": {"deny": None}, "disabled": "yes",
@@ -22463,7 +22463,7 @@ class DosProtectionProfileKindTests(_ZoneDosBase):
     def test_an_absent_type_stores_NOTHING_because_the_key_is_MANDATORY_at_commit(self):
         """Measured rather than inferred: stage 4 built a second bare profile for this question
         alone and the commit was refused with `missing 'type'`. The merge view is
-        candidate-derived, so a STAGED profile can reach a normaliser without it, and the blank
+        candidate-derived, so a STAGED profile can reach a normalizer without it, and the blank
         says exactly that rather than naming a default."""
         from optivedge_integrations.integrations.platforms.pan_os.normalization.zone_dos_protection import (  # noqa: E501
             dos_protection_profile_values,

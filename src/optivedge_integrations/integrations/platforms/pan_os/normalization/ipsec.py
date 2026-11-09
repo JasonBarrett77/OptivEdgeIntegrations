@@ -374,7 +374,7 @@ def _nullable_text(node: Any, *, implicit: Implicit) -> tuple[str | None, Any, s
 
     TWO NEAR MISSES EXIST AND NEITHER IS THE ANSWER, both found before this was written.
     `security_profiles.py::_text_or_none` is `_text(node) or None`: its own docstring says it
-    cannot tell an absent key from an empty element, on a per-key licence that does not hold here,
+    cannot tell an absent key from an empty element, on a per-key license that does not hold here,
     and it drops the provenance triple - so a TRACKED field read through it writes no row and then
     reads as a field nobody tracks. And `value or None` applied to `parse_text_field`'s own return,
     which another run in this wave recorded in OptivEdgeProbe's `reference/consumer-repo-notes.md`

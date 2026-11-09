@@ -802,8 +802,8 @@ def decryption_version_rank(token: str) -> int:
     """The token's position in the device's own order, or -1 for one the order does not place.
 
     -1 SORTS BELOW EVERY REAL VERSION, so every "the floor is too low" comparison FIRES on an
-    unrecognised token. That is the direction stage 0 measured the enumerated query gets wrong:
-    a list of the forbidden values reads a token it does not recognise as compliant.
+    unrecognized token. That is the direction stage 0 measured the enumerated query gets wrong:
+    a list of the forbidden values reads a token it does not recognize as compliant.
     """
     text = str(token or "")
     return DECRYPTION_VERSION_ORDER.index(text) if text in DECRYPTION_VERSION_ORDER else -1
@@ -1301,7 +1301,7 @@ def profile_ml_models(entry: dict[str, Any]) -> dict[str, str]:
     """{model name: configured action} for the models this profile's config names.
 
     Only what the config holds. Which models EXIST is a content question answered by the
-    predefined profile, and the catalogue is applied at persist time - see
+    predefined profile, and the catalog is applied at persist time - see
     `ml_model_catalogue`.
     """
     node = entry.get("mlav-engine-filebased-enabled")
@@ -1564,7 +1564,7 @@ def inline_detector_action(kind: str, configured: dict[str, str], detector: str)
 
     This replaced reading the configured string as the whole answer, which stored an EMPTY
     action for an engine that is running - stage5-anti-spyware.json declares `materialised`
-    `alert` for exactly this column and said so of the shipped behaviour.
+    `alert` for exactly this column and said so of the shipped behavior.
     """
     action = configured.get(detector, "")
     if action:
@@ -1577,10 +1577,10 @@ def inline_detector_action(kind: str, configured: dict[str, str], detector: str)
 def inline_detector_catalogue(profiles: list, kind: str) -> list[str]:
     """Every detector of this kind seen anywhere in the build, plus the measured key space.
 
-    UNLIKE the ML model catalogue, this falls back to a measured constant when the build
+    UNLIKE the ML model catalog, this falls back to a measured constant when the build
     names none. The antivirus case could rely on the predefined profile carrying every model;
     a predefined spyware profile need not mention the inline engine at all, and an empty
-    catalogue would write no rows - which reads as "nothing is unprotected" and is the
+    catalog would write no rows - which reads as "nothing is unprotected" and is the
     direction these controls must never fail in.
 
     The constant is the key SPACE, completed against a profile that does not exist, so it is
@@ -1617,7 +1617,7 @@ def antivirus_posture_aggregates(
     values and a boolean has only two.
 
     `ml_catalogue` is passed rather than taken from `ml_models` because the ML rows are
-    SYNTHESIZED for every catalogue member and an absent model means DISABLED - the weakest
+    SYNTHESIZED for every catalog member and an absent model means DISABLED - the weakest
     state. Reading only what the config names would miss exactly the profile that mentions no
     model at all.
 
@@ -1662,7 +1662,7 @@ def wildfire_coverage_aggregates(wildfire_rules: list[tuple]) -> dict[str, Any]:
     not an absence of information.
 
     The two booleans answer `some rule names any` and cannot answer more. The accepted file-type
-    set moves with the content release and the application set is a content catalogue of some
+    set moves with the content release and the application set is a content catalog of some
     1400 entries; neither is in any configuration read or in this store, so there is no
     denominator to compare a list of named members against.
 
@@ -2439,7 +2439,7 @@ def build_normalized_security_profiles(enforcement_point: EnforcementPoint) -> S
                 kind="custom url category", name="", severity=PolicyObjectIssue.WARNING,
                 node="predefined/pan-url-categories", source="predefined",
                 disposition=PolicyObjectIssue.KEPT, raw_entry={},
-                reason=("the URL category catalogue was not collected for this appliance, so "
+                reason=("the URL category catalog was not collected for this appliance, so "
                         "no url-filtering profile of this point can be shown to restrict or "
                         "log every category the device offers")))
     else:

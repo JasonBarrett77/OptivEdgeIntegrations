@@ -397,7 +397,7 @@ def pushed_decryption_rules(
     UNEXERCISED IN THIS LAB: re-measured 2026-10-29 on all four appliances, the pushed
     `pre-rulebase` and `post-rulebase` hold `security` and `default-security-rules` and no
     `decryption` child at all. `pushed_rulebases` is the security normalizer's own accessor for
-    those two containers and raises on a shape nobody has seen, which is the behaviour CLAUDE.md's
+    those two containers and raises on a shape nobody has seen, which is the behavior CLAUDE.md's
     first principle asks for: being handed an unknown shape is worth failing on.
     """
     pre_rulebase, post_rulebase = pushed_rulebases(snapshot.payload)
@@ -850,7 +850,7 @@ def normalize_decryption_policy(enforcement_point: EnforcementPoint) -> dict[str
 def normalize_ssl_decryption_exclusions(
     appliance: Appliance,
 ) -> list[SslDecryptionExclusion]:
-    """Replace every SSL decryption exclusion the organisation added on one appliance.
+    """Replace every SSL decryption exclusion the organization added on one appliance.
 
     BOTH WRITABLE SCOPES, in one pass: the appliance's own shared container and every vsys. An
     appliance whose whole `ssl-decrypt` branch is absent writes no row and raises nothing - there
@@ -858,7 +858,7 @@ def normalize_ssl_decryption_exclusions(
     four lab appliances at both scopes before stage 6 built two.
 
     WHAT NO ROW CAN SAY, recorded because it is the measured state of most of this estate: "the
-    organisation has added no exclusion of its own here". The entry grain has no row for it and no
+    organization has added no exclusion of its own here". The entry grain has no row for it and no
     control in this domain asserts on it - PAN-DEC-004's first half is about an exclusion that
     EXISTS and carries no reason.
     """

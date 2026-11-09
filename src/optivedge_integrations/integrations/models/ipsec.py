@@ -50,7 +50,7 @@ tunnel it terminates" - so on such an appliance the predicate is VACUOUSLY TRUE.
 in exactly that state. Closing it needs a per-APPLIANCE row carrying a profile count, a tunnel
 count and whether each collection was reached, which is a fourth model at a different grain and
 not a column here; stage 5 recorded it in `not_stored` rather than specifying it, and the
-catalogue already has the shape in PAN-COV-001 and PAN-COV-002.
+catalog already has the shape in PAN-COV-001 and PAN-COV-002.
 """
 
 from __future__ import annotations
@@ -328,7 +328,7 @@ class IpsecTunnel(IpsecNetworkObject):
     answers. PAN-IPS-002 asks "and above all one a live tunnel uses" and nothing here can rank by
     that; stage 5 recorded it in `not_stored`.
 
-    NO COLUMN REACHES THE `manual-key` BRANCH, and the gap is in the catalogue rather than in
+    NO COLUMN REACHES THE `manual-key` BRANCH, and the gap is in the catalog rather than in
     this model: a hand-keyed tunnel has its own protocol choice and its own algorithm list -
     including the 56-bit `des`, which stage 4 measured as OFFERED at
     `manual-key/esp/encryption/algorithm` and REFUSED at the crypto profile's `esp/encryption` on
@@ -521,7 +521,7 @@ class MonitorProfile(IpsecNetworkObject):
 
     A COLLECTOR THAT SKIPS THIS OBJECT LEAVES PAN-IPS-007's SECOND RECORD UNANSWERABLE, in stage
     4's words: the tunnel's row says monitoring is on and names a profile, while the action it
-    would take lives only here. The subject is modelled even though that record is discharged to
+    would take lives only here. The subject is modeled even though that record is discharged to
     an engineer's question, because the column is owed either way and the derived column that
     resolves it lives on the tunnel.
 

@@ -40,7 +40,7 @@ for an action, that the in-force branch carries no `action` key). Both FIRE, bec
 in this domain is a negated equality and `"" != "daily"` holds - so an appliance nobody read
 reports rather than passing, with no companion column needed. A nullable column would have been
 invisible to both polarities, which is why `parse_text_field`'s coercion of `None` to `""`
-(`normalization/common.py:225-238`) is the behaviour these columns are built on rather than one
+(`normalization/common.py:225-238`) is the behavior these columns are built on rather than one
 they work around.
 
 THE TWO INTEGER COLUMNS ARE THE EXCEPTION AND THEY ARE NULLABLE ON PURPOSE. What an absent

@@ -1090,7 +1090,7 @@ class SecurityProfile(ScopedPolicyObject):
         CLAUDE.md: "A column derived from a JSON field gets a `clean()` asserting the two
         agree." Gated on the kind, because every other kind keeps the defaults - a 0 count
         beside an empty list, which agrees trivially - and because the counts mean nothing on
-        a row that has no URL category catalogue.
+        a row that has no URL category catalog.
 
         The nullable counts are checked only when they hold a number: null is "nobody
         computed this", which has no list to disagree with.
@@ -1215,7 +1215,7 @@ class SecurityProfile(ScopedPolicyObject):
 
         The graded value behind PAN-SPY-004 and PAN-VLN-003, as against the booleans above,
         which say only whether. An engine the profile never mentions is counted at its MEASURED
-        implicit rather than skipped - a row is synthesized for every engine in the catalogue
+        implicit rather than skipped - a row is synthesized for every engine in the catalog
         with a blank configured action, and `ACTION_STRENGTH_WEAKEST_FIRST` ranks blank with the
         implicit, so an unconfigured profile reads `alert` here rather than empty.
 
@@ -1352,7 +1352,7 @@ class SecurityProfile(ScopedPolicyObject):
 
     @property
     def non_blocking_application_overrides(self) -> list[str]:
-        """Per-application overrides that do not stop the transfer, as labelled strings.
+        """Per-application overrides that do not stop the transfer, as labeled strings.
 
         `blocks is not True` rather than `not blocks`, so the unestablished `default` case is
         reported rather than passed - see SecurityProfileApplicationOverride.blocks.
@@ -1445,7 +1445,7 @@ class SecurityProfile(ScopedPolicyObject):
         """What an engineer has to change, naming each category and its action.
 
         `default` is reported as itself rather than as `allow`, because that is what the
-        config says and the resolution to allow is the vendor's documented behaviour (Help
+        config says and the resolution to allow is the vendor's documented behavior (Help
         p.284) rather than something measured here.
         """
         src = SecurityProfileDnsSignatureSource
@@ -1833,7 +1833,7 @@ class SecurityProfileInlineDetector(models.Model):
     Spyware entries also carry `local-deep-learning`, which vulnerability entries do not.
 
     **The detector names come from the CONTENT release**, the same rule as the antivirus ML
-    models, so nothing here hardcodes them - the catalogue is read from the profiles in the
+    models, so nothing here hardcodes them - the catalog is read from the profiles in the
     build.
     """
 
@@ -1959,7 +1959,7 @@ class SecurityProfileMlModel(models.Model):
 
     **The model names come from the CONTENT release, not from PAN-OS.** controls.json says so
     and says to enumerate them on the target version before automating. So nothing here hardcodes
-    them: the catalogue is read from the PREDEFINED profile, which carries every model the
+    them: the catalog is read from the PREDEFINED profile, which carries every model the
     device knows about. On the lab that is eight - Windows Executables, PowerShell Script 1,
     PowerShell Script 2, Executable Linked Format, MSOffice, Shell, OOXML, MachO - and a
     content update that adds a ninth adds it here with no code change.
@@ -1967,7 +1967,7 @@ class SecurityProfileMlModel(models.Model):
     **An absent model means DISABLED**, the same way an absent decoder action means `allow`.
     Measured 2026-10-07: a profile written with no `mlav-engine-filebased-enabled` node at all
     renders every model as `disable (for all protocols)` in the UI. So a profile that says
-    nothing about ML does no ML, and a row is synthesized for every model in the catalogue
+    nothing about ML does no ML, and a row is synthesized for every model in the catalog
     rather than only for the ones the config names.
 
     **The shipped profile is STRONGER than a hand-made one here**, which is the reverse of the
@@ -2457,7 +2457,7 @@ class SecurityProfileThreatException(models.Model):
 
 
 class SecurityProfileGroup(ScopedPolicyObject):
-    """Objects > Security Profile Groups. Modelled because it is how profiles reach rules: on the
+    """Objects > Security Profile Groups. Modeled because it is how profiles reach rules: on the
     lab every Panorama-shared rule protection arrives through a group, and a predefined profile
     counts as used when a group names it. Not assessed itself."""
 

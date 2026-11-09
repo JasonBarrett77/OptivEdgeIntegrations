@@ -84,7 +84,7 @@ def entry_provenance_record(entry: dict) -> tuple[str, str, str]:
 class Implicit:
     """What PAN-OS does when a key is absent - and whether we KNOW or are inferring.
 
-    Every site that stores a value for an absent key makes a claim about the vendor's behaviour.
+    Every site that stores a value for an absent key makes a claim about the vendor's behavior.
     Before 2026-09-21 that claim was a bare `default_effective=False` with nothing saying where
     it came from, and an audit of all 33 sites found three kinds mixed together: defaults
     measured on hardware and recorded in the payload contract, defaults documented in a vendor
@@ -469,7 +469,7 @@ def choice_child(node: Any, valid: tuple[str, ...]) -> tuple[str, dict[str, Any]
     MOVED HERE FROM `device_services.py` on 2026-10-29, which is where it was written and which
     now calls this. Its docstring already named two earlier private copies -
     `security_profiles._choice` and `management_ssh._host_key` - and said both were left alone
-    because each is load-bearing for a shipped control and neither is broken. That judgement is
+    because each is load-bearing for a shipped control and neither is broken. That judgment is
     unchanged; what changed is that a FOURTH caller arrived, so the shared one lives in the
     shared module instead of being copied again.
     """
@@ -506,7 +506,7 @@ def entry_container(node: Any, *path: str) -> tuple[str, list[dict[str, Any]]]:
     private `_ike_container` with the same signature and the same three states, and its docstring
     records that five earlier passes over this estate each got the distinction wrong in the same
     direction - making a device look emptier than it is. That copy is DELIBERATELY LEFT ALONE: it
-    is load-bearing for a shipped domain and it is not broken, which is the same judgement
+    is load-bearing for a shipped domain and it is not broken, which is the same judgment
     `choice_child`'s own note records about `security_profiles._choice` and
     `management_ssh._host_key`. Before writing a third, this is the one to import.
     """
@@ -693,7 +693,7 @@ def pushed_shared(payload: dict[str, Any] | Any) -> dict[str, Any]:
     shared-object optimization keeps its 176 Shared objects out of every per-vsys
     response) would lose every Panorama-Shared object with no error at all.
 
-    A dict carrying neither root raises rather than yielding {}: an unrecognised
+    A dict carrying neither root raises rather than yielding {}: an unrecognized
     shape is not evidence of an empty one.
 
     DELIBERATELY ASYMMETRIC with pushed_vsys_panorama(): that one absorbs
@@ -731,7 +731,7 @@ def pushed_shared(payload: dict[str, Any] | Any) -> dict[str, Any]:
         return panorama
 
     raise ValueError(
-        f"unrecognised pushed shared payload root: expected 'shared' or 'policy.panorama', "
+        f"unrecognized pushed shared payload root: expected 'shared' or 'policy.panorama', "
         f"got keys {sorted(payload)}"
     )
 

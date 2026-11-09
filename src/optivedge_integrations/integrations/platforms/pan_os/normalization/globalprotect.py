@@ -40,7 +40,7 @@ and `::ScopedEntry` for the scoped-row write with its provenance rows and its de
 (that module's own docstring says those two are object-type agnostic and that authentication
 profiles import them from there), `services_settings.py::write_node_row` for the node-shaped
 enforcement-point row, and `device_identification.py::latest_license_info_snapshot` and
-`::_licence_entries` for the licence reply - which another domain's stage 7 run collected and
+`::_licence_entries` for the license reply - which another domain's stage 7 run collected and
 normalized earlier today, so this domain's third read was already issued when its spec was
 written.
 """
@@ -211,7 +211,7 @@ def gp_app_setting_dictionary(snapshot: Snapshot | None) -> dict[str, dict[str, 
 
     NOTHING IN THIS DOMAIN GRADES ON IT. It is a decoding input: it carries each setting's
     label, its permitted value set and its form default, which is what makes a stored member
-    list legible and a typo recognisable. A `{}` here means a column cannot be LABELLED, not
+    list legible and a typo recognizable. A `{}` here means a column cannot be LABELED, not
     that a value cannot be read.
     """
     if snapshot is None:
@@ -226,7 +226,7 @@ def _vsys_entries(snapshot: Snapshot) -> list[tuple[str, dict[str, Any]]]:
 
     A FOURTH PRIVATE COPY OF THIS WALK, and it is private deliberately rather than promoted.
     `certificates.py::scoped_nodes`, `log_settings.py::normalize_log_settings` and
-    `decryption.py` each carry their own four-line version; the judgement
+    `decryption.py` each carry their own four-line version; the judgment
     `common.py::choice_child` recorded when it was promoted on its fourth caller applies in the
     other direction here, because the three existing copies are load-bearing for shipped
     controls and this run is one of four changing this repository at the same time. Recorded in
@@ -255,7 +255,7 @@ def _text_or_null(node: Any, *, implicit: Implicit) -> tuple[str | None, Any, st
     `parse_text_field` answers "" for an absent key, which is right for the columns a control
     compares with `is_empty` - the only absence operator the query layer offers - and wrong for
     the three here that stage 5 declares as storing NULL. Those three are compared by clauses
-    that must NOT match an unread row: a NULL satisfies no comparison, which is the behaviour
+    that must NOT match an unread row: a NULL satisfies no comparison, which is the behavior
     stage 5 reasoned from and built a companion boolean beside. Converting here keeps the
     provenance row intact - the absence still records `not_configured` through the `Implicit`.
     """
@@ -602,17 +602,17 @@ def _clientless_vpn_feature_state(publishing_portals: int, app_count: int,
 
 
 def _licence_verdicts(appliance: Appliance) -> dict[str, Any]:
-    """The four licence columns, from `request license info`.
+    """The four license columns, from `request license info`.
 
     THE REPLY CANNOT TELL "HOLDS NOTHING" FROM "NOBODY ASKED", which is why the boolean exists:
     `{'licenses': None}` arrives with status=success and the container empty, so a consumer
-    testing the reply's truthiness concludes licences are present on an appliance that has none.
+    testing the reply's truthiness concludes licenses are present on an appliance that has none.
     Measured 2026-10-29: ten entries on 691665AC334B458, three on 6A9C0A9904E7D6E and that empty
     envelope on both PA-5220s.
 
     `expired` IS READ AND DELIBERATELY NOT USED. `device_identification.py` requires
     `expired: no` for its own feature test, and copying that here would point the wrong way:
-    an expired portal licence would make `licence_excludes_globalprotect` TRUE, which is the one
+    an expired portal license would make `licence_excludes_globalprotect` TRUE, which is the one
     value that SUPPRESSES PAN-GPP-006 - so an entitlement that lapsed last week would silence a
     control about a portal that is still configured and still serving. The spec's rule is
     presence of the feature NAME, and presence is what this reads. Every lab entry carries
@@ -1479,11 +1479,11 @@ def normalized_gateways(snapshot: Snapshot,
 
 
 def gateway_licence_verdicts(appliance: Appliance) -> dict[str, Any]:
-    """The gateway's two licence columns, from `request license info`.
+    """The gateway's two license columns, from `request license info`.
 
     A SEPARATE FEATURE FROM THE PORTAL'S, measured: 691665AC334B458 names both
     `GlobalProtect Gateway` and `GlobalProtect Portal`, so a control asserting "a GlobalProtect
-    licence" has to say which. `_licence_entries` is imported rather than rewritten for the
+    license" has to say which. `_licence_entries` is imported rather than rewritten for the
     reason its own docstring gives - `{'licenses': None}` is truthy at the outer dict and falsy
     one level in, and both PA-5220s answer exactly that.
 
@@ -1497,7 +1497,7 @@ def gateway_licence_verdicts(appliance: Appliance) -> dict[str, Any]:
     `licence_state_known` IS NOT `licence_reply_collected`. The shipped column says the reply
     ARRIVED; this one says it carried AN ENTRY. Both PA-5220s answered and carried none, so the
     two differ on half this estate, and conflating them would suppress on exactly the appliances
-    whose licence state nobody knows.
+    whose license state nobody knows.
     """
     snapshot = latest_license_info_snapshot(appliance)
     entries = _licence_entries(snapshot.payload) if snapshot is not None else None
@@ -1565,7 +1565,7 @@ def normalize_globalprotect_gateways(appliance: Appliance) -> dict[str, int]:
     than raising.
 
     A SEPARATE ENTRY POINT FROM `normalize_globalprotect`, not a branch inside it: one failure
-    must not cost the other, which is the judgement `platform_lifecycle.py`'s six entry points
+    must not cost the other, which is the judgment `platform_lifecycle.py`'s six entry points
     record. The two write the SAME `GlobalProtectEnforcementPoint` row from two concerns, which
     is what `write_node_row` is built for - it deletes only the provenance rows for the fields it
     writes, because a wide delete would have each silently erase the other's and a missing row

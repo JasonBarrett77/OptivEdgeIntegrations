@@ -106,7 +106,7 @@ def management_node(snapshot: Snapshot) -> dict[str, Any]:
     `authentication_settings.py`, `panorama_registration.py`, `services_settings.py`,
     `log_settings.py`, `wildfire_settings.py` (its sibling `setting/wildfire`) and
     `device_identification.py`. They are deliberately left alone: each is load-bearing for a
-    shipped control and none is broken, which is the judgement `common.py::choice_child`
+    shipped control and none is broken, which is the judgment `common.py::choice_child`
     recorded when it was promoted. This exists so the SEVENTH caller does not write an eighth
     copy, and it lives here rather than in `common.py` because its two consumers -
     `login_banner_from_node` and `authentication_settings_from_node` - already take the node
@@ -298,7 +298,7 @@ def password_complexity_from_snapshot(snapshot: Snapshot) -> tuple[dict[str, Any
     THE CHANGE REACHES ALL FOURTEEN NON-DECLINED KEYS, including the three no control reads -
     block-repeated-characters, password-change-on-first-login, password-change-period-block.
     They share this loop and they share the one form reading, so a third branch holding them at
-    `Implicit.measured` would say the form measured PAN-OS behaviour for three keys and not for
+    `Implicit.measured` would say the form measured PAN-OS behavior for three keys and not for
     the other eleven, which is not a distinction anything supports.
     """
     # NO EARLY RETURN. Every level that is missing narrows to an empty mapping and falls

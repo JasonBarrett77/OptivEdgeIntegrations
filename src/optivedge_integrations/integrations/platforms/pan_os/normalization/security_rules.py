@@ -372,7 +372,7 @@ def normalize_rule(
             "materialises one, unlike `action` which is refused at commit. So absence is "
             "real here and this code will meet it. What the device ENFORCES for such a "
             "rule is NOT measured: PAN-OS pre-selects a profile named `default` in NEW "
-            "rules, which is form behaviour that writes a key, and no compiled view "
+            "rules, which is form behavior that writes a key, and no compiled view "
             "reports log settings. not_configured is the honest row until the UI oracle "
             "reads one. See claim S-106"))
     negate_source, negate_source_rk, negate_source_rv = parse_yes_no_field(

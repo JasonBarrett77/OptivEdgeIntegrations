@@ -15,7 +15,7 @@ where it is, in a module about `show config merged`, is a defect this module rec
 than fixes: moving it changes another module's surface.
 
 `show iot icd version` answers a THREE-LINE FREE-TEXT BLOB rather than XML, on all four lab
-appliances including the two holding no licence of any kind. Its numbering does not map
+appliances including the two holding no license of any kind. Its numbering does not map
 onto the content version and its TimeBuilt date ranks the estate the opposite way, so it is
 collected to be SHOWN beside a staleness finding and never graded on.
 
@@ -41,7 +41,7 @@ SHOW_IOT_ICD_VERSION_COMMAND = "<show><iot><icd><version/></icd></iot></show>"
 
 
 def collect_request_license_info(session: PANSession) -> PANOSCollectedResponse:
-    """One appliance's licence table.
+    """One appliance's license table.
 
     The reply has THREE shapes and two of them look like the third. Measured on all four lab
     appliances, 2026-10-29: a list of ten entries, a list of three, and `{'licenses': None}`.
@@ -96,7 +96,7 @@ def collect_show_system_info(session: PANSession) -> PANOSCollectedResponse:
 def collect_show_iot_icd_version(session: PANSession) -> PANOSCollectedResponse:
     """The IoT classification-data build, as free text.
 
-    `result` is a plain string of three labelled lines and not a dict:
+    `result` is a plain string of three labeled lines and not a dict:
 
         Version: 13.pan_h1_r3
         TimeBuilt: 2026-02-06T13:34:53PST

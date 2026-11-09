@@ -74,7 +74,7 @@ def resolve_profile_row(appliance: Appliance, name: str):
     custom entry was not merely outranked on protocol settings, it was discarded whole.
 
     The OPPOSITE of `region`, where a custom definition extends its predefined namesake - name
-    collision behaviour is per object type and each has to be measured separately.
+    collision behavior is per object type and each has to be measured separately.
 
     The vsys scope is deliberately absent: `deviceconfig/system` cannot reference a vsys profile
     at all. Measured the same day with `action=complete` on the binding field, which lists valid
@@ -111,7 +111,7 @@ def floor_below_minimum(profile_row) -> bool:
     with `RANK_UNRECOGNISED = -1` as its sentinel and its migration default, and its own comment
     says that sentinel "sorts BELOW tls1-0 so every 'the floor is too low' comparison FIRES on
     it - which is the direction stage 0 measured the enumerated query gets wrong: a list of the
-    forbidden values reads an unrecognised token as compliant". Comparing tokens here would
+    forbidden values reads an unrecognized token as compliant". Comparing tokens here would
     rebuild that defect beside the column built to prevent it.
 
     IT CANNOT TELL THE TWO NO-FLOOR CASES APART, and that is a real limit rather than an

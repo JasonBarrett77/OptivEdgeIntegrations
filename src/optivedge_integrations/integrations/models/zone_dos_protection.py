@@ -24,7 +24,7 @@ THREE GRAINS, and they are the identity decisions:
 collection lives under `network/profiles`, which has exactly one scope on a firewall:
 `action=complete` is refused code=6 Invalid sequence at both the shared and the vsys
 spellings, measured by stage 4. `InterfaceManagementProfile` is the one network profile
-already modelled and is unique on (appliance, name) for the same reason; this copies it.
+already modeled and is unique on (appliance, name) for the same reason; this copies it.
 
 `DosPolicyRule` is ONE ROW PER RULEBASE PER NAME within one enforcement point. The rulebase
 is part of the key because one rule name can exist in the vsys-local rulebase and in a pushed

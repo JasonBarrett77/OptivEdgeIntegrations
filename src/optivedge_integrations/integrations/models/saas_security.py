@@ -331,7 +331,7 @@ class SaasApplicationPolicyPosture(ProvenancedMixin, SyncTrackedModel):
     applications are refused, and whether the partition selects cloud applications by ATTRIBUTE
     rather than one name at a time.
 
-    THE POPULATION FOR THE FIRST QUESTION COMES FROM THE PREDEFINED CATALOGUE, and without it the
+    THE POPULATION FOR THE FIRST QUESTION COMES FROM THE PREDEFINED CATALOG, and without it the
     two function columns hold their firing defaults. Measured 2026-10-29 at
     `/config/predefined/application` on three appliances: `dropbox-uploading` and
     `dropbox-downloading` carry `application-container: dropbox` and `use-applications/member:
@@ -345,7 +345,7 @@ class SaasApplicationPolicyPosture(ProvenancedMixin, SyncTrackedModel):
     `deny` IS NOT THE ONLY REFUSAL. The `action` leaf's value set is six, measured identically on
     all four lab appliances with `@default='yes'` on `allow`, and `drop`, `reset-client`,
     `reset-server` and `reset-both` are all denials in this control's sense while none of them is
-    the string `deny` the catalogue's own set command writes. A query matching the literal `deny`
+    the string `deny` the catalog's own set command writes. A query matching the literal `deny`
     reports a compliant partition as failing.
     """
 
@@ -480,7 +480,7 @@ class CloudAppEngineSetting(ProvenancedMixin, SyncTrackedModel):
     against the declaration is not left to guess which side is wrong.
 
     THE DEVICE CERTIFICATE IS A SECOND PRECONDITION AND IT IS NOT IN `request license info` AT
-    ALL, so a remediation reading only the licence would buy a subscription and still have no
+    ALL, so a remediation reading only the license would buy a subscription and still have no
     engine. That is why the reason column exists beside the verdict.
     """
 

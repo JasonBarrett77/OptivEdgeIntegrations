@@ -315,7 +315,7 @@ def _collect(device_entry: dict) -> tuple[list[dict], list[InterfaceIssue]]:
                 kind=ISSUE_KIND, name=container,
                 severity=NormalizationIssue.Severity.WARNING,
                 disposition=NormalizationIssue.Disposition.KEPT,
-                reason=("Unrecognised interface container. It is walked with the ordinary "
+                reason=("Unrecognized interface container. It is walked with the ordinary "
                         "rules and its entries are kept, but nothing here has been measured "
                         "against this shape - check whether its bindings, addressing and "
                         "type discrimination are read correctly before trusting them."),

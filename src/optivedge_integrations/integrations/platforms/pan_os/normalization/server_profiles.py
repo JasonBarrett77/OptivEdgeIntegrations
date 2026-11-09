@@ -386,7 +386,7 @@ def _kind_entries(snapshot: Snapshot, appliance: Appliance) -> list[tuple[Scoped
                     kind="server profile", name=raw_kind,
                     severity=NormalizationIssue.Severity.WARNING,
                     disposition=NormalizationIssue.Disposition.KEPT,
-                    reason=f"unrecognised server-profile kind {raw_kind!r}; rows kept",
+                    reason=f"unrecognized server-profile kind {raw_kind!r}; rows kept",
                     raw_entry={})
             for entry in ensure_list(node.get("entry")):
                 if isinstance(entry, dict):

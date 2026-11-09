@@ -36,7 +36,7 @@ THREE TRI-STATE VOCABULARIES HERE ARE THIS PIPELINE'S AND NOT THE DEVICE'S -
 `False`, which excludes exactly the rows nobody read. Each one's `unknown` member is what keeps
 an unread row inside the comparison instead of quietly outside it.
 
-WHAT IS NOT MODELLED HERE, recorded because the absence is deliberate: the portal's satellite
+WHAT IS NOT MODELED HERE, recorded because the absence is deliberate: the portal's satellite
 configuration, the clientless application and application-group definitions as objects (only
 their COUNTS, on the enforcement point), the login response page's content, the gateway's
 `roles` collection and its `ip-pool`/`max-user` networking leaves, the GlobalProtect IPSec app
@@ -151,9 +151,9 @@ LICENSED_YES = "yes"
 LICENSED_NO = "no"
 LICENSED_UNKNOWN = "unknown"
 PORTAL_LICENSED_CHOICES = [
-    (LICENSED_YES, "A GlobalProtect Portal licence is installed"),
-    (LICENSED_NO, "A populated licence list does not carry it"),
-    (LICENSED_UNKNOWN, "The appliance reported no licences at all, or was never asked"),
+    (LICENSED_YES, "A GlobalProtect Portal license is installed"),
+    (LICENSED_NO, "A populated license list does not carry it"),
+    (LICENSED_UNKNOWN, "The appliance reported no licenses at all, or was never asked"),
 ]
 
 
@@ -647,7 +647,7 @@ class GlobalProtectEnforcementPoint(ProvenancedMixin, SyncTrackedModel):
                     and self.globalprotect_portal_licensed == LICENSED_NO)
         if self.licence_excludes_globalprotect != expected:
             raise ValidationError(
-                "licence_excludes_globalprotect must follow the licence reply it came from.")
+                "licence_excludes_globalprotect must follow the license reply it came from.")
         # The posture verdict is a conjunction over the three counts beside it, so the four
         # cannot be allowed to disagree - the same guard `licence_excludes_globalprotect` above
         # carries, and the reason PAN-GPG-005's finding can print the counts and rest on the

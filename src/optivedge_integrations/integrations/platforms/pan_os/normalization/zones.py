@@ -11,7 +11,7 @@ zone path, all six type subtrees, both interface-address shapes, and every conta
 `network.interface` (ethernet, aggregate-ethernet, loopback, tunnel, vlan). One inferred
 field was wrong - see `enable-packet-buffer-protection` below.
 
-Nothing here raises on an unrecognised shape: it degrades to "no zones" or "no addresses".
+Nothing here raises on an unrecognized shape: it degrades to "no zones" or "no addresses".
 That was the right call while the shapes were guesses and is now a liability worth knowing
 about - a container type this code has not met would produce silently empty addresses,
 indistinguishable from an interface that genuinely has none (see `ZoneInterface`).
@@ -126,9 +126,9 @@ def _text(node: Any) -> str:
 def _device_entry(payload: dict[str, Any]) -> dict[str, Any]:
     """The first device entry of a merged-config payload, or an empty dict.
 
-    `device_configuration.device_entry_from_snapshot` RAISES on a payload it does not recognise
+    `device_configuration.device_entry_from_snapshot` RAISES on a payload it does not recognize
     and takes a Snapshot; this module is handed a bare payload and degrades to "no zones"
-    rather than raising, which is the behaviour its own docstring records as deliberate while
+    rather than raising, which is the behavior its own docstring records as deliberate while
     the shapes were guesses and as a known liability now. Kept consistent rather than mixed.
     """
     config = payload.get("config") if isinstance(payload, dict) else None
@@ -254,7 +254,7 @@ def zone_attachment_verdict(
     `Zone.zone_protection_profile` is the clause a reviewer would write and it misses that case.
 
     THE COMPARISON IS CASE-SENSITIVE AND MUST STAY SO. Profile names are case-sensitive and not
-    normalised (help p.663), so a case-insensitive resolution would report a profile as attached
+    normalized (help p.663), so a case-insensitive resolution would report a profile as attached
     that the dataplane does not resolve.
     """
     name = (zone_protection_profile or "").strip()

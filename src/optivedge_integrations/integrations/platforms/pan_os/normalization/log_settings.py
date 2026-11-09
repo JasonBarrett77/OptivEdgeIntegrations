@@ -206,7 +206,7 @@ LOG_SETTINGS_IMPLICITS = {
         "protocol SMTP, while the outer grid stays blank in every state. A constant 1.2 expanded "
         "over every row would claim a hardened setting for relays that have none"),
     "auth": Implicit.not_assumed(
-        "stage 4 left it unmeasured and declined to licence a guess: the grids render it blank "
+        "stage 4 left it unmeasured and declined to license a guess: the grids render it blank "
         "with the key absent, and over cleartext SMTP with a username and password set the "
         "client sent NO AUTH command for auth absent, Auto and Login alike, so the one "
         "available oracle does not move with the key"),
@@ -722,7 +722,7 @@ def _entry_is_offbox(entry: dict[str, Any], vsys_name: str, index: _ProfileIndex
 
     A syslog member must RESOLVE to a profile - a member naming nothing delivers nothing. An
     HTTP member is counted WITHOUT resolution, which is the one asymmetry here and is recorded
-    rather than hidden: no control asserts an HTTP profile, so none is modelled and there is no
+    rather than hidden: no control asserts an HTTP profile, so none is modeled and there is no
     index to resolve against. Counting it unresolved is the non-firing direction for the gap
     columns, and the alternative - ignoring HTTP collectors - would report a gap on an appliance
     that forwards everything to one.
@@ -925,7 +925,7 @@ def _http_profile_names(snapshot: Snapshot) -> set[str]:
     `http` is a sibling of the two kinds `LogServerTarget` models and is deliberately not a row
     of its own: no logging control asserts an HTTP collector's own fields. What it is needed for
     here is EXISTENCE - a `send-http` member naming nothing delivers nothing, the same reason
-    `_ProfileIndex` exists for the two modelled kinds, and counting it would make an appliance
+    `_ProfileIndex` exists for the two modeled kinds, and counting it would make an appliance
     with a typo in a member list look like one with a working collector.
 
     SHARED ONLY, matching where the members come from: the Device > Log Settings match lists are

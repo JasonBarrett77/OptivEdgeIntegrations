@@ -16,11 +16,11 @@ holds six AAA kinds. EVERY CONTROL ON THIS MODEL MUST CLAUSE ON THE KIND: `trans
 nothing on the email kind and holds its default there, and `protocol`/`tls_version`/`auth_method`
 mean nothing on the syslog kind.
 
-`http` and `snmptrap` live in the same container and are NOT modelled: no logging control asserts
+`http` and `snmptrap` live in the same container and are NOT modeled: no logging control asserts
 them, and a row nothing asserts is a row nobody needs. They become a third and fourth kind when
 something asserts them. That is why the normalizer reads two NAMED containers rather than
 iterating the container's children the way the AAA one does - an unfamiliar child here is not an
-unrecognised kind of the same thing, it is a different object.
+unrecognized kind of the same thing, it is a different object.
 
 NOT A SUBCLASS OF `ApplianceScopedObject`, AND THAT IS THE ONE DEPARTURE FROM THE CONVENTION.
 That base carries a single `name`, because every object it was built for is a named entry in a

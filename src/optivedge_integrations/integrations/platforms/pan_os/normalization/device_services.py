@@ -550,7 +550,7 @@ def snmp_default_community_exposure(
 
     ONLY A MEASURED REFUSAL EARNS THE REDUCTION. An appliance whose surfaces have not been
     walked keeps the high-severity member, which is stage 3's own direction: the per-surface
-    switch's behaviour when absent is not obtainable from any corpus this project can reach, so
+    switch's behavior when absent is not obtainable from any corpus this project can reach, so
     the unknown must not relax the finding.
 
     THE LAB MAKES IT VIVID: the appliance storing `public` is the one where nothing is listening
@@ -629,7 +629,7 @@ def timezone_offset_class(timezone: str) -> tuple[bool, str]:
     device offers. Stage 3 restated the control as whether the zone DECLARES zero offset, and
     the shipped column is superseded here rather than removed.
 
-    AN UNRECOGNISED KEY FALLS TO `non_zero_offset_or_shifts_under_a_daylight_rule`, which fires.
+    AN UNRECOGNIZED KEY FALLS TO `non_zero_offset_or_shifts_under_a_daylight_rule`, which fires.
     That covers a zone the sets above do not name - including every alias this host's tzdata
     could not resolve - and it is the safe direction: the alternative would hand a zone nobody
     has classified the most reassuring rank.
@@ -724,7 +724,7 @@ def dns_resolver_posture(
     chosen_count: int, follows_lease: bool, mechanism: str, addressing_mode: str) -> str:
     """The four-way class. PAN-SVC-003.
 
-    ORDERED FROM NOBODY HAVING CHOSEN THE RESOLVERS TO THE ORGANISATION HAVING CHOSEN THEM, and
+    ORDERED FROM NOBODY HAVING CHOSEN THE RESOLVERS TO THE ORGANIZATION HAVING CHOSEN THEM, and
     the split between the first two members is the one that matters: an appliance with no
     resolver on a LEASED management address is resolving through an address nobody chose, which
     is a different finding from one with no resolver on a FIXED address, where nothing is

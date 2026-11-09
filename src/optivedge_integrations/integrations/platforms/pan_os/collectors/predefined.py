@@ -99,7 +99,7 @@ def collect_show_predefined_url_lists(session: PANSession) -> PANOSCollectedResp
 
 
 def collect_show_predefined_url_categories(session: PANSession) -> PANOSCollectedResponse:
-    """The device's own URL category catalogue - the denominator PAN-URL-001/002/003 need."""
+    """The device's own URL category catalog - the denominator PAN-URL-001/002/003 need."""
     request = PANOSOperationRequest(
         command_xml=SHOW_PREDEFINED_URL_CATEGORIES_COMMAND,
         target=session.target,
@@ -325,7 +325,7 @@ PREDEFINED_APPLICATION_SOURCE_TYPE = "config_predefined_application"
 
 
 def collect_predefined_applications(session: PANSession) -> PANOSCollectedResponse:
-    """Collect the vendor's App-ID catalogue for one appliance. PAN-SAS-003.
+    """Collect the vendor's App-ID catalog for one appliance. PAN-SAS-003.
 
     Appliance-wide, like every other predefined catalog, and read-only; no lease is needed and
     none is taken. Per appliance rather than once and reused, because the entry count differs by
@@ -338,7 +338,7 @@ def collect_predefined_applications(session: PANSession) -> PANOSCollectedRespon
     `parent-app` leaf, while `dropbox-delete` carries `parent-app: dropbox-base` as well - so
     `parent-app` is present on one function child of three and a derivation resting on it alone
     under-counts silently. Without this read the question has to be answered from the spelling of
-    an application's name, which is a heuristic over a vendor catalogue.
+    an application's name, which is a heuristic over a vendor catalog.
     """
     request = PANOSConfigRequest(
         xpath=PREDEFINED_APPLICATION_XPATH,

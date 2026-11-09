@@ -124,7 +124,7 @@ class NormalizedAddressGroup:
 #: so that is a signature change and a separate decision. Jason has it.
 UNREADABLE_EDL_TYPE = Implicit.not_assumed(
     "an EDL's value lives under one of type/{ip,domain,url,imei,imsi} and this entry carries "
-    "none of them. Nothing is stored because there is nothing to read - this is an unrecognised "
+    "none of them. Nothing is stored because there is nothing to read - this is an unrecognized "
     "payload shape, not an author leaving a field alone, and the row says so rather than the "
     "field looking untracked")
 
@@ -491,7 +491,7 @@ def normalize_address_group(
 def _unreadable_edls(normalized) -> list[PolicyObjectIssue]:
     """An EDL whose `type` node carried none of ip/domain/url/imei/imsi.
 
-    `external_list_value` returns `list_type=""` only in that case - an UNRECOGNISED PAYLOAD
+    `external_list_value` returns `list_type=""` only in that case - an UNRECOGNIZED PAYLOAD
     SHAPE rather than an author leaving a field alone. The provenance row says the field is
     tracked and empty; this says the payload could not be read, which is a collection fault
     and the same severity as a duplicate name for the same reason: the data for that object
@@ -619,7 +619,7 @@ def build_normalized_addresses(
     object is then a symptom and the cause is invisible.
 
     Still raised, because there is nothing to iterate and no partial result worth having:
-    a missing merged/pushed snapshot, or a pushed payload whose root cannot be recognised.
+    a missing merged/pushed snapshot, or a pushed payload whose root cannot be recognized.
     Those mean the READ is unusable, not that one entry is bad.
     """
     merged_snapshot = latest_merged_snapshot(enforcement_point)

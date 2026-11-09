@@ -9,7 +9,7 @@ both subjects need. Nothing here opens a connection or touches the database exce
 WHY THE VERDICTS ARE COLUMNS AND NOT CLAUSES. A url-filtering profile's PERMIT SET IS NOT IN THE
 PROFILE: `allow` is what the device OMITS for a predefined category, so a profile that permits
 all ninety names them nowhere, and the answer to "what does this profile leave reachable" is the
-DEVICE'S OWN CATALOGUE minus the five or six restricting lists. That is a set difference over a
+DEVICE'S OWN CATALOG minus the five or six restricting lists. That is a set difference over a
 collection the entry does not contain, with a default supplied per member, which no predicate of
 one field, one operator and one literal can express.
 
@@ -210,7 +210,7 @@ CLOUD_INLINE_CAT_ABSENT = Implicit.measured(
     "stage4-url-filtering.json fields.cloud-inline-cat.implicit, status measured, "
     "may_materialise true: the cloud-side engine is OFF when the key is absent, on all three "
     "appliances a browser reached, across both major versions and both vsys modes, and on the "
-    "one appliance holding an Advanced URL Filtering licence as well as the three that do not. "
+    "one appliance holding an Advanced URL Filtering license as well as the three that do not. "
     "The positive control wrote `yes` and the box rendered ticked. THIS DEFAULT FIRES.")
 
 #: THE ONE IMPLICIT ON THIS OBJECT THAT IS A RELATION RATHER THAN A CONSTANT, and nothing is
@@ -223,7 +223,7 @@ LOCAL_INLINE_CAT_ABSENT = Implicit.not_assumed(
     "control paid on both sides. A consumer that materialised `yes` from a PA-VM reading onto a "
     "PA-5220 would report an on-box analysis engine the device's own interface says is off. The "
     "one candidate cause stage 4 could rule out is the Advanced URL Filtering subscription: "
-    "6A9C0A9904E7D6E renders TICKED and holds no URL filtering licence of any kind.")
+    "6A9C0A9904E7D6E renders TICKED and holds no URL filtering license of any kind.")
 
 MLAV_EXCEPTION_ABSENT = Implicit.measured(
     [],
@@ -411,7 +411,7 @@ def url_category_catalogue(payload: Any) -> list[str]:
 def latest_url_category_catalogue_snapshot(
     enforcement_point: EnforcementPoint,
 ) -> Snapshot | None:
-    """The newest catalogue read for the appliance that speaks for this point.
+    """The newest catalog read for the appliance that speaks for this point.
 
     Appliance-wide, like every `show predefined` read, so it hangs off the appliance and not off
     the point - and `choose_local_appliance` is the one definition of which appliance's
@@ -457,7 +457,7 @@ def normalize_custom_url_category(
     """One custom-url-category entry.
 
     `predefined` is accepted and is always False today: there is NO predefined custom-category
-    namespace - the predefined CATALOGUE is a different collection reached by an op command - so
+    namespace - the predefined CATALOG is a different collection reached by an op command - so
     the parameter exists to keep the signature honest beside its profile sibling rather than to
     be passed.
     """
@@ -513,7 +513,7 @@ def rule_category_references(root: Any, *, where: str, pushed: bool,
     holding a MEMBER LIST is the rule surface and nothing else: measured 2026-10-29 over a
     1.3 MB merged payload, `category` appears as a member list at
     `vsys/entry/rulebase/security/rules/entry/category` and NOWHERE ELSE. The profile rule's own
-    `category` is a text leaf and the App-ID catalogue's is a text leaf, so both are skipped by
+    `category` is a text leaf and the App-ID catalog's is a text leaf, so both are skipped by
     the shape test alone.
 
     `any` is dropped: it is the wildcard rather than a category, and every rule on three of the
@@ -659,7 +659,7 @@ def categories_in_scope(
     action on a custom category that a vsys profile on the same appliance can.
 
     A VENDOR-SCOPED profile is treated as a shared one here, which is DERIVED and not measured:
-    the predefined `default` is read-only - every control on its dialog greys - so no custom
+    the predefined `default` is read-only - every control on its dialog grays - so no custom
     category can be given an action on it either way, and the two readings cannot differ in any
     value this model stores.
 
@@ -723,7 +723,7 @@ def effective_credential_action(
 class UrlFilteringContext:
     """What a url-filtering row's verdicts need that is not on the entry.
 
-    `catalogue` is the device's own category names and `collected` says whether the read
+    `catalog` is the device's own category names and `collected` says whether the read
     answered at all - which is a fact about the COLLECTION rather than about the configuration,
     and is why it needs a column of its own.
     """

@@ -21,7 +21,7 @@ NAME a profile's member list holds, which is the only thing a reference carries.
 
 WHAT THIS MODEL CANNOT SAY, and it is a real asymmetry rather than an untested step: a custom
 category's MEMBERSHIP is readable from configuration and its RESOLUTION is readable from nowhere.
-The predefined catalogue has an op command; this collection has none - `show system state filter`
+The predefined catalog has an op command; this collection has none - `show system state filter`
 was searched for *url*, *category* and *custom* and the CLI index for two terms, and the compiled
 state tree has nothing for this object. So a `Category Match` entry's actual reach - the
 INTERSECTION of the predefined categories its `list` names, not their union - is not stored and

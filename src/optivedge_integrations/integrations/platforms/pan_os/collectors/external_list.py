@@ -211,7 +211,7 @@ def collect_show_external_list(
 
     Reading result["entry"] found nothing, so the loop below saw a zero-length page, stopped
     after one request, and stored an empty list - an EDL with 2,776 entries would have
-    normalised to nothing at all, and silently, because an empty EDL is indistinguishable from
+    normalized to nothing at all, and silently, because an empty EDL is indistinguishable from
     one the device could not fetch.
 
     Paging semantics, all measured 2026-09-22 against panw-known-ip-list (4,000 valid):
